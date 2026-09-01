@@ -1,0 +1,69 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/06-indexes.md",
+  "layout": "key = CKE(Array[v1..vk, NitriteId]), value = EMPTY",
+  "entries": [
+    {
+      "indexed_value": {
+        "t": "str",
+        "utf8": "726564"
+      },
+      "nitrite_id": 7,
+      "key": "a0016072656400000180800000000000000700"
+    },
+    {
+      "indexed_value": {
+        "t": "str",
+        "utf8": "626c7565"
+      },
+      "nitrite_id": 7,
+      "key": "a00160626c756500000180800000000000000700"
+    },
+    {
+      "indexed_value": {
+        "t": "int",
+        "w": "i32",
+        "v": "5"
+      },
+      "nitrite_id": 3,
+      "key": "a00130034002a00000020180800000000000000300"
+    },
+    {
+      "indexed_value": {
+        "t": "float",
+        "w": "f64",
+        "bits": "4014000000000000"
+      },
+      "nitrite_id": 4,
+      "key": "a00130034002a000000b0180800000000000000400"
+    },
+    {
+      "indexed_value": {
+        "t": "null"
+      },
+      "nitrite_id": 9,
+      "key": "a001000180800000000000000900"
+    }
+  ],
+  "range_construction": {
+    "rule": "Numeric bounds MUST be built from N(v), never CKE(v). spec/03-key-encoding.md section 8.2.",
+    "eq_5_any_numeric_type": {
+      "lower": "30034002a00000",
+      "upper": "30034002a00001",
+      "contains": [
+        "30034002a0000000",
+        "30034002a0000002",
+        "30034002a000000b",
+        "30034002a0000009"
+      ]
+    },
+    "array_prefix_numeric_5": "a00130034002a00000",
+    "starts_with_abc": {
+      "lower": "60616263",
+      "upper": "60616264"
+    }
+  }
+}

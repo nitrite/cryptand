@@ -1,0 +1,299 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/03-key-encoding.md",
+  "cases": [
+    {
+      "value": {
+        "t": "null"
+      },
+      "cke": "00",
+      "note": "spec section 9 worked example"
+    },
+    {
+      "value": {
+        "t": "bool",
+        "v": false
+      },
+      "cke": "1000",
+      "note": "FALSE < TRUE, section 8 rule 9"
+    },
+    {
+      "value": {
+        "t": "bool",
+        "v": true
+      },
+      "cke": "1001",
+      "note": "spec section 9 worked example"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "i32",
+        "v": "0"
+      },
+      "cke": "300202",
+      "note": "zero has an empty ordering region"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "i32",
+        "v": "5"
+      },
+      "cke": "30034002a0000002",
+      "note": "spec section 9 worked example"
+    },
+    {
+      "value": {
+        "t": "float",
+        "w": "f64",
+        "bits": "4014000000000000"
+      },
+      "cke": "30034002a000000b",
+      "note": "same ordering region as I32(5), type code 0x0B"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "i32",
+        "v": "-5"
+      },
+      "cke": "3001bffd5fffff02",
+      "note": "negatives are the complemented body"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "i32",
+        "v": "-9"
+      },
+      "cke": "3001bffc6fffff02",
+      "note": "larger magnitude sorts lower"
+    },
+    {
+      "value": {
+        "t": "str",
+        "utf8": "6162"
+      },
+      "cke": "6061620000",
+      "note": "spec section 9 worked example"
+    },
+    {
+      "value": {
+        "t": "str",
+        "utf8": "616263"
+      },
+      "cke": "606162630000",
+      "note": "a prefix sorts before its extension"
+    },
+    {
+      "value": {
+        "t": "str",
+        "utf8": "610062"
+      },
+      "cke": "60610001620000",
+      "note": "an embedded NUL escapes as 00 01"
+    },
+    {
+      "value": {
+        "t": "str",
+        "utf8": ""
+      },
+      "cke": "600000",
+      "note": "the empty string is the terminator alone"
+    },
+    {
+      "value": {
+        "t": "nitrite_id",
+        "v": "1"
+      },
+      "cke": "808000000000000001",
+      "note": "spec section 9 worked example"
+    },
+    {
+      "value": {
+        "t": "nitrite_id",
+        "v": "-1"
+      },
+      "cke": "807fffffffffffffff",
+      "note": "the sign bit is flipped so i64 sorts unsigned"
+    },
+    {
+      "value": {
+        "t": "nitrite_id",
+        "v": "-9223372036854775808"
+      },
+      "cke": "800000000000000000",
+      "note": "i64 minimum"
+    },
+    {
+      "value": {
+        "t": "nitrite_id",
+        "v": "9223372036854775807"
+      },
+      "cke": "80ffffffffffffffff",
+      "note": "i64 maximum"
+    },
+    {
+      "value": {
+        "t": "array",
+        "items": [
+          {
+            "t": "str",
+            "utf8": "6162"
+          },
+          {
+            "t": "nitrite_id",
+            "v": "1"
+          }
+        ]
+      },
+      "cke": "a00160616200000180800000000000000100",
+      "note": "spec section 9 worked example: a non-unique index key"
+    },
+    {
+      "value": {
+        "t": "array",
+        "items": []
+      },
+      "cke": "a000",
+      "note": "ELEM_END alone"
+    },
+    {
+      "value": {
+        "t": "timestamp",
+        "millis": 1000
+      },
+      "cke": "4001800000000000000100000000",
+      "note": "one instant subclass"
+    },
+    {
+      "value": {
+        "t": "timestamp_ns",
+        "secs": 1,
+        "nanos": 0
+      },
+      "cke": "4001800000000000000100000000",
+      "note": "byte-identical to TIMESTAMP(1000)"
+    },
+    {
+      "value": {
+        "t": "timestamp",
+        "millis": 2000
+      },
+      "cke": "4001800000000000000200000000",
+      "note": "sorts above TIMESTAMP_NS(1, 0)"
+    },
+    {
+      "value": {
+        "t": "timestamp",
+        "millis": -1
+      },
+      "cke": "40017fffffffffffffff3b8b87c0",
+      "note": "floor division: secs -1, nanos 999000000"
+    },
+    {
+      "value": {
+        "t": "zoned",
+        "millis": 1000,
+        "zone": "Asia/Kolkata"
+      },
+      "cke": "4001800000000000000100000000",
+      "note": "the zone is not part of the key"
+    },
+    {
+      "value": {
+        "t": "date",
+        "days": 0
+      },
+      "cke": "400380000000",
+      "note": "epoch day"
+    },
+    {
+      "value": {
+        "t": "date",
+        "days": -719162
+      },
+      "cke": "40037ff506c6",
+      "note": "year 1 AD, exercising the i32 sign"
+    },
+    {
+      "value": {
+        "t": "time",
+        "nanos": 86399999999999
+      },
+      "cke": "400400004e94914effff",
+      "note": "one nanosecond before midnight"
+    },
+    {
+      "value": {
+        "t": "duration",
+        "secs": -5,
+        "nanos": 500000000
+      },
+      "cke": "40057ffffffffffffffb1dcd6500",
+      "note": "a negative duration with nanos"
+    },
+    {
+      "value": {
+        "t": "uuid",
+        "v": "000102030405060708090a0b0c0d0e0f"
+      },
+      "cke": "90000102030405060708090a0b0c0d0e0f",
+      "note": "RFC 4122 network byte order"
+    },
+    {
+      "value": {
+        "t": "char",
+        "v": 128008
+      },
+      "cke": "500001f408",
+      "note": "a supplementary-plane scalar"
+    },
+    {
+      "value": {
+        "t": "bytes",
+        "v": "000001ff"
+      },
+      "cke": "700001000101ff0000",
+      "note": "BYTES uses the same escape as STRING"
+    }
+  ],
+  "rejects": [
+    {
+      "cke": "b0",
+      "why": "unknown group tag"
+    },
+    {
+      "cke": "6061",
+      "why": "truncated body"
+    },
+    {
+      "cke": "606100020000",
+      "why": "non-canonical escape"
+    },
+    {
+      "cke": "300340027f000002",
+      "why": "mantissa first byte below 0x80"
+    },
+    {
+      "cke": "3003400200000002",
+      "why": "empty mantissa"
+    },
+    {
+      "cke": "30034002a000000d",
+      "why": "type code 0x0D is reserved"
+    },
+    {
+      "cke": "4002800000000000000100000000",
+      "why": "temporal subclass 0x02 is reserved"
+    },
+    {
+      "cke": "0000",
+      "why": "trailing bytes after a complete key"
+    }
+  ]
+}

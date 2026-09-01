@@ -1,0 +1,65 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/14-security.md sections 3.4 and 4.2",
+  "hkdf_rfc5869_case1": {
+    "ikm": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+    "salt": "000102030405060708090a0b0c",
+    "info": "f0f1f2f3f4f5f6f7f8f9",
+    "length": 42,
+    "okm": "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+  },
+  "subkeys": {
+    "master_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "database_uuid": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "info_prefix": "cryptand/v1/",
+    "page": "acadba8599f27c38e08d54a933816a5e7743de208e69bb02fd9b2431c102cce2",
+    "vlog": "49fee4d81f60eff758b6e1cac1d7ca39a658411a42437bf54baf6157c47564ec",
+    "sbmac": "206aa256721d4790cfdc63f54ce9c6da11450cd85a98e9b81ae88cf9ecc327f2"
+  },
+  "nonces": [
+    {
+      "domain": 1,
+      "counter": 1,
+      "object_id": 2,
+      "offset": 0,
+      "nonce": "010100000000000000020000000000000000000000000000"
+    },
+    {
+      "domain": 2,
+      "counter": 72623859790382856,
+      "object_id": 1229782938247303441,
+      "offset": 72057594037927935,
+      "nonce": "0208070605040302011111111111111111ffffffffffffff"
+    }
+  ],
+  "nonce_watermark": {
+    "gap": 1048576,
+    "rule": "On open, publish persisted + gap DURABLY before allocating anything; allocate upward from persisted; never reach the published value without publishing again."
+  },
+  "keyslot": {
+    "size": 144,
+    "count": 4,
+    "offset_in_superblock": 3512,
+    "field_offsets": {
+      "state": 0,
+      "kdf": 1,
+      "label_len": 2,
+      "t_cost": 4,
+      "m_cost_kib": 8,
+      "parallelism": 12,
+      "salt": 16,
+      "wrap_nonce": 48,
+      "wrapped_key": 72,
+      "wrap_tag": 104,
+      "label": 120
+    },
+    "wrap_aad": "database_uuid || slot_index:u8"
+  },
+  "not_implemented": [
+    "XChaCha20-Poly1305 -- see REPORT.md",
+    "Argon2id -- see REPORT.md"
+  ]
+}

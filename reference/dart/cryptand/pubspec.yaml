@@ -1,0 +1,14 @@
+name: cryptand
+description: >-
+  Reference implementation of the Cryptand File Format (CFF v1.0), in pure Dart.
+  Normative source is ../../../spec/. Where this code and the spec disagree,
+  the spec wins and this code is wrong (spec/11-conformance.md section 7).
+version: 0.1.0-phase1
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^5.0.0

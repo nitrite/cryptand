@@ -1,0 +1,217 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/02-value-encoding.md",
+  "cases": [
+    {
+      "value": {
+        "t": "null"
+      },
+      "cve": "00",
+      "note": "one byte"
+    },
+    {
+      "value": {
+        "t": "bool",
+        "v": true
+      },
+      "cve": "02",
+      "note": "one byte"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "intVar",
+        "v": "1"
+      },
+      "cve": "0d02",
+      "note": "INT_VAR is the canonical compact form"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "intVar",
+        "v": "-1"
+      },
+      "cve": "0d01",
+      "note": "zigzag"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "i64",
+        "v": "1"
+      },
+      "cve": "060100000000000000",
+      "note": "fixed width when the declared width matters"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "i128",
+        "v": "170141183460469231731687303715884105727"
+      },
+      "cve": "07ffffffffffffffffffffffffffffff7f",
+      "note": "i128 maximum"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "i128",
+        "v": "-170141183460469231731687303715884105728"
+      },
+      "cve": "0700000000000000000000000000000080",
+      "note": "i128 minimum"
+    },
+    {
+      "value": {
+        "t": "int",
+        "w": "u128",
+        "v": "340282366920938463463374607431768211455"
+      },
+      "cve": "0cffffffffffffffffffffffffffffffff",
+      "note": "u128 maximum"
+    },
+    {
+      "value": {
+        "t": "float",
+        "w": "f64",
+        "bits": "7ff8000000000000"
+      },
+      "cve": "0f000000000000f87f",
+      "note": "NaN canonicalized on encode"
+    },
+    {
+      "value": {
+        "t": "str",
+        "utf8": "4261636b657265692d53747261737365203132"
+      },
+      "cve": "12134261636b657265692d53747261737365203132",
+      "note": "UTF-8"
+    },
+    {
+      "value": {
+        "t": "bytes",
+        "v": "00ff"
+      },
+      "cve": "130200ff",
+      "note": "raw bytes"
+    },
+    {
+      "value": {
+        "t": "nitrite_id",
+        "v": "-9223372036854775808"
+      },
+      "cve": "1b0000000000000080",
+      "note": "signed i64, exchanged as such"
+    },
+    {
+      "value": {
+        "t": "array",
+        "items": [
+          {
+            "t": "null"
+          },
+          {
+            "t": "int",
+            "w": "intVar",
+            "v": "7"
+          }
+        ]
+      },
+      "cve": "200402000d0e",
+      "note": "byte_len then count"
+    },
+    {
+      "value": {
+        "t": "map",
+        "entries": [
+          {
+            "k": {
+              "t": "int",
+              "w": "i32",
+              "v": "1"
+            },
+            "v": {
+              "t": "str",
+              "utf8": "6f6e65"
+            }
+          },
+          {
+            "k": {
+              "t": "int",
+              "w": "i32",
+              "v": "2"
+            },
+            "v": {
+              "t": "str",
+              "utf8": "74776f"
+            }
+          }
+        ]
+      },
+      "cve": "211502050100000012036f6e650502000000120374776f",
+      "note": "entries sorted by CKE(key)"
+    },
+    {
+      "value": {
+        "t": "vector",
+        "dtype": "f32",
+        "dim": 2,
+        "f32": [
+          1.5,
+          -2.25
+        ]
+      },
+      "cve": "2300020000c03f000010c0",
+      "note": "a first-class vector"
+    },
+    {
+      "value": {
+        "t": "opaque",
+        "origin": "java",
+        "type_name": "org.dizitart.Thing",
+        "data": "cafe"
+      },
+      "cve": "7f1b046a617661126f72672e64697a69746172742e5468696e6702cafe",
+      "note": "the interchange escape hatch"
+    },
+    {
+      "value": {
+        "t": "unknown",
+        "tag": 144,
+        "payload": "010203"
+      },
+      "cve": "9003010203",
+      "note": "a reserved tag: length-prefixed so it can be preserved (section 1.1)"
+    }
+  ],
+  "rejects": [
+    {
+      "cve": "13ffffff7f",
+      "why": "BYTES length past the buffer"
+    },
+    {
+      "cve": "20ffffff7f",
+      "why": "ARRAY length past the buffer"
+    },
+    {
+      "cve": "2002e807",
+      "why": "ARRAY count exceeds its own byte span"
+    },
+    {
+      "cve": "0000",
+      "why": "trailing bytes"
+    },
+    {
+      "cve": "1d",
+      "why": "a reserved tag with no length prefix"
+    },
+    {
+      "cve": "1100d80000",
+      "why": "CHAR is not a Unicode scalar value"
+    }
+  ]
+}

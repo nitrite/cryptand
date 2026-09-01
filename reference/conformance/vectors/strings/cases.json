@@ -1,0 +1,90 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/00-conventions.md section 4, spec/03-key-encoding.md section 3.1",
+  "rule": "Strings compare by UTF-8 byte order. No locale, no case folding, no normalization. NFC and NFD forms of the same text are different keys.",
+  "cases": [
+    {
+      "utf8": "",
+      "cke": "600000",
+      "cve": "1200",
+      "note": "empty"
+    },
+    {
+      "utf8": "61",
+      "cke": "60610000",
+      "cve": "120161",
+      "note": "ASCII"
+    },
+    {
+      "utf8": "6162",
+      "cke": "6061620000",
+      "cve": "12026162",
+      "note": "prefix of the next"
+    },
+    {
+      "utf8": "616263",
+      "cke": "606162630000",
+      "cve": "1203616263",
+      "note": "extends the previous, so it sorts after"
+    },
+    {
+      "utf8": "610062",
+      "cke": "60610001620000",
+      "cve": "1203610062",
+      "note": "embedded NUL: escapes as 00 01, sorts between a and ab"
+    },
+    {
+      "utf8": "c3a9",
+      "cke": "60c3a90000",
+      "cve": "1202c3a9",
+      "note": "NFC: e-acute as one code point"
+    },
+    {
+      "utf8": "65cc81",
+      "cke": "6065cc810000",
+      "cve": "120365cc81",
+      "note": "NFD: e + combining acute. The format applies NO normalization, so this is a DIFFERENT key from the NFC form."
+    },
+    {
+      "utf8": "c39f",
+      "cke": "60c39f0000",
+      "cve": "1202c39f",
+      "note": "sharp s: simple lowercase, not full case folding"
+    },
+    {
+      "utf8": "f09f9088",
+      "cke": "60f09f90880000",
+      "cve": "1204f09f9088",
+      "note": "supplementary plane, 4 UTF-8 bytes"
+    },
+    {
+      "utf8": "f48fbfbf",
+      "cke": "60f48fbfbf0000",
+      "cve": "1204f48fbfbf",
+      "note": "the last scalar value"
+    }
+  ],
+  "rejects_on_write": [
+    {
+      "why": "unpaired high surrogate",
+      "utf16": "d800"
+    },
+    {
+      "why": "unpaired low surrogate",
+      "utf16": "dc00"
+    }
+  ],
+  "rejects_on_read": [
+    {
+      "utf8": "c328",
+      "why": "ill-formed UTF-8, MUST NOT become U+FFFD"
+    },
+    {
+      "utf8": "eda080",
+      "why": "CESU-8 surrogate"
+    }
+  ]
+}

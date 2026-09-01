@@ -1,0 +1,102 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/02-value-encoding.md section 5",
+  "dictionary": [
+    {
+      "name_id": 1,
+      "name": "_id"
+    },
+    {
+      "name_id": 2,
+      "name": "_revision"
+    },
+    {
+      "name_id": 3,
+      "name": "_modified"
+    },
+    {
+      "name_id": 4,
+      "name": "_source"
+    },
+    {
+      "name_id": 5,
+      "name": "_type"
+    },
+    {
+      "name_id": 6,
+      "name": "alpha"
+    },
+    {
+      "name_id": 7,
+      "name": "zulu"
+    }
+  ],
+  "cases": [
+    {
+      "note": "field table sorted by resolved name bytes, mixed dictionary and inline names",
+      "value": {
+        "t": "doc",
+        "fields": {
+          "_id": {
+            "t": "nitrite_id",
+            "v": "7"
+          },
+          "zulu": {
+            "t": "str",
+            "utf8": "7a"
+          },
+          "alpha": {
+            "t": "int",
+            "w": "intVar",
+            "v": "1"
+          },
+          "mango": {
+            "t": "str",
+            "utf8": "696e6c696e65206e616d652c206e6f7420696e207468652064696374696f6e617279"
+          }
+        }
+      },
+      "cve_with_dictionary": "2242040102000c09010b0e2f056d616e676f1b07000000000000000d021222696e6c696e65206e616d652c206e6f7420696e207468652064696374696f6e61727912017a",
+      "cve_without_dictionary": "2251040101000309050b072f035f696405616c706861056d616e676f047a756c751b07000000000000000d021222696e6c696e65206e616d652c206e6f7420696e207468652064696374696f6e61727912017a",
+      "field_order": [
+        "_id",
+        "alpha",
+        "mango",
+        "zulu"
+      ]
+    },
+    {
+      "note": "an unknown tag inside an array survives, which needs the length prefix of section 1.1",
+      "value": {
+        "t": "array",
+        "items": [
+          {
+            "t": "int",
+            "w": "intVar",
+            "v": "1"
+          },
+          {
+            "t": "unknown",
+            "tag": 197,
+            "payload": "070707"
+          },
+          {
+            "t": "str",
+            "utf8": "6166746572"
+          }
+        ]
+      },
+      "cve": "200f030d02c50307070712056166746572"
+    }
+  ],
+  "reserved_field_ids": {
+    "_id": 1,
+    "_revision": 2,
+    "_modified": 3,
+    "_source": 4,
+    "_type": 5
+  }
+}

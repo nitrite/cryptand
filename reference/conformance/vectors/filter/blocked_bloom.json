@@ -1,0 +1,31 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/04-segments.md section 2.4",
+  "WARNING": "These vectors use the reference implementation CRC-32C-derived hash, NOT the XXH3-64 the spec names. See REPORT.md. The STRUCTURE assertions below are hash-independent and are the ones to port; the block bytes are not portable until the hash question is settled.",
+  "structure": {
+    "block_bits": 512,
+    "probes_for_bits_per_key": {
+      "10": 7,
+      "12": 8,
+      "14": 10,
+      "16": 11
+    },
+    "block_count_examples": {
+      "32 keys at 16 bits": 1,
+      "33 keys at 16 bits": 2,
+      "1000 keys at 16 bits": 32
+    }
+  },
+  "measured_false_positive_rate": {
+    "10": "1.67%",
+    "12": "0.87%",
+    "14": "0.53%",
+    "16": "0.33%",
+    "method": "100k keys inserted, 1M absent keys probed",
+    "note": "blocked Bloom. The earlier 0.04% and 1% in the spec were classic-Bloom figures for the same bits per key."
+  },
+  "header_bytes": "315046432000000010000b00e8030000"
+}
