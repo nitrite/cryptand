@@ -8,6 +8,16 @@
 /// measurement differs from a claim in `cryptand/design/`.
 library;
 
+export 'src/aead.dart'
+    show
+        chacha20,
+        chacha20Block,
+        chacha20Poly1305Decrypt,
+        chacha20Poly1305Encrypt,
+        hchacha20,
+        poly1305,
+        xchacha20Poly1305Decrypt,
+        xchacha20Poly1305Encrypt;
 export 'src/bytes.dart' show ByteReader, ByteWriter, encodeUtf8Strict;
 export 'src/cke.dart'
     show
@@ -26,23 +36,34 @@ export 'src/container.dart'
 export 'src/crc32c.dart' show crc32c;
 export 'src/cve.dart'
     show DocFlags, DocView, NameDict, decodeValue, encodeValue, readValue, writeDoc, writeValue;
+export 'src/engine.dart'
+    show Engine, LocalityPolicy, ScanResult;
 export 'src/errors.dart';
 export 'src/filter.dart'
-    show BlockedBloom, Hash64, blockCountFor, crcHash64, kBlockBits, probesFor;
+    show BlockedBloom, Hash64, blockCountFor, cfh64, kBlockBits, probesFor;
 export 'src/limits.dart';
 export 'src/security.dart'
     show
+        KeyRing,
         Keyslot,
         NonceAllocator,
         NonceDomain,
         Purpose,
         buildNonce,
         constantTimeEquals,
+        decryptPagePayload,
+        decryptVlogRecord,
         deriveSubkey,
+        encryptPagePayload,
+        encryptVlogRecord,
         hkdf,
         hmacSha256,
         kNonceGap,
         sha256,
+        unlock,
+        unwrapMasterKey,
+        vlogAad,
+        wrapMasterKey,
         superblockMac,
         verifySuperblockMac;
 export 'src/segment.dart'
@@ -57,9 +78,13 @@ export 'src/segment.dart'
         SegmentCursor,
         SegmentHeader,
         ValueKind,
+        kHasExpiry,
+        kPointerBytes,
         internalKey,
         parseInternalKey,
         shortestSeparator,
         userKeyPrefix;
 export 'src/u128.dart' show U128, clz64;
+export 'src/vlog.dart'
+    show HeatClass, ValueLog, VlogPointer, VlogSegment, VlogTier;
 export 'src/value.dart';

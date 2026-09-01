@@ -98,8 +98,10 @@ NameDict benchDict() {
       b.add(SegEntry(key, ValueKind.inline, encoded));
     } else {
       final ptr = encodeValue(CVlogRef(1, i * 512, encoded.length));
-      // spec/04-segments.md section 6.4: the pointer is 16 bytes.
-      final pointer = Uint8List.sublistView(ptr, ptr.length - 16);
+      // spec/04-segments.md section 6.4: the pointer is exactly 16 bytes, and
+      // the leaf cell carries no length for it.
+      final pointer = Uint8List.fromList(
+          Uint8List.sublistView(ptr, ptr.length - 16));
       valueTotal += 16;
       b.add(SegEntry(key, ValueKind.vlog, pointer));
     }

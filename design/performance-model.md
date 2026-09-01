@@ -38,37 +38,64 @@ Two derived quantities drive everything below.
 **Merged footprint** `K` — what compaction actually rewrites per entry:
 
 ```
-internal key, prefix-compressed   ~12 B
-cell overhead (lengths, pointer)   ~4 B
+internal key, prefix-compressed   ~13 B
+cell overhead (suffix_len varint,  ~4 B     kind_flags, and the 2-byte
+  kind_flags, cell pointer)                 cell pointer (04 §2.2)
 value-log pointer                  16 B
                                   ─────
-K                                 ~32 B          k = K/R = 6.2 %
+K                                 ~33 B          k = K/R = 6.4 %
 ```
 
-**`k` = 6.2 % is the number the whole write argument rests on.** Compaction
+**Measured: 33.1 B**, from 121.9 entries per leaf at a 4 KiB page
+(`reference/dart/cryptand/bench/p1_height.dart`). The model said 32 B and the
+first implementation measured **34 B**; `04-segments.md` §2.2 was then changed
+to share `value_kind` with the entry flags and to omit `value_len` for the two
+kinds whose width is fixed at 16, which recovered two of those bytes. The
+remaining 1 B over the model is the prefix-compressed key, which runs ~13 B
+rather than 12 on snowflake-shaped ids.
+
+**`k` = 6.4 % is the number the whole write argument rests on.** Compaction
 rewrites 6 % of the data, not 100 % of it.
 
 ## 2. Fanout and segment height
 
-Leaf cell in a data segment ≈ 32 B → **~127 entries per leaf**. Internal cell
-(separator ~5 B + 8 B child + 8 B count + 2 B pointer) ≈ 24 B → **~169 children
+Leaf cell in a data segment ≈ 33 B → **~122 entries per leaf**. Internal cell
+(separator ~5 B + 8 B child + 8 B count + 2 B pointer) ≈ 24 B → **~172 children
 per internal page**.
+
+Both are **measured**, not derived — the second column is what
+`bench/p1_height.dart` reports at 10⁶ documents, and the first is the model:
+
+| | model | measured |
+|---|---|---|
+| entries per leaf | ~127 | **121.9** |
+| children per internal page | ~169 | **171.9** |
 
 | entries | segment height |
 |---|---|
-| ≤ 127 | 1 |
+| ≤ 122 | 1 |
 | ≤ 21 k | 2 |
 | ≤ 3.6 M | 3 |
-| ≤ 613 M | 4 |
+| ≤ **619 M** | 4 |
 
 Because values are separated, a data segment's leaves hold pointers rather than
 documents, so a segment holding 3.6 M documents is 3 levels deep and ~115 MB of
 key index — of which the interior is ~1 MB and stays cached permanently.
 
-**Prediction P1.** Segment height ≤ 4 for every collection below 613 M
-documents at 4 KiB pages, and the interior of the last level's key index fits in
-under 2 MiB per 10⁷ documents. *Measure:* `cryptand dump` on generated
-collections at 10⁴/10⁵/10⁶/10⁷ documents.
+**Prediction P1 — CONFIRMED.** Segment height ≤ 4 for every collection below
+613 M documents at 4 KiB pages, and the interior of the last level's key index
+fits in under 2 MiB per 10⁷ documents.
+
+*Measured* (`reference/dart/cryptand/bench/p1_height.dart`, 4 KiB pages,
+snowflake ids, the 20-field document below): height 2 at 10⁴, height 3 at 10⁵
+and 10⁶, capacity **619 M** at height 4, and an interior of **192 KiB** at 10⁶
+documents — **1.88 MiB** extrapolated to 10⁷. The interior is 0.6 % of the
+extent at every size measured, which is the property the claim is really about:
+the part of the key index that has to stay cached is negligible.
+
+The first implementation measured 548 M and 2.03 MiB, missing both. The gap was
+two bytes per leaf cell, and `04-segments.md` §2.2 was changed to recover them
+rather than the prediction being relaxed.
 
 ## 3. Write amplification — the main claim
 
@@ -82,17 +109,19 @@ over a dataset much larger than RAM.
 | value written once | **0.97×** | 500/516; there is no WAL, so this is the only time the value reaches the device |
 | promotion of survivors into the cold log | 0.29× | ~30 % of values reach the last level; the rest die in the hot tier and are never promoted |
 | key index: L0 flush | 0.06× | 1 × k |
-| key index: tiered levels L1…L3 | 0.19× | (L−1) × k = 3 × 0.062 |
-| key index: levelled last level | 0.50× | T × k = 8 × 0.062 |
+| key index: tiered levels L1…L3 | 0.19× | (L−1) × k = 3 × 0.064 |
+| key index: levelled last level | 0.51× | T × k = 8 × 0.064 |
 | value-log GC | 0.15 – 0.35× | the two-tier split collects a *low*-liveness hot log and rarely touches the high-liveness cold one, so the classic `f/(1−f)` term is small at both ends |
-| **total** | **2.16 – 2.36×** | the six rows, summed; midpoint **≈ 2.26×** |
+| **total** | **2.18 – 2.38×** | the six rows, summed; midpoint **≈ 2.28×** |
 
 The two-tier log costs a promotion write and saves more than that in collection,
 so the total is within noise of a single-tier log — and it delivers key
 clustering for free, which a single-tier log cannot (§5.2).
 
-Key-index write amplification is **12×** (1 + 3 + 8) — but against 6.2 % of the
-data, so it contributes 0.75× overall.
+Key-index write amplification is **12×** (1 + 3 + 8) — but against the measured
+6.4 % of the data, so it contributes 0.77× overall. (At the 6.2 % the model
+assumed it would be 0.75×; the difference is inside every other term's
+uncertainty.)
 
 ### 3.2 Fjall
 
@@ -241,8 +270,10 @@ it back:
   checks and covering queries are served entirely from the key index — and
   Nitrite does a great deal of exactly this.
 - **Projections decode one field, not the document.** The value encoding's
-  sorted `(name_id, offset)` table makes `doc["price"]` a binary search and a
-  slice.
+  sorted `(name_ref, offset)` table makes `doc["price"]` one pass and a slice.
+  **Measured at 11× cheaper than a full decode for one field, 6× for two**; the
+  table is varint-encoded, so it is a forward scan rather than the binary search
+  an earlier draft described (`02-value-encoding.md` §5.2).
 
 **Prediction P4.** Cold point reads of whole documents: at parity with Fjall
 (which also separates), and **up to 2× slower than MVStore and Hive**, which
@@ -305,16 +336,61 @@ Three normative mechanisms close the gap, all MUSTs:
   reads in non-decreasing `(segment, offset)` order over a window of at least
   `readahead_window`, coalescing same-page reads.
 
-**Prediction P8.** On a database aged by 10× its size in random updates, a full
-scan returning whole documents costs **≤ 1.5×** the same scan on a
-freshly-loaded database, and `value_reads_per_scanned_row` stays **below 0.3** —
-with clustered promotion, the locality-debt bound and readahead in force; and
-**≥ 6×** with all three disabled. *Measure:* load, scan, apply 10× random
-updates, scan again; toggle each mechanism independently.
+**Prediction P8 — CONFIRMED, after a mechanism was added.** On a database aged
+by 10× its size in random updates, a full scan returning whole documents costs
+**≤ 1.5×** the same scan on a freshly-loaded database, and
+`value_reads_per_scanned_row` stays **below 0.3** — with clustered promotion,
+cold-tier collection, the locality-debt bound and readahead in force; and
+**≥ 6×** with them disabled.
+
+*Measured* (`reference/dart/cryptand/bench/p8_aged_scan.dart`, 20 000 documents
+then 200 000 random updates, values in the value log at `vlog_min` 256 B, laid
+out over 4 KiB pages and read through a bounded LRU):
+
+| mechanisms | live runs | aged / fresh | `value_reads_per_scanned_row` | value-log space |
+|---|---|---|---|---|
+| all four on | 2 | **1.00×** | **0.100** | 1.00× |
+| promotion but no collection | 19 | 2.14× | 0.224 | 5.82× |
+| none | 19 | **9.62×** | 1.038 | 5.82× |
+
+Both halves of the prediction hold — comfortably at the top, and 9.62× against
+a predicted "≥ 6×" at the bottom.
+
+**It did not hold on the first attempt, and what was missing is worth stating.**
+The design named three mechanisms: promotion, the locality-debt bound, and
+readahead. Implementing exactly those produced **2.14×**, a failure. The cause
+was that promotion clusters each *generation* of surviving values into its own
+run, so ten rounds of compaction left nineteen runs — each perfectly sorted,
+which is why the original `locality_debt` (defined over the *clustered flag*)
+read 0 % throughout. `spec/04-segments.md` §6.9 now defines the debt over
+**surplus runs**, §6.8 makes collection a trigger on it, and §6.3 no longer
+claims a value is written "at most twice".
+
+**What it costs.** Holding the debt under 20 % cost **2.12×** value-side write
+amplification against **1.76×** with no collection — 20 % more value writes, in
+exchange for an aged scan at 1.00× instead of 2.14× and a value log at 1.00× its
+live size instead of 5.82×. Collection pays for itself twice over on space
+alone.
+
+**Readahead made no measurable difference** in either direction, and that is the
+design working: once promotion and collection leave one key-ordered run,
+sorting a window of pointers that are already in order is a no-op. §8.1 remains
+a MUST because it is what bounds the *unclustered* case, which is exactly when
+the other mechanisms have not caught up yet.
+
+**The promotion term of §3.1 is workload-sensitive, as §3.1 itself warns.** That
+section costs promotion at 0.29×, assuming ~30 % of values reach the last level,
+and adds: "If the fraction of values surviving to the last level is much higher
+than ~30 % … promotion costs closer to 0.97×." P8's harness is deliberately that
+workload — every compaction promotes every surviving value — and promotion
+measured **1.06×**. The caveat was right; the headline number is for a different
+workload, and P2 must be measured on its own.
 
 P8 is the failure mode that would otherwise be found by a user a year in,
-reported as "the database got slow", and never traced. It is now a **mandatory
-conformance test** (`spec/11-conformance.md` §6), not merely a benchmark.
+reported as "the database got slow", and never traced. It is a **mandatory
+conformance test** (`spec/11-conformance.md` §6), not merely a benchmark — and
+the reason to have written it that way is that it caught a missing mechanism in
+the design it was written to defend.
 
 ### 5.3 Latency, not just throughput
 
@@ -347,18 +423,26 @@ filter only has to be good, not excellent.
 
 **Encoding density**, per the assumed 20-field document, before page compression:
 
-| encoding | estimate |
-|---|---|
-| Java serialization | ~900–1400 B |
-| bincode (`Value::Document`) | ~820 B |
-| JSON | ~740 B |
-| Hive adapters | ~600–700 B |
-| Kryo (registered) | ~500–600 B |
-| **CVE with a per-tree name dictionary** | **~485 B** |
-| **CVE + LZ4** | **~330 B** |
+| encoding | estimate | measured |
+|---|---|---|
+| Java serialization | ~900–1400 B | — |
+| bincode (`Value::Document`) | ~820 B | — |
+| JSON | ~740 B | **661 B** |
+| Hive adapters | ~600–700 B | — |
+| Kryo (registered) | ~500–600 B | — |
+| **CVE, every name inline** | ~730 B | **639 B** |
+| **CVE with a per-tree name dictionary** | **~485 B** | **388 B** |
+| **CVE + LZ4** | **~330 B** | not implemented |
 
 The win is that `"customerAddressLine1"` is stored once per *tree*, not once per
-*document*.
+*document*: the dictionary alone recovers 251 B of a 639 B document, 39 %.
+
+The measured column is `reference/dart/cryptand/bench/p4_p6_decode.dart` at the
+document shape below (realized: 11.6 B names, 17.2 B values). Both absolutes
+land ~20 % under the estimate because the realized values are slightly shorter
+than the assumed 20 B; the **ratio** is the portable number, and CVE:JSON
+measured **1 : 1.70** against a predicted 1 : 1.53. CVE is *relatively* denser
+than the model claimed.
 
 **Space amplification** (allocated ÷ live) is the one place Cryptand is
 deliberately not best in class:

@@ -18,6 +18,7 @@ import 'package:cryptand/src/crc32c.dart';
 import 'package:cryptand/src/cve.dart';
 import 'package:cryptand/src/errors.dart';
 import 'package:cryptand/src/filter.dart';
+import 'package:cryptand/src/segment.dart';
 import 'package:cryptand/src/security.dart';
 import 'package:cryptand/src/u128.dart';
 import 'package:cryptand/src/value.dart';
@@ -344,8 +345,32 @@ void main() {
       expect(bc['1000 keys at 16 bits'], blockCountFor(1000, 16));
     });
 
-    test('the vector file warns that its bytes are not portable yet', () {
-      expect(v['WARNING'], contains('XXH3-64'));
+    test('the named hash is CFH-64 and its vectors reproduce', () {
+      expect(v['hash'], contains('CFH-64'));
+      final vectors = v['cfh64_vectors']! as Map<String, Object?>;
+      vectors.forEach((keyHex, want) {
+        final got = BigInt.from(cfh64(unhex(keyHex)))
+            .toUnsigned(64)
+            .toRadixString(16);
+        expect(got, want, reason: 'CFH-64 of $keyHex');
+      });
+      expect(vectors.length, greaterThanOrEqualTo(6));
+    });
+
+    test('the recorded filter blocks reproduce bit for bit', () {
+      // This is the assertion that was impossible while the hash was
+      // unspecified. It is now the whole point of the file.
+      final r = v['reproduce']! as Map<String, Object?>;
+      final keys = [
+        for (var i = 0; i < (r['key_count']! as int); i++)
+          userKeyPrefix(r['tree_id']! as int,
+              encodeKey(CNitriteId((r['first_id']! as int) + i)))
+      ];
+      final f = BlockedBloom.build(keys,
+          bitsPerKey: r['bits_per_key']! as int, distinctKeys: keys.length);
+      expect(hex(f.blocks), v['blocks']);
+      expect(hex(Uint8List.sublistView(f.encodePayload(), 0, 16)),
+          v['header_bytes']);
     });
   });
 

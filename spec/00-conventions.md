@@ -97,10 +97,14 @@ ordinary page the checksum is the first field and the covered range is
 *last* field and the covered range is `0 … 4091` (`01-container.md` §2). There
 are no other placements.
 
-A 64-bit checksum (**XXH3-64**) MAY be used for blob extents and value-log
-segment bodies when
-feature bit `HASH64` is set. CRC-32C remains mandatory for pages and
-superblocks regardless.
+A 64-bit checksum (**CFH-64**, `04-segments.md` §2.4.1) MAY be used for blob
+extents and value-log segment bodies when feature bit `HASH64` is set. CRC-32C
+remains mandatory for pages and superblocks regardless.
+
+CFH-64 is a *hash*, not a CRC: it has no burst-error guarantee, and it is used
+here only where the alternative is nothing at all. An earlier draft named
+XXH3-64 for both this and the segment filter; `04-segments.md` §2.4.1 records
+why a hash small enough to print in the spec replaced it.
 
 ## 7. Integer identifiers
 

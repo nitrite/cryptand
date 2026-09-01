@@ -283,6 +283,103 @@ void main() {
     });
   });
 
+  group('leaf cell layout, section 2.2', () {
+    test('kind and flags share one byte', () {
+      final b = SegmentBuilder(pageSize: 4096, segmentId: 1, treeId: kTree);
+      b.add(SegEntry(ikFor(1), ValueKind.inline, Uint8List(4),
+          expiryMs: 1767225600000));
+      final s = Segment(b.build(), 4096);
+      final c = s.cursor()..seekFirst();
+      final rec = c.record();
+      expect(rec.valueKind, ValueKind.inline);
+      expect(rec.expiryMs, 1767225600000);
+      expect(rec.value.length, 4);
+    });
+
+    test('a VLOG or BLOB cell carries no value_len', () {
+      // Both pointers are exactly 16 bytes, so a length field whose only legal
+      // value is 16 is a second place to disagree. Section 2.2.
+      final withPtr = SegmentBuilder(pageSize: 4096, segmentId: 1, treeId: kTree)
+        ..add(SegEntry(ikFor(1), ValueKind.vlog, Uint8List(16)));
+      final withInline =
+          SegmentBuilder(pageSize: 4096, segmentId: 1, treeId: kTree)
+            ..add(SegEntry(ikFor(1), ValueKind.inline, Uint8List(16)));
+      final a = Segment(withPtr.build(), 4096);
+      final bSeg = Segment(withInline.build(), 4096);
+      final na = a.node(1), nb = bSeg.node(1);
+      // The inline cell pays one extra byte for its uvar length.
+      expect(nb.freeStart, na.freeStart);
+      final aCell = a.cursor()..seekFirst();
+      final bCell = bSeg.cursor()..seekFirst();
+      expect(aCell.record().value.length, 16);
+      expect(bCell.record().value.length, 16);
+      // Same key, same 16-byte payload: the VLOG extent must be smaller.
+      expect(a.extent.length, lessThanOrEqualTo(bSeg.extent.length));
+    });
+
+    test('a pointer value must be exactly 16 bytes', () {
+      final b = SegmentBuilder(pageSize: 4096, segmentId: 1, treeId: kTree);
+      expect(() => b.add(SegEntry(ikFor(1), ValueKind.vlog, Uint8List(8))),
+          throwsA(isA<InvalidArgumentException>()));
+      expect(() => b.add(SegEntry(ikFor(2), ValueKind.blob, Uint8List(20))),
+          throwsA(isA<InvalidArgumentException>()));
+    });
+
+    test('an out-of-range value_kind is refused on write', () {
+      final b = SegmentBuilder(pageSize: 4096, segmentId: 1, treeId: kTree);
+      expect(() => b.add(SegEntry(ikFor(1), 7, Uint8List(0))),
+          throwsA(isA<InvalidArgumentException>()));
+    });
+
+    test('reserved kind_flags bits are corruption on read', () {
+      final b = SegmentBuilder(pageSize: 4096, segmentId: 1, treeId: kTree)
+        ..add(SegEntry(ikFor(1), ValueKind.inline, Uint8List(4)));
+      final extent = b.build();
+      final s = Segment(extent, 4096);
+      final n = s.node(1);
+      // Locate the cell's kind_flags byte: after suffix_len and the suffix.
+      final base = 40;
+      final ptr = ByteData.view(extent.buffer)
+          .getUint16(4096 + base + 16 + n.prefixLen, Endian.little);
+      final off = 4096 + base + ptr;
+      final suffixLen = extent[off];
+      final kindAt = off + 1 + suffixLen;
+      final broken = Uint8List.fromList(extent);
+      broken[kindAt] |= 0x80; // a reserved high-nibble bit
+      // The page checksum must be repaired so the failure is the one we want.
+      _repairPageChecksum(broken, 1, 4096);
+      final s2 = Segment(broken, 4096);
+      final c = s2.cursor()..seekFirst();
+      expect(() => c.record(), throwsA(isA<CorruptionException>()));
+    });
+
+    test('the separated cell is 32 bytes, the figure the model assumes', () {
+      // design/performance-model.md section 1 costs the whole write-
+      // amplification argument against K ~= 32 B. Measure it.
+      final n = 100000;
+      final b = SegmentBuilder(pageSize: 4096, segmentId: 1, treeId: kTree);
+      for (var i = 0; i < n; i++) {
+        b.add(SegEntry(ikFor(snowflake(i)), ValueKind.vlog, Uint8List(16)));
+      }
+      final s = Segment(b.build(), 4096);
+      var leaves = 0, cells = 0;
+      for (var p = 1; p < s.pageCount; p++) {
+        final node = s.node(p);
+        if (node.isLeaf) {
+          leaves++;
+          cells += node.cellCount;
+        }
+      }
+      final perLeaf = cells / leaves;
+      final bytesPerCell = (4096 - 40 - 16) / perLeaf;
+      printOnFailure('per leaf ${perLeaf.toStringAsFixed(1)}, '
+          '${bytesPerCell.toStringAsFixed(1)} B/cell');
+      expect(perLeaf, greaterThan(120),
+          reason: 'model predicts ~127 entries per leaf at K = 32 B');
+      expect(bytesPerCell, lessThan(34));
+    });
+  });
+
   group('internal key', () {
     test('newest version of a key sorts first', () {
       // spec/04-segments.md section 1: seq is inverted.
@@ -340,4 +437,19 @@ class _Lcg {
   int next() => s = (s * 6364136223846793005 + 1442695040888963407);
   Uint8List bytes(int n) =>
       Uint8List.fromList(List.generate(n, (_) => next().abs() % 256));
+}
+
+/// Recomputes a page's CRC-32C after a direct byte edit, so a test that means
+/// to break one invariant does not trip the checksum first.
+void _repairPageChecksum(Uint8List extent, int pageIndex, int pageSize) {
+  final start = pageIndex * pageSize;
+  var crc = 0xFFFFFFFF;
+  for (var i = start + 4; i < start + pageSize; i++) {
+    crc ^= extent[i];
+    for (var k = 0; k < 8; k++) {
+      crc = (crc & 1) != 0 ? (0x82F63B78 ^ (crc >> 1)) : (crc >> 1);
+    }
+  }
+  ByteData.view(extent.buffer)
+      .setUint32(start, (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF, Endian.little);
 }

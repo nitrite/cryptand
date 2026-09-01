@@ -286,10 +286,12 @@ positional read. Three things pay it back:
   existence checks and covering queries are entirely served from the key index.
   Nitrite does a great deal of exactly this.
 - **Projections decode one field, not the document.** The value encoding carries
-  a sorted `(name_id, offset)` table, so `doc["price"]` is a binary search and a
-  slice — not a deserialization. On a 20-field document where a query needs two
-  fields, that is ~10× less decode work than Java serialization, Kryo, Hive
-  adapters or bincode, and it applies to every row of every scan.
+  a sorted `(name_ref, offset)` table, so `doc["price"]` is one pass over that
+  table and a slice — not a deserialization. **Measured** on a 20-field
+  document: one field costs **11×** less than decoding the whole thing, two
+  fields **6×** less (`reference/dart/cryptand/bench/p4_p6_decode.dart`). It
+  applies to every row of every scan, and it is the mechanism P4's
+  engine-to-engine comparison rests on.
 
 **Scans use cursors** — a merge heap over one iterator per candidate segment,
 each with its own path stack. Because the last level is disjoint, a cold-data
@@ -361,9 +363,11 @@ dispatch, bincode round-trips, JNI crossings, base64 of every key, and the
 in-memory re-sorting that Hive's unordered keys force on the Dart SDK.
 
 Added: CRC-32C per page (hardware-accelerated everywhere, and
-`java.util.zip.CRC32C` on the JVM), LZ4 on compressed pages, XXH3-64 for filter
-probes, and key encoding per operation — cheap integer work that replaces the
-comparator calls it displaces.
+`java.util.zip.CRC32C` on the JVM), LZ4 on compressed pages, CFH-64 for filter
+probes — twenty lines of multiply-and-rotate printed in the spec itself
+(`spec/04-segments.md` §2.4.1), not a 500-line algorithm with a secret table —
+and key encoding per operation. Cheap integer work that replaces the comparator
+calls it displaces.
 
 ## 9. Extension points, all inside the container
 

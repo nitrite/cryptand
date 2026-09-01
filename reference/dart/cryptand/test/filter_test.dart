@@ -152,20 +152,68 @@ void main() {
       return hits / trials;
     }
 
-    test('16 bits per key is at or below the predicted 0.04 %', () {
+    test('16 bits per key is at or below the stated 0.33 %', () {
       final r = falsePositiveRate(16, 100000, 200000);
       printOnFailure('measured ${(r * 100).toStringAsFixed(4)} %');
-      expect(r, lessThan(0.002),
+      expect(r, lessThan(0.005),
           reason: 'measured ${(r * 100).toStringAsFixed(4)} %, '
-              'section 2.4 predicts ~0.04 %');
+              'section 2.4 states ~0.33 % for a blocked filter');
     });
 
-    test('10 bits per key is at or below the predicted 1 %', () {
+    test('10 bits per key is at or below the stated 1.7 %', () {
       final r = falsePositiveRate(10, 100000, 200000);
       printOnFailure('measured ${(r * 100).toStringAsFixed(4)} %');
-      expect(r, lessThan(0.02),
+      expect(r, lessThan(0.025),
           reason: 'measured ${(r * 100).toStringAsFixed(4)} %, '
-              'section 2.4 predicts ~1 %');
+              'section 2.4 states ~1.7 % for a blocked filter');
+    });
+
+    test('the rate is stable across key shapes -- CFH-64 has 64 bits', () {
+      // The property that ruled CRC-32C out: any pair of CRC evaluations over
+      // the same key is affinely related and carries only 32 bits, which shows
+      // up as a shape-dependent rate. Section 2.4.1.
+      final shapes = <String, List<Uint8List>>{
+        'snowflake': keySet(0, 50000),
+        'sparse': [
+          for (var i = 0; i < 50000; i++)
+            userKeyPrefix(17, encodeKey(CNitriteId(i * 1048576)))
+        ],
+        'sequential': [
+          for (var i = 0; i < 50000; i++)
+            userKeyPrefix(17, encodeKey(CNitriteId(i)))
+        ],
+        'compound': [
+          for (var i = 0; i < 50000; i++)
+            userKeyPrefix(
+                17, encodeKey(CArray([const CStr('dispatched'), CNitriteId(i)])))
+        ],
+      };
+      final rates = <String, double>{};
+      shapes.forEach((name, keys) {
+        final f =
+            BlockedBloom.build(keys, bitsPerKey: 16, distinctKeys: keys.length);
+        var hits = 0;
+        for (var i = 0; i < 200000; i++) {
+          final probe =
+              userKeyPrefix(17, encodeKey(CNitriteId(-1 - i * 7919)));
+          if (f.mayContain(probe)) hits++;
+        }
+        rates[name] = hits / 200000;
+        // Sanity: the probes must actually be absent, or the test measures
+        // nothing. Every present key here is non-negative.
+        expect(keys.length, 50000);
+      });
+      printOnFailure(rates.entries
+          .map((e) => '${e.key} ${(e.value * 100).toStringAsFixed(3)}%')
+          .join('  '));
+      final values = rates.values.toList();
+      final lo = values.reduce((a, b) => a < b ? a : b);
+      final hi = values.reduce((a, b) => a > b ? a : b);
+      expect(lo, greaterThan(0.0005),
+          reason: 'a rate of zero means the probes were not actually absent');
+      expect(hi / lo, lessThan(1.6),
+          reason: 'false-positive rate varies too much across key shapes: '
+              '$rates');
     });
   });
 }

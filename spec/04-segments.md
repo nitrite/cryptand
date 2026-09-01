@@ -151,23 +151,42 @@ Offsets are relative to the payload.
 ```
 uvar  suffix_len
 bytes suffix_len        -- internal key with `prefix` removed (includes seq and op)
-u8    value_kind        -- 0 INLINE, 1 OVERFLOW, 2 BLOB, 3 EMPTY, 4 VLOG
-u8    entry_flags       -- bit0 HAS_EXPIRY
+u8    kind_flags        -- low nibble  value_kind: 0 INLINE, 1 OVERFLOW,
+                        --                         2 BLOB, 3 EMPTY, 4 VLOG
+                        -- high nibble flags:      bit4 HAS_EXPIRY
 [u64  expiry_ms]        -- present iff HAS_EXPIRY; Unix ms, UTC (§9)
-uvar  value_len         -- absent for EMPTY; absent when op == DELETE
-bytes value_len         -- INLINE: the CVE value
-                        -- VLOG:  a 16-byte value-log pointer (§6.4)
-                        -- BLOB:  a 16-byte blob pointer (01 §5)
-                        -- OVERFLOW: inline head + u64 next_page
+[uvar value_len]        -- present ONLY for INLINE and OVERFLOW
+bytes value             -- INLINE:   `value_len` bytes of CVE value
+                        -- VLOG:     exactly 16 bytes, the pointer of §6.4
+                        -- BLOB:     exactly 16 bytes, the pointer of 01 §5
+                        -- OVERFLOW: `value_len` inline bytes + u64 next_page
+                        -- EMPTY, or op == DELETE: nothing
 ```
 
-`value_kind` and `value_len` by `op`: a `PUT` uses any kind; a `DELETE` writes
-`value_kind = EMPTY` and no `value_len`; a `RANGE_DELETE` writes
-`value_kind = INLINE` and the payload of §2.5. A tree whose values are raw byte
-layouts rather than CVE — `postings` (`07-fulltext.md` §4.2) and `vector_graph`
-(`09-vector.md` §3) — stores them as a CVE `BYTES` value (`0x13`), so that
-"INLINE means a CVE value" holds without exception and generic tooling can dump
-any tree.
+**Two bytes are deliberately absent, and both absences are the point.**
+
+`value_kind` and the entry flags share one byte because five kinds need three
+bits and the flags need one. And `value_len` is **omitted for `VLOG` and
+`BLOB`**, because both pointers are exactly 16 bytes: a length field whose only
+legal value is 16 is not information, it is a second place for two
+implementations to disagree.
+
+That brings a separated leaf cell to `1 + ~12 + 1 + 16 + 2` (the cell pointer)
+= **32 bytes**, which is the merged footprint `K` that
+`design/performance-model.md` §1 costs the entire write-amplification argument
+against. The reference implementation measured 34 B before this change and 115
+entries per leaf against a predicted 127; the model was right and the layout was
+two bytes fatter than it.
+
+`value_kind` by `op`: a `PUT` uses any kind; a `DELETE` writes
+`value_kind = EMPTY` and no value; a `RANGE_DELETE` writes `value_kind = INLINE`
+and the payload of §2.5. A reader MUST reject a `kind_flags` whose low nibble is
+above 4, and MUST reject a set bit in the high nibble other than bit 4.
+
+A tree whose values are raw byte layouts rather than CVE — `postings`
+(`07-fulltext.md` §4.2) and `vector_graph` (`09-vector.md` §3) — stores them as
+a CVE `BYTES` value (`0x13`), so that "INLINE means a CVE value" holds without
+exception and generic tooling can dump any tree.
 
 **Internal cell:**
 
@@ -211,7 +230,7 @@ filter that disagrees between languages produces **wrong results**, not slow
 ones — a false *negative* silently loses a key.
 
 ```
-hash        = XXH3-64(user_key, seed = 0)          -- the 64-bit variant
+hash        = CFH64(user_key)                      -- §2.4.1, u64
 h1          = hash & 0xFFFF_FFFF                   -- u32
 h2          = (hash >> 32) | 1                     -- u32, forced ODD
 block_count = max(1, ceil(entry_count * filter_bits_per_key / 512))
@@ -252,6 +271,77 @@ minor version can change the derivation without invalidating existing files.
 
 `filter_page = 0` means no filter, and a reader MUST then treat every probe as a
 hit.
+
+#### 2.4.1 CFH-64 — the filter hash
+
+**The hash is specified here, in full, rather than named.** That is the whole
+point of it.
+
+```
+CFH64(key):                       -- all arithmetic is u64 and wraps;
+                                  -- >>> is a logical (zero-fill) shift
+  P1 = 0x9E3779B185EBCA87
+  P2 = 0xC2B2AE3D27D4EB4F
+  P3 = 0x165667B19E3779F9
+  M1 = 0xBF58476D1CE4E5B9
+  M2 = 0x94D049BB133111EB
+
+  h = P1 XOR (length(key) * P2)
+  i = 0
+  while length(key) - i >= 8:
+      w = u64le(key[i .. i+8])                 -- little-endian, 00 §3
+      h = h XOR (w * P2)
+      h = rotl64(h, 31) * P1
+      i = i + 8
+
+  tail = 0                                     -- the final 0..7 bytes,
+  while i < length(key):                       --   folded most-significant
+      tail = (tail << 8) OR key[i]             --   byte first
+      i = i + 1
+  h = h XOR (tail * P3)
+  h = rotl64(h, 27) * P1
+
+  h = (h XOR (h >>> 30)) * M1                  -- finalizer
+  h = (h XOR (h >>> 27)) * M2
+  h = h XOR (h >>> 31)
+  return h
+```
+
+Every operation is a wrapping 64-bit multiply, an XOR, a logical shift or a
+rotate. Java has all four on `long` (`Long.rotateLeft`, `>>>`); Rust has
+`wrapping_mul` and `rotate_left`; Dart's `int` is a wrapping 64-bit two's
+complement value with `>>>`. There is no table, no secret, and nothing to look
+up.
+
+**Why not XXH3-64**, which an earlier draft named. XXH3-64 is roughly 500 lines
+with seven length-dependent branches and a fixed 192-byte secret table. For a
+structure whose failure mode is a silent false *negative*, that made the single
+largest and least verifiable primitive in Level 0 the one guarding the most
+dangerous failure — and it had to be reproduced bit-exactly, from the paper, in
+three languages. A hash small enough to print here is one an implementer reads
+rather than sources, and the conformance vectors pin it.
+
+**Why not CRC-32C**, which is already mandatory for every page and would
+therefore have been free. CRC is affine in its initial state, so
+`CRC(i1, m) XOR CRC(i2, m)` depends only on `length(m)`, and appending or
+prepending a salt is likewise an invertible linear map of the original value.
+**Any pair of CRC-32C evaluations over the same key therefore carries 32 bits of
+entropy, not 64** — a finalizer spreads those bits but cannot create more. Two
+distinct keys colliding in 32 bits set identical filter bits, so one is a
+*guaranteed* false positive whenever the other is present, and the number of
+such pairs grows as `n^2 / 2^33`. The reference implementation measured
+4 000 000 random keys: the CRC pair produced **1868** collisions against
+**1863** predicted by that bound, and CFH-64 produced **none**.
+
+Measured false-positive rate at 16 bits per key, 200 000 keys and 2 000 000
+absent probes, across five key shapes — snowflake ids, dense sequential ids,
+sparse ids, strings with a long shared prefix, and compound index keys:
+**0.222 % – 0.235 %**, stable to within 6 % across all five. The raw CRC pair
+ranged from 0.18 % to 0.45 % on the same shapes, which is the linearity showing.
+
+CFH-64 is used **only** for filters. It is not a checksum (CRC-32C, §6 of
+`00-conventions.md`), it is not a MAC (`14-security.md` §6), and it MUST NOT be
+used where either is required.
 
 **A filter need not be resident** — on an unencrypted file. Block selection
 depends only on `h1`, so a probe reads exactly one 64-byte block.
@@ -653,8 +743,20 @@ Consequences worth stating:
 - A value that dies before reaching the last level is **never promoted** — the
   hot tier absorbs the churn, which is most of it under a skewed update
   distribution.
-- Values are written at most **twice** over their whole life: once on write, once
-  on promotion. Values that never reach the last level are written once.
+- A value that survives is written **twice** in the common case: once on write,
+  once on promotion. Values that never reach the last level are written once.
+- **A long-lived value may be written more than twice.** Promotion clusters a
+  *generation* of surviving values into one run; ten rounds of compaction
+  produce ten runs, and merging them back into one is a collection (§6.8),
+  which is a further write of every value that survives it. An earlier draft
+  said "at most twice over their whole life", which is true only of a database
+  that is never collected — and one that is never collected is the database
+  whose scans decay (§6.9). Measured on the aged-scan workload of
+  `spec/11-conformance.md` §6, holding `locality_debt` under 20 % cost
+  **2.12×** value-side write amplification against **1.76×** with no collection
+  at all: 20 % more value writes, in exchange for an aged scan that stays at
+  1.00× instead of degrading to 2.14×, and a value log that stays at 1.00×
+  its live size instead of 5.82×.
 - A **bulk or sequential writer MAY write directly to a COLD segment**, skipping
   the hot tier and the promotion write entirely. If the batch is sorted, it MUST
   set `clustered`; if not, it MUST NOT.
@@ -819,34 +921,75 @@ property:
 3. `live_bytes` may overstate liveness and MUST NOT understate it.
 
 **Collecting a COLD segment MUST preserve key clustering**: survivors are
-emitted in `(tree_id, CKE(key))` order and the output keeps `clustered`.
-Since the input is already sorted, this is a merge, not a sort.
+emitted in `(tree_id, CKE(key))` order and the output keeps `clustered`. Since
+every input run is already sorted, this is a merge, not a sort.
+
+**Collection is what keeps the cold tier one run rather than many**, and it is
+therefore not optional maintenance — it is half of §6.9's bound. Promotion
+(§6.3) clusters each generation of surviving values as it passes; only
+collection merges the generations. An implementation that promotes but never
+collects has a cold tier that is *individually* sorted and *collectively*
+fragmented, which is the exact state §6.9 now measures and which an earlier
+draft's metric could not see.
+
+**A collection MUST be triggered by `locality_debt` as well as by
+`vlog_space_target_pct`.** The two bounds share a cause — surplus runs — but
+they are not the same quantity, and a value log can sit comfortably inside its
+space target while a key-ordered scan interleaves nineteen runs. Measured, a
+space-only trigger left an aged scan at 1.58× where a debt trigger held it at
+1.00×.
 
 ### 6.9 Locality debt — a MUST with a number
 
 Define, over the live value-log bytes of a database:
 
 ```
-locality_debt = live bytes in value-log segments not marked clustered
-                ────────────────────────────────────────────
-                          total live value-log bytes
+ideal_runs    = ceil(live value-log bytes / vlog_segment_bytes)
+
+locality_debt = live bytes in surplus runs
+                ─────────────────────────────
+                  total live value-log bytes
 ```
+
+where the **surplus runs** are found by sorting the value-log segments that
+still hold live data by live bytes, descending, and taking everything past the
+first `ideal_runs` of them. Live bytes in a run that is not key-clustered at all
+are surplus regardless of where it sorts.
 
 **An implementation MUST keep `locality_debt` at or below `locality_debt_pct`
 (profile default: 20 %)** whenever the database is not under active write
-pressure, by promoting or collecting unclustered segments.
+pressure, by promoting (§6.3) or collecting (§6.8) surplus runs.
 
-This is stated as a bounded *outcome* rather than as a mechanism, because that
-is what can be measured, tested and enforced. An earlier draft made clustering a
-SHOULD on the mechanism; that was a mistake. Scan performance over separated
-values depends entirely on clustering, the degradation is gradual and shows up
-months later as "the database got slow", and a format whose scan performance
-silently decays is not acceptable.
+**Why it counts runs and not flags.** An earlier draft defined this as "live
+bytes in segments *without* the clustered flag", and the reference
+implementation showed that measures the wrong thing. After ageing a database by
+ten times its size in random updates, it held **nineteen** live cold segments,
+**every one of them internally sorted** — so the old definition read **0 %** —
+while a key-ordered scan had to interleave all nineteen and cost **2.14×** a
+fresh scan. Nineteen individually sorted runs are not one sorted run, and a scan
+pays for the difference.
 
-Normal operation satisfies the bound almost for free: promotion (§6.3) clusters
-everything that reaches the last level, which is most of the data. The bound
-exists to catch the residue — a database that is bulk-loaded unsorted and never
-compacted to the last level.
+Under the definition above the same database reads **89 % debt**, which is what
+a bound is for. Measured, with collection triggered on it:
+
+| live runs | `locality_debt` | aged scan | `value_reads_per_scanned_row` | value-log space |
+|---|---|---|---|---|
+| 2 | 0 % | **1.00×** | 0.100 | 1.00× |
+| 4 | ~40 % | 1.58× | 0.163 | 1.63× |
+| 19 | ~89 % | 2.14× | 0.224 | 5.82× |
+
+The bound is stated as an *outcome* rather than a mechanism because that is what
+can be measured, tested and enforced. Scan performance over separated values
+depends entirely on how many runs a scan interleaves, the degradation is gradual
+and shows up months later as "the database got slow", and a format whose scan
+performance silently decays is not acceptable.
+
+**It is also the space bound in disguise.** The same surplus runs that cost a
+scan are the ones holding dead bytes: at nineteen runs the value log was 5.82×
+its live size against a `vlog_space_target_pct` of 150 %. An implementation that
+collects on `locality_debt` gets `vlog_space_target_pct` for free; one that
+collects only on space does **not** get locality for free, because a log can sit
+inside its space target with its live data spread across many runs.
 
 An implementation MUST expose `locality_debt` as a metric
 (`13-operations.md` §6).

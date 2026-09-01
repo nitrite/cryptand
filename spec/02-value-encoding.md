@@ -179,14 +179,36 @@ MUST NOT assume `name_id` order matches name order.
 
 ```
 resolve(name):
-  lo, hi = 0, field_count
-  binary search comparing name bytes (dictionary lookup is an array index)
+  walk the field table, comparing name bytes as you go
+  (a dictionary lookup is an array index; the table is sorted, so a name
+   above the target ends the search)
   → value_offset → decode one Value
 ```
 
-No allocation for unread fields. This is the property the whole design is built
-around, and it is what makes Cryptand cheaper than Java serialization, Kryo, Hive
-adapters and bincode on every read that does not need the whole document.
+**No allocation for unread fields.** That is the property the whole design is
+built around, and it is what makes Cryptand cheaper than Java serialization,
+Kryo, Hive adapters and bincode on every read that does not need the whole
+document.
+
+**It is a forward pass, not a binary search, and the difference is the field
+table's own encoding.** Each table entry is two `uvar`s, so the table cannot be
+*indexed* without first walking it — a binary search would pay an O(n) index
+build before its O(log n) probes. For the document shape this format is built
+for, one forward pass over a sorted table, stopping early when a name exceeds
+the target, is simply cheaper. An implementation SHOULD scan forward for small
+documents and MAY switch to a binary search for wide ones; the reference
+implementation crosses over at 64 fields.
+
+An earlier draft described this as "a binary search and a slice", which
+overstated it. Measured on the 20-field document of
+`design/performance-model.md` §1, resolving one field costs **11×** less than
+decoding the whole document, and two fields **6×** less — the mechanism is
+real, the algorithm is a scan.
+
+A fixed-width field table would make the walk O(1) and a binary search genuine.
+It was considered and rejected: two `u32`s per entry would add about 10 % to
+every document to save roughly 30 % of an already-small projection cost, and
+documents are the thing this format stores most of.
 
 ### 5.3 The name dictionary
 

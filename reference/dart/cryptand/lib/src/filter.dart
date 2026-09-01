@@ -6,24 +6,25 @@
 ///   >  languages produces **wrong results**, not slow ones -- a false
 ///   >  *negative* silently loses a key."
 ///
-/// Everything below the hash -- block count, block selection, the probe
-/// sequence, bit order within a block, the derivation of `k`, and the page
-/// layout -- is implemented exactly as the spec states, and
-/// `test/filter_test.dart` checks each against the text.
+/// Block count, block selection, the probe sequence, bit order within a block,
+/// the derivation of `k`, the page layout and **the hash itself** are all
+/// implemented exactly as the spec states, and `test/filter_test.dart` checks
+/// each against the text.
 ///
-/// **The 64-bit hash is a parameter here, not a constant.** The spec names
-/// XXH3-64. See [Hash64] and `REPORT.md` section "XXH3-64" for why this
-/// reference does not ship an unverified one.
+/// The hash is [cfh64], specified in full in `spec/04-segments.md` §2.4.1. It
+/// replaced XXH3-64 during phase 1 of this implementation: see `REPORT.md`.
 library;
 
 import 'dart:typed_data';
 
 import 'bytes.dart';
 import 'container.dart';
-import 'crc32c.dart';
 import 'errors.dart';
 
-/// A 64-bit hash of a user key, seeded.
+/// A 64-bit hash of a user key.
+///
+/// A parameter only so that `tool/experiments/` can measure alternatives.
+/// Conforming files use [cfh64] and nothing else.
 typedef Hash64 = int Function(List<int> key);
 
 /// Bits per block. `spec/04-segments.md` section 2.4: 512 bits (64 bytes),
@@ -52,7 +53,7 @@ final class BlockedBloom {
     Iterable<List<int>> userKeys, {
     required int bitsPerKey,
     required int distinctKeys,
-    Hash64 hash = crcHash64,
+    Hash64 hash = cfh64,
   }) {
     final blockCount = blockCountFor(distinctKeys, bitsPerKey);
     final probes = probesFor(bitsPerKey);
@@ -116,7 +117,7 @@ final class BlockedBloom {
   }
 
   static BlockedBloom decodePayload(Uint8List payload,
-      {Hash64 hash = crcHash64}) {
+      {Hash64 hash = cfh64}) {
     final r = ByteReader(payload);
     if (r.u32() != 0x43465031) {
       throw const CorruptionException('bad filter page magic (expected CFP1)');
@@ -164,33 +165,59 @@ final class BlockedBloom {
   }
 }
 
-/// The reference implementation's 64-bit hash.
+/// CFH-64, the filter hash of `spec/04-segments.md` §2.4.1.
 ///
-/// **This is not XXH3-64**, which `spec/04-segments.md` section 2.4 names.
+/// Every operation is a wrapping 64-bit multiply, an XOR, a logical shift or a
+/// rotate — four things every target language has on its widest integer. There
+/// is no table, no secret, and nothing to look up: the twenty lines below are
+/// the whole definition, and the spec prints them.
 ///
-/// XXH3-64 is a ~500-line algorithm with seven length-dependent branches and a
-/// fixed 192-byte secret table. This reference cannot verify an XXH3
-/// implementation against the canonical vectors in the environment it was
-/// written in, and shipping an *unverified* hash in the artifact that other
-/// SDKs are meant to match would bake any error into the contract -- as false
-/// negatives, which lose keys silently.
+/// **Why not XXH3-64**, which the spec named until phase 1. Roughly 500 lines,
+/// seven length-dependent branches, and a 192-byte secret table, guarding the
+/// one structure in the format whose failure mode is a silent false *negative*
+/// — a lost key. Three independent reimplementations of that from the paper is
+/// a risk out of all proportion to what a Bloom filter needs.
 ///
-/// So the filter is built over two independent CRC-32C evaluations instead:
-/// CRC-32C is already mandatory for every page (`spec/00-conventions.md`
-/// section 6), is already verified here against the RFC 3720 vectors, and is
-/// hardware-accelerated on every target. `test/filter_test.dart` measures the
-/// false-positive rate this produces against the rates section 2.4 predicts.
-///
-/// `REPORT.md` carries the recommendation that follows from that measurement.
-int crcHash64(List<int> key) {
-  final lo = crc32c(key);
-  // A second, independent evaluation over a domain-separated copy.
-  final salted = Uint8List(key.length + 4);
-  salted.setRange(0, key.length, key);
-  salted[key.length] = 0x9E;
-  salted[key.length + 1] = 0x37;
-  salted[key.length + 2] = 0x79;
-  salted[key.length + 3] = 0xB9;
-  final hi = crc32c(salted);
-  return (hi << 32) | lo;
+/// **Why not CRC-32C**, which is already mandatory for every page and would
+/// have been free. CRC is affine in its initial state, so any pair of CRC-32C
+/// evaluations over the same key is affinely related and carries **32 bits of
+/// entropy, not 64** — a finalizer spreads those bits but cannot create more.
+/// `tool/experiments/hash_entropy2.dart` measures it: over 4 000 000 random
+/// keys the CRC pair collided 1868 times against 1863 predicted by the 2^32
+/// birthday bound, and CFH-64 collided zero times. Each such collision is a
+/// *guaranteed* false positive, and they grow as n^2 / 2^33.
+int cfh64(List<int> key) {
+  const p1 = 0x9E3779B185EBCA87;
+  const p2 = -0x3D4D51C2D82B14B1; // 0xC2B2AE3D27D4EB4F as a signed 64-bit int
+  const p3 = 0x165667B19E3779F9;
+  const m1 = -0x40A7B892E31B1A47; // 0xBF58476D1CE4E5B9
+  const m2 = -0x6B2FB644ECCEEE15; // 0x94D049BB133111EB
+
+  final n = key.length;
+  var h = p1 ^ (n * p2);
+  var i = 0;
+  while (n - i >= 8) {
+    // Little-endian 64-bit word, per spec/00-conventions.md section 3.
+    var w = 0;
+    for (var j = 7; j >= 0; j--) {
+      w = (w << 8) | (key[i + j] & 0xFF);
+    }
+    h ^= w * p2;
+    h = _rotl64(h, 31) * p1;
+    i += 8;
+  }
+  // The final 0..7 bytes, folded most-significant byte first.
+  var tail = 0;
+  while (i < n) {
+    tail = (tail << 8) | (key[i] & 0xFF);
+    i++;
+  }
+  h ^= tail * p3;
+  h = _rotl64(h, 27) * p1;
+
+  h = (h ^ (h >>> 30)) * m1;
+  h = (h ^ (h >>> 27)) * m2;
+  return h ^ (h >>> 31);
 }
+
+int _rotl64(int x, int n) => (x << n) | (x >>> (64 - n));

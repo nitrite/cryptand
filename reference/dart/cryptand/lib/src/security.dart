@@ -6,16 +6,19 @@
 /// (section 3.3), and the superblock MAC (section 6.2). Each has RFC test
 /// vectors, which `test/security_test.dart` checks against.
 ///
-/// **What is not here, and why:** XChaCha20-Poly1305 and Argon2id.
-/// `REPORT.md` states the reasoning; in short, a reference implementation that
-/// ships an *unverified* AEAD or KDF would have other SDKs match its errors,
-/// and the environment this was written in cannot check either against
-/// canonical vectors. The layouts they live in are implemented and tested, so
-/// adding the two primitives is a drop-in.
+/// XChaCha20-Poly1305 lives in `aead.dart`, verified against the published
+/// RFC 8439 and draft-irtf-cfrg-xchacha vectors.
+///
+/// **What is still not here:** Argon2id. `REPORT.md` states the reasoning; in
+/// short, a reference implementation that ships an *unverified* KDF would have
+/// other SDKs match its errors. Every layout it lives in is implemented and
+/// tested, and `Keyslot.kdfRaw` — a host-supplied 32-byte key, which
+/// section 3.3 already defines — exercises the whole wrap path without it.
 library;
 
 import 'dart:typed_data';
 
+import 'aead.dart';
 import 'bytes.dart';
 import 'container.dart';
 import 'errors.dart';
@@ -434,4 +437,250 @@ void verifySuperblockMac(List<int> sbMacKey, Uint8List superblock) {
         'superblock MAC mismatch: this file has been modified by someone '
         'without the key (spec/14-security.md section 6.2)');
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// Page and record encryption, section 5
+// ---------------------------------------------------------------------------
+
+/// The keys a single open database holds.
+///
+/// Section 3.4: never use the master key directly. Each purpose gets its own
+/// HKDF subkey, because pages and value-log records use *different* nonce
+/// spaces and one key across two independently-constructed spaces is how a
+/// nonce collision becomes possible again.
+final class KeyRing {
+  KeyRing(this.masterKey, this.databaseUuid)
+      : pageKey = deriveSubkey(masterKey, databaseUuid, Purpose.page),
+        vlogKey = deriveSubkey(masterKey, databaseUuid, Purpose.vlog),
+        macKey = deriveSubkey(masterKey, databaseUuid, Purpose.sbMac);
+
+  final Uint8List masterKey;
+  final Uint8List databaseUuid;
+  final Uint8List pageKey;
+  final Uint8List vlogKey;
+  final Uint8List macKey;
+
+  /// Zeroes every key. Section 11: "An implementation MUST zero the master key
+  /// and every subkey on close()."
+  void destroy() {
+    for (final k in [masterKey, pageKey, vlogKey, macKey]) {
+      k.fillRange(0, k.length, 0);
+    }
+  }
+}
+
+/// Encrypts a page in place, section 5.2.
+///
+/// ```
+/// nonce = 1 || counter || page_id || 0
+/// aad   = the 40-byte page header with `checksum` zeroed
+/// ```
+///
+/// The AAD covers `page_type`, `flags`, `tree_id`, `commit_id`,
+/// `extent_pages`, `payload_len` and `nonce`, so none of them can be edited
+/// without detection — an attacker cannot relabel an index page as a data
+/// page, or move a page between trees.
+///
+/// Order is **compress, then encrypt** on write and **verify checksum,
+/// decrypt, then decompress** on read, so a corrupt page is never fed to a
+/// cipher.
+Uint8List encryptPagePayload({
+  required KeyRing keys,
+  required int pageId,
+  required int nonceCounter,
+  required Uint8List pageHeader40,
+  required List<int> payload,
+}) {
+  if (pageHeader40.length != PageHeader.size) {
+    throw const InvalidArgumentException('page header is 40 bytes');
+  }
+  final aad = Uint8List.fromList(pageHeader40);
+  for (var i = 0; i < 4; i++) {
+    aad[i] = 0; // the checksum is computed after encryption
+  }
+  final r = xchacha20Poly1305Encrypt(
+    key: keys.pageKey,
+    nonce24: buildNonce(NonceDomain.page, nonceCounter, pageId, 0),
+    plaintext: payload,
+    aad: aad,
+  );
+  // Section 5.2: "The 16-byte tag is appended to the ciphertext and is inside
+  // payload_len."
+  final out = Uint8List(r.ciphertext.length + 16)
+    ..setRange(0, r.ciphertext.length, r.ciphertext)
+    ..setRange(r.ciphertext.length, r.ciphertext.length + 16, r.tag);
+  return out;
+}
+
+/// Decrypts a page payload. Throws [TamperException] on a tag mismatch.
+Uint8List decryptPagePayload({
+  required KeyRing keys,
+  required int pageId,
+  required int nonceCounter,
+  required Uint8List pageHeader40,
+  required Uint8List sealed,
+}) {
+  if (sealed.length < 16) {
+    throw CorruptionException('encrypted payload shorter than its tag',
+        pageId: pageId);
+  }
+  final aad = Uint8List.fromList(pageHeader40);
+  for (var i = 0; i < 4; i++) {
+    aad[i] = 0;
+  }
+  final ct = Uint8List.sublistView(sealed, 0, sealed.length - 16);
+  final tag = Uint8List.sublistView(sealed, sealed.length - 16);
+  final pt = xchacha20Poly1305Decrypt(
+    key: keys.pageKey,
+    nonce24: buildNonce(NonceDomain.page, nonceCounter, pageId, 0),
+    ciphertext: ct,
+    tag: tag,
+    aad: aad,
+  );
+  if (pt == null) {
+    throw TamperException(
+        'page authentication failed: this page has been modified by someone '
+        'without the key (spec/14-security.md section 6.2)',
+        pageId: pageId);
+  }
+  return pt;
+}
+
+/// Encrypts one value-log record body, section 5.3.
+///
+/// ```
+/// nonce = 2 || counter || vlog_segment_id || record_offset
+/// aad   = u64le(vlog_segment_id) || u64le(record_offset) || u32le(tree_id)
+/// ```
+({Uint8List ciphertext, Uint8List tag}) encryptVlogRecord({
+  required KeyRing keys,
+  required int segmentId,
+  required int recordOffset,
+  required int treeId,
+  required int nonceCounter,
+  required List<int> body,
+}) =>
+    xchacha20Poly1305Encrypt(
+      key: keys.vlogKey,
+      nonce24:
+          buildNonce(NonceDomain.vlogRecord, nonceCounter, segmentId, recordOffset),
+      plaintext: body,
+      aad: vlogAad(segmentId, recordOffset, treeId),
+    );
+
+Uint8List? decryptVlogRecord({
+  required KeyRing keys,
+  required int segmentId,
+  required int recordOffset,
+  required int treeId,
+  required int nonceCounter,
+  required List<int> ciphertext,
+  required List<int> tag,
+}) =>
+    xchacha20Poly1305Decrypt(
+      key: keys.vlogKey,
+      nonce24:
+          buildNonce(NonceDomain.vlogRecord, nonceCounter, segmentId, recordOffset),
+      ciphertext: ciphertext,
+      tag: tag,
+      aad: vlogAad(segmentId, recordOffset, treeId),
+    );
+
+Uint8List vlogAad(int segmentId, int recordOffset, int treeId) {
+  final out = Uint8List(20);
+  final bd = ByteData.view(out.buffer);
+  bd
+    ..setUint64(0, segmentId, Endian.little)
+    ..setUint64(8, recordOffset, Endian.little)
+    ..setUint32(16, treeId, Endian.little);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Keyslot wrapping, section 3.3
+// ---------------------------------------------------------------------------
+
+/// Wraps [masterKey] into a keyslot under a key-encryption key.
+///
+/// The AAD is `database_uuid || slot_index`, which binds a slot to its file:
+/// a keyslot lifted from another database does not unwrap here, so an attacker
+/// cannot graft a slot whose password they know onto a file they want to read
+/// (threat T3).
+Keyslot wrapMasterKey({
+  required Uint8List masterKey,
+  required Uint8List kek,
+  required Uint8List databaseUuid,
+  required int slotIndex,
+  required Uint8List wrapNonce,
+  required Uint8List salt,
+  int kdf = Keyslot.kdfArgon2id,
+  int tCost = 3,
+  int mCostKib = 65536,
+  int parallelism = 1,
+  String label = 'password',
+}) {
+  if (masterKey.length != 32) {
+    throw const InvalidArgumentException('master key is 32 bytes');
+  }
+  if (kdf == Keyslot.kdfArgon2id) {
+    Keyslot.checkCreateCost(tCost, mCostKib, parallelism);
+  }
+  final r = xchacha20Poly1305Encrypt(
+    key: kek,
+    nonce24: wrapNonce,
+    plaintext: masterKey,
+    aad: Keyslot.wrapAad(databaseUuid, slotIndex),
+  );
+  return Keyslot(
+    state: Keyslot.occupied,
+    kdf: kdf,
+    tCost: kdf == Keyslot.kdfRaw ? 0 : tCost,
+    mCostKib: kdf == Keyslot.kdfRaw ? 0 : mCostKib,
+    parallelism: kdf == Keyslot.kdfRaw ? 0 : parallelism,
+    salt: kdf == Keyslot.kdfRaw ? Uint8List(32) : salt,
+    wrapNonce: wrapNonce,
+    wrappedKey: r.ciphertext,
+    wrapTag: r.tag,
+    label: label,
+  );
+}
+
+/// Unwraps a master key, or null when [kek] is wrong for this slot.
+Uint8List? unwrapMasterKey({
+  required Keyslot slot,
+  required Uint8List kek,
+  required Uint8List databaseUuid,
+  required int slotIndex,
+}) {
+  if (slot.state != Keyslot.occupied) return null;
+  return xchacha20Poly1305Decrypt(
+    key: kek,
+    nonce24: slot.wrapNonce,
+    ciphertext: slot.wrappedKey,
+    tag: slot.wrapTag,
+    aad: Keyslot.wrapAad(databaseUuid, slotIndex),
+  );
+}
+
+/// Tries every occupied slot in order, section 3.3.
+///
+/// "A failure across all slots is 'wrong key', and an implementation MUST NOT
+/// distinguish 'no such slot' from 'bad password' in what it reports."
+Uint8List? unlock({
+  required Uint8List keyslotArea,
+  required Uint8List kek,
+  required Uint8List databaseUuid,
+}) {
+  for (var i = 0; i < Sb.keyslotCount; i++) {
+    final raw = Uint8List.sublistView(
+        keyslotArea, i * Keyslot.size, (i + 1) * Keyslot.size);
+    final slot = Keyslot.decode(raw, i);
+    if (slot.state != Keyslot.occupied) continue;
+    final key = unwrapMasterKey(
+        slot: slot, kek: kek, databaseUuid: databaseUuid, slotIndex: i);
+    if (key != null) return key;
+  }
+  return null;
 }

@@ -115,7 +115,7 @@ draft's column header and its own following paragraph disagreed:
 | 4 | `VECTOR` | any `vector_graph` tree exists | **optional** | Level 4 |
 | 5 | `ZSTD` | any page uses codec 2 | required | Zstd |
 | 6 | `CIPHER` | `cipher ≠ 0` | required | encryption (`14-security.md`) |
-| 7 | `HASH64` | an XXH3-64 checksum is stored for a blob or value-log body | required | |
+| 7 | `HASH64` | a CFH-64 checksum is stored for a blob or value-log body | required | |
 | 8 | `DEC128` | any `DEC128` value stored | required | decimal128 |
 | 9 | `MULTIPROC` | multi-process **writing** enabled | required | post-1.0 |
 | 10 | `DEDUP` | blob deduplication in use | required | |
@@ -138,10 +138,11 @@ Working through the interesting ones:
 - `TTL` is **required**: a reader that ignores expiry returns deleted data,
   which is the definition of wrong.
 - `HASH64` is required only when a 64-bit checksum is actually *stored* for a
-  blob or value-log body (`00-conventions.md` §6). XXH3-64 is unconditionally
-  mandatory for segment filters (`04-segments.md` §2.4) at every level, and that
-  use does not set this bit — a Level-0 implementation implements XXH3-64
-  regardless.
+  blob or value-log body (`00-conventions.md` §6). CFH-64 is unconditionally
+  mandatory for segment filters (`04-segments.md` §2.4.1) at every level, and
+  that use does not set this bit — a Level-0 implementation implements CFH-64
+  regardless. It is twenty lines and it is printed in the spec, which is the
+  point of having replaced XXH3-64 with it.
 - `CHECKPOINTS` is optional, but a reader that ignores tree 8 MUST still honour
   the retention it implies or it will reclaim extents a checkpoint needs. The
   safe behaviour for a reader that does not understand tree 8 is not to reclaim
@@ -294,10 +295,19 @@ Rules:
 - **An aged-scan test is mandatory.** Load a dataset, scan it, apply 10× its
   size in random updates, then scan again. The second scan MUST cost no more
   than **1.5×** the first, and `value_reads_per_scanned_row` MUST stay below
-  **0.3**. This is the test that enforces clustered promotion
-  (`04-segments.md` §6.3), the locality-debt bound (§6.9) and value readahead
-  (§8.1) — three MUSTs whose violation is invisible to every other check and
-  shows up months later as "the database got slow".
+  **0.3**. It MUST also assert `locality_debt` is within `locality_debt_pct`
+  at the end, because that is the bound the other two numbers follow from.
+
+  This is the test that enforces **four** MUSTs whose violation is invisible to
+  every other check and shows up months later as "the database got slow":
+  clustered promotion (`04-segments.md` §6.3), cold-tier collection (§6.8),
+  the locality-debt bound (§6.9), and value readahead (§8.1). An earlier draft
+  named only three, omitting collection — and the reference implementation
+  found that promotion without collection lands at **2.14×**, failing the test
+  it was supposed to pass.
+
+  The reference implementation measures **1.00×** and 0.100 with all four in
+  force, and **9.62×** and 1.038 with promotion and readahead disabled.
 - **A stale-version test is mandatory.** Build a file in which a segment at a
   *lower* level has a higher `max_seq` than a segment above it, from an unrelated
   key, while both cover the queried key. A reader that resolves candidates by

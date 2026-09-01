@@ -228,7 +228,8 @@ cannot be validated without them.
 |---|---|
 | `live_bytes` / `allocated_bytes` | space amplification |
 | `vlog_live_bytes` / `vlog_allocated_bytes` | value-log amplification against its target |
-| **`locality_debt`** | `04-segments.md` §6.9 — the number that predicts scan decay |
+| **`locality_debt`** | `04-segments.md` §6.9 — live value bytes in surplus runs. **This is the number that predicts scan decay**, and it has to be the run-based definition: the earlier flag-based one read 0 % on a database whose scans had already degraded 2.1× |
+| `vlog_live_runs` / `vlog_ideal_runs` | the raw counts behind it: how many value-log runs a key-ordered scan interleaves, against how many the live data needs |
 | `pinned_by_snapshots` / `pinned_by_checkpoints` | why space is not being reclaimed |
 | `unencrypted_pages` | 0 on a fully encrypted file; non-zero mid-conversion. An implementation MUST NOT report a database as encrypted while this is above 0 (`14-security.md` §8.3) |
 | `nonces_allocated` / `nonce_floor` | headroom to the next published floor (`14-security.md` §4.1) |
@@ -240,7 +241,7 @@ cannot be validated without them.
 | `page_cache_hit_rate` | |
 | `segments_probed_per_lookup` (p50/p99) | validates the bounded read tail |
 | `filter_false_positive_rate` | validates §2.4's bit allocation |
-| `value_reads_per_scanned_row` | validates readahead and clustering; ≈0.13 when clustering is working, ≈1.0 when it is not |
+| `value_reads_per_scanned_row` | validates readahead and clustering. **Measured 0.100 when clustering is working and 1.038 when it is not** (`reference/dart/cryptand/bench/p8_aged_scan.dart`); an earlier draft estimated 0.13 and 1.0 |
 
 **Structure**
 

@@ -121,7 +121,8 @@ Three supporting changes make it enforceable rather than hopeful:
 | | |
 |---|---|
 | **Promotion is a MUST** (§6.3) | last-level compaction must promote or re-inline every surviving HOT value |
-| **Locality debt is a bounded MUST** (§6.9) | `locality_debt` — live bytes in unclustered segments over total live value bytes — MUST stay under `locality_debt_pct` (20 %). A *measurable outcome*, not a mechanism |
+| **Locality debt is a bounded MUST** (§6.9) | `locality_debt` — live value bytes in **surplus runs** — MUST stay under `locality_debt_pct` (20 %). A *measurable outcome*, not a mechanism. The reference implementation had to redefine it: counting segments that merely *lack the clustered flag* reads 0 % on a database whose scans have already degraded 2.1× |
+| **Cold-tier collection is a MUST** (§6.8) | promotion clusters each generation of surviving values; only collection merges the generations. Added after the aged-scan test failed at 2.14× with promotion alone |
 | **Value readahead is a MUST** (§8.1) | a cursor dereferencing values must issue reads in non-decreasing `(segment, offset)` order over a window of ≥ `readahead_window`, coalescing same-page reads |
 
 And it is now tested: an **aged-scan conformance test is mandatory**

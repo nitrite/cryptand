@@ -189,28 +189,36 @@ Read in this order.
 
 ## Status
 
-**Phase 1 of the reference implementation is built**, in pure Dart, at
-[`reference/dart/cryptand/`](reference/dart/cryptand/) — the container, CVE,
-CKE, segments and cursors, the segment filter, and the byte layouts and keyed
-hashing of the security chapter. 204 tests, and a conformance vector set at
+**Phases 1 and 2 of the reference implementation are built**, in pure Dart, at
+[`reference/dart/cryptand/`](reference/dart/cryptand/): the container, CVE, CKE,
+segments and cursors, the segment filter, the two-tier value log with compaction
+and clustered promotion, and the security chapter including a verified
+XChaCha20-Poly1305. **259 tests**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
-self-verifying, and portable to the other SDKs.
+byte-exact and self-verifying.
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-It records **nine defects in these documents** that building the code found —
-including a headline invariant that was literally false, a page header whose
-field table did not fit its own declared size, a nonce rule that did nothing,
-and filter false-positive rates quoted from the wrong formula — and it measures
-what it can against the predictions below.
+Building the code found **fourteen defects in these documents** — a headline
+invariant that was literally false, a page header whose field table did not fit
+its own declared size, a nonce rule that did nothing, filter rates quoted from
+the wrong formula, "unknown tags round-trip" that no reader could implement —
+and one gap in the **design** rather than its description: the aged-scan bound
+was missing a mechanism, and the metric meant to detect that was blind to it
+(§2.1 of the report).
 
-**Confirmed by measurement:** P5 (paged scan at **1.07×** a full scan, against a
-predicted 1.0–1.2×, with the `nitrite-rust` defect reproduced at 15.7× wall
-time), P1 (height and fanout, ~9 % optimistic on leaf fanout), P6 (encoding
-density, better than predicted), and P4's mechanism (a one-field projection is
-**11×** cheaper than a full decode).
+**Confirmed by measurement:**
 
-**Still unmeasured, and stated as such:** P2 and P3 — write amplification and
-write concurrency — because they need compaction, the value log, and threads,
-and Dart has none of the three. Every other figure in these documents remains an
-analytic prediction, labelled as such, with the measurement that would confirm
-or refute it.
+| | predicted | measured |
+|---|---|---|
+| **P8** aged scan | ≤ 1.5×, v/row < 0.3 | **1.00×**, **0.100** — after adding cold-tier collection |
+| **P5** paged scan | 1.0–1.2× | **1.07×**, with the `nitrite-rust` defect reproduced at 15.7× |
+| **P1** height ≤ 4 below | 613 M docs | **619 M**, interior 1.88 MiB per 10⁷ |
+| **P6** density | CVE:JSON 1 : 1.53 | **1 : 1.70** — denser than claimed |
+| **P4** mechanism | ~10× for a projection | **11.2×** one field, 6.4× two |
+
+**Still unmeasured, and stated as such:** P2 and P3 — write amplification
+against Fjall and RocksDB, and write concurrency — because they need those
+engines and real threads, and Dart has neither. That is the one real flaw in
+"implement in the weakest SDK first", and it is why phase 3 is Rust. Every other
+figure in these documents remains an analytic prediction, labelled as such, with
+the measurement that would confirm or refute it.

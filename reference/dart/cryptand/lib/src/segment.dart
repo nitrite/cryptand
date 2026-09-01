@@ -25,13 +25,34 @@ class Op {
 }
 
 /// How a leaf cell carries its value, `spec/04-segments.md` section 2.2.
+///
+/// The kind occupies the **low nibble** of the cell's `kind_flags` byte; the
+/// high nibble carries [kHasExpiry]. Sharing one byte, and omitting
+/// `value_len` for the two kinds whose length is always 16, is what brings a
+/// separated leaf cell to the 32 bytes `design/performance-model.md` section 1
+/// costs the write-amplification argument against.
 class ValueKind {
   static const int inline = 0;
   static const int overflow = 1;
   static const int blob = 2;
   static const int empty = 3;
   static const int vlog = 4;
+
+  static const int max = vlog;
+
+  /// True when the value is a fixed 16-byte pointer, so no `value_len` is
+  /// written: a length field whose only legal value is 16 is not information,
+  /// it is a second place for two implementations to disagree.
+  static bool isPointer(int kind) => kind == vlog || kind == blob;
 }
+
+/// `kind_flags` bit 4: an `expiry_ms` follows. The rest of the high nibble is
+/// reserved and MUST be zero.
+const int kHasExpiry = 0x10;
+
+/// Size of a `VLOG` or `BLOB` pointer, `spec/04-segments.md` section 6.4 and
+/// `spec/01-container.md` section 5.
+const int kPointerBytes = 16;
 
 /// Segment header flags, section 2.1.
 class SegFlags {
@@ -304,15 +325,27 @@ final class SegmentBuilder {
   }
 
   Uint8List _leafCellPayload(SegEntry e) {
+    if (e.valueKind < 0 || e.valueKind > ValueKind.max) {
+      throw InvalidArgumentException('value_kind ${e.valueKind} is not 0..4');
+    }
     final w = ByteWriter(e.value.length + 12);
-    final entryFlags = e.expiryMs != null ? 0x01 : 0x00;
-    w
-      ..u8(e.valueKind)
-      ..u8(entryFlags);
+    var kindFlags = e.valueKind;
+    if (e.expiryMs != null) kindFlags |= kHasExpiry;
+    w.u8(kindFlags);
     if (e.expiryMs != null) w.u64(e.expiryMs!);
+
     final op = e.internalKey[e.internalKey.length - 1];
-    // Section 2.2: value_len is absent for EMPTY and absent when op == DELETE.
-    if (e.valueKind != ValueKind.empty && op != Op.delete) {
+    // Section 2.2: nothing follows for EMPTY, or when op == DELETE.
+    if (e.valueKind == ValueKind.empty || op == Op.delete) return w.takeBytes();
+
+    if (ValueKind.isPointer(e.valueKind)) {
+      if (e.value.length != kPointerBytes) {
+        throw InvalidArgumentException(
+            'a VLOG or BLOB value is exactly $kPointerBytes bytes, '
+            'got ${e.value.length}');
+      }
+      w.bytes(e.value); // no value_len: the width is fixed
+    } else {
       w
         ..uvar(e.value.length)
         ..bytes(e.value);
@@ -656,13 +689,25 @@ final class Node {
     final r = ByteReader(page, _cellOffset(i), page.length);
     final suffixLen = r.uvar();
     r.position = r.position + suffixLen;
-    final valueKind = r.u8();
-    final entryFlags = r.u8();
-    final expiry = entryFlags & 0x01 != 0 ? r.u64() : null;
+
+    final kindFlags = r.u8();
+    final valueKind = kindFlags & 0x0F;
+    if (valueKind > ValueKind.max) {
+      throw CorruptionException(
+          'page $pageIndex cell $i: value_kind $valueKind is not 0..4');
+    }
+    if (kindFlags & 0xE0 != 0) {
+      throw CorruptionException(
+          'page $pageIndex cell $i: reserved kind_flags bits are set');
+    }
+    final expiry = kindFlags & kHasExpiry != 0 ? r.u64() : null;
+
     final op = key[key.length - 1];
-    Uint8List value = Uint8List(0);
+    var value = Uint8List(0);
     if (valueKind != ValueKind.empty && op != Op.delete) {
-      value = r.bytesView(r.uvar());
+      value = ValueKind.isPointer(valueKind)
+          ? r.bytesView(kPointerBytes)
+          : r.bytesView(r.uvar());
     }
     return SegRecord(key, valueKind, value, expiry);
   }
