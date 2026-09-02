@@ -687,6 +687,42 @@ reporting is concentrated in the parts that were rewritten under review, not
 spread evenly. A section rewritten three times has had three chances to acquire
 an unwritten assumption; §2.5 is nine lines and has had none.
 
+### 8.6 Phase 7 — checkpoints, planner statistics, and a bound on the wrong dimension
+
+Phase 7 built `13-operations.md` §1 (checkpoints) and §9 (planner statistics),
+and added `11-conformance.md` §6's **mandatory stale-version test**.
+
+| | defect | fix |
+|---|---|---|
+| 37 | **§9 bounds the histogram in the wrong dimension.** It caps the bucket *count* at 64 and specifies CKE keys as bounds — but a CKE key runs to kilobytes, and `params.stats` lives in a catalog descriptor, which is one cell of a copy-on-write B+tree and MUST fit one page. Measured: 64 bounds over 300 string keys came to **4734 B against a 4096 B page**, and the descriptor could not be written at all | §9 now bounds it in **bytes**, with the count as a maximum rather than a target, and says to drop alternate buckets so the histogram stays equi-depth at twice the width |
+
+Defect 37 is a small instance of a pattern this document has now recorded four
+times: **a bound stated over the quantity that is easy to count rather than the
+one that is actually scarce.** §2.4's filter rate was arithmetic on the wrong
+Bloom structure, §6.9's `locality_debt` counted flags rather than runs, P10
+counted false positives rather than versions, and §9 counts buckets rather than
+bytes. In each case the stated bound was *satisfiable* while the real constraint
+was violated.
+
+It is also the first defect found by the format's own layering rather than by a
+measurement: nothing about statistics is wrong, and nothing about the
+copy-on-write trees is wrong — the two chapters were each internally consistent
+and disagreed only where they met. That is the failure mode a single-chapter
+review cannot catch, and it argues for the implementation order this project has
+been using, where a later chapter is built on top of an earlier one rather than
+beside it.
+
+**What phase 7 did not find:** checkpoints went in from §1 with no defects, and
+the section's two load-bearing rules — that `checkpoint_root` is deliberately
+not captured, and that a restore rolls back roots but never counters — were both
+directly implementable and are both now tested. The second is the one with a
+security consequence, and it is worth noting that the *reason* it works in the
+reference implementation is a simplification recorded back in phase 3: the page
+store never reclaims freed pages, so an old copy-on-write root is still readable.
+A production implementation reclaiming pages under `min_retained_commit` gets the
+same property from the retention rule instead — and a checkpoint that pins
+retention is exactly what makes that safe.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

@@ -189,7 +189,7 @@ Read in this order.
 
 ## Status
 
-**Phases 1 through 6 of the reference implementation are built**, in pure Dart,
+**Phases 1 through 7 of the reference implementation are built**, in pure Dart,
 at [`reference/dart/cryptand/`](reference/dart/cryptand/): the container, CVE,
 CKE, segments and cursors, the segment filter, the two-tier value log with
 compaction and clustered promotion, the security chapter including a verified
@@ -197,14 +197,14 @@ XChaCha20-Poly1305, the **level policy**, the **manifest as a copy-on-write
 tree**, the **catalog**, **secondary indexes**, and — new in phase 4 —
 **BLAKE2b and Argon2id**, both verified against their RFCs' published vectors,
 which completes `spec/14-security.md`, **`spec/10-transactions.md` apart from its concurrent write protocol**, and — new in
-phase 6 — **range deletes and TTL** (which complete `spec/04-segments.md`) plus
-**corruption containment and the required metrics** of `spec/13-operations.md`.
-**394 tests**, and a conformance vector set at
+phase 6 — **range deletes and TTL** (which complete `spec/04-segments.md`) plus,
+from `spec/13-operations.md`, **corruption containment, the required metrics,
+checkpoints and planner statistics**. **410 tests**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code has found **twenty-eight defects in these documents** — a headline
+Building the code has found **twenty-nine defects in these documents** — a headline
 invariant that was literally false, a page header whose field table did not fit
 its own declared size, a nonce rule that did nothing, filter rates quoted from
 the wrong formula, "unknown tags round-trip" that no reader could implement —

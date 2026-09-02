@@ -1,15 +1,69 @@
-# Cryptand reference implementation — phase 6 report
+# Cryptand reference implementation — phase 7 report
 
 **Implementation:** pure Dart 3.12, `reference/dart/cryptand/`
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 394 tests green, `dart analyze` clean, conformance vectors byte-exact and self-verifying
+**Status:** 410 tests green, `dart analyze` clean, conformance vectors byte-exact and self-verifying
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-2 Phase 7 — checkpoints, planner statistics, and the stale-version test
+
+| | |
+|---|---|
+| **checkpoints** (`13` §1) | tree 8; a named retained snapshot, one small write, "an undo point around a migration for the price of one tree entry, which is not something the current storage backends can offer at any price" |
+| **planner statistics** (`13` §9) | HyperLogLog `distinct_estimate` and an equi-depth histogram, completing what `06` §7.1 promised |
+| **the stale-version test** | `11` §6's third mandatory test, now written |
+
+### One defect: a bound stated over the wrong dimension
+
+**§9 caps the histogram at 64 *buckets*, and that does not bound its size.**
+Bounds are CKE keys, a CKE key runs to kilobytes, and `params.stats` lives in a
+catalog descriptor — which is **one cell of a copy-on-write B+tree** and must
+fit one page. Measured: 64 bounds over 300 string keys came to **4734 B against
+a 4096 B page**, and the descriptor could not be written at all.
+
+§9 now bounds it in bytes, with 64 as a maximum rather than a target, dropping
+alternate buckets so the histogram stays equi-depth at twice the width. That is
+safe for exactly one reason and §9 already stated it: statistics are advisory,
+so a coarser histogram is a worse estimate and never a wrong answer.
+
+This is the first defect here found by the format's **layering** rather than by
+a measurement. Nothing about statistics is wrong and nothing about the
+copy-on-write trees is wrong; the two chapters were each internally consistent
+and disagreed only where they met. A single-chapter review cannot catch that.
+
+### The mandatory stale-version test, and a fixture bug worth admitting
+
+`11` §6 requires: "Build a file in which a segment at a *lower* level has a
+higher `max_seq` than a segment above it, from an unrelated key, while both
+cover the queried key." Written, and it passes.
+
+The first version of it queried id 500 while its own padding loop wrote
+`i * 10` for `i` up to 100 — so the fixture overwrote the key under test and the
+assertion was measuring itself. Caught because the expected bytes did not match;
+it would have passed silently had I chosen the padding differently. Same class
+as phase 3's ascending-insert benchmark, and worth recording each time.
+
+### What phase 7 did not find
+
+Checkpoints went in from §1 with **no defects**, and both of the section's
+load-bearing rules are now tested: `checkpoint_root` is deliberately not
+captured, so a restore does not delete its own siblings; and a restore rolls
+back roots but **never counters** — the one with a security consequence, since
+rolling `next_nonce` back would reissue nonces against pages still in the file.
+
+Worth naming why restore *works* here: the page store never reclaims freed pages
+(a simplification recorded in phase 3 §5), so an old copy-on-write root stays
+readable. A production implementation gets the same property from retention
+instead — and a checkpoint pinning `min_retained_commit` is exactly what makes
+that safe, which is §1's own argument.
 
 ---
 
@@ -453,13 +507,17 @@ and the filter pages live in the extent.
 | **`06-indexes`** | **complete** — the §1 layout, §3 null/sparse, §4 arrays and the 1024 cap, §5 field paths, the §7 scans, §8 same-batch maintenance |
 | `14-security` | **complete**, Argon2id included and vector-verified |
 | **`10-transactions`** | **complete except §2** — the concurrent write protocol needs threads Dart does not have |
-| **`13-operations`** §4 containment, §6 metrics | **complete**; §1–§3, §5, §7–§9 not started |
+| **`13-operations`** §1 checkpoints, §4 containment, §6 metrics, §9 statistics | **complete**; §2 backup, §3 repair, §5 API, §7 change feed, §8 multi-process not started |
 | `07`–`09`, `12` | not started |
 
 New in phase 3: `lib/src/cow.dart` (copy-on-write B+trees),
 `lib/src/manifest.dart` (tree 6), `lib/src/catalog.dart`, `lib/src/index.dart`,
 `lib/src/database.dart`, `bench/p10_read_tail.dart`, and the
 `index/entries.json` and `catalog/trees.json` vectors.
+
+New in phase 7: `lib/src/checkpoint.dart`, `lib/src/stats.dart`,
+`test/checkpoint_stats_test.dart`, and `Collection.analyze` / `statsOf` /
+`mostSelective` — the evidence-based index choice `06` §7.1 asks for.
 
 New in phase 6: `lib/src/metrics.dart`, `test/rangedelete_ttl_test.dart`,
 `test/operations_test.dart`, and `Segment.rangeDeletes` — §4's in-memory
@@ -474,7 +532,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 `conformance/vectors/security/derivation.json`, and `deriveKek` /
 `unlockWithPassword` in `lib/src/security.dart`.
 
-**394 tests**, up from 259 at the end of phase 2.
+**410 tests**, up from 259 at the end of phase 2.
 
 ---
 
@@ -529,9 +587,10 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 4. **Measure P2 against Fjall and RocksDB.**
 5. **Re-run the aged scan at 10⁶ on a real device.** 2×10⁵ found a real defect
    that 2×10⁴ did not; there is no reason to assume that stops.
-6. ~~Range deletes and TTL.~~ **Done** (§0.-1). What is left of `13` is
-   checkpoints, backup, repair and the change feed; chapters `07`–`09` and
-   `12` are untouched.
+6. ~~Range deletes and TTL.~~ **Done** (§0.-1). ~~Checkpoints and planner
+   statistics.~~ **Done** (§0.-2). What is left of `13` is backup, repair, the
+   compaction API, the change feed and multi-process readers; chapters `07`–`09`
+   and `12` are untouched.
 
 ---
 
@@ -541,7 +600,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 cd reference/dart/cryptand
 dart pub get
 dart analyze                              # clean
-dart test                                 # 394 tests
+dart test                                 # 410 tests
 
 dart run tool/generate_vectors.dart       # regenerates ../../conformance/vectors
 dart test test/conformance_test.dart      # verifies them

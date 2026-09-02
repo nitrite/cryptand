@@ -330,8 +330,31 @@ params.stats = {
 
 `distinct_estimate` comes from a HyperLogLog sketch computed during the
 last-level compaction that produced the segment — free, because that compaction
-already touches every key. The histogram is equi-depth with at most 64 buckets,
-bounds being CKE keys so a planner can compare them without decoding.
+already touches every key. The sketch is chosen for the property that makes it
+usable at all here: it is **mergeable and fixed-size**, so a compaction
+accumulates it in a few hundred bytes while streaming and two segments' sketches
+combine by register-wise maximum. An exact distinct count needs memory
+proportional to cardinality, which a compaction cannot afford.
+
+The histogram is equi-depth, bounds being CKE keys so a planner can compare them
+without decoding.
+
+**Its size is bounded in bytes, not only in buckets, and the byte bound is the
+binding one.** `params.stats` lives inside a catalog descriptor, and a catalog
+descriptor is **one cell of a copy-on-write B+tree** (`04-segments.md` §3.3),
+so it MUST fit one page. A CKE key runs to kilobytes (`00-conventions.md` §8),
+so a bucket *count* does not bound the histogram's size at all: the reference
+implementation measured 64 bounds over 300 string keys at **4734 B against a
+4096 B page**, and the descriptor could not be written.
+
+A writer therefore MUST reduce the bucket count until the encoded
+`params.stats` fits the descriptor's page budget, and SHOULD do so by dropping
+alternate buckets — which keeps the histogram equi-depth at twice the width
+rather than truncating its range. **64 buckets is a maximum, not a target.**
+
+This is safe for exactly one reason, and it is the reason the next paragraph
+gives: statistics are advisory, so a coarser histogram is a worse estimate and
+never a wrong answer.
 
 Nitrite's `FindPlan` currently chooses an index by static descriptor properties —
 uniqueness and field count — with no idea of selectivity. Real statistics let it

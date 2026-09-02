@@ -23,6 +23,7 @@ import 'cve.dart';
 import 'engine.dart';
 import 'errors.dart';
 import 'index.dart';
+import 'stats.dart';
 import 'value.dart';
 
 /// Format version reported in the store metadata of `05` §7.
@@ -174,6 +175,78 @@ final class Collection {
     for (final e in _e.scanTree(indexTree.treeId, range: range)) {
       yield [...indexEntryValues(e.cke, idx.fields.length), indexEntryId(e.cke)];
     }
+  }
+
+  /// Recomputes `params.stats` for an index tree, `spec/13-operations.md` §9.
+  ///
+  /// §9 maintains these "at compaction, ... free, because that compaction
+  /// already touches every key". This method is the same walk, exposed so the
+  /// statistics can be refreshed on demand — a scan of the index tree in key
+  /// order, which is exactly what a last-level compaction of it would do.
+  ///
+  /// The result is **advisory** and is stored under `params.stats`; a planner
+  /// must work without it.
+  IndexStats analyze(TreeDescriptor indexTree) {
+    final idx = IndexDescriptor.fromDescriptor(indexTree);
+    final b = StatsBuilder();
+    // Equi-depth: with the stream already in key order, a bucket boundary is
+    // a counter reaching its quota. The quota needs the count, so the entries
+    // are walked once to count and once to bound -- the second pass is over
+    // keys only and touches no values.
+    final keys = <Uint8List>[];
+    for (final e in _e.scanTree(indexTree.treeId)) {
+      keys.add(Uint8List.fromList(e.cke));
+    }
+    final quota = keys.length <= 64 ? 1 : (keys.length / 64).ceil();
+    for (var i = 0; i < keys.length; i++) {
+      final values = indexEntryValues(keys[i], idx.fields.length);
+      final prefix = Keys.prefixOfArray(values);
+      b.add(prefix, keys[i],
+          seq: 0, isNull: values.any((v) => v is CNull));
+      if ((i + 1) % quota == 0) b.boundary(keys[i]);
+    }
+    final stats = b.build();
+
+    final name = db.catalog.nameOf(indexTree.treeId)!;
+    db.catalog.put(
+        name,
+        indexTree.with_({
+          'params': CDoc({...indexTree.params.fields, 'stats': stats.toDoc()})
+        }));
+    return stats;
+  }
+
+  /// The statistics stored for an index, or null when none have been computed.
+  ///
+  /// §9: "Statistics are advisory. They may be stale or absent."
+  IndexStats? statsOf(TreeDescriptor indexTree) {
+    final d = db.catalog.get(db.catalog.nameOf(indexTree.treeId)!);
+    final s = d?.params['stats'];
+    return s == null ? null : IndexStats.fromDoc(s as CDoc);
+  }
+
+  /// Picks the most selective index among [candidates], `06` §7.1.
+  ///
+  /// This is the decision Nitrite's `FindPlan` currently makes from static
+  /// descriptor properties — "whether it is unique, and how many fields it
+  /// covers" — which "routinely picks a unique index on a field the query
+  /// barely constrains over a non-unique index that would eliminate 99 % of
+  /// the collection". With statistics it is made on evidence.
+  ///
+  /// Returns null when no candidate has statistics, which a planner must treat
+  /// as "choose some other way" rather than as an error.
+  TreeDescriptor? mostSelective(List<TreeDescriptor> candidates) {
+    TreeDescriptor? best;
+    var bestSel = double.infinity;
+    for (final c in candidates) {
+      final s = statsOf(c);
+      if (s == null) continue;
+      if (s.selectivity < bestSel) {
+        bestSel = s.selectivity;
+        best = c;
+      }
+    }
+    return best;
   }
 
   void _writeIndexEntries(

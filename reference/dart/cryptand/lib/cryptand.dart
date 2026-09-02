@@ -43,6 +43,7 @@ export 'src/catalog.dart'
         IndexType,
         TreeDescriptor,
         TreeKind;
+export 'src/checkpoint.dart' show Checkpoint, CheckpointStore;
 export 'src/cow.dart' show CowTree, PageStore;
 export 'src/crc32c.dart' show crc32c;
 export 'src/database.dart' show Collection, Database, kFormatVersion;
@@ -104,6 +105,8 @@ export 'src/security.dart'
         wrapMasterKey,
         superblockMac,
         verifySuperblockMac;
+export 'src/stats.dart'
+    show HistogramBucket, HyperLogLog, IndexStats, StatsBuilder;
 export 'src/segment.dart'
     show
         Node,

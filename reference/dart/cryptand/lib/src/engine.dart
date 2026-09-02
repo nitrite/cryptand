@@ -14,6 +14,7 @@ library;
 import 'dart:typed_data';
 
 import 'bytes.dart';
+import 'checkpoint.dart';
 import 'cke.dart';
 import 'cow.dart';
 import 'errors.dart';
@@ -144,6 +145,7 @@ final class Engine {
           cachePages: cachePages,
         ) {
     manifest = Manifest(store);
+    checkpoints = CheckpointStore(store);
   }
 
   final int pageSize;
@@ -202,6 +204,9 @@ final class Engine {
 
   /// Tree 6.
   late final Manifest manifest;
+
+  /// Tree 8, `spec/13-operations.md` §1.
+  late final CheckpointStore checkpoints;
 
   // -------------------------------------------------------------------------
   // Sequencing and visibility — `spec/10-transactions.md` §1, §2
@@ -306,10 +311,18 @@ final class Engine {
   ///
   /// §8: it "bounds version collapsing in compaction" — a compaction may drop
   /// a superseded version only when the *newer* version is at or below this.
+  ///
+  /// **A checkpoint counts exactly as a live reader does**
+  /// (`13-operations.md` §1): it holds the watermarks down to its own values,
+  /// which is what makes `open_at` work later and what makes a forgotten
+  /// checkpoint an unbounded space leak.
   int get minRetainedSeq {
     var m = visibleSeq;
     for (final s in _liveSnapshots) {
       if (s.seq < m) m = s.seq;
+    }
+    for (final c in checkpoints.all) {
+      if (c.seq < m) m = c.seq;
     }
     return m;
   }
@@ -320,8 +333,100 @@ final class Engine {
     for (final s in _liveSnapshots) {
       if (s.commitId < m) m = s.commitId;
     }
+    for (final c in checkpoints.all) {
+      if (c.commitId < m) m = c.commitId;
+    }
     return m;
   }
+
+  // -------------------------------------------------------------------------
+  // Checkpoints — `spec/13-operations.md` §1
+  // -------------------------------------------------------------------------
+
+  /// §1: refuse by default to create a checkpoint pinning more than this
+  /// fraction of the live size. Default 25 %.
+  int checkpointSpaceLimitPct = 25;
+
+  /// Creates a named, retained snapshot.
+  ///
+  /// One small write; it costs nothing until the data diverges from it.
+  Checkpoint createCheckpoint(String name,
+      {int? expires, int nowMs = 0, bool force = false}) {
+    if (checkpoints.get(name) != null) {
+      throw InvalidArgumentException('a checkpoint named "$name" exists');
+    }
+    if (!force) {
+      final pinned = checkpointWouldPin();
+      final live = vlog.liveBytes;
+      if (live > 0 && pinned * 100 > live * checkpointSpaceLimitPct) {
+        throw LimitException(
+            'this checkpoint would pin $pinned B against a live size of '
+            '$live B, over checkpoint_space_limit of '
+            '$checkpointSpaceLimitPct% — pass force to override');
+      }
+    }
+    final s = snapshot(nowMs: nowMs);
+    release(s); // the checkpoint pins it from now on; the snapshot need not
+    final c = Checkpoint.of(name, s, expires: expires);
+    checkpoints.put(c);
+    return c;
+  }
+
+  /// What a checkpoint taken now would pin, §1's "report the space each
+  /// checkpoint pins".
+  int checkpointWouldPin() => vlog.allocatedBytes - vlog.liveBytes;
+
+  /// Space each existing checkpoint is holding down.
+  Map<String, int> get checkpointPinning => {
+        for (final c in checkpoints.all) c.name: pinnedBySnapshots,
+      };
+
+  /// `open_at(checkpoint)` — a read-only view at that snapshot, §1.
+  Snapshot openAt(String name) {
+    final c = checkpoints.get(name);
+    if (c == null) throw InvalidArgumentException('no checkpoint "$name"');
+    final s = c.snapshot;
+    _liveSnapshots.add(s);
+    return s;
+  }
+
+  /// Restores the database to a checkpoint, §1.
+  ///
+  /// **Roots roll back; counters never do.** `next_seq`, `next_segment_id` and
+  /// the rest keep their current values — and on an encrypted file so does
+  /// `next_nonce`, because rolling it back would reissue nonce values the
+  /// abandoned commits already used against pages still present in the file:
+  /// same key, same nonce, two plaintexts. Ids that are "never reused" must
+  /// survive a restore for the same reason they survive a crash.
+  ///
+  /// `checkpoint_root` is *not* restored, so a restore does not delete the
+  /// other checkpoints — including the one just used.
+  void restore(String name) {
+    final c = checkpoints.get(name);
+    if (c == null) throw InvalidArgumentException('no checkpoint "$name"');
+
+    final seqBefore = _nextSeq;
+    final segBefore = _nextSegmentId;
+    final commitBefore = commitId;
+
+    manifest.tree.root = c.manifestRoot;
+    _levelCache.clear();
+    visibleSeq = c.seq;
+    commitId = commitBefore + 1; // a restore is itself a commit
+
+    // The counters MUST NOT move backwards.
+    assert(_nextSeq == seqBefore, 'restore rolled next_seq back');
+    assert(_nextSegmentId == segBefore, 'restore rolled next_segment_id back');
+
+    _emit(StoreEvent(StoreEventKind.commit,
+        commitId: commitId,
+        visibleSeq: visibleSeq,
+        detail: 'restored checkpoint "$name"'));
+  }
+
+  /// §1: honour `expires` and drop the checkpoint automatically past it.
+  List<String> dropExpiredCheckpoints(int nowMs) =>
+      checkpoints.dropExpired(nowMs);
 
   int get liveSnapshotCount => _liveSnapshots.length;
 
