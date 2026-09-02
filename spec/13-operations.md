@@ -250,6 +250,7 @@ cannot be validated without them.
 | segment count and bytes per level | |
 | `oldest_snapshot_age_ms` | the usual cause of unreclaimed space |
 | `compaction_backlog_bytes` | |
+| **`unavailable_ranges`** | key ranges §4 has taken out of service after a checksum failure, and the trees they affect. **0 is the normal state.** Without it §4's containment is observable only by *hitting* it: a caller has no way to ask whether the database is whole, so a partially-available database looks identical to a healthy one until a read happens to land in the hole. An implementation MUST expose the count and SHOULD expose the ranges |
 
 `value_reads_per_scanned_row` and `locality_debt` deserve emphasis: they are the
 two numbers that detect the format's most insidious failure mode — a database

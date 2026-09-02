@@ -58,6 +58,27 @@ final class InvalidArgumentException extends CryptandException {
   const InvalidArgumentException(super.message);
 }
 
+/// A read landed inside a key range that corruption has made unavailable.
+///
+/// `spec/13-operations.md` section 4 requires exactly this shape: a damaged
+/// page MUST NOT make the whole database unreadable, so a reader keeps serving
+/// every key outside the affected range and fails inside it "with a specific
+/// corruption error naming the range, never with a wrong or empty answer".
+///
+/// It is distinct from [CorruptionException] because the two call for different
+/// responses: this one says *which* keys are gone and implies the rest are
+/// fine, which is what a caller needs in order to degrade rather than stop.
+final class UnavailableRangeException extends CryptandException {
+  const UnavailableRangeException(super.message,
+      {required this.segmentId, required this.treeIds});
+
+  final int segmentId;
+
+  /// Section 4 step 5: the trees whose indexes a planner must not silently
+  /// substitute a scan of, because the results would be incomplete.
+  final List<int> treeIds;
+}
+
 /// A transaction's write set collided with a batch sequenced after it began.
 /// `spec/10-transactions.md` section 3: "On conflict the transaction aborts;
 /// the format does not define automatic retry."

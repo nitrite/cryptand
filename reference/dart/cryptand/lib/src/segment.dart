@@ -857,6 +857,34 @@ final class Node {
   }
 }
 
+/// One `RANGE_DELETE`, section 2.5: `[start, end)` deleted at `seq`.
+///
+/// Both bounds are **user key prefixes** — `u32be(tree_id) || CKE(key)` — so a
+/// containment test is one comparison against the same bytes a point read
+/// seeks with.
+final class RangeDelete {
+  const RangeDelete({
+    required this.treeId,
+    required this.start,
+    required this.end,
+    required this.seq,
+  });
+
+  final int treeId;
+  final Uint8List start;
+  final Uint8List end;
+  final int seq;
+
+  /// §2.5: "an entry at `seq' < seq` whose key falls in the interval is
+  /// invisible". The interval is half-open.
+  bool covers(Uint8List userKeyPrefix) =>
+      compareKeys(userKeyPrefix, start) >= 0 &&
+      compareKeys(userKeyPrefix, end) < 0;
+
+  @override
+  String toString() => 'RANGE_DELETE seq $seq over tree $treeId';
+}
+
 /// The segment header, section 2.1.
 final class SegmentHeader {
   const SegmentHeader({
@@ -1050,6 +1078,40 @@ final class Segment {
       if (!node(i).isLeaf) bytes += pageSize;
     }
     return bytes;
+  }
+
+  List<RangeDelete>? _rangeDeletes;
+
+  /// The segment's range deletes, §2.5 — its "range-delete summary".
+  ///
+  /// §4 SHOULDs keeping this "in memory alongside the manifest entry, so
+  /// `rd_sources` is normally empty after an in-memory test rather than after a
+  /// page read". It is built once, lazily, and only for a segment whose header
+  /// carries `HAS_RANGE_DELETES` — so a segment without range deletes, which is
+  /// almost all of them, never pays for this at all.
+  List<RangeDelete> get rangeDeletes {
+    final cached = _rangeDeletes;
+    if (cached != null) return cached;
+    if (!header.hasRangeDeletes) return _rangeDeletes = const [];
+    final out = <RangeDelete>[];
+    final c = cursor()..seekFirst();
+    while (c.isValid) {
+      final k = c.key();
+      if (k[k.length - 1] == Op.rangeDelete) {
+        final rec = c.record();
+        final r = ByteReader(rec.value);
+        final end = r.bytesCopy(r.uvar());
+        final p = parseInternalKey(k);
+        out.add(RangeDelete(
+          treeId: p.treeId,
+          start: userKeyPrefix(p.treeId, Uint8List.fromList(p.cke)),
+          end: userKeyPrefix(p.treeId, end),
+          seq: p.seq,
+        ));
+      }
+      c.next();
+    }
+    return _rangeDeletes = out;
   }
 
   BlockedBloom? _filter;

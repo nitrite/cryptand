@@ -659,6 +659,34 @@ key". Two of the three phases-3-and-4 defects were of that kind too, and it is
 now the most common failure mode this project has found — more common than
 arithmetic errors, and much harder to see by reading.
 
+### 8.5 Phase 6 — range deletes, TTL, containment, metrics
+
+Phase 6 completed `04-segments.md` — range deletes (§2.5) and time to live
+(§9) — and built the operational surface every conformance level requires:
+corruption containment (`13` §4) and the required metrics (`13` §6).
+
+**Two of the four are mandatory conformance tests**, and both now exist:
+the range-delete-under-filter test, and the containment test. The first is the
+one whose failure mode is a *resurrected deleted key*, and the construction it
+needs is specific: the segment carrying the range delete must not hold the
+deleted key as a point key, so its filter genuinely answers "absent" — the test
+asserts that the filter would prune it before asserting that the key is still
+deleted, because otherwise the test passes for the wrong reason.
+
+**One defect, and it is a gap rather than an error:**
+
+| | defect | fix |
+|---|---|---|
+| 36 | **§4 mandates corruption containment; §6's required-metric list gave no way to observe it.** A partially-available database is therefore indistinguishable from a healthy one until a read happens to land in the hole — the caller cannot ask "is this database whole?" at all, which is exactly the class of question §6 exists to make answerable | `unavailable_ranges` added to §6, with 0 as the normal state |
+
+Worth recording what *did not* happen: range deletes and TTL were implemented
+from the chapter with **no defects found**, first run, fourteen tests green.
+Those two sections are among the oldest in the document and among the least
+revised — which is mild evidence that the defect density this project has been
+reporting is concentrated in the parts that were rewritten under review, not
+spread evenly. A section rewritten three times has had three chances to acquire
+an unwritten assumption; §2.5 is nine lines and has had none.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

@@ -1,15 +1,65 @@
-# Cryptand reference implementation — phase 5 report
+# Cryptand reference implementation — phase 6 report
 
 **Implementation:** pure Dart 3.12, `reference/dart/cryptand/`
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 368 tests green, `dart analyze` clean, conformance vectors byte-exact and self-verifying
+**Status:** 394 tests green, `dart analyze` clean, conformance vectors byte-exact and self-verifying
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-1 Phase 6 — chapter 04 finished, and the operational surface
+
+Phase 6 completed `spec/04-segments.md` and built the part of
+`spec/13-operations.md` that every conformance level requires:
+
+| | |
+|---|---|
+| **range deletes** (`04` §2.5) | `clear()`, `drop()` and bulk-insert rollback become **O(1) writes** rather than O(n) tombstones |
+| **time to live** (`04` §9) | per-entry `expiry_ms`, evaluated at read time so it is exact whenever compaction runs |
+| **corruption containment** (`13` §4) | one damaged page no longer makes the database unreadable |
+| **required metrics** (`13` §6) | the normative observability surface, in `lib/src/metrics.dart` |
+
+**Two of these are mandatory conformance tests** (`spec/11-conformance.md` §6)
+and both now exist.
+
+The range-delete-under-filter test needs a specific construction to be worth
+anything: the segment carrying the range delete must **not** hold the deleted
+key as a point key, so its filter genuinely answers "absent" for it. The test
+asserts `filter.mayContain(key) == false` *before* asserting the key is still
+deleted — otherwise it would pass for the wrong reason, which is the same trap
+as phase 3's ascending-insert benchmark.
+
+The containment test corrupts a page in the middle of a mid-level segment and
+checks all five of §4's steps: the segment is identified, its key range is
+reported **from the manifest** (so the range is knowable without touching the
+damaged extent — that is what makes containment cheap), every key outside is
+still served, every key inside fails with `UnavailableRangeException` naming the
+range rather than returning null, and the affected trees are marked so a planner
+does not substitute an incomplete index scan. Measured: most of the database
+survives one bad block.
+
+### One defect, and it is a gap
+
+**§4 mandates containment; §6's required-metric list had no way to observe it.**
+A partially-available database was therefore indistinguishable from a healthy
+one until a read happened to land in the hole — a caller could not ask "is this
+database whole?", which is precisely the class of question §6 exists to make
+answerable. `unavailable_ranges` is now in §6, with 0 as the normal state.
+
+### And one non-finding worth recording
+
+Range deletes and TTL were implemented straight from the chapter with **no
+defects found** — fourteen tests, green first run. Those are among the oldest
+and least-revised sections in the spec. It is mild evidence that this project's
+defect density is concentrated in the parts that were *rewritten under review*
+rather than spread evenly: a section revised three times has had three chances
+to acquire an unwritten assumption, and §2.5 is nine lines that have had none.
 
 ---
 
@@ -394,21 +444,27 @@ and the filter pages live in the extent.
 | chapter | status |
 |---|---|
 | `00-conventions`, `01-container`, `02-value-encoding`, `03-key-encoding` | complete |
-| `04-segments` §1, §2 (filter included), §8 | complete |
+| `04-segments` §1, §2 (filter and **range deletes**), §8, **§9 TTL** | complete |
 | `04-segments` §3 — level policy, manifest as a copy-on-write tree, internal trees | **complete** |
-| `04-segments` §4 — read resolution, manifest pruning, filter pruning, early exit | **complete**; range deletes are not built, so `rd_sources` is always empty |
+| `04-segments` §4 — read resolution, manifest pruning, filter pruning, early exit, **`rd_sources`** | **complete** |
 | `04-segments` §5 — compaction, entry dropping, tombstone dropping, **retention** | complete except §5.1 parallelism (no threads) and §5.2 interruptibility |
 | `04-segments` §6 — two-tier value log, promotion, collection, debt | complete |
 | **`05-catalog`** | **complete** — descriptors with unknown-field preservation, reserved trees, the §11 enumerations, attributes, store metadata |
 | **`06-indexes`** | **complete** — the §1 layout, §3 null/sparse, §4 arrays and the 1024 cap, §5 field paths, the §7 scans, §8 same-batch maintenance |
 | `14-security` | **complete**, Argon2id included and vector-verified |
 | **`10-transactions`** | **complete except §2** — the concurrent write protocol needs threads Dart does not have |
-| `07`–`09`, `12`, `13` | not started |
+| **`13-operations`** §4 containment, §6 metrics | **complete**; §1–§3, §5, §7–§9 not started |
+| `07`–`09`, `12` | not started |
 
 New in phase 3: `lib/src/cow.dart` (copy-on-write B+trees),
 `lib/src/manifest.dart` (tree 6), `lib/src/catalog.dart`, `lib/src/index.dart`,
 `lib/src/database.dart`, `bench/p10_read_tail.dart`, and the
 `index/entries.json` and `catalog/trees.json` vectors.
+
+New in phase 6: `lib/src/metrics.dart`, `test/rangedelete_ttl_test.dart`,
+`test/operations_test.dart`, and `Segment.rangeDeletes` — §4's in-memory
+range-delete summary, built only for a segment whose header carries
+`HAS_RANGE_DELETES`, so the normal case pays nothing.
 
 New in phase 5: `lib/src/txn.dart` (snapshots, transactions, backpressure,
 durability, events) and `test/txn_test.dart`.
@@ -418,7 +474,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 `conformance/vectors/security/derivation.json`, and `deriveKek` /
 `unlockWithPassword` in `lib/src/security.dart`.
 
-**368 tests**, up from 259 at the end of phase 2.
+**394 tests**, up from 259 at the end of phase 2.
 
 ---
 
@@ -473,8 +529,9 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 4. **Measure P2 against Fjall and RocksDB.**
 5. **Re-run the aged scan at 10⁶ on a real device.** 2×10⁵ found a real defect
    that 2×10⁴ did not; there is no reason to assume that stops.
-6. **Range deletes (§2.5) and TTL (§9)**, which are the two remaining pieces of
-   `04` that the read path has stubs for.
+6. ~~Range deletes and TTL.~~ **Done** (§0.-1). What is left of `13` is
+   checkpoints, backup, repair and the change feed; chapters `07`–`09` and
+   `12` are untouched.
 
 ---
 
@@ -484,7 +541,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 cd reference/dart/cryptand
 dart pub get
 dart analyze                              # clean
-dart test                                 # 368 tests
+dart test                                 # 394 tests
 
 dart run tool/generate_vectors.dart       # regenerates ../../conformance/vectors
 dart test test/conformance_test.dart      # verifies them

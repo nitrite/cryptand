@@ -62,6 +62,7 @@ export 'src/txn.dart'
         Transaction,
         TxnWrite;
 export 'src/manifest.dart' show Manifest, SegmentRef, manifestKey;
+export 'src/metrics.dart' show EngineMetrics, Metrics;
 export 'src/errors.dart';
 export 'src/index.dart'
     show
@@ -110,6 +111,7 @@ export 'src/segment.dart'
         SegEntry,
         SegFlags,
         SegRecord,
+        RangeDelete,
         Segment,
         SegmentBuilder,
         SegmentCursor,

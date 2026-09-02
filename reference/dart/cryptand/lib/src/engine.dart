@@ -13,6 +13,7 @@ library;
 
 import 'dart:typed_data';
 
+import 'bytes.dart';
 import 'cke.dart';
 import 'cow.dart';
 import 'errors.dart';
@@ -24,10 +25,13 @@ import 'vlog.dart';
 
 /// One buffered write, before it reaches a segment.
 final class _Pending {
-  _Pending(this.internalKey, this.valueKind, this.value);
+  _Pending(this.internalKey, this.valueKind, this.value, {this.expiryMs});
   final Uint8List internalKey;
   final int valueKind;
   final Uint8List value;
+
+  /// `spec/04-segments.md` §9 — Unix milliseconds, UTC.
+  final int? expiryMs;
 }
 
 /// How aggressively the engine keeps values near their keys.
@@ -182,6 +186,14 @@ final class Engine {
   /// §6.9). The ceiling on the fraction of live value bytes in surplus runs.
   final int localityDebtPct;
 
+  /// Wall clock used for §9's expiry when a caller supplies none.
+  ///
+  /// §9: "expiry uses wall-clock time and is therefore subject to clock
+  /// changes... an implementation MUST treat a backwards clock jump as
+  /// resurrecting entries rather than as corruption." Making the clock an
+  /// injectable field is what lets that rule be tested rather than asserted.
+  int nowMs = 0;
+
   final ValueLog vlog;
 
   /// The file's page space. The manifest lives in it; segment extents do not,
@@ -229,6 +241,58 @@ final class Engine {
 
   /// Segment extents by `segment_id`, standing in for `start_page`/`pages`.
   final Map<int, Segment> extents = {};
+
+  /// Segments a checksum failure has taken out of service, and the key range
+  /// each one covered — `spec/13-operations.md` §4.
+  ///
+  /// "A single damaged page MUST NOT make the whole database unreadable." The
+  /// alternative, which every engine Nitrite uses today exhibits, is that one
+  /// bad block turns a phone user's entire journal into an error message.
+  final Map<int, SegmentRef> quarantined = {};
+
+  /// §4 step 5: trees whose data is now incomplete, so a planner must not
+  /// silently substitute an index scan that would return partial results.
+  Set<int> get affectedTrees =>
+      {for (final r in quarantined.values) ...r.trees};
+
+  /// Takes a segment out of service after a checksum failure, §4 steps 1–2.
+  ///
+  /// Returns the manifest entry, whose `min_key`/`max_key` are the affected
+  /// key range the chapter requires be *reported* — the range is knowable
+  /// without touching the damaged extent at all, which is what makes
+  /// containment cheap.
+  SegmentRef quarantine(int segmentId) {
+    final existing = quarantined[segmentId];
+    if (existing != null) return existing;
+    for (var l = 0; l <= lastLevel; l++) {
+      for (final r in refsAt(l)) {
+        if (r.segmentId == segmentId) {
+          quarantined[segmentId] = r;
+          return r;
+        }
+      }
+    }
+    throw InvalidArgumentException('no segment $segmentId in the manifest');
+  }
+
+  /// Verifies every live segment's page checksums, quarantining what fails.
+  ///
+  /// `spec/01-container.md` §9 step 2, with §4's containment applied rather
+  /// than an exception thrown: verification **reports**.
+  List<SegmentRef> verify() {
+    final bad = <SegmentRef>[];
+    for (var l = 0; l <= lastLevel; l++) {
+      for (final r in refsAt(l)) {
+        if (quarantined.containsKey(r.segmentId)) continue;
+        try {
+          extents[r.segmentId]!.verifyChecksums();
+        } on CorruptionException {
+          bad.add(quarantine(r.segmentId));
+        }
+      }
+    }
+    return bad;
+  }
 
   final Map<Uint8List, _Pending> _memtable = {};
 
@@ -372,8 +436,35 @@ final class Engine {
   // -------------------------------------------------------------------------
 
   /// Writes one document.
-  void put(int treeId, CValue key, Uint8List encodedValue) =>
-      _write(treeId, key, encodedValue, Op.put);
+  ///
+  /// [expiryMs] is §9's per-entry time to live, in Unix milliseconds UTC. A
+  /// tree may also carry `params.ttl_ms`, which the layer above applies.
+  void put(int treeId, CValue key, Uint8List encodedValue, {int? expiryMs}) =>
+      _write(treeId, key, encodedValue, Op.put, expiryMs: expiryMs);
+
+  /// Deletes the half-open interval `[start, end)` in one write,
+  /// `spec/04-segments.md` §2.5.
+  ///
+  /// This is what makes `clear()`, `drop()` and the rollback of a bulk insert
+  /// **O(1) writes rather than O(n) tombstones** — the single largest
+  /// asymptotic difference between this format and a per-key tombstone engine
+  /// on those three operations.
+  void removeRange(int treeId, CValue start, CValue end) {
+    final startCke = encodeKey(start);
+    final endCke = encodeKey(end);
+    if (compareKeys(startCke, endCke) >= 0) {
+      throw const InvalidArgumentException(
+          'a range delete needs start < end; the interval is half-open');
+    }
+    final seq = _nextSeq++;
+    final ik = internalKey(treeId, startCke, seq, Op.rangeDelete);
+    // §2.5: "The value payload holds `uvar end_key_len || end_key`."
+    final w = ByteWriter(endCke.length + 4)
+      ..uvar(endCke.length)
+      ..bytes(endCke);
+    _memtable[ik] = _Pending(ik, ValueKind.inline, w.takeBytes());
+    if (_memtable.length >= memtableEntries) flush();
+  }
 
   /// Writes a tombstone.
   void remove(int treeId, CValue key) =>
@@ -425,7 +516,8 @@ final class Engine {
     );
   }
 
-  void _write(int treeId, CValue key, Uint8List encodedValue, int op) {
+  void _write(int treeId, CValue key, Uint8List encodedValue, int op,
+      {int? expiryMs}) {
     final cke = encodeKey(key);
     final seq = _nextSeq++;
     final ik = internalKey(treeId, cke, seq, op);
@@ -447,7 +539,7 @@ final class Engine {
       kind = ValueKind.inline;
       stored = encodedValue;
     }
-    _memtable[ik] = _Pending(ik, kind, stored);
+    _memtable[ik] = _Pending(ik, kind, stored, expiryMs: expiryMs);
     _writtenAt[Transaction.keyOf(treeId, cke)] = seq;
     if (_memtable.length >= memtableEntries) flush();
   }
@@ -554,7 +646,8 @@ final class Engine {
     final b = _builder(level: 0);
     for (final k in keys) {
       final p = _memtable[k]!;
-      b.add(SegEntry(p.internalKey, p.valueKind, p.value));
+      b.add(SegEntry(p.internalKey, p.valueKind, p.value,
+          expiryMs: p.expiryMs));
     }
     _publish(b, level: 0, group: 0);
     _memtable.clear();
@@ -766,6 +859,14 @@ final class Engine {
     // class of wrong answer as resolving by segment order.
     final retained = minRetainedSeq;
     final published = visibleSeq;
+    // §9: "compaction drops expired entries under the rule in §5" — and §5
+    // adds that the deadline must be older than the oldest live snapshot's
+    // wall-clock floor, so a snapshot taken before the expiry still sees it.
+    final compactionNowMs = _liveSnapshots.isEmpty
+        ? nowMs
+        : _liveSnapshots
+            .map((s) => s.takenAtMs == 0 ? nowMs : s.takenAtMs)
+            .reduce((a, b) => a < b ? a : b);
     if (levelled) pinnedBySnapshots = 0;
     var pinned = 0;
 
@@ -800,7 +901,10 @@ final class Engine {
         // one key in two segments of the same disjoint run would break the
         // "at most one segment per group covers a key" invariant of §3.1.
         if (out.entryCount >= segmentEntriesAt(target)) rotate();
-        if (levelled && rec.op == Op.delete && rec.seq <= retained) {
+        if (levelled &&
+            (rec.op == Op.delete ||
+                _isExpired(rec, compactionNowMs) && rec.op != Op.rangeDelete) &&
+            rec.seq <= retained) {
           // §5: a tombstone may be dropped when the compaction reaches the
           // last level **and** its own seq is at or below the oldest live
           // snapshot's. The second half is not optional: a snapshot older than
@@ -826,7 +930,8 @@ final class Engine {
           // live: without it, §5 would have dropped this entry here.
           pinned += rec.value.length + rec.internalKey.length;
         }
-        out.add(SegEntry(rec.internalKey, rec.valueKind, rec.value));
+        out.add(SegEntry(rec.internalKey, rec.valueKind, rec.value,
+            expiryMs: rec.expiryMs));
       }
       pick.next();
     }
@@ -878,6 +983,15 @@ final class Engine {
   /// always at or above its own user prefix, so an untruncated `max_key` is a
   /// valid upper bound on user keys as it stands. Erring toward "overlaps"
   /// merges more than strictly necessary; erring the other way loses a key.
+  static String _hexBound(Uint8List b) {
+    final sb = StringBuffer();
+    for (var i = 0; i < b.length && i < 8; i++) {
+      sb.write(b[i].toRadixString(16).padLeft(2, '0'));
+    }
+    if (b.length > 8) sb.write('…');
+    return sb.toString();
+  }
+
   static Uint8List _userLow(Uint8List bound) =>
       bound.length >= 13 ? Uint8List.sublistView(bound, 0, bound.length - 9) : bound;
 
@@ -897,19 +1011,28 @@ final class Engine {
     return m;
   }
 
+  /// §9: an entry whose `expiry_ms` is at or before the clock is invisible,
+  /// "treated exactly as a `DELETE`". Evaluated at read time, so it is exact
+  /// regardless of when compaction runs.
+  static bool _isExpired(SegRecord rec, int nowMs) =>
+      rec.expiryMs != null && rec.expiryMs! <= nowMs;
+
   SegEntry _promote(SegRecord rec, int treeId, List<VlogPointer> dead) {
     if (rec.valueKind != ValueKind.vlog || !policy.clusteredPromotion) {
-      return SegEntry(rec.internalKey, rec.valueKind, rec.value);
+      return SegEntry(rec.internalKey, rec.valueKind, rec.value,
+          expiryMs: rec.expiryMs);
     }
     final ptr = VlogPointer.decode(rec.value);
     final seg = vlog.segments[ptr.segmentId];
     if (seg == null) {
-      return SegEntry(rec.internalKey, rec.valueKind, rec.value);
+      return SegEntry(rec.internalKey, rec.valueKind, rec.value,
+          expiryMs: rec.expiryMs);
     }
     if (seg.tier == VlogTier.cold && !_recluster) {
       // Already clustered within its own generation, and the log is inside its
       // space target, so leave it: §6.3's "values are written at most twice".
-      return SegEntry(rec.internalKey, rec.valueKind, rec.value);
+      return SegEntry(rec.internalKey, rec.valueKind, rec.value,
+          expiryMs: rec.expiryMs);
     }
     final value = vlog.readValue(ptr);
     final cke = parseInternalKey(rec.internalKey).cke;
@@ -920,7 +1043,8 @@ final class Engine {
       tier: VlogTier.cold,
     );
     dead.add(ptr);
-    return SegEntry(rec.internalKey, ValueKind.vlog, moved.encode());
+    return SegEntry(rec.internalKey, ValueKind.vlog, moved.encode(),
+        expiryMs: rec.expiryMs);
   }
 
   // -------------------------------------------------------------------------
@@ -932,10 +1056,115 @@ final class Engine {
   /// Manifest key-range pruning costs no I/O; the filter costs one page read
   /// of an already-hot page. What survives both is what gets descended into,
   /// and its count is `segments_probed_per_lookup`.
+  /// Segments that may hold a `RANGE_DELETE` covering [userKeyPrefix], §4.
+  ///
+  /// **These MUST NOT be filter-pruned.** The filter holds the segment's
+  /// *point* keys (§2.4); a range delete covers keys that are not in it, so
+  /// filtering such a segment out loses the delete and resurrects a deleted
+  /// key. `flags.HAS_RANGE_DELETES` exists exactly so this test costs no I/O.
+  List<RangeDelete> rangeDeletesFor(Uint8List prefix) {
+    final out = <RangeDelete>[];
+    for (var l = 0; l <= lastLevel; l++) {
+      for (final ref in refsAt(l)) {
+        if (!ref.hasRangeDeletes) continue;
+        for (final rd in extents[ref.segmentId]!.rangeDeletes) {
+          if (rd.covers(prefix)) out.add(rd);
+        }
+      }
+    }
+    for (final e in _memtable.entries) {
+      final k = e.key;
+      if (k[k.length - 1] != Op.rangeDelete) continue;
+      final p = parseInternalKey(k);
+      final r = ByteReader(e.value.value);
+      final end = r.bytesCopy(r.uvar());
+      final rd = RangeDelete(
+        treeId: p.treeId,
+        start: userKeyPrefix(p.treeId, Uint8List.fromList(p.cke)),
+        end: userKeyPrefix(p.treeId, end),
+        seq: p.seq,
+      );
+      if (rd.covers(prefix)) out.add(rd);
+    }
+    return out;
+  }
+
+  /// Whether any live segment or buffered write carries a `RANGE_DELETE`.
+  ///
+  /// §4: "range deletes are rare, so the number of segments in `rd_sources` is
+  /// normally zero." This makes that the *measured* common case rather than an
+  /// assumption — with no range deletes anywhere, the read and scan paths skip
+  /// the whole mechanism on one boolean instead of walking the manifest.
+  bool get hasAnyRangeDeletes {
+    for (var l = 0; l <= lastLevel; l++) {
+      for (final r in refsAt(l)) {
+        if (r.hasRangeDeletes) return true;
+      }
+    }
+    for (final k in _memtable.keys) {
+      if (k[k.length - 1] == Op.rangeDelete) return true;
+    }
+    return false;
+  }
+
+  /// The greatest range-delete seq covering [prefix] at or below [ceiling],
+  /// or 0 when none does. §4's `rd`.
+  int _rangeDeleteSeq(Uint8List prefix, int? ceiling) {
+    if (!hasAnyRangeDeletes) return 0;
+    return _rangeDeleteSeqIn(rangeDeletesFor(prefix), prefix, ceiling);
+  }
+
+  static int _rangeDeleteSeqIn(
+      List<RangeDelete> all, Uint8List prefix, int? ceiling) {
+    var rd = 0;
+    for (final r in all) {
+      if (!r.covers(prefix)) continue;
+      if (ceiling != null && r.seq > ceiling) continue;
+      if (r.seq > rd) rd = r.seq;
+    }
+    return rd;
+  }
+
+  /// Every range delete in [treeId], gathered once.
+  ///
+  /// A scan hoists this: recomputing it per row would make a scan cost
+  /// O(rows × segments) for a mechanism that is normally not in use at all.
+  List<RangeDelete> _allRangeDeletes(int treeId) {
+    if (!hasAnyRangeDeletes) return const [];
+    final out = <RangeDelete>[];
+    for (var l = 0; l <= lastLevel; l++) {
+      for (final ref in refsAt(l)) {
+        if (!ref.hasRangeDeletes) continue;
+        for (final rd in extents[ref.segmentId]!.rangeDeletes) {
+          if (rd.treeId == treeId) out.add(rd);
+        }
+      }
+    }
+    for (final e in _memtable.entries) {
+      final k = e.key;
+      if (k[k.length - 1] != Op.rangeDelete) continue;
+      final p = parseInternalKey(k);
+      if (p.treeId != treeId) continue;
+      final r = ByteReader(e.value.value);
+      final end = r.bytesCopy(r.uvar());
+      out.add(RangeDelete(
+        treeId: p.treeId,
+        start: userKeyPrefix(p.treeId, Uint8List.fromList(p.cke)),
+        end: userKeyPrefix(p.treeId, end),
+        seq: p.seq,
+      ));
+    }
+    return out;
+  }
+
   List<Segment> candidatesFor(Uint8List userKeyPrefix) {
     final out = <Segment>[];
 
     void consider(List<SegmentRef> refs) {
+      refs = [
+        for (final r in refs)
+          if (!quarantined.containsKey(r.segmentId)) r
+      ];
       // **Level discipline, and the ordering §4 does not spell out.** §4 names
       // "L0 newest-flush-first, then strictly increasing level", which predates
       // §3.1's range-partition groups: a *tiered* level holds up to
@@ -988,6 +1217,20 @@ final class Engine {
       return best.op == Op.delete ? null : _resolve(best);
     }
 
+    // §4 step 4: a read landing inside an unavailable range fails naming the
+    // range, "never with a wrong or empty answer". The test is on the manifest
+    // entry, so it costs no I/O and works even though the extent is unreadable.
+    for (final r in quarantined.values) {
+      if (r.covers(prefix)) {
+        throw UnavailableRangeException(
+            'key falls inside the range of quarantined segment '
+            '${r.segmentId} (level ${r.level}); '
+            '${_hexBound(r.minKey)}..${_hexBound(r.maxKey)} is unavailable',
+            segmentId: r.segmentId,
+            treeIds: r.trees);
+      }
+    }
+
     final candidates = candidatesFor(prefix);
     var probed = 0;
     for (final s in candidates) {
@@ -1001,7 +1244,14 @@ final class Engine {
       if (earlyExit) break;
     }
     segmentsProbed.add(probed);
-    if (best == null || best.op == Op.delete) return null;
+
+    // §4: `rd` is the greatest RANGE_DELETE seq covering this key at or below
+    // the snapshot. A delete newer than the winning entry hides it.
+    final rd = _rangeDeleteSeq(prefix, ceiling);
+    if (best == null || rd > best.seq) return null;
+    if (best.op == Op.delete || best.op == Op.rangeDelete) return null;
+    // §9: an expired entry is invisible, "treated exactly as a DELETE".
+    if (_isExpired(best, nowMs)) return null;
     return _resolve(best);
   }
 
@@ -1058,6 +1308,7 @@ final class Engine {
   Iterable<({Uint8List cke, Uint8List value})> scanTree(int treeId,
       {KeyRange? range, Snapshot? at}) sync* {
     final ceiling = at?.seq;
+    final rangeDeletes = _allRangeDeletes(treeId);
     final lower = userKeyPrefix(treeId, range?.lower ?? Uint8List(0));
     final upperKey = range?.upper;
     final upper = upperKey == null ? null : userKeyPrefix(treeId, upperKey);
@@ -1100,17 +1351,20 @@ final class Engine {
       final int op;
       final int valueKind;
       final Uint8List value;
+      final int? expiry;
       if (fromMem) {
         final p = _memtable[bestKey]!;
         op = bestKey[bestKey.length - 1];
         valueKind = p.valueKind;
         value = p.value;
+        expiry = p.expiryMs;
         pi++;
       } else {
         final rec = pick!.record();
         op = rec.op;
         valueKind = rec.valueKind;
         value = rec.value;
+        expiry = rec.expiryMs;
         pick.next();
       }
 
@@ -1119,11 +1373,18 @@ final class Engine {
       if (ceiling != null && parseInternalKey(bestKey).seq > ceiling) {
         continue; // invisible at this snapshot; a lower version may still show
       }
+      if (op == Op.rangeDelete) continue; // not an entry, a tombstone interval
       if (lastUserKey != null && compareKeys(lastUserKey, userKey) == 0) {
         continue; // an older version of a key already yielded
       }
       lastUserKey = Uint8List.fromList(userKey);
       if (op == Op.delete) continue;
+      final entrySeq = parseInternalKey(bestKey).seq;
+      if (rangeDeletes.isNotEmpty &&
+          _rangeDeleteSeqIn(rangeDeletes, userKey, ceiling) > entrySeq) {
+        continue;
+      }
+      if (expiry != null && expiry <= nowMs) continue;
       yield (
         cke: Uint8List.sublistView(userKey, 4),
         value: valueKind == ValueKind.vlog
