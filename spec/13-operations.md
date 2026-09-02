@@ -230,7 +230,7 @@ cannot be validated without them.
 | `vlog_live_bytes` / `vlog_allocated_bytes` | value-log amplification against its target |
 | **`locality_debt`** | `04-segments.md` §6.9 — live value bytes in surplus runs. **This is the number that predicts scan decay**, and it has to be the run-based definition: the earlier flag-based one read 0 % on a database whose scans had already degraded 2.1× |
 | `vlog_live_runs` / `vlog_ideal_runs` | the raw counts behind it: how many value-log runs a key-ordered scan interleaves, against how many the live data needs |
-| `pinned_by_snapshots` / `pinned_by_checkpoints` | why space is not being reclaimed |
+| `pinned_by_snapshots` / `pinned_by_checkpoints` | why space is not being reclaimed. **Not derivable as `allocated − live`**: a live snapshot's effect is to stop superseded versions from *becoming* dead, so the bytes it pins never enter that difference and the obvious derivation reads **0** on a database holding a large pinned set. Accumulate it where the retention decision is made — the bytes of every entry a compaction kept solely because `10-transactions.md` §5's condition 2 was not met |
 | `unencrypted_pages` | 0 on a fully encrypted file; non-zero mid-conversion. An implementation MUST NOT report a database as encrypted while this is above 0 (`14-security.md` §8.3) |
 | `nonces_allocated` / `nonce_floor` | headroom to the next published floor (`14-security.md` §4.1) |
 

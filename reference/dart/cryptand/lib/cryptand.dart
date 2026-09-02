@@ -50,6 +50,17 @@ export 'src/cve.dart'
     show DocFlags, DocView, NameDict, decodeValue, encodeValue, readValue, writeDoc, writeValue;
 export 'src/engine.dart'
     show Engine, LevelPolicy, LocalityPolicy, ScanResult, percentile;
+export 'src/txn.dart'
+    show
+        Backpressure,
+        Bound,
+        Durability,
+        Isolation,
+        Snapshot,
+        StoreEvent,
+        StoreEventKind,
+        Transaction,
+        TxnWrite;
 export 'src/manifest.dart' show Manifest, SegmentRef, manifestKey;
 export 'src/errors.dart';
 export 'src/index.dart'

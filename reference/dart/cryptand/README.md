@@ -1,4 +1,4 @@
-# Cryptand — Dart reference implementation (phase 4)
+# Cryptand — Dart reference implementation (phase 5)
 
 Pure Dart implementation of the Cryptand File Format, CFF v1.0.
 
@@ -7,7 +7,7 @@ the spec disagree, the spec wins and this code is wrong
 (`spec/11-conformance.md` §7).
 
 Read **[REPORT.md](REPORT.md)** first: it states what is implemented, the
-twenty-four spec defects this work has found across four phases, and every place a
+twenty-seven spec defects this work has found across five phases, and every place a
 measurement differs from a claim in `../../design/`.
 
 ## Quick start
@@ -36,7 +36,8 @@ dart pub get && dart test
 | `lib/src/vlog.dart` | the two-tier value log, promotion and collection (`spec/04` §6) |
 | `lib/src/cow.dart` | **copy-on-write B+trees** — the reserved trees (`spec/04` §3.3, `spec/05` §2) |
 | `lib/src/manifest.dart` | **tree 6**, the segment index the read path prunes with (`spec/04` §3.2) |
-| `lib/src/engine.dart` | the LSM engine: levels, compaction, the §4 read path |
+| `lib/src/engine.dart` | the LSM engine: levels, compaction, the `spec/04` §4 read path, commit and retention |
+| `lib/src/txn.dart` | **snapshots, transactions, backpressure, durability, events** (`spec/10`) |
 | `lib/src/catalog.dart` | **the catalog** — descriptors, reserved trees, attributes (`spec/05`) |
 | `lib/src/index.dart` | **secondary indexes** — entry derivation and the §7 scans (`spec/06`) |
 | `lib/src/database.dart` | collections and repositories over the engine |

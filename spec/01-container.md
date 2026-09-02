@@ -341,7 +341,10 @@ A conforming implementation MUST expose a verification pass that:
 2. walks the manifest and every segment, verifying page checksums, key order,
    separator invariants, `subtree_entries`, and each segment's declared key and
    seq ranges;
-3. verifies that segments at a levelled level do not overlap;
+3. verifies that segments at a levelled level do not overlap **in user keys**
+   — `u32be(tree_id) || CKE(key)`, not whole internal keys, which carry `seq`
+   and would report two versions of one key as disjoint (`04-segments.md`
+   §3.1.1);
 4. verifies every value-log record's CRC and that every `VLOG` pointer resolves
    to a record whose stored key matches, and that no pointer resolves past the
    segment's durable `bytes` watermark in tree 7 (`04-segments.md` §6.2);

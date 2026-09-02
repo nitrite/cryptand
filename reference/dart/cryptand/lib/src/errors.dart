@@ -57,3 +57,13 @@ final class UnsupportedFeatureException extends CryptandException {
 final class InvalidArgumentException extends CryptandException {
   const InvalidArgumentException(super.message);
 }
+
+/// A transaction's write set collided with a batch sequenced after it began.
+/// `spec/10-transactions.md` section 3: "On conflict the transaction aborts;
+/// the format does not define automatic retry."
+final class ConflictException extends CryptandException {
+  const ConflictException(super.message, {this.key});
+
+  /// The first colliding key, as `tree_id:CKE` hex, for diagnosis.
+  final String? key;
+}

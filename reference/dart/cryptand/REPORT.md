@@ -1,15 +1,81 @@
-# Cryptand reference implementation — phase 4 report
+# Cryptand reference implementation — phase 5 report
 
 **Implementation:** pure Dart 3.12, `reference/dart/cryptand/`
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 338 tests green, `dart analyze` clean, conformance vectors byte-exact and self-verifying
+**Status:** 368 tests green, `dart analyze` clean, conformance vectors byte-exact and self-verifying
 
-Phases 2 and 3's reports are superseded by this one; their findings are carried
-forward. **Phase 4 is short and has one theme**: it was prompted by the question
+Earlier phase reports are superseded by this one; their findings are carried
+forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.0 Phase 5 — chapter 10, and the worst defect this project has found
+
+Phase 5 implemented `spec/10-transactions.md` apart from §2, the concurrent
+write protocol, which needs threads Dart does not have. Everything else in the
+chapter is independent of thread count and is now built and tested: snapshots
+(§1), the commit and its ordering invariants (§2.3), transactions with all four
+isolation levels, conflict detection and savepoints (§3), the normative
+backpressure curve (§6), durability reporting (§7), retention watermarks (§8),
+store events (§9) and close (§10).
+
+That split matters: a single writer still has to get **atomicity, visibility,
+conflict detection and retention** right, and those are where a database returns
+wrong answers rather than slow ones. Which is exactly what happened.
+
+### The last level had quietly stopped being disjoint
+
+`spec/04-segments.md` §3.1 says the last level's "segments partition the key
+space with no overlap". The compaction's overlap test compared whole **internal**
+keys — and an internal key is `tree_id ‖ CKE(key) ‖ ~seq ‖ op`. Two segments
+holding *different versions of the same user key* therefore occupy **disjoint**
+internal-key ranges: one holds `~11 … ~5`, the other `~4 … ~1`. The test
+reported "no overlap", the merge left both in place, and the level stopped being
+disjoint.
+
+Everything structural still passed. `min_key` and `max_key` were right,
+`subtree_entries` was right, every checksum verified, the manifest was
+consistent. What broke was the read: §4's early exit rests on at most one
+segment per group covering a key, so a lookup stopped at whichever of the two it
+reached first and **returned a stale version** — version 8 of 11, in the test
+that caught it.
+
+**It had been there since phase 3, under 338 passing tests**, including a
+read-tail benchmark whose entire subject is which segments cover a key. It
+stayed hidden because an engine that drops every superseded version at the last
+level has exactly one entry per user key there — so internal-key and user-key
+disjointness *coincide*, and the test is accidentally correct. It only diverges
+once versions are genuinely retained, which needs a live snapshot, which is what
+§5's condition 2 does, which is what phase 5 added.
+
+`04` §3.1.1 is new and states the rule; `01` §9 step 3's verifier check now says
+user keys too.
+
+### Two more, both about retention
+
+- **`min_retained_seq` floors at `visible_seq`, so a watermark that never
+  advances makes retention unbounded.** Compaction can then never satisfy §5's
+  condition 2, keys never collapse, and the key index grows without bound while
+  the value side looks perfectly healthy — measured as the aged scan's key pages
+  going **34 → 369** with its value-page count unchanged. `10` §8 now says the
+  watermark advances whenever a batch's records become durable.
+- **`pinned_by_snapshots` is not `allocated − live`.** A snapshot's effect is to
+  stop superseded versions from *becoming* dead, so the bytes it pins never
+  enter that difference, and the obvious derivation reads **0** on a database
+  holding a large pinned set. `13` §6 listed the metric without saying how to
+  derive it; it now says to accumulate it at the retention decision itself.
+
+### What §2 costs to skip
+
+`spec/10-transactions.md` §2 is not implemented and **prediction P3 remains
+unmeasurable here**. That is the whole of what `Level 0 (single-writer)` gives
+up (`11` §1.1), and it is worth being exact about what is *not* given up: the
+files this implementation writes are byte-identical to a concurrent writer's,
+and every rule in §1, §3, §4, §5, §6, §7, §8, §9 and §10 is exercised.
 
 ---
 
@@ -331,24 +397,28 @@ and the filter pages live in the extent.
 | `04-segments` §1, §2 (filter included), §8 | complete |
 | `04-segments` §3 — level policy, manifest as a copy-on-write tree, internal trees | **complete** |
 | `04-segments` §4 — read resolution, manifest pruning, filter pruning, early exit | **complete**; range deletes are not built, so `rd_sources` is always empty |
-| `04-segments` §5 — compaction, entry dropping, tombstone dropping | complete except §5.1 parallelism (no threads) and §5.2 interruptibility |
+| `04-segments` §5 — compaction, entry dropping, tombstone dropping, **retention** | complete except §5.1 parallelism (no threads) and §5.2 interruptibility |
 | `04-segments` §6 — two-tier value log, promotion, collection, debt | complete |
 | **`05-catalog`** | **complete** — descriptors with unknown-field preservation, reserved trees, the §11 enumerations, attributes, store metadata |
 | **`06-indexes`** | **complete** — the §1 layout, §3 null/sparse, §4 arrays and the 1024 cap, §5 field paths, the §7 scans, §8 same-batch maintenance |
 | `14-security` | **complete**, Argon2id included and vector-verified |
-| `07`–`09`, `10`, `12`, `13` | not started |
+| **`10-transactions`** | **complete except §2** — the concurrent write protocol needs threads Dart does not have |
+| `07`–`09`, `12`, `13` | not started |
 
 New in phase 3: `lib/src/cow.dart` (copy-on-write B+trees),
 `lib/src/manifest.dart` (tree 6), `lib/src/catalog.dart`, `lib/src/index.dart`,
 `lib/src/database.dart`, `bench/p10_read_tail.dart`, and the
 `index/entries.json` and `catalog/trees.json` vectors.
 
+New in phase 5: `lib/src/txn.dart` (snapshots, transactions, backpressure,
+durability, events) and `test/txn_test.dart`.
+
 New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 `bench/p11_encryption.dart`, the `argon2id` and `profile_costs` blocks in
 `conformance/vectors/security/derivation.json`, and `deriveKek` /
 `unlockWithPassword` in `lib/src/security.dart`.
 
-**338 tests**, up from 259 at the end of phase 2.
+**368 tests**, up from 259 at the end of phase 2.
 
 ---
 
@@ -373,11 +443,12 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
   end for the first time. What remains unproven about it is only what a vector
   cannot prove: that the *cost* is right on a real device, which §0.1 shows it
   is not, for `mobile`, in this runtime.
-- **No concurrency, so `spec/10-transactions.md` §2 is untested.** Not
-  under-tested — *untested*. Dart has no threads; the chapter's whole content is
-  what happens when several of them write at once. Snapshot isolation,
-  conflict detection and recovery are equally unbuilt, and `Engine` reads at the
-  latest seq with no snapshot set at all. This is the largest single gap.
+- **`spec/10-transactions.md` §2 is untested, and only §2.** Dart has no
+  shared-memory threads, so *N* writers contending on one counter cannot be
+  exercised and prediction P3 cannot be measured. Everything else in the chapter
+  is built and tested (§0.0). This implementation declares
+  `Level 0 (single-writer)`, which `11` §1.1 defines, and writes byte-identical
+  files.
 - **Extents are in memory.** The manifest and the reserved trees now live in a
   real `PageStore` with page identity and page-granular counters; segment
   extents do not. Only the counter-based results are portable.
@@ -395,9 +466,8 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
    CKE, CVE, documents, container, filter, security derivation, **index
    entries** and **catalog descriptors**. Until a second implementation reads
    these, "portable" is a claim.
-2. **Build `10-transactions.md` in Rust and measure P3.** It is the only chapter
-   this SDK cannot even partially exercise, and the write-concurrency claim is
-   the design's headline.
+2. **Measure P3 in Rust.** `10-transactions.md` §2 is now the only part of the
+   chapter left, and the write-concurrency claim is the design's headline.
 3. ~~Add Argon2id, then measure P11.~~ **Done** (§0.1). What is left of P11 is
    its steady-state half, which needs real storage.
 4. **Measure P2 against Fjall and RocksDB.**
@@ -414,7 +484,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 cd reference/dart/cryptand
 dart pub get
 dart analyze                              # clean
-dart test                                 # 338 tests
+dart test                                 # 368 tests
 
 dart run tool/generate_vectors.dart       # regenerates ../../conformance/vectors
 dart test test/conformance_test.dart      # verifies them

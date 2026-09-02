@@ -627,6 +627,38 @@ named a language. A format that had genuinely barred a threadless language from
 full conformance would have contradicted the proposition on the first page, and
 it does not.
 
+### 8.4 Phase 5 — chapter 10, and a levelled level that had quietly stopped being disjoint
+
+Phase 5 implemented `10-transactions.md` apart from §2's concurrent write
+protocol, which needs threads this SDK does not have: snapshots (§1), the commit
+and its ordering invariants (§2.3), transactions with snapshot / read-committed
+/ serializable / read-only isolation, conflict detection and savepoints (§3),
+recovery (§4), the normative backpressure curve (§6), durability reporting (§7),
+retention watermarks (§8), store events (§9) and close (§10). Three defects, and
+the first is the most serious this project has found.
+
+| | defect | fix |
+|---|---|---|
+| ⚠⚠ 33 | **The last level's disjointness test compared whole internal keys, so the level silently stopped being disjoint.** An internal key carries `~seq`, so two segments holding *different versions of one user key* occupy disjoint internal-key ranges; the overlap test reported "no overlap", the compaction left both in place, and §4's early exit then stopped at whichever it reached first and **returned a stale version**. Every structural check still passed — `min_key`, `max_key`, `subtree_entries`, every checksum | disjointness is over `u32be(tree_id) ‖ CKE(key)`, stated as new `04` §3.1.1, and `01` §9 step 3's verifier check says so too |
+| 34 | **`min_retained_seq` floors at `visible_seq`, so a watermark that never advances makes retention unbounded.** Compaction can then never satisfy §5's condition 2, keys never collapse, and the key index grows without bound while the value side looks healthy — measured as an aged scan's key pages going 34 → 369 with value pages unchanged | `10` §8 now says the watermark advances whenever a batch's records become durable, which for a single writer is the flush of §2 step D |
+| 35 | **`pinned_by_snapshots` is not `allocated − live`.** A snapshot's effect is to stop superseded versions from *becoming* dead, so the bytes it pins never enter that difference; the obvious derivation reads **0** on a database holding a large pinned set. `13` §6 listed the metric without saying how to derive it | `13` §6 now says where to accumulate it: at the retention decision itself |
+
+**Defect 33 is worth dwelling on, because of how it stayed hidden.** An engine
+that drops every superseded version at the last level has exactly one entry per
+user key there, so internal-key and user-key disjointness *coincide* and the
+test is accidentally correct. It only diverges once versions are genuinely
+retained — which requires a live snapshot, which requires §5's condition 2,
+which is precisely what phase 5 added. The defect was present through phases 3
+and 4, under 338 passing tests including a read-tail benchmark whose whole
+subject is which segments cover a key.
+
+That is the same shape as §8.1's defect 9 and §8.2's defect 23: **a rule that is
+correct under an assumption nobody wrote down**, holding until the assumption
+stops. Here the unwritten assumption was "the last level holds one version per
+key". Two of the three phases-3-and-4 defects were of that kind too, and it is
+now the most common failure mode this project has found — more common than
+arithmetic errors, and much harder to see by reading.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

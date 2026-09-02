@@ -339,6 +339,17 @@ stating to applications because it is not true of Hive's append-only file.
 collapsing in compaction. Both are computed from the live snapshot set and
 persisted every commit.
 
+**Both floor at `visible_seq`, and that watermark has to keep moving or
+retention is unbounded.** With no live snapshot the floor *is* `visible_seq`, so
+an engine whose watermark never advances retains every superseded version
+forever: compaction can never satisfy §5's condition 2, keys never collapse, and
+the key index grows without bound while the value side looks healthy. The
+reference implementation measured exactly that shape — an aged scan's key-page
+count rising from 34 to 369 with its value-page count unchanged — when the
+watermark advanced only on an explicit commit and the workload never issued one.
+A conforming implementation advances `visible_seq` whenever a batch's records
+become durable, which for a single writer is the memtable flush of §2 step D.
+
 A long-lived reader **pins space and pins versions** — and now also pins
 **value-log segments**, which a garbage collector would otherwise have freed. A
 reader held open across a heavy update burst can therefore hold far more space

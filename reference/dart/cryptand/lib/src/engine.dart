@@ -18,6 +18,7 @@ import 'cow.dart';
 import 'errors.dart';
 import 'manifest.dart';
 import 'segment.dart';
+import 'txn.dart';
 import 'value.dart';
 import 'vlog.dart';
 
@@ -190,6 +191,42 @@ final class Engine {
   /// Tree 6.
   late final Manifest manifest;
 
+  // -------------------------------------------------------------------------
+  // Sequencing and visibility — `spec/10-transactions.md` §1, §2
+  // -------------------------------------------------------------------------
+
+  /// The greatest seq that is committed and durable, §1. A new reader takes
+  /// `S.seq = visible_seq`.
+  int visibleSeq = 0;
+
+  int commitId = 1;
+
+  /// Live snapshots, §8. They pin space, versions **and value-log segments**,
+  /// and the amount "is not obvious from the outside", which is why §8 requires
+  /// the watermarks and the age to be exposed.
+  final Set<Snapshot> _liveSnapshots = {};
+
+  /// Keys written by committed batches, with the seq that wrote them.
+  ///
+  /// This is what §3's conflict detection compares against. It is pruned at
+  /// [minRetainedSeq] — no live snapshot can be older, so an entry below it can
+  /// never conflict with a transaction that is still open — which is what keeps
+  /// it bounded by the oldest live reader rather than by history.
+  final Map<String, int> _writtenAt = {};
+
+  /// §9. Events are appended after durability, never before.
+  final List<StoreEvent> events = [];
+
+  /// §7. What this implementation actually performs, not what was asked for.
+  ///
+  /// In-memory extents with no file under them cannot survive a process crash,
+  /// so the honest report is `none`. §7's rule is that an implementation
+  /// records what it did; claiming a mode it did not reach is the silent
+  /// failure the chapter exists to prevent.
+  Durability durabilityAchieved = Durability.none;
+
+  bool _closed = false;
+
   /// Segment extents by `segment_id`, standing in for `start_page`/`pages`.
   final Map<int, Segment> extents = {};
 
@@ -200,6 +237,95 @@ final class Engine {
   bool _recluster = false;
 
   int get lastLevel => levels.levelCount - 1;
+
+  /// The oldest live snapshot's seq, or [visibleSeq] when none is live.
+  ///
+  /// §8: it "bounds version collapsing in compaction" — a compaction may drop
+  /// a superseded version only when the *newer* version is at or below this.
+  int get minRetainedSeq {
+    var m = visibleSeq;
+    for (final s in _liveSnapshots) {
+      if (s.seq < m) m = s.seq;
+    }
+    return m;
+  }
+
+  /// §8: bounds page reuse.
+  int get minRetainedCommit {
+    var m = commitId;
+    for (final s in _liveSnapshots) {
+      if (s.commitId < m) m = s.commitId;
+    }
+    return m;
+  }
+
+  int get liveSnapshotCount => _liveSnapshots.length;
+
+  /// §6 / `13-operations.md` §6: how old the oldest live snapshot is.
+  int oldestSnapshotAgeMs(int nowMs) {
+    var oldest = 0;
+    for (final s in _liveSnapshots) {
+      if (s.takenAtMs != 0 && (oldest == 0 || s.takenAtMs < oldest)) {
+        oldest = s.takenAtMs;
+      }
+    }
+    return oldest == 0 ? 0 : nowMs - oldest;
+  }
+
+  /// Takes a read snapshot at `visible_seq`, §1.
+  ///
+  /// The snapshot carries **all nine** roots. It needs no locks, no copying and
+  /// no coordination with writers, because segments are immutable and every
+  /// version carries its own seq.
+  Snapshot snapshot({int nowMs = 0}) {
+    final s = Snapshot(
+      seq: visibleSeq,
+      commitId: commitId,
+      catalogRoot: 0,
+      freelistRoot: 0,
+      attributesRoot: 0,
+      manifestRoot: manifest.root,
+      vlogStatsRoot: 0,
+      checkpointRoot: 0,
+      changefeedRoot: 0,
+      takenAtMs: nowMs,
+    );
+    _liveSnapshots.add(s);
+    return s;
+  }
+
+  /// Releases a snapshot. §8: "never break a live snapshot to reclaim space" —
+  /// the corollary is that an unreleased one holds space indefinitely, and
+  /// abandoned cursors are the realistic failure mode.
+  void release(Snapshot s) {
+    _liveSnapshots.remove(s);
+    _pruneWrittenAt();
+  }
+
+  void _pruneWrittenAt() {
+    final floor = minRetainedSeq;
+    _writtenAt.removeWhere((_, seq) => seq < floor);
+  }
+
+  /// Space a snapshot is holding that would otherwise be reclaimable, §8.
+  ///
+  /// **Measured where it happens, not inferred.** The first version of this
+  /// metric reported `allocated − live` value-log bytes, which is exactly
+  /// wrong: a live snapshot's effect is to stop superseded versions from
+  /// *becoming* dead in the first place, so the very bytes it pins never enter
+  /// that difference and the metric read 0 on a database holding a large
+  /// pinned set. It is now accumulated during compaction — the bytes of every
+  /// entry retained *solely* because §5's condition 2 was not met.
+  ///
+  /// §8 requires a warning past a configurable amount, default 64 MiB, because
+  /// "a reader held open across a heavy update burst can hold far more space
+  /// than its own data, and the amount is not obvious from the outside".
+  int pinnedBySnapshots = 0;
+
+  int snapshotPinWarningBytes = 64 << 20;
+
+  bool get snapshotPinExceeded =>
+      _liveSnapshots.isNotEmpty && pinnedBySnapshots > snapshotPinWarningBytes;
 
   /// How many cold-tier collections have run. A collection is a third write of
   /// a value, which §6.3's "at most twice" does not account for.
@@ -259,9 +385,44 @@ final class Engine {
   /// the indexed values *and* the document id in the key, so the value carries
   /// nothing and an index entry costs no value bytes at all.
   void putEmpty(int treeId, CValue key) {
-    final ik = internalKey(treeId, encodeKey(key), _nextSeq++, Op.put);
+    final cke = encodeKey(key);
+    final seq = _nextSeq++;
+    final ik = internalKey(treeId, cke, seq, Op.put);
     _memtable[ik] = _Pending(ik, ValueKind.empty, Uint8List(0));
+    _writtenAt[Transaction.keyOf(treeId, cke)] = seq;
     if (_memtable.length >= memtableEntries) flush();
+  }
+
+  // -------------------------------------------------------------------------
+  // Transactions — §3
+  // -------------------------------------------------------------------------
+
+  /// Begins a transaction at a fresh snapshot, §3.
+  ///
+  /// Writes are buffered and sequenced at [Transaction.commit]; nothing
+  /// durable exists before then, which is what makes rollback free and what
+  /// makes an abort leave no trace.
+  Transaction begin({Isolation isolation = Isolation.snapshot, int nowMs = 0}) {
+    final s = snapshot(nowMs: nowMs);
+    return Transaction(
+      snapshot: s,
+      isolation: isolation,
+      writtenSeqOf: (key) => _writtenAt[key] ?? 0,
+      onCommit: (txn) {
+        for (final w in txn.writes) {
+          final seq = _nextSeq++;
+          final ik = internalKey(
+              w.treeId, w.cke, seq, w.isDelete ? Op.delete : Op.put);
+          _memtable[ik] = _Pending(
+              ik,
+              w.isDelete ? ValueKind.empty : ValueKind.inline,
+              w.isDelete ? Uint8List(0) : w.value);
+          _writtenAt[Transaction.keyOf(w.treeId, w.cke)] = seq;
+        }
+        release(s);
+        commit();
+      },
+    );
   }
 
   void _write(int treeId, CValue key, Uint8List encodedValue, int op) {
@@ -287,8 +448,104 @@ final class Engine {
       stored = encodedValue;
     }
     _memtable[ik] = _Pending(ik, kind, stored);
+    _writtenAt[Transaction.keyOf(treeId, cke)] = seq;
     if (_memtable.length >= memtableEntries) flush();
   }
+
+  // -------------------------------------------------------------------------
+  // Commit — `spec/10-transactions.md` §2, §5, §9, §10
+  // -------------------------------------------------------------------------
+
+  /// The committer of §2 steps A–G, in its single-writer form.
+  ///
+  /// **The step order is the correctness, not the performance.** §2.3 states
+  /// two ordering invariants whose violation "produces a database that opens
+  /// cleanly and is wrong", and both are about this sequence:
+  ///
+  ///  1. A superblock MUST NOT name a segment whose value-log records are not
+  ///     already durable — so the value-log barrier (C) precedes the segment
+  ///     write (D) and the superblock (F). Reversed, the key index points into
+  ///     bytes that were never written, "a dangling pointer that no checksum
+  ///     catches, because the key side is intact".
+  ///  2. The `bytes` watermark of a value-log segment advances only over a
+  ///     **contiguous prefix of completed reservations** — a writer that
+  ///     reserved and died leaves a hole, and advancing past it publishes
+  ///     garbage as a live record.
+  ///
+  /// `visible_seq` advancing past a batch's seq range is the commit: §2.3,
+  /// "there is no commit record and no two-phase protocol; the watermark is
+  /// the commit".
+  int commit({Durability durability = Durability.sync}) {
+    if (_closed) throw const InvalidArgumentException('engine is closed');
+    // B/C: seal the open value-log segments and barrier over their tails
+    // BEFORE anything names them.
+    vlog.sealOpen();
+    _barrier(durability);
+
+    // D: memtable -> L0, and the manifest edit that names it.
+    final sequenced = _nextSeq - 1;
+    flush();
+
+    // E: barrier over the segment and manifest writes.
+    _barrier(durability);
+
+    // F/G: publish. Everything at or below `sequenced` is now durable.
+    commitId++;
+    visibleSeq = sequenced;
+    _pruneWrittenAt();
+    _emit(StoreEvent(StoreEventKind.commit,
+        commitId: commitId, visibleSeq: visibleSeq));
+    return commitId;
+  }
+
+  /// §7: an implementation records what it actually performed.
+  ///
+  /// There is no file under this implementation, so no barrier reaches stable
+  /// storage and the honest record is `none` whatever was requested. Claiming
+  /// the requested mode here is precisely the silent failure §7 exists to
+  /// prevent.
+  void _barrier(Durability requested) {
+    durabilityAchieved = Durability.none;
+  }
+
+  void _emit(StoreEvent e) => events.add(e);
+
+  /// §10. Close is not a special case: "the file is valid at every commit, and
+  /// reopening after a kill takes the same path as after a clean close".
+  void close({bool flushMemtable = true}) {
+    if (_closed) return;
+    _emit(const StoreEvent(StoreEventKind.closing));
+    if (flushMemtable && _memtable.isNotEmpty) commit();
+    vlog.sealOpen();
+    _closed = true;
+    _emit(const StoreEvent(StoreEventKind.closed));
+  }
+
+  bool get isClosed => _closed;
+
+  // -------------------------------------------------------------------------
+  // Backpressure — §6
+  // -------------------------------------------------------------------------
+
+  /// The bounds §6 requires an implementation to keep, with their soft and
+  /// hard thresholds.
+  List<Bound> get bounds => [
+        Bound('l0_segment_count', refsAt(0).length, levels.l0Trigger,
+            levels.l0Trigger * 4),
+        for (var l = 1; l < lastLevel; l++)
+          Bound('segments_at_L$l', refsAt(l).length, levels.tierWidth,
+              levels.tierWidth * 2),
+        Bound('memtable_entries', _memtable.length, memtableEntries,
+            memtableEntries * 2),
+        Bound('vlog_space_amplification', vlog.spaceAmplification,
+            vlogSpaceTargetPct / 100, 2 * vlogSpaceTargetPct / 100),
+        Bound('locality_debt', vlog.localityDebt * 100, localityDebtPct,
+            2 * localityDebtPct),
+      ];
+
+  /// §6's normative curve. An implementation MUST expose the delay and the
+  /// bound that caused it (`13-operations.md` §6).
+  Backpressure get backpressure => Backpressure.compute(bounds);
 
   /// Turns the memtable into an L0 segment, §2.3, and publishes it.
   void flush() {
@@ -301,6 +558,20 @@ final class Engine {
     }
     _publish(b, level: 0, group: 0);
     _memtable.clear();
+    // §2 steps D and F: once a memtable's records are in a segment the
+    // manifest names, they are published, and `visible_seq` is "the highest
+    // fully durable seq". With one writer and no separate committer thread
+    // those two steps are the same event, so the watermark advances here
+    // rather than only in [commit].
+    //
+    // This is load-bearing beyond visibility: `min_retained_seq` floors at
+    // `visible_seq` (§8), and a watermark that never advanced would make every
+    // superseded versionpermanently retained — compaction could never collapse a key,
+    // and the key index would grow without bound. That is exactly what
+    // happened when this line was missing: the aged scan's key-page count went
+    // from 34 to 369 while its value side was untouched.
+    visibleSeq = _nextSeq - 1;
+    _emit(const StoreEvent(StoreEventKind.flushed));
     maybeCompact();
   }
 
@@ -440,11 +711,28 @@ final class Engine {
       // The last level is disjoint, so the compaction must include every
       // last-level segment whose range the inputs touch — that is also §5's
       // condition 3, the one that makes dropping a superseded version legal.
-      final lo = _minOf(inputs);
+      //
+      // **The test is on USER keys, and testing it on internal keys is a
+      // silent correctness bug.** An internal key is
+      // `tree_id || CKE(key) || ~seq || op` (§1), so two segments holding
+      // *different versions of the same key* occupy disjoint internal-key
+      // ranges — one holds `~11 … ~5`, the other `~4 … ~1`. An overlap test on
+      // internal keys reports them as non-overlapping, the merge leaves both
+      // in place, and the last level stops being disjoint while every
+      // structural check still passes. §3.1's "segments partition the key
+      // space with no overlap" is about the key space, not the version space.
+      //
+      // The consequence is a wrong answer, not a slow one: §4's early exit
+      // relies on at most one segment per group covering a key, so the lookup
+      // stops at whichever of the two it reaches first and returns a stale
+      // version. This was invisible until snapshot retention (§5 condition 2)
+      // began keeping superseded versions at all.
+      final lo = _userLow(_minOf(inputs));
       final hi = _maxOf(inputs);
       for (final r in refsAt(lastLevel)) {
         if (seen.contains(r.segmentId)) continue;
-        if (compareKeys(r.minKey, hi) <= 0 && compareKeys(r.maxKey, lo) >= 0) {
+        if (compareKeys(_userLow(r.minKey), hi) <= 0 &&
+            compareKeys(r.maxKey, lo) >= 0) {
           all.add(r);
         }
       }
@@ -466,6 +754,20 @@ final class Engine {
     final outputs = <Segment>[];
     var out = _builder(level: target);
     Uint8List? lastUserKey;
+    var newestSeq = 0;
+
+    // §5's conditions 2 and 3. Condition 3 — "the compaction includes every
+    // segment that could hold an older version" — holds only at the last
+    // level, which is what `levelled` tests. Condition 2 is this watermark:
+    // a version may be dropped only once the version that supersedes it is
+    // itself visible to every live snapshot. Without it a compaction silently
+    // removes the version a long-running reader is entitled to see, and the
+    // reader's next lookup returns a *newer* row than its snapshot — the same
+    // class of wrong answer as resolving by segment order.
+    final retained = minRetainedSeq;
+    final published = visibleSeq;
+    if (levelled) pinnedBySnapshots = 0;
+    var pinned = 0;
 
     void rotate() {
       if (out.entryCount == 0) return;
@@ -493,27 +795,37 @@ final class Engine {
 
       if (isNewest) {
         lastUserKey = Uint8List.fromList(userKey);
+        newestSeq = parsed.seq;
         // A segment boundary is only legal between user keys: two versions of
         // one key in two segments of the same disjoint run would break the
         // "at most one segment per group covers a key" invariant of §3.1.
         if (out.entryCount >= segmentEntriesAt(target)) rotate();
-        if (levelled && rec.op == Op.delete) {
+        if (levelled && rec.op == Op.delete && rec.seq <= retained) {
           // §5: a tombstone may be dropped when the compaction reaches the
-          // last level and its seq is at or below the oldest live snapshot's.
-          // There are no snapshots here, so that second half is trivially true.
+          // last level **and** its own seq is at or below the oldest live
+          // snapshot's. The second half is not optional: a snapshot older than
+          // the tombstone still sees the versions it hides, so dropping the
+          // tombstone alone would resurrect them for every later reader.
         } else {
           out.add(_promote(rec, parsed.treeId, dead));
         }
-      } else if (levelled) {
+      } else if (levelled && newestSeq <= retained) {
         // §5 condition 3 holds only at the last level, so a superseded
-        // version may be dropped only here. A tiered compaction keeps every
-        // version, which is what makes tiering cheap on the write side.
+        // version may be dropped only here — and only once the version that
+        // supersedes it is itself visible to every live snapshot (condition 2).
+        // A tiered compaction keeps every version, which is what makes tiering
+        // cheap on the write side.
         if (rec.valueKind == ValueKind.vlog) {
           // §6.7 lets liveness be decremented only when a compaction has
           // *observed* the value superseded, which is here.
           dead.add(VlogPointer.decode(rec.value));
         }
       } else {
+        if (levelled && newestSeq <= published) {
+          // Kept only because a snapshot older than the superseding version is
+          // live: without it, §5 would have dropped this entry here.
+          pinned += rec.value.length + rec.internalKey.length;
+        }
         out.add(SegEntry(rec.internalKey, rec.valueKind, rec.value));
       }
       pick.next();
@@ -530,8 +842,12 @@ final class Engine {
     }
     _levelCache.remove(target);
 
+    if (levelled) pinnedBySnapshots = pinned;
     if (_recluster) coldCollections++;
     _recluster = false;
+    _emit(StoreEvent(StoreEventKind.compacted,
+        detail: 'level $target, ${outputs.length} segments, '
+            '${all.length} inputs'));
     for (final p in dead) {
       vlog.markDead(p);
     }
@@ -553,6 +869,17 @@ final class Engine {
     }
     throw const LimitException('a tiered level cannot hold 256 groups');
   }
+
+  /// The user-key prefix of a segment bound, for the disjointness test.
+  ///
+  /// Conservative in both directions, which is what a correctness test wants:
+  /// `min_key` may have been *shortened* by §2.1's truncation and is then
+  /// already at or below every user key in the segment, and an internal key is
+  /// always at or above its own user prefix, so an untruncated `max_key` is a
+  /// valid upper bound on user keys as it stands. Erring toward "overlaps"
+  /// merges more than strictly necessary; erring the other way loses a key.
+  static Uint8List _userLow(Uint8List bound) =>
+      bound.length >= 13 ? Uint8List.sublistView(bound, 0, bound.length - 9) : bound;
 
   Uint8List _minOf(List<SegmentRef> refs) {
     var m = refs.first.minKey;
@@ -646,14 +973,15 @@ final class Engine {
   /// §4, with the two rules that were wrong in an earlier draft: every
   /// candidate is examined and the winner is the entry with the greatest seq,
   /// never the first hit in segment order.
-  Uint8List? get(int treeId, CValue key) {
+  Uint8List? get(int treeId, CValue key, {Snapshot? at}) {
     final prefix = userKeyPrefix(treeId, encodeKey(key));
+    final ceiling = at?.seq;
 
     // The memtable holds records that are sequenced but not yet in a segment.
     // `spec/10-transactions.md` §2 step 5 publishes into it, and a reader at
     // `visible_seq` sees them; a `get` that skipped it would lose every write
     // since the last flush.
-    SegRecord? best = _memtableLookup(prefix);
+    SegRecord? best = _memtableLookup(prefix, ceiling);
     if (best != null && earlyExit) {
       // Nothing in a segment can be newer than an unflushed record.
       segmentsProbed.add(0);
@@ -664,7 +992,7 @@ final class Engine {
     var probed = 0;
     for (final s in candidates) {
       probed++;
-      final rec = _seekIn(s, prefix);
+      final rec = _seekIn(s, prefix, ceiling);
       if (rec == null) {
         if (s.filter != null) filterFalsePositives++;
         continue;
@@ -677,11 +1005,12 @@ final class Engine {
     return _resolve(best);
   }
 
-  SegRecord? _memtableLookup(Uint8List prefix) {
+  SegRecord? _memtableLookup(Uint8List prefix, int? ceiling) {
     SegRecord? best;
     for (final e in _memtable.entries) {
       final k = e.key;
       if (k.length != prefix.length + 9) continue;
+      if (ceiling != null && parseInternalKey(k).seq > ceiling) continue;
       var match = true;
       for (var i = 0; i < prefix.length; i++) {
         if (k[i] != prefix[i]) {
@@ -696,15 +1025,24 @@ final class Engine {
     return best;
   }
 
-  SegRecord? _seekIn(Segment s, Uint8List prefix) {
+  /// The newest entry for [prefix] in [s] at or below [ceiling].
+  ///
+  /// §1: "A read at snapshot S sees exactly the records with `seq ≤ S.seq`."
+  /// Because seq is inverted in the internal key (§1 of `04`), versions of one
+  /// key run newest-first, so the walk stops at the first visible one.
+  SegRecord? _seekIn(Segment s, Uint8List prefix, int? ceiling) {
     final c = s.cursor()..seekCeiling(prefix);
-    if (!c.isValid) return null;
-    final k = c.key();
-    if (k.length < prefix.length) return null;
-    for (var i = 0; i < prefix.length; i++) {
-      if (k[i] != prefix[i]) return null;
+    while (c.isValid) {
+      final k = c.key();
+      if (k.length < prefix.length) return null;
+      for (var i = 0; i < prefix.length; i++) {
+        if (k[i] != prefix[i]) return null;
+      }
+      final rec = c.record();
+      if (ceiling == null || rec.seq <= ceiling) return rec;
+      c.next(); // a version newer than the snapshot; keep walking down
     }
-    return c.record();
+    return null;
   }
 
   Uint8List _resolve(SegRecord rec) => rec.valueKind == ValueKind.vlog
@@ -718,7 +1056,8 @@ final class Engine {
   /// of them arrives here. Versions are resolved as §4 requires — the newest
   /// entry for a user key wins, and a `DELETE` hides it.
   Iterable<({Uint8List cke, Uint8List value})> scanTree(int treeId,
-      {KeyRange? range}) sync* {
+      {KeyRange? range, Snapshot? at}) sync* {
+    final ceiling = at?.seq;
     final lower = userKeyPrefix(treeId, range?.lower ?? Uint8List(0));
     final upperKey = range?.upper;
     final upper = upperKey == null ? null : userKeyPrefix(treeId, upperKey);
@@ -777,6 +1116,9 @@ final class Engine {
 
       final userKey =
           Uint8List.sublistView(bestKey, 0, bestKey.length - 9);
+      if (ceiling != null && parseInternalKey(bestKey).seq > ceiling) {
+        continue; // invisible at this snapshot; a lower version may still show
+      }
       if (lastUserKey != null && compareKeys(lastUserKey, userKey) == 0) {
         continue; // an older version of a key already yielded
       }

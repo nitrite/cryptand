@@ -189,26 +189,31 @@ Read in this order.
 
 ## Status
 
-**Phases 1 through 4 of the reference implementation are built**, in pure Dart,
+**Phases 1 through 5 of the reference implementation are built**, in pure Dart,
 at [`reference/dart/cryptand/`](reference/dart/cryptand/): the container, CVE,
 CKE, segments and cursors, the segment filter, the two-tier value log with
 compaction and clustered promotion, the security chapter including a verified
 XChaCha20-Poly1305, the **level policy**, the **manifest as a copy-on-write
 tree**, the **catalog**, **secondary indexes**, and — new in phase 4 —
 **BLAKE2b and Argon2id**, both verified against their RFCs' published vectors,
-which completes `spec/14-security.md`. **338 tests**, and a conformance vector set at
+which completes `spec/14-security.md`, and — new in phase 5 — **`spec/10-transactions.md`
+apart from its concurrent write protocol**: snapshots, transactions with all four
+isolation levels, conflict detection, retention watermarks, the backpressure curve
+and store events. **368 tests**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code has found **twenty-four defects in these documents** — a headline
+Building the code has found **twenty-seven defects in these documents** — a headline
 invariant that was literally false, a page header whose field table did not fit
 its own declared size, a nonce rule that did nothing, filter rates quoted from
 the wrong formula, "unknown tags round-trip" that no reader could implement —
-and two gaps in the **design** rather than its description: the aged-scan bound
-was missing a mechanism and the metric meant to detect that was blind to it, and
-the read-tail bound turned out to belong to a read path the prediction never
-named.
+and three gaps in the **design** rather than its description: the aged-scan bound
+was missing a mechanism and the metric meant to detect that was blind to it, the
+read-tail bound turned out to belong to a read path the prediction never named,
+and the last level's disjointness rule was stated over the wrong key space — a
+levelled level that had quietly stopped being disjoint returned **stale
+versions**, under 338 passing tests, until snapshot retention exposed it.
 
 **Confirmed by measurement:**
 

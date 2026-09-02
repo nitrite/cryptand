@@ -403,7 +403,7 @@ than O(n) tombstones. A reader MUST apply range deletes: an entry at
 |---|---|---|
 | **L0** | overlapping | one per memtable-shard flush; `l0_trigger` before compaction |
 | **L1 … Lmax−1** | **tiered, range-partitioned** | up to `tier_width` size-similar segments, arranged so that no more than `overlap_bound` (default **2**) of them cover any single key |
-| **Lmax** | **levelled, disjoint** | segments partition the key space with no overlap |
+| **Lmax** | **levelled, disjoint** | segments partition the **user** key space with no overlap (§3.1.1) |
 
 This is *lazy levelling* — tiering everywhere except the largest level — with
 one addition. Plain tiering lets all `tier_width` segments at a level overlap a
@@ -441,6 +441,29 @@ that follows would have been meaningless.
 else changed: `tier_width` runs of one whole-range segment each. That equality
 is worth stating because it makes the comparison in §4.1 a change of one
 superblock field rather than a different engine.
+
+#### 3.1.1 Disjointness is over **user** keys
+
+**A levelled level's segments MUST NOT overlap in `u32be(tree_id) || CKE(key)`,
+and testing this on whole internal keys is wrong.** An internal key is
+`tree_id || CKE(key) || ~seq || op` (§1), so two segments holding *different
+versions of the same key* occupy disjoint internal-key ranges — one holds
+`~11 … ~5`, the other `~4 … ~1` — and an overlap test on internal keys reports
+them as non-overlapping. A compaction that trusts that test leaves both in
+place, and the level stops being disjoint while `min_key`, `max_key`,
+`subtree_entries` and every checksum remain perfectly valid.
+
+The consequence is a **wrong answer, not a slow one**: §4's early exit rests on
+at most one segment per group covering a key, so a lookup stops at whichever of
+the two it reaches first and returns a stale version. A verifier's levelled-
+overlap check (`01-container.md` §9 step 3) is on user keys for the same reason.
+
+This is stated because it is invisible until superseded versions are actually
+retained. An engine that drops every superseded version at the last level has
+one entry per user key there, so internal-key and user-key disjointness
+coincide, and the defect stays hidden until §5's condition 2 — a live snapshot —
+keeps versions the compaction would otherwise have collapsed. The reference
+implementation found it exactly that way.
 
 A conforming reader MUST NOT depend on the policy. It reads the manifest and
 resolves by `seq`. An implementation MAY use a different policy — pure levelled,
