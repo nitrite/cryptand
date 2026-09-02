@@ -1,0 +1,67 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/05-catalog.md",
+  "reserved_tree_ids": {
+    "catalog": 0,
+    "free_space": 1,
+    "attributes": 2,
+    "tree_index": 3,
+    "repair_log": 4,
+    "users": 5,
+    "manifest": 6,
+    "vlog_stats": 7,
+    "checkpoints": 8,
+    "change_feed": 9,
+    "first_user_tree": 16
+  },
+  "index_type_names": {
+    "note": "section 10: lower snake case, no hyphens, no camel case. These five are the only portable names.",
+    "values": [
+      "full_text",
+      "non_unique",
+      "spatial",
+      "unique",
+      "vector"
+    ]
+  },
+  "levelled_kinds": [
+    "data",
+    "index",
+    "kv",
+    "name_dict",
+    "postings",
+    "term_dict",
+    "term_index",
+    "vector_graph"
+  ],
+  "store_metadata_key": "602473746f72650000",
+  "trees": [
+    {
+      "name": "orders|2026+eu",
+      "name_key": "606f72646572737c323032362b65750000",
+      "tree_id": 16,
+      "kind": "data",
+      "levelled": true,
+      "descriptor_without_created": "2288010701010003090512071e09240b250d3c07656e7472696573086665617475726573086b65795f6b696e64046b696e64086c6576656c6c656406706172616d7307747265655f69640b00000000000000000b0000000000000000120a6e6974726974655f6964120464617461022215010101000474797065120a636f6c6c656374696f6e0a10000000"
+    },
+    {
+      "name": "org.dizitart.no2.Employee+archive",
+      "name_key": "606f72672e64697a69746172742e6e6f322e456d706c6f7965652b617263686976650000",
+      "tree_id": 17,
+      "kind": "data",
+      "levelled": true,
+      "descriptor_without_created": "22bb010701010003090512071e09240b250d6f07656e7472696573086665617475726573086b65795f6b696e64046b696e64086c6576656c6c656406706172616d7307747265655f69640b00000000000000000b0000000000000000120a6e6974726974655f696412046461746102224803010100031b052406656e74697479036b6579047479706512196f72672e64697a69746172742e6e6f322e456d706c6f796565120761726368697665120a7265706f7369746f72790a11000000"
+    },
+    {
+      "name": "idx:orders|2026+eu:country,city:unique",
+      "name_key": "606964783a6f72646572737c323032362b65753a636f756e7472792c636974793a756e697175650000",
+      "tree_id": 18,
+      "kind": "index",
+      "levelled": true,
+      "descriptor_without_created": "22b80107010100030905120719091a0b2a0d6f07656e7472696573086665617475726573046b696e64086c6576656c6c6564056f776e657206706172616d7307747265655f69640b00000000000000000b00000000000000001205696e64657802120e6f72646572737c323032362b65752243030101000305051709646174615f74726565066669656c64730a696e6465785f747970650a110000002010021207636f756e7472791204636974791206756e697175650a12000000"
+    }
+  ]
+}

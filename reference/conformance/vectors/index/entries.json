@@ -1,0 +1,316 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/06-indexes.md sections 3-5",
+  "cap_per_document": 1024,
+  "field_path_escapes": {
+    "note": "The only escaping in the format, and only inside index field paths (section 5).",
+    "a\\.b.c": [
+      "a.b",
+      "c"
+    ],
+    "a\\\\b": [
+      "a\\b"
+    ],
+    "a.b.c": [
+      "a",
+      "b",
+      "c"
+    ]
+  },
+  "cases": [
+    {
+      "note": "one entry per array element (section 4)",
+      "fields": [
+        "tags"
+      ],
+      "index_type": "non_unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "tags": {
+            "t": "array",
+            "items": [
+              {
+                "t": "str",
+                "utf8": "726564"
+              },
+              {
+                "t": "str",
+                "utf8": "626c7565"
+              }
+            ]
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "7"
+      },
+      "keys": [
+        "a0016072656400000180800000000000000700",
+        "a00160626c756500000180800000000000000700"
+      ]
+    },
+    {
+      "note": "duplicate elements produce one entry, not two",
+      "fields": [
+        "tags"
+      ],
+      "index_type": "non_unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "tags": {
+            "t": "array",
+            "items": [
+              {
+                "t": "str",
+                "utf8": "726564"
+              },
+              {
+                "t": "str",
+                "utf8": "726564"
+              }
+            ]
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "7"
+      },
+      "keys": [
+        "a0016072656400000180800000000000000700"
+      ]
+    },
+    {
+      "note": "a present null is indexed as NULL (section 3)",
+      "fields": [
+        "tags"
+      ],
+      "index_type": "non_unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "tags": {
+            "t": "null"
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "9"
+      },
+      "keys": [
+        "a001000180800000000000000900"
+      ]
+    },
+    {
+      "note": "an absent field is indexed as NULL (section 3)",
+      "fields": [
+        "tags"
+      ],
+      "index_type": "non_unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {}
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "9"
+      },
+      "keys": [
+        "a001000180800000000000000900"
+      ]
+    },
+    {
+      "note": "sparse skips an absent field entirely (section 3)",
+      "fields": [
+        "tags"
+      ],
+      "index_type": "non_unique",
+      "sparse": true,
+      "document": {
+        "t": "doc",
+        "fields": {}
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "9"
+      },
+      "keys": []
+    },
+    {
+      "note": "sparse still indexes a present null",
+      "fields": [
+        "tags"
+      ],
+      "index_type": "non_unique",
+      "sparse": true,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "tags": {
+            "t": "null"
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "9"
+      },
+      "keys": [
+        "a001000180800000000000000900"
+      ]
+    },
+    {
+      "note": "array traversal flattens the rest of the path (section 5)",
+      "fields": [
+        "orders.items.sku"
+      ],
+      "index_type": "non_unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "orders": {
+            "t": "array",
+            "items": [
+              {
+                "t": "doc",
+                "fields": {
+                  "items": {
+                    "t": "array",
+                    "items": [
+                      {
+                        "t": "doc",
+                        "fields": {
+                          "sku": {
+                            "t": "str",
+                            "utf8": "61"
+                          }
+                        }
+                      },
+                      {
+                        "t": "doc",
+                        "fields": {
+                          "sku": {
+                            "t": "str",
+                            "utf8": "62"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "t": "doc",
+                "fields": {
+                  "items": {
+                    "t": "array",
+                    "items": [
+                      {
+                        "t": "doc",
+                        "fields": {
+                          "sku": {
+                            "t": "str",
+                            "utf8": "63"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "11"
+      },
+      "keys": [
+        "a001606100000180800000000000000b00",
+        "a001606200000180800000000000000b00",
+        "a001606300000180800000000000000b00"
+      ]
+    },
+    {
+      "note": "a compound index takes the cartesian product (section 4)",
+      "fields": [
+        "country",
+        "city"
+      ],
+      "index_type": "unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "country": {
+            "t": "str",
+            "utf8": "6672"
+          },
+          "city": {
+            "t": "array",
+            "items": [
+              {
+                "t": "str",
+                "utf8": "7061726973"
+              },
+              {
+                "t": "str",
+                "utf8": "6c796f6e"
+              }
+            ]
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "12"
+      },
+      "keys": [
+        "a00160667200000160706172697300000180800000000000000c00",
+        "a001606672000001606c796f6e00000180800000000000000c00"
+      ]
+    },
+    {
+      "note": "\\. is a literal dot in a field path (section 5)",
+      "fields": [
+        "a\\.b.c"
+      ],
+      "index_type": "non_unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "a.b": {
+            "t": "doc",
+            "fields": {
+              "c": {
+                "t": "str",
+                "utf8": "78"
+              }
+            }
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "13"
+      },
+      "keys": [
+        "a001607800000180800000000000000d00"
+      ]
+    }
+  ]
+}

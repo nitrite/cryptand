@@ -2,6 +2,7 @@
 /// aged-scan test of `spec/11-conformance.md` section 6.
 library;
 
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptand/src/bytes.dart';
@@ -254,6 +255,106 @@ void main() {
           reason: 'the run-based definition sees what the flag-based one '
               'cannot');
       expect(aged.totalPageReads / fresh.totalPageReads, greaterThan(1.5));
+    });
+  });
+
+  group('P10 -- the bounded read tail (design/performance-model.md section 5.4)',
+      () {
+    /// Builds a database whose segments genuinely overlap.
+    ///
+    /// Ascending inserts would not: each memtable flush would cover a disjoint
+    /// key range, manifest pruning alone would leave one candidate, and the
+    /// bound would hold for a reason that has nothing to do with the design.
+    Engine aged({LevelPolicy levels = LevelPolicy.desktop, bool early = true}) {
+      final dict = benchDict();
+      final e = Engine(
+          memtableEntries: 1000,
+          vlogMin: 1024,
+          levels: levels,
+          earlyExit: early);
+      final order = [for (var i = 0; i < 20000; i++) i]..shuffle(Random(7));
+      for (final i in order) {
+        e.put(17, CNitriteId(snowflakeId(i)), docBytes(dict, i));
+      }
+      final rw = Random(11);
+      for (var i = 0; i < 10000; i++) {
+        final k = rw.nextInt(20000);
+        e.put(17, CNitriteId(snowflakeId(k)), docBytes(dict, k));
+      }
+      e.flush();
+      return e;
+    }
+
+    List<int> probe(Engine e) {
+      e.resetCounters();
+      final rnd = Random(3);
+      for (var i = 0; i < 5000; i++) {
+        e.get(17, CNitriteId(snowflakeId(rnd.nextInt(20000))));
+      }
+      return e.segmentsProbed;
+    }
+
+    test('segments_probed_per_lookup p99 <= 2 and p99.9 <= 3', () {
+      final s = probe(aged());
+      expect(percentile(s, 0.99), lessThanOrEqualTo(2));
+      expect(percentile(s, 0.999), lessThanOrEqualTo(3));
+    });
+
+    test('every candidate stays inside the section 4.1 bound', () {
+      final e = aged();
+      final s = probe(e);
+      expect(s.reduce(max), lessThanOrEqualTo(e.levels.candidateBound));
+    });
+
+    test('the reads are still correct without the early exit', () {
+      // The early exit is an optimization resting on level discipline; if it
+      // ever disagreed with the conservative rule of section 4, it would be
+      // returning stale versions and no bound would matter.
+      final dict = benchDict();
+      final fast = aged();
+      final slow = aged(early: false);
+      final rnd = Random(99);
+      for (var i = 0; i < 500; i++) {
+        final k = CNitriteId(snowflakeId(rnd.nextInt(20000)));
+        expect(fast.get(17, k), slow.get(17, k));
+      }
+      expect(fast.get(17, CNitriteId(snowflakeId(7))),
+          docBytes(dict, 7));
+    });
+
+    test('a segment holds a filter, and it prunes', () {
+      final e = aged();
+      final seg = e.extents.values.first;
+      expect(seg.filter, isNotNull);
+      expect(seg.header.filterPage, greaterThan(0));
+      // A key that is not in the database at all: manifest pruning and the
+      // filter together should leave nothing to descend into.
+      e.resetCounters();
+      expect(e.get(17, const CNitriteId(-99)), isNull);
+      expect(e.segmentsProbed.single, 0);
+    });
+
+    test('an unflushed write is visible to get', () {
+      // The memtable is part of the read path: spec/10-transactions.md
+      // section 2 step 5 publishes into it, and a reader at visible_seq sees
+      // it. Phase 2's get consulted only segments.
+      final dict = benchDict();
+      final e = Engine(memtableEntries: 1000);
+      e.put(17, CNitriteId(snowflakeId(1)), docBytes(dict, 1));
+      expect(e.get(17, CNitriteId(snowflakeId(1))), docBytes(dict, 1));
+    });
+
+    test('remove writes a tombstone that hides the value', () {
+      final dict = benchDict();
+      final e = Engine(memtableEntries: 10);
+      e.put(17, CNitriteId(snowflakeId(1)), docBytes(dict, 1));
+      e.flush();
+      e.remove(17, CNitriteId(snowflakeId(1)));
+      e.flush();
+      expect(e.get(17, CNitriteId(snowflakeId(1))), isNull);
+      e.compact();
+      expect(e.get(17, CNitriteId(snowflakeId(1))), isNull);
+      expect(e.scanDocuments().rows, 0);
     });
   });
 }

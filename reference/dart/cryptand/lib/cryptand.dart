@@ -33,12 +33,34 @@ export 'src/cke.dart'
 export 'src/compare.dart' show compareNumeric, compareValues, isOrdered;
 export 'src/container.dart'
     show Feature, PageFlags, PageHeader, PageType, Profile, Sb, Superblock, TreeId;
+export 'src/catalog.dart'
+    show
+        Attributes,
+        Catalog,
+        DataTreeType,
+        IndexType,
+        TreeDescriptor,
+        TreeKind;
+export 'src/cow.dart' show CowTree, PageStore;
 export 'src/crc32c.dart' show crc32c;
+export 'src/database.dart' show Collection, Database, kFormatVersion;
 export 'src/cve.dart'
     show DocFlags, DocView, NameDict, decodeValue, encodeValue, readValue, writeDoc, writeValue;
 export 'src/engine.dart'
-    show Engine, LocalityPolicy, ScanResult;
+    show Engine, LevelPolicy, LocalityPolicy, ScanResult, percentile;
+export 'src/manifest.dart' show Manifest, SegmentRef, manifestKey;
 export 'src/errors.dart';
+export 'src/index.dart'
+    show
+        IndexDescriptor,
+        IndexScan,
+        indexEntryId,
+        indexEntryValues,
+        indexKeysFor,
+        kMaxIndexEntriesPerDocument,
+        resolvePath,
+        splitFieldPath,
+        uniquenessApplies;
 export 'src/filter.dart'
     show BlockedBloom, Hash64, blockCountFor, cfh64, kBlockBits, probesFor;
 export 'src/limits.dart';
@@ -78,6 +100,8 @@ export 'src/segment.dart'
         SegmentCursor,
         SegmentHeader,
         ValueKind,
+        encodeNodePage,
+        nodePageBytes,
         kHasExpiry,
         kPointerBytes,
         internalKey,

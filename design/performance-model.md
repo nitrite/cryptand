@@ -415,9 +415,45 @@ implemented.
 
 P10 survived the filter correction of `spec/04-segments.md` §2.4 with room to
 spare: at the measured 0.33 % blocked-Bloom rate the expected extra descents are
-0.026, so p99 is 1 and p99.9 is 2. The prediction was never sensitive to the
-filter's exact rate — it is range partitioning that bounds the tail, and the
-filter only has to be good, not excellent.
+0.026, so p99 is 1 and p99.9 is 2.
+
+**Measured, and CONFIRMED — with one condition the prediction did not state.**
+`reference/dart/cryptand/bench/p10_read_tail.dart`, 20 000 uniform-random point
+reads after random-order inserts plus updates over half the key space, at
+`desktop` shape:
+
+| documents | p50 | p99 | p99.9 | max | mean |
+|---|---|---|---|---|---|
+| 10 000 | 1 | 1 | 1 | 2 | 1.00 |
+| 25 000 | 1 | 1 | 2 | 3 | 1.01 |
+| 50 000 | 1 | 1 | 2 | 2 | 1.00 |
+| 100 000 | 1 | 1 | 2 | 2 | 1.01 |
+| 200 000 | 1 | 1 | 2 | 2 | 1.01 |
+
+**The condition is the early exit of `spec/04-segments.md` §4.** This
+prediction's arithmetic counts filter false positives and nothing else, which
+is the whole story only for a reader that stops at the first candidate holding
+the key. A reader that examines every candidate — what §4 *requires* absent a
+level-discipline proof — also probes every segment legitimately holding an
+older version, and the same databases then measure p99 3 and p99.9 4 at 25 000
+documents, outside the bound. P10 is a claim about a reader that takes the
+early exit, and §4 now states the ordering that makes the proof available
+(descending `segment_id` within a level).
+
+**The sentence that followed was also wrong, and the control is what showed
+it:** "it is range partitioning that bounds the tail, and the filter only has to
+be good, not excellent." Measured the other way round at 2×10⁵ documents — with
+range partitioning intact, removing the filter takes the mean from 1.01 to 3.91;
+with the filter intact, removing range partitioning (`overlap_bound = tier_width`)
+leaves it at 1.01. Range partitioning is worth 1.64 probes only once the filter
+is gone, and one step of tail (p99 1 vs 2) when it is not.
+
+**And the write load decides whether this is measurable at all.** The first
+version of the benchmark inserted keys in ascending order and reported p99 = 1
+for every shape, controls included — because sequential inserts give each
+memtable flush a disjoint key range, so manifest pruning alone leaves one
+candidate and there is no tail to bound. `spec/11-conformance.md` §6's
+read-tail test therefore specifies the write load, not just the read load.
 
 ## 6. Space
 
@@ -625,7 +661,7 @@ write-ahead log, lazy levelling, and per-writer append streams.
 | P6 | ≤ 0.6× MVStore file size | high — the name dictionary alone accounts for it |
 | P7 | RSS bounded by the cache budget; Hive linear in keys | **high** — Hive's behaviour is documented |
 | P9 | write p99 within 5× p50; no mobile foreground stall over 8 ms | medium — the mechanisms are specified, the constants are guesses |
-| P10 | `segments_probed_per_lookup` p99 ≤ 2 | high — arithmetic, given range-partitioned tiers |
+| P10 | `segments_probed_per_lookup` p99 ≤ 2 | **CONFIRMED** at p99 1 / p99.9 2, 10⁴–2×10⁵ docs — but only with §4's early exit, and it is the filter rather than range partitioning that delivers it |
 | P11 | encryption costs ≤ 5 % throughput on phone/SATA, ≤ 15 % on NVMe; the real cost is a ~250–500 ms open | high — XChaCha20 outruns the storage on every target device |
 | **P8** | **aged full scans ≤ 1.5× fresh, `value_reads_per_scanned_row` < 0.3; ≥ 6× with the mechanisms disabled** | medium-high — clustering is now structural rather than scheduled, so the mechanism runs whether or not anyone remembers to trigger it |
 | — | space amplification worse than leveled RocksDB | high, and deliberate |

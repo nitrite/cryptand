@@ -165,7 +165,7 @@ Read in this order.
 | [`design/tradeoff-analysis.md`](design/tradeoff-analysis.md) | What the write-path design costs reads, durability, space, memory, latency and complexity — the full accounting |
 | [`spec/`](spec/) | The normative format specification — this is the contract |
 | [`adoption/rollout.md`](adoption/rollout.md) | How the three SDKs get there from here, and how existing files migrate |
-| [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md) | **Phase 1 reference implementation report** — what was built, the nine spec defects building it found, and every measurement against a claim in `design/` |
+| [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md) | **Reference implementation report (phase 3)** — what is built, the nineteen spec defects building it has found across three phases, and every measurement against a claim in `design/` |
 
 ### Specification chapters
 
@@ -189,36 +189,41 @@ Read in this order.
 
 ## Status
 
-**Phases 1 and 2 of the reference implementation are built**, in pure Dart, at
-[`reference/dart/cryptand/`](reference/dart/cryptand/): the container, CVE, CKE,
-segments and cursors, the segment filter, the two-tier value log with compaction
-and clustered promotion, and the security chapter including a verified
-XChaCha20-Poly1305. **259 tests**, and a conformance vector set at
+**Phases 1, 2 and 3 of the reference implementation are built**, in pure Dart,
+at [`reference/dart/cryptand/`](reference/dart/cryptand/): the container, CVE,
+CKE, segments and cursors, the segment filter, the two-tier value log with
+compaction and clustered promotion, the security chapter including a verified
+XChaCha20-Poly1305, and — new in phase 3 — the **level policy**, the **manifest
+as a copy-on-write tree**, the **catalog** and **secondary indexes**.
+**319 tests**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code found **fourteen defects in these documents** — a headline
+Building the code has found **nineteen defects in these documents** — a headline
 invariant that was literally false, a page header whose field table did not fit
 its own declared size, a nonce rule that did nothing, filter rates quoted from
 the wrong formula, "unknown tags round-trip" that no reader could implement —
-and one gap in the **design** rather than its description: the aged-scan bound
-was missing a mechanism, and the metric meant to detect that was blind to it
-(§2.1 of the report).
+and two gaps in the **design** rather than its description: the aged-scan bound
+was missing a mechanism and the metric meant to detect that was blind to it, and
+the read-tail bound turned out to belong to a read path the prediction never
+named.
 
 **Confirmed by measurement:**
 
 | | predicted | measured |
 |---|---|---|
-| **P8** aged scan | ≤ 1.5×, v/row < 0.3 | **1.00×**, **0.100** — after adding cold-tier collection |
+| **P8** aged scan | ≤ 1.5×, v/row < 0.3 | **1.00×** / 0.100 at 2×10⁴ and 2×10⁵ documents, **1.04×** / 0.104 at **10⁶** — after adding cold-tier collection, then after fixing when it is triggered |
+| **P10** read tail | p99 ≤ 2, p99.9 ≤ 3 | **p99 1, p99.9 2** from 10⁴ to 2×10⁵ documents — but only with §4's early exit, and it is the *filter* rather than range partitioning that delivers it |
 | **P5** paged scan | 1.0–1.2× | **1.07×**, with the `nitrite-rust` defect reproduced at 15.7× |
 | **P1** height ≤ 4 below | 613 M docs | **619 M**, interior 1.88 MiB per 10⁷ |
 | **P6** density | CVE:JSON 1 : 1.53 | **1 : 1.70** — denser than claimed |
-| **P4** mechanism | ~10× for a projection | **11.2×** one field, 6.4× two |
+| **P4** mechanism | ~10× for a projection | **11.1×** one field, 6.5× two |
 
 **Still unmeasured, and stated as such:** P2 and P3 — write amplification
 against Fjall and RocksDB, and write concurrency — because they need those
-engines and real threads, and Dart has neither. That is the one real flaw in
-"implement in the weakest SDK first", and it is why phase 3 is Rust. Every other
-figure in these documents remains an analytic prediction, labelled as such, with
-the measurement that would confirm or refute it.
+engines and real threads, and Dart has neither. `spec/10-transactions.md` is
+therefore not merely under-tested but *untested*, which is the largest single
+gap and the reason phase 4 is Rust. Every other figure in these documents
+remains an analytic prediction, labelled as such, with the measurement that
+would confirm or refute it.

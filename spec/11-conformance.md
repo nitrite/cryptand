@@ -308,6 +308,20 @@ Rules:
 
   The reference implementation measures **1.00×** and 0.100 with all four in
   force, and **9.62×** and 1.038 with promotion and readahead disabled.
+- **A read-tail test is mandatory**, and **its write load is part of the
+  test**. Build a database by writing keys in **random order** and then updating
+  a substantial fraction of them, with no forced full compaction; then issue
+  uniform-random point reads and record `segments_probed_per_lookup`
+  (`13-operations.md` §6). p99 MUST be ≤ 2 and p99.9 ≤ 3.
+
+  The write load is normative here because it is the only thing that creates the
+  condition being tested. Ascending inserts give every memtable flush a disjoint
+  key range, so manifest pruning alone leaves one candidate: the reference
+  implementation's first attempt reported p99 = 1 for every shape *including its
+  controls*, which is a measurement of nothing. An implementation MUST also
+  report which read path it used — with §4's early exit or without — because the
+  bound holds for the first and not the second (`04-segments.md` §4.1).
+
 - **A stale-version test is mandatory.** Build a file in which a segment at a
   *lower* level has a higher `max_seq` than a segment above it, from an unrelated
   key, while both cover the queried key. A reader that resolves candidates by

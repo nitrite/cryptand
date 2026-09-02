@@ -14,6 +14,7 @@ import 'bytes.dart';
 import 'cke.dart';
 import 'container.dart';
 import 'errors.dart';
+import 'filter.dart';
 import 'limits.dart';
 
 /// Entry operations, `spec/04-segments.md` section 1.
@@ -170,6 +171,102 @@ int _uvarLen(int v) {
   return n;
 }
 
+
+/// The shared prefix of a page's keys, which the page stores once.
+int _pagePrefix(List<Uint8List> keys) {
+  if (keys.isEmpty) return 0;
+  var n = keys.first.length;
+  for (var i = 1; i < keys.length && n > 0; i++) {
+    final c = _commonPrefix(keys.first, keys[i]);
+    if (c < n) n = c;
+  }
+  return n;
+}
+
+/// Exact encoded size of a B+tree page holding [keys] and [payloads],
+/// including the 40-byte page header. `spec/04-segments.md` §2.2.
+///
+/// Exact, not an upper bound: the copy-on-write trees of §3.3 decide splits by
+/// this number, and an approximation there either wastes space or overflows a
+/// page after the split decision has already been taken.
+int nodePageBytes(List<Uint8List> keys, List<Uint8List> payloads) {
+  final prefixLen = _pagePrefix(keys);
+  var n = PageHeader.size + 16 + prefixLen + 2 * keys.length;
+  for (var i = 0; i < keys.length; i++) {
+    final suffixLen = keys[i].length - prefixLen;
+    n += _uvarLen(suffixLen) + suffixLen + payloads[i].length;
+  }
+  return n;
+}
+
+/// Serializes one B+tree page, `spec/04-segments.md` §2.2.
+///
+/// One encoder for both users of the format: [SegmentBuilder], which writes
+/// pages into an immutable extent, and the copy-on-write trees of §3.3, which
+/// write them one at a time into the page space. Two encoders would be two
+/// places for the same bytes to drift, and §2.2 is a format the conformance
+/// vectors pin.
+Uint8List encodeNodePage({
+  required int pageSize,
+  required bool isLeaf,
+  required List<Uint8List> keys,
+  required List<Uint8List> payloads,
+  required int subtreeEntries,
+  int treeId = TreeId.noTree,
+  int commitId = 0,
+}) {
+  checkPageSize(pageSize);
+  final page = Uint8List(pageSize);
+  final bd = ByteData.view(page.buffer);
+  final base = PageHeader.size;
+  final payloadSize = pageSize - base;
+  final count = keys.length;
+  final prefixLen = _pagePrefix(keys);
+
+  // Cells grow downward from the payload end; cell_ptr[] grows up.
+  var cellTop = payloadSize;
+  final ptrs = List<int>.filled(count, 0);
+  for (var i = count - 1; i >= 0; i--) {
+    final k = keys[i];
+    final suffixLen = k.length - prefixLen;
+    final cellSize = _uvarLen(suffixLen) + suffixLen + payloads[i].length;
+    cellTop -= cellSize;
+    ptrs[i] = cellTop;
+    final w = ByteWriter(cellSize)
+      ..uvar(suffixLen)
+      ..bytes(Uint8List.sublistView(k, prefixLen))
+      ..bytes(payloads[i]);
+    page.setRange(base + cellTop, base + cellTop + cellSize, w.view);
+  }
+
+  final freeStart = 16 + prefixLen + 2 * count;
+  if (freeStart > cellTop) {
+    throw StateError(
+        'page overflow: header+pointers $freeStart, cells at $cellTop');
+  }
+  bd
+    ..setUint16(base + 0, count, Endian.little)
+    ..setUint16(base + 2, freeStart, Endian.little)
+    ..setUint16(base + 4, prefixLen, Endian.little)
+    ..setUint16(base + 6, isLeaf ? NodeFlags.isLeaf : 0, Endian.little)
+    ..setUint64(base + 8, subtreeEntries, Endian.little);
+  if (prefixLen > 0) {
+    page.setRange(base + 16, base + 16 + prefixLen,
+        Uint8List.sublistView(keys.first, 0, prefixLen));
+  }
+  for (var i = 0; i < count; i++) {
+    bd.setUint16(base + 16 + prefixLen + i * 2, ptrs[i], Endian.little);
+  }
+
+  PageHeader(
+    pageType: isLeaf ? PageType.btreeLeaf : PageType.btreeInternal,
+    treeId: treeId,
+    commitId: commitId,
+    payloadLen: payloadSize,
+  ).writeInto(page);
+  return page;
+}
+
 /// A page under construction.
 class _PendingPage {
   _PendingPage(this.isLeaf);
@@ -218,6 +315,7 @@ final class SegmentBuilder {
     this.level = 0,
     this.group = 0,
     this.treeId,
+    this.filterBitsPerKey = 0,
   }) {
     checkPageSize(pageSize);
     _payloadSize = pageSize - PageHeader.size;
@@ -230,6 +328,14 @@ final class SegmentBuilder {
 
   /// When set, every entry belongs to this tree and `SINGLE_TREE` is flagged.
   final int? treeId;
+
+  /// §2.4's filter bit rate, or 0 for no filter.
+  ///
+  /// **Set per level, not globally**: 16 above the last level, 10 at it. The
+  /// upper levels hold little data, so a high rate there is nearly free and it
+  /// is what bounds the read tail (§4.1). Zero writes `filter_page = 0`, which
+  /// a reader MUST read as "treat every probe as a hit".
+  final int filterBitsPerKey;
 
   late final int _payloadSize;
 
@@ -260,6 +366,11 @@ final class SegmentBuilder {
   int _flags = 0;
   final Map<int, int> _treeSpan = {};
 
+  /// Distinct **user** keys, `u32be(tree_id) || CKE(key)`, for the filter.
+  /// §2.4: all versions of a key share one entry, so `entry_count` from the
+  /// header — which counts versions — is the wrong number for `block_count`.
+  final List<Uint8List> _userKeys = [];
+
   int get entryCount => _entryCount;
 
   /// Appends one entry. Keys MUST arrive strictly increasing.
@@ -275,6 +386,12 @@ final class SegmentBuilder {
       // a caller bug, not something to sort around.
       throw const InvalidArgumentException(
           'SegmentBuilder.add requires strictly increasing internal keys');
+    }
+    if (filterBitsPerKey > 0) {
+      final u = Uint8List.sublistView(k, 0, k.length - 9);
+      if (_userKeys.isEmpty || compareKeys(_userKeys.last, u) != 0) {
+        _userKeys.add(Uint8List.fromList(u));
+      }
     }
     _prevKey = k;
     _minKey ??= Uint8List.fromList(k);
@@ -412,52 +529,13 @@ final class SegmentBuilder {
 
   /// Serializes one page and returns its index within the extent.
   int _emitPage(_PendingPage p) {
-    final page = Uint8List(pageSize);
-    final bd = ByteData.view(page.buffer);
-    final base = PageHeader.size;
-    final prefixLen = p.prefixLen < 0 ? 0 : p.prefixLen;
-
-    // Cells grow downward from the payload end; cell_ptr[] grows up.
-    var cellTop = _payloadSize;
-    final ptrs = List<int>.filled(p.count, 0);
-    for (var i = p.count - 1; i >= 0; i--) {
-      final k = p.keys[i];
-      final suffixLen = k.length - prefixLen;
-      final cellSize = _uvarLen(suffixLen) + suffixLen + p.payloads[i].length;
-      cellTop -= cellSize;
-      ptrs[i] = cellTop;
-      final w = ByteWriter(cellSize)
-        ..uvar(suffixLen)
-        ..bytes(Uint8List.sublistView(k, prefixLen))
-        ..bytes(p.payloads[i]);
-      page.setRange(base + cellTop, base + cellTop + cellSize, w.view);
-    }
-
-    final freeStart = 16 + prefixLen + 2 * p.count;
-    if (freeStart > cellTop) {
-      throw StateError('page overflow: header+pointers $freeStart, cells at $cellTop');
-    }
-    bd
-      ..setUint16(base + 0, p.count, Endian.little)
-      ..setUint16(base + 2, freeStart, Endian.little)
-      ..setUint16(base + 4, prefixLen, Endian.little)
-      ..setUint16(base + 6, p.isLeaf ? NodeFlags.isLeaf : 0, Endian.little)
-      ..setUint64(base + 8, p.subtreeEntries, Endian.little);
-    if (prefixLen > 0) {
-      page.setRange(base + 16, base + 16 + prefixLen,
-          Uint8List.sublistView(p.keys.first, 0, prefixLen));
-    }
-    for (var i = 0; i < p.count; i++) {
-      bd.setUint16(base + 16 + prefixLen + i * 2, ptrs[i], Endian.little);
-    }
-
-    PageHeader(
-      pageType: p.isLeaf ? PageType.btreeLeaf : PageType.btreeInternal,
-      treeId: TreeId.noTree,
-      payloadLen: _payloadSize,
-    ).writeInto(page);
-
-    _pages.add(page);
+    _pages.add(encodeNodePage(
+      pageSize: pageSize,
+      isLeaf: p.isLeaf,
+      keys: p.keys,
+      payloads: p.payloads,
+      subtreeEntries: p.subtreeEntries,
+    ));
     return _pages.length; // page 0 is the segment header
   }
 
@@ -504,7 +582,8 @@ final class SegmentBuilder {
       level++;
     }
 
-    final header = _buildHeader(rootPage, rootEntries);
+    final filterPage = _emitFilter();
+    final header = _buildHeader(rootPage, rootEntries, filterPage);
     final out = Uint8List(pageSize * (_pages.length + 1))
       ..setRange(0, pageSize, header);
     for (var i = 0; i < _pages.length; i++) {
@@ -513,7 +592,30 @@ final class SegmentBuilder {
     return out;
   }
 
-  Uint8List _buildHeader(int rootPage, int rootEntries) {
+  /// Appends the filter's pages to the extent and returns the index of the
+  /// first, or 0 when there is no filter.
+  int _emitFilter() {
+    if (filterBitsPerKey <= 0 || _userKeys.isEmpty) return 0;
+    final payload = BlockedBloom.build(_userKeys,
+            bitsPerKey: filterBitsPerKey, distinctKeys: _userKeys.length)
+        .encodePayload();
+    final first = _pages.length + 1;
+    final capacity = pageSize - PageHeader.size;
+    for (var off = 0; off < payload.length; off += capacity) {
+      final n = (payload.length - off).clamp(0, capacity);
+      final page = Uint8List(pageSize)
+        ..setRange(PageHeader.size, PageHeader.size + n, payload, off);
+      PageHeader(
+        pageType: PageType.segmentFilter,
+        treeId: TreeId.noTree,
+        payloadLen: n,
+      ).writeInto(page);
+      _pages.add(page);
+    }
+    return first;
+  }
+
+  Uint8List _buildHeader(int rootPage, int rootEntries, int filterPage) {
     final page = Uint8List(pageSize);
     final base = PageHeader.size;
     final w = ByteWriter(256)
@@ -521,14 +623,14 @@ final class SegmentBuilder {
       ..u64(segmentId)
       ..u8(level)
       ..u8(treeId != null ? _flags | SegFlags.singleTree : _flags)
-      ..u16(0) // filter_bits_per_key: no filter in this build path
+      ..u16(filterBitsPerKey)
       ..u32(_treeSpan.length)
       ..u64(rootPage)
       ..u64(_entryCount)
       ..u64(_tombstones)
       ..u64(_minSeq < 0 ? 0 : _minSeq)
       ..u64(_maxSeq)
-      ..u64(0) // filter_page
+      ..u64(filterPage)
       ..u64(_valueBytes)
       ..u64(_vlogBytes)
       ..u64(_minExpiry)
@@ -674,6 +776,18 @@ final class Node {
     return (prefixLen + suffixLen) == target.length
         ? 0
         : ((prefixLen + suffixLen) < target.length ? -1 : 1);
+  }
+
+  /// A reader positioned at the start of cell [i]'s payload.
+  ///
+  /// A segment leaf decodes this as [recordAt] does; a copy-on-write tree
+  /// (§3.3) decodes it itself, because its keys are user keys with no trailing
+  /// `op` byte and [recordAt]'s `op == DELETE` test would misread one.
+  ByteReader payloadAt(int i) {
+    final r = ByteReader(page, _cellOffset(i), page.length);
+    final suffixLen = r.uvar();
+    r.position = r.position + suffixLen;
+    return r;
   }
 
   /// `(child_page, child_subtree_entries)` of internal cell [i].
@@ -936,6 +1050,44 @@ final class Segment {
       if (!node(i).isLeaf) bytes += pageSize;
     }
     return bytes;
+  }
+
+  BlockedBloom? _filter;
+  bool _filterLoaded = false;
+
+  /// The segment's membership filter, or null when `filter_page = 0`.
+  ///
+  /// §4: a reader with no filter MUST treat every probe as a hit, which is
+  /// what a null here means at the call site.
+  BlockedBloom? get filter {
+    if (_filterLoaded) return _filter;
+    _filterLoaded = true;
+    final first = header.filterPage;
+    if (first == 0) return null;
+    final out = BytesBuilder();
+    for (var i = first; i < pageCount; i++) {
+      final page = Uint8List.sublistView(
+          extent, i * pageSize, (i + 1) * pageSize);
+      final h = PageHeader.read(page, pageId: i);
+      if (h.pageType != PageType.segmentFilter) break;
+      out.add(Uint8List.sublistView(
+          page, PageHeader.size, PageHeader.size + h.payloadLen));
+    }
+    return _filter = BlockedBloom.decodePayload(out.takeBytes());
+  }
+
+  /// True when this segment's key range can contain [userKeyPrefix].
+  ///
+  /// §4.1's first mechanism: manifest key-range pruning, with no I/O. The
+  /// internal keys of one user key occupy `[prefix, successor(prefix))`, so
+  /// the segment is pruned when that interval misses `[min_key, max_key]`.
+  /// `min_key` and `max_key` may have been *widened* by §2.1's truncation,
+  /// which keeps the test conservative — never the other way.
+  bool covers(Uint8List userKeyPrefix) {
+    if (compareKeys(userKeyPrefix, header.maxKey) > 0) return false;
+    final sup = Keys.successor(userKeyPrefix);
+    if (sup != null && compareKeys(sup, header.minKey) <= 0) return false;
+    return true;
   }
 
   SegmentCursor cursor() => SegmentCursor(this);

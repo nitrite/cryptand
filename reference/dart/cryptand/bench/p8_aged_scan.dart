@@ -28,7 +28,11 @@ import 'package:cryptand/src/value.dart';
 
 import 'harness.dart';
 
-const int kDocs = 20000;
+/// Overridable, so `REPORT.md`'s outstanding item — "re-run the aged-scan test
+/// at 10⁶ documents" — is one argument rather than an edit:
+///
+///     dart run bench/p8_aged_scan.dart 1000000
+int kDocs = 20000;
 const int kAgeMultiple = 10;
 
 /// Deterministic, so a failure is reproducible.
@@ -97,7 +101,13 @@ void report(String label, LocalityPolicy policy) {
   ], w));
 }
 
-void main() {
+void main(List<String> args) {
+  final positional = args.where((a) => !a.startsWith('--')).toList();
+  if (positional.isNotEmpty) kDocs = int.parse(positional.first);
+  // At 10^6 documents the three control configurations cost an hour each and
+  // establish nothing the smaller runs have not; --only-on measures the row
+  // the size claim is about.
+  final onlyOn = args.contains('--only-on');
   print('# P8 -- aged scan over separated values');
   print('');
   print('$kDocs documents, then ${kAgeMultiple}x that many random updates.');
@@ -111,6 +121,7 @@ void main() {
   print(row(['---', '---', '---', '---', '---', '---'], w));
 
   report('all three on', const LocalityPolicy());
+  if (onlyOn) return;
   report('no readahead', const LocalityPolicy(readahead: false));
   report('no promotion',
       const LocalityPolicy(clusteredPromotion: false));

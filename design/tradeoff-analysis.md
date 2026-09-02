@@ -550,6 +550,39 @@ Against the copy-on-write B+tree design this replaced, and against the field.
 | Space amplification | **worse** | ~1.2× mobile, ~1.5× desktop, against ~1.2× |
 | Implementation complexity | **much worse** | the real cost, paid three times |
 
+### 8.2 Phase 3 of the reference implementation — five more
+
+Phase 3 built the level policy (`04` §3.1), the manifest as a copy-on-write tree
+(§3.2, §3.3), the per-level segment filters (§2.4), the catalog (`05`) and the
+secondary indexes (`06`), and measured prediction **P10** — the one structural
+claim that had no measurement at all. Building them found five things.
+
+| | defect | fix |
+|---|---|---|
+| ⚠ 23 | **P10's bound belongs to the early exit, and neither `04` §4.1 nor `performance-model` §5.4 said so.** The arithmetic counts filter false positives only; a reader that examines every candidate — which `04` §4 *requires* absent the level-discipline proof — also probes every segment legitimately holding an older version. Measured: p99 1 / p99.9 2 with the early exit at every size from 10⁴ to 2×10⁵ documents; **p99 3 / p99.9 4** at 25 000 without it. | the condition is stated in both places, and `11` §6's new read-tail test requires an implementation to report which path it measured |
+| ⚠ 24 | **`04` §4's level-discipline sentence predates §3.1's range-partition groups.** "L0 newest-flush-first, then strictly increasing level" gives no order *within* a tiered level, which now holds up to `overlap_bound` runs where one key may sit in more than one. Without that order the early exit of defect 23 is not actually available. | `segment_id` is globally unique, never reused and allocated from `next_segment_id`, so descending `segment_id` within a level is newest-first. Written into `04` §4 |
+| 25 | **§4.1's attribution was backwards at the desktop shape.** It credited range-partitioned tiers with the bound and the filter with "the residue". Measured at 2×10⁵ documents: filter off takes the mean from 1.01 to 3.91 with range partitioning intact; range partitioning off leaves it at 1.01 with the filter intact. At `tier_width = 4` the filter carries the tail. | the table and the correction are in §4.1; range partitioning is credited where it is worth something — a wide tier, or a filterless build |
+| 26 | **§3.1 gave no rule for output segment size, and both its bounds cannot hold without one.** A fixed size at every level made each tiered level cross `tier_width` after its *second* run and compact immediately, so no level ever held more than one run and range partitioning could not do anything. | `segment_entries(L)` is derived from `l0_trigger`, `overlap_bound` and `tier_width` in §3.1 — a writer rule, not a format rule |
+| 27 | **The reference implementation's `get` did not consult the memtable.** Phase 2's read path walked segments only, so every write since the last flush was invisible to a point read. An implementation defect rather than a specification one — `10` §2 step 5 is unambiguous — but it survived 259 tests because every test called `compact()` first. | fixed, with a test that reads back an unflushed write |
+
+Defect 23 has a shape worth naming, because it is the third time this project
+has hit it: **a bound that is arithmetic on one mechanism, stated as a property
+of the system.** §2.4's filter rate was classic-Bloom arithmetic applied to a
+blocked filter; §6.9's `locality_debt` was arithmetic on the clustered flag
+rather than on runs; P10 is arithmetic on false positives rather than on
+versions. Each was right about its own term and silent about the one that
+dominated.
+
+There is also a **measurement** lesson, and it belongs here rather than in the
+implementation report because it is about how these documents are validated. The
+P10 benchmark's first version inserted keys in ascending order and reported
+p99 = 1 for every shape **including both of its controls**. Sequential inserts
+give every memtable flush a disjoint key range, so manifest pruning alone leaves
+one candidate. A control that cannot fail has not controlled anything, and the
+number it produces is not evidence — it is the shape of the harness. `11` §6 now
+makes the write load part of the mandatory read-tail test for exactly this
+reason.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

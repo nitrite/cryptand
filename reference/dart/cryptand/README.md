@@ -1,4 +1,4 @@
-# Cryptand — Dart reference implementation (phase 1)
+# Cryptand — Dart reference implementation (phase 3)
 
 Pure Dart implementation of the Cryptand File Format, CFF v1.0.
 
@@ -6,9 +6,9 @@ Pure Dart implementation of the Cryptand File Format, CFF v1.0.
 the spec disagree, the spec wins and this code is wrong
 (`spec/11-conformance.md` §7).
 
-Read **[REPORT.md](REPORT.md)** first: it states what is implemented, the nine
-spec defects this work found, and every place a measurement differs from a claim
-in `../../design/`.
+Read **[REPORT.md](REPORT.md)** first: it states what is implemented, the
+nineteen spec defects this work has found across three phases, and every place a
+measurement differs from a claim in `../../design/`.
 
 ## Quick start
 
@@ -31,12 +31,19 @@ dart pub get && dart test
 | `lib/src/segment.dart` | internal keys, bulk builder, B+tree pages, cursor (`spec/04`) |
 | `lib/src/filter.dart` | blocked Bloom (`spec/04` §2.4) — see REPORT.md on the hash |
 | `lib/src/security.dart` | SHA-256, HMAC, HKDF, subkeys, nonces, keyslots, superblock MAC (`spec/14`) |
+| `lib/src/vlog.dart` | the two-tier value log, promotion and collection (`spec/04` §6) |
+| `lib/src/cow.dart` | **copy-on-write B+trees** — the reserved trees (`spec/04` §3.3, `spec/05` §2) |
+| `lib/src/manifest.dart` | **tree 6**, the segment index the read path prunes with (`spec/04` §3.2) |
+| `lib/src/engine.dart` | the LSM engine: levels, compaction, the §4 read path |
+| `lib/src/catalog.dart` | **the catalog** — descriptors, reserved trees, attributes (`spec/05`) |
+| `lib/src/index.dart` | **secondary indexes** — entry derivation and the §7 scans (`spec/06`) |
+| `lib/src/database.dart` | collections and repositories over the engine |
 
 `bench/` holds the benchmarks that test the `design/` predictions,
 `tool/generate_vectors.dart` produces `../../conformance/vectors/`, and
 `tool/experiments/` keeps the one-off scripts REPORT.md cites as evidence.
 
-## The two tests that matter most
+## The three tests that matter most
 
 - `test/cke_test.dart` — asserts CKE's ordering invariant over the full cross
   product of the numeric torture set, against an **independent** exact
@@ -44,3 +51,9 @@ dart pub get && dart test
 - `test/conformance_test.dart` — reads the generated vectors back and checks
   every assertion. It touches only JSON and the public encode/decode paths,
   which is what makes it the first thing to port to Rust and Java.
+
+- `test/engine_test.dart` — the two mandatory tests of `spec/11-conformance.md`
+  §6 that this SDK can run: the **aged scan** (§6's four MUSTs, and the size at
+  which they stop holding — see REPORT.md §3.1) and the **read tail**, whose
+  write load is as normative as its read load and for a reason REPORT.md §1.4
+  spells out.

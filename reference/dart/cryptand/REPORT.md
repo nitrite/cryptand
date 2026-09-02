@@ -1,230 +1,232 @@
-# Cryptand reference implementation — phase 2 report
+# Cryptand reference implementation — phase 3 report
 
 **Implementation:** pure Dart 3.12, `reference/dart/cryptand/`
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 259 tests green, `dart analyze` clean, conformance vectors byte-exact and self-verifying
+**Status:** 319 tests green, `dart analyze` clean, conformance vectors byte-exact and self-verifying
 
-Phase 1's report is superseded by this one; its findings are carried forward in
-section 2.
+Phase 2's report is superseded by this one; its findings are carried forward in
+section 3.
 
 ---
 
-## 0. What phase 2 did
+## 0. What phase 3 did
 
-Phase 1 built the format — container, CVE, CKE, segments, cursors — and found
-nine defects. It ended with five items outstanding. Four are now closed:
+Phase 2 ended with five outstanding items. Two are now closed, one is closed
+better than it was asked for, and two still need another language.
 
-| phase 1 said | now |
+| phase 2 said | now |
 |---|---|
-| "Settle the filter hash. It blocks portable filter vectors." | **CFH-64**, specified in full in `spec/04-segments.md` §2.4.1. Filter vectors are byte-exact and portable (§1) |
-| "Add XChaCha20-Poly1305 and Argon2id against published vectors" | **XChaCha20-Poly1305 shipped and verified** against every RFC 8439 vector. Argon2id still absent (§5) |
-| "Take the P1 cell-layout saving, or correct §1's `K` to 34 B" | **Taken.** Leaf cells are 2 bytes smaller and P1 now *exceeds* its prediction (§3.2) |
-| "Build the value log and compaction, then run `aged-scan` immediately" | **Built.** P8 measured, and it **failed at first** — the design was missing a mechanism (§3.1) |
-| "Port `test/conformance_test.dart` to Rust and Java" | not done; needs those toolchains |
+| "Port `test/conformance_test.dart` to Rust and Java" | still not done; needs those toolchains. The suite it would port is larger — `index/entries` and `catalog/trees` are new (§4) |
+| "Add Argon2id, then measure P11" | still absent, same reasoning (§6) |
+| "**Build the tiered levels and range partitioning, then measure P10** — the bounded read tail is the one structural claim with no measurement at all" | **built and measured. P10 is CONFIRMED — but only for a reader that takes §4's early exit, which the prediction never said** (§1) |
+| "Measure P2 and P3 in Rust, against Fjall and RocksDB, with threads" | not possible here |
+| "Re-run the aged-scan test at 10⁶ documents" | **done — and it failed at 2×10⁵ first**: 1.35× and 25.6 % locality debt against a 20 % bound. The cause was a real gap in when collection is triggered; fixed, and 2×10⁵ now measures 1.00× / 0 % and **10⁶ measures 1.04×** (§3.1) |
 
-Five more spec defects were found, one of them a genuine gap in the design
-rather than in its description.
+Chapters `05-catalog` and `06-indexes` went from "not started" to complete, and
+the manifest became what §3.2 says it is — a copy-on-write B+tree — rather than
+two lists in memory.
+
+Five more defects, on top of phase 1's nine and phase 2's five.
 
 ---
 
-## 1. CFH-64: the filter hash is now in the spec
+## 1. P10 — the bounded read tail: CONFIRMED, with a condition the prediction did not state
 
-Phase 1 declined to ship XXH3-64 — ~500 lines, seven branches, a 192-byte
-secret — guarding the one structure whose failure mode is a silent false
-*negative*, and recommended two CRC-32C evaluations instead.
+`design/performance-model.md` §5.4 predicted `segments_probed_per_lookup`
+p99 ≤ 2 and p99.9 ≤ 3 at every database size. Measured over 20 000
+uniform-random point reads, `desktop` shape:
 
-**Measurement killed that recommendation, and it is worth showing why.** CRC is
-affine in its initial state, so `CRC(i₁,m) XOR CRC(i₂,m)` depends only on
-`length(m)`, and salting is likewise an invertible linear map. **Any pair of
-CRC-32C evaluations over the same key therefore carries 32 bits of entropy, not
-64.** Over 4 000 000 random keys:
+| documents | p50 | p99 | p99.9 | max | mean | level shape |
+|---|---|---|---|---|---|---|
+| 10 000 | 1 | 1 | 1 | 2 | 1.00 | L1: 4 seg / 2 groups |
+| 25 000 | 1 | 1 | 2 | 3 | 1.01 | L0 3, L1 2, L2 3 |
+| 50 000 | 1 | 1 | 2 | 2 | 1.00 | L0 2, L2 3, L3 3 |
+| 100 000 | 1 | 1 | 2 | 2 | 1.01 | L0 3, L3 7 |
+| 200 000 | 1 | 1 | 2 | 2 | 1.01 | L0 2, L1 2, L3 13 |
 
-| hash | collisions | 32-bit birthday bound predicts |
+Comfortable. Three things about it are worth more than the table.
+
+### 1.1 The bound belongs to the early exit
+
+P10's arithmetic is `expected extra descents ≈ 0.026`, which is the blocked-Bloom
+false-positive rate times the candidate count. **It counts false positives and
+nothing else.** That is the whole story only for a reader that stops at the first
+candidate holding the key. A reader that examines every candidate — which is what
+`spec/04-segments.md` §4 *requires* absent a level-discipline proof — also probes
+every segment legitimately holding an *older* version of the key, and those are
+not false positives. Same databases, same reads, early exit off:
+
+| documents | p99 | p99.9 | max |
+|---|---|---|---|
+| 10 000 | 2 | 2 | 2 |
+| **25 000** | **3** | **4** | **5** |
+| 50 000 | 3 | 3 | 4 |
+| 100 000 | 2 | 3 | 3 |
+| 200 000 | 2 | 2 | 3 |
+
+Outside the bound at two of the five sizes. The prediction is not wrong; it is
+about a read path it never named. Both `04` §4.1 and `performance-model` §5.4 now
+say which one.
+
+### 1.2 §4's discipline sentence predates §3.1's groups, so the early exit was not actually available
+
+§4 permits the early exit "only when it can prove no unexamined candidate can
+hold a newer version of *this* key — the standard proof is level discipline: L0
+newest-flush-first, then strictly increasing level."
+
+That sentence gives no order **inside** a level. With range-partitioned tiers a
+level holds up to `overlap_bound` runs and a key may sit in more than one of
+them, so "strictly increasing level" does not order two candidates at the same
+level, and the proof does not close. `max_seq` cannot supply the order either —
+§4 disqualifies it two paragraphs earlier, for the same reason.
+
+`segment_id` supplies it at no cost, and the format already records it in the
+manifest entry: globally unique, never reused, allocated from the superblock's
+`next_segment_id` (`00-conventions.md` §7). A higher id was written later, and a
+later run at a level was compacted from later data than the run beside it. The
+discipline in full is **L0 by descending `segment_id`, then levels ascending,
+each by descending `segment_id`** — now written into §4.
+
+`test/engine_test.dart` checks the two paths agree on 500 random keys, because
+an early exit that disagrees with the conservative rule is not an optimization,
+it is a reader returning stale versions.
+
+### 1.3 §4.1 credited the wrong mechanism
+
+§4.1 read: "the bounded-read-tail property comes from range-partitioned tiers and
+manifest pruning; the filter is what stops the residue." Measured at 200 000
+documents, mean segments probed per lookup:
+
+| | filter on | filter off |
 |---|---|---|
-| two CRC-32C + splitmix64 finalizer | **1868** | 1863 |
-| CFH-64 | **0** | — |
+| range-partitioned (`overlap_bound` 2) | **1.01** | 3.91 |
+| plain tiered (`overlap_bound` = `tier_width` = 4) | 1.01 | 5.55 |
 
-Each collision is a *guaranteed* false positive, and they grow as `n²/2³³` — at
-4 M keys in one segment that is a 0.047 % floor against a 0.22 % target.
+With the filter on, range partitioning is worth **nothing** in the mean and one
+step in the tail (p99 1 vs 2, max 2 vs 3). With the filter off it is worth 1.64
+probes. At `tier_width = 4` it is manifest pruning and the filter that produce
+the bound; range partitioning is the residue, which is the reverse of what was
+written. It earns its keep as `tier_width` grows — a `server` profile, or a
+filterless build — and §4.1 now says that instead.
 
-So the recommendation became: a hash **small enough to print in the spec**.
-CFH-64 is twenty lines of wrapping multiply, XOR, shift and rotate — four
-operations every target language has on its widest integer. No table, no
-secret, nothing to source. Measured across five key shapes (snowflake ids,
-dense sequential, sparse, long shared prefix, compound index keys):
-**0.222 % – 0.235 %**, stable to 6 %. The raw CRC pair ranged 0.18 % – 0.45 % on
-the same shapes, which is the linearity showing.
+The control that showed this is free, and that is worth recording too: **plain
+tiering is this policy with `overlap_bound = tier_width` and nothing else
+changed.** No switch in the engine, one superblock field.
 
-The practical consequence: `conformance/vectors/filter/blocked_bloom.json` now
-carries the **filter block bytes**, and `test/conformance_test.dart` asserts
-they reproduce bit for bit. In phase 1 that file had to warn that its bytes were
-not portable.
+### 1.4 The first version of this benchmark measured nothing
+
+It inserted keys in ascending order and reported p99 = 1 for every shape
+**including both controls**. Sequential inserts give every memtable flush a
+disjoint key range, so manifest pruning alone leaves one candidate and there is
+no tail to bound. A control that cannot fail has not controlled anything.
+
+`spec/11-conformance.md` §6 now carries a mandatory read-tail test whose **write
+load is normative** — random insertion order, then updates — for exactly this
+reason. It is the same class of error as phase 2's `locality_debt`: a number that
+looked fine because the thing it measured could not go wrong in the harness.
 
 ---
 
-## 2. Defects found, phase 2
+## 2. Defects found, phase 3
 
-Five, on top of phase 1's nine. The first is the significant one.
+Five, all listed in `design/tradeoff-analysis.md` §8.2. Three are described
+above (§1.1, §1.2, §1.3). The other two:
 
-### 2.1 The design was missing a mechanism, and its own metric could not see it
+### 2.1 §3.1 gave no rule for output segment size, and both its bounds cannot hold without one
 
-`spec/04-segments.md` §6.9 named three things that keep an aged scan fast:
-clustered promotion, a bounded `locality_debt`, and cursor readahead.
-Implementing exactly those and running the mandatory aged-scan test gave
-**2.14×**, against a bound of 1.5×. A failure.
+§3.1 wants a tiered level to hold up to `tier_width` **size-similar** segments
+arranged in `overlap_bound` disjoint runs. It never says how big an output
+segment should be, and the two bounds are not independent: a run occupies
+`tier_width / overlap_bound` segments, so the run size fixes the segment size at
+every level.
 
-The cause: **promotion clusters a *generation*, not the log.** Each last-level
-compaction promotes the values that survived it into a fresh cold run, in key
-order. Ten rounds produce ten runs. Every one is perfectly sorted — so the
-original `locality_debt`, defined as "live bytes in segments *without* the
-clustered flag", read **0 %** throughout — while a key-ordered scan interleaved
-**nineteen** runs holding 8 MB of live data inside 48 MB of extents.
+The first implementation used one fixed output size everywhere. Every tiered
+level then crossed `tier_width` after its **second** run and compacted
+immediately, so no level ever held more than one run — and the P10 control could
+not have shown anything even with the write load fixed. §3.1 now states the
+derivation as a writer rule (a reader depends on none of it).
 
-> The metric that `spec/13-operations.md` §6 calls "the number that predicts
-> scan decay" was blind to the only decay this design exhibits.
+### 2.2 `get` did not consult the memtable
 
-Two changes followed, both in the spec:
-
-- **`locality_debt` is redefined** over *surplus runs*: sort the live value-log
-  segments by live bytes descending, keep the `ceil(live / segment_bytes)` the
-  data genuinely needs, and every byte past that is debt. The same database
-  reads 89 % under this definition, which is what a bound is for.
-- **Cold-tier collection is a MUST triggered by that debt**, not only by
-  `vlog_space_target_pct`. §6.8 already required collection to preserve
-  clustering; nothing required it to *happen*.
-
-Measured, after the fix:
-
-| mechanisms | live runs | aged / fresh | v/row | value-log space |
-|---|---|---|---|---|
-| all four | 2 | **1.00×** | **0.100** | 1.00× |
-| promotion, no collection | 19 | 2.14× | 0.224 | 5.82× |
-| none | 19 | **9.62×** | 1.038 | 5.82× |
-
-The space column is the part I did not expect. **The same surplus runs that
-cost a scan are the ones holding dead bytes**, so a debt-triggered collection
-delivers `vlog_space_target_pct` for free — while a space-only trigger does
-*not* deliver locality, because a log can sit inside its space target with its
-live data spread across nineteen runs. The design treated these as separate
-concerns with separate bounds; they have one cause and one fix.
-
-### 2.2 "Values are written at most twice" — §6.3
-
-Directly contradicted by the fix above: a collection is a third write of every
-value that survives it. §6.3 now says so, with the price attached — holding the
-debt under 20 % cost **2.12×** value-side write amplification against **1.76×**
-with no collection. 20 % more value writes, for an aged scan at 1.00× instead of
-2.14× and a value log at 1.00× its live size instead of 5.82×.
-
-### 2.3 `02` §5.2's "binary search and a slice"
-
-The field table holds two varints per entry, so it cannot be *indexed* without
-first walking it — a binary search pays an O(n) index build before its O(log n)
-probes. Measured, a single forward pass over the sorted table wins outright at
-realistic field counts. §5.2 now says what it is, and records that a
-fixed-width table was considered and rejected (≈10 % on every document to save
-≈30 % of an already-small projection cost).
-
-### 2.4 The leaf cell was two bytes fatter than the model — §2.2
-
-`design/performance-model.md` §1 costs the entire write-amplification argument
-against `K ≈ 32 B`; phase 1 measured 34 B. Both bytes were recoverable without
-losing anything:
-
-- `value_kind` (5 values) and the entry flags (1 bit) now share one byte;
-- `value_len` is **omitted for `VLOG` and `BLOB`**, whose pointers are always
-  exactly 16 bytes — a length field with one legal value is not information, it
-  is a second place for two implementations to disagree.
-
-### 2.5 Argon2id's floor was unreachable in `kdfRaw` slots
-
-`spec/14-security.md` §3.2's minimum cost applies to Argon2id, but the wrap path
-applied it unconditionally, making a host-supplied key (`kdf = 0`, which §3.3
-explicitly defines) impossible to store. Fixed in the implementation; the spec
-was already right.
+Phase 2's read path walked segments only, so **every write since the last flush
+was invisible to a point read**. An implementation defect rather than a
+specification one — `spec/10-transactions.md` §2 step 5 is unambiguous — but it
+survived 259 tests, because every test that read anything called `compact()`
+first. Now fixed, with a test that reads back an unflushed write, and the
+memtable is a source in `scanTree` as well.
 
 ---
 
 ## 3. Measured against the claims
 
-Counters are the primary result and wall time an observation, per
-`design/performance-model.md` §8: "Never assert on a wall-clock ratio in CI."
+### 3.1 P8 — aged scan: the 20 000-document result was optimistic, and the bound was not being enforced
 
-### 3.1 P8 — aged scan: **CONFIRMED, after §2.1**
+Phase 2 measured 1.00× and `v/row` 0.100 at 20 000 documents, and phase 2's
+report asked for 10⁶ because "P8 is a claim about databases that get old and
+large, and only one of those two has been tested." It was right to ask. At
+**200 000 documents** — ten times the size, ten times the updates — the phase 2
+code measured:
 
-20 000 documents, then 200 000 random updates; values in the value log
-(`vlog_min` 256 B), laid out over real 4 KiB pages and read through a bounded
-LRU. A value log held in a flat map would make every locality claim vacuously
-true, so it is not one.
+| | documents | aged/fresh | v/row | ending locality debt |
+|---|---|---|---|---|
+| phase 2 code | 2×10⁵ | **1.35×** | 0.139 | **25.6 %** |
+| after the fix | 2×10⁵ | **1.00×** | **0.100** | **0.0 %** |
+| after the fix | **10⁶** | **1.04×** | **0.104** | not captured — that run measures the `all on` row only, at ~45 min |
 
-**1.00× aged/fresh** against a predicted ≤ 1.5×, **v/row 0.100** against < 0.3,
-and **9.62×** with the mechanisms disabled against a predicted ≥ 6×. Both halves
-hold comfortably.
+1.35× is still inside P8's 1.5×, but 25.6 % is **outside** `locality_debt_pct`,
+and that is the real result: the bound was not being enforced.
 
-**Readahead made no measurable difference**, and that is the design working:
-once promotion and collection leave one key-ordered run, sorting a window of
-already-ordered pointers is a no-op. §8.1 stays a MUST because it bounds the
-*unclustered* case — exactly when the other mechanisms have not caught up.
+At 10⁶ documents and 10⁷ updates — fifty times phase 2's dataset — the aged scan
+costs **1.04×** a fresh one at `v/row` **0.104**, against bounds of 1.5× and 0.3.
+The 4 % is not noise and not a failure: it is the residue of the collection
+window above, now bounded to one generation instead of accumulating. P8 holds at
+every size this SDK can reach.
 
-**The promotion term is workload-sensitive, as §3.1 warned.** That section costs
-promotion at 0.29× assuming ~30 % of values reach the last level, and adds: "If
-the fraction … is much higher than ~30 % … promotion costs closer to 0.97×."
-P8's harness is deliberately that workload, and promotion measured **1.06×**.
-The caveat was right; P2 must be measured on its own workload.
+The cause is a window, not a mechanism. Collection is triggered when a
+compaction *starts* over the bound. A merge that begins inside the bound
+promotes a fresh generation into its own cold run without collecting, and can
+therefore *end* above the bound — where nothing looks again until the next
+compaction happens to. At 20 000 documents the window never opened; at 200 000 it
+is where the measurement lands. The fix is to re-check after the merge and
+collect until the debt is back inside — `Engine.collectWhileOverDebt`.
 
-### 3.2 P1 — height and key-index size: **CONFIRMED, now exceeding the prediction**
+The floor case rose with size too: **10.14×** with the mechanisms off, against
+9.61× at 20 000 and a predicted ≥ 6×.
 
-| | predicted | phase 1 | phase 2 |
-|---|---|---|---|
-| entries per leaf | ~127 | 114.9 | **121.9** |
-| children per internal page | ~169 | 168.4 | **171.9** |
-| height ≤ 4 below | 613 M docs | 548 M | **619 M** |
-| interior at 10⁷ docs | "under 2 MiB" | 2.03 MiB | **1.88 MiB** |
+### 3.2 P1, P4, P5, P6 — unchanged
 
-The two bytes of §2.4 closed a gap that phase 1 could only report. `K` measures
-33.1 B against a model of 32 B; the residual 1 B is the prefix-compressed key
-running ~13 B rather than 12 on snowflake ids, and `performance-model` §1 now
-says so.
+Re-run after the level and filter work, to confirm nothing regressed:
 
-### 3.3 P5 — paged scan: **CONFIRMED** (unchanged from phase 1)
+| | phase 2 | phase 3 |
+|---|---|---|
+| P1 height ≤ 4 below | 619 M docs | **619 M** |
+| P1 interior at 10⁷ | 1.88 MiB | **1.88 MiB** |
+| P5 paged/full node accesses | 1.07× | **1.07×** |
+| P4 one field / two fields | 11.2× / 6.4× | **11.06× / 6.45×** |
+| P6 CVE : JSON | 1 : 1.70 | **1 : 1.70** |
 
-**1.07×** against a predicted 1.0–1.2×, with the `nitrite-rust` no-cursor defect
-reproduced at 27.9× node accesses and 15.7× wall time.
+The page encoder is now shared between `SegmentBuilder` and the copy-on-write
+trees (`encodeNodePage`), and the conformance vectors are byte-identical across
+that refactor, which is what makes "one format, two writers" a checked claim
+rather than an intention.
 
-### 3.4 P4's mechanism and P6 — density: **CONFIRMED**
+### 3.3 Filter false-positive rate
 
-One field costs **11.2×** less than a full decode, two fields **6.4×** less
-(`design/architecture.md` predicted ~10× for two — directionally right, ~35 %
-optimistic, and now corrected to the measured figures).
+Measured **0.255 % – 0.62 %** over admitted probes on a mixed-level database,
+against §2.4's ≈ 0.33 % above the last level and ≈ 1.7 % at it. In range, and the
+per-level allocation (16 bits above, 10 at the last level) is now in the file
+rather than in a comment: `filter_page` and `filter_bits_per_key` are written,
+and the filter pages live in the extent.
 
-CVE with a name dictionary is **388 B** against JSON's **661 B** — a ratio of
-1 : 1.70 against a predicted 1 : 1.53. CVE is *relatively* denser than the model
-claimed. The dictionary alone recovers 39 % of the document.
-
-### 3.5 The AEAD: verified
-
-Every published vector reproduces byte for byte — RFC 8439 §2.3.2 (block
-function), §2.4.2 (encryption), §2.5.2 and A.3 (Poly1305), §2.8.2 (the full
-AEAD ciphertext *and* tag), and draft-irtf-cfrg-xchacha §2.2.1 (HChaCha20).
-
-That is what changed since phase 1, which declined to ship an AEAD it could not
-verify. Reproducing a published ciphertext from an independent derivation *is*
-the verification; without those vectors passing, the file should not be used.
-
-Wired into the page and record paths with the AAD and nonce construction of
-`spec/14-security.md` §5, and tested for the attacks the chapter names: a page
-moved to another offset fails, a relabelled `tree_id` fails, a keyslot lifted
-from another database fails to unwrap (threat T3), and crypto-erase works.
-
-### 3.6 Still not measurable here
+### 3.4 Still not measurable here
 
 | | why |
 |---|---|
 | **P2** write amplification vs Fjall/RocksDB | needs those engines |
 | **P3** write concurrency | Dart has no threads — the one real flaw in "implement in the weakest SDK first" |
 | P7 memory, P9 latency | need real page-cache budgets and a real device |
-| P11 encryption cost | now possible (the AEAD exists); not yet benchmarked |
+| P11 encryption cost | the AEAD exists, Argon2id does not; not benchmarked |
 
 ---
 
@@ -233,56 +235,75 @@ from another database fails to unwrap (threat T3), and crypto-erase works.
 | chapter | status |
 |---|---|
 | `00-conventions`, `01-container`, `02-value-encoding`, `03-key-encoding` | complete |
-| `04-segments` §1, §2, §8 — internal keys, bulk builder, cursor, filter | complete |
-| `04-segments` §4, §5, §6 — read resolution, compaction, two-tier value log, promotion, collection | **complete enough to measure P8**; see §5 |
-| `06-indexes` | complete as vectors |
-| `14-security` — SHA-256, HMAC, HKDF, XChaCha20-Poly1305, subkeys, nonces, keyslots, page and record encryption, superblock MAC | complete except Argon2id |
-| `05`, `07`–`13` | not started |
+| `04-segments` §1, §2 (filter included), §8 | complete |
+| `04-segments` §3 — level policy, manifest as a copy-on-write tree, internal trees | **complete** |
+| `04-segments` §4 — read resolution, manifest pruning, filter pruning, early exit | **complete**; range deletes are not built, so `rd_sources` is always empty |
+| `04-segments` §5 — compaction, entry dropping, tombstone dropping | complete except §5.1 parallelism (no threads) and §5.2 interruptibility |
+| `04-segments` §6 — two-tier value log, promotion, collection, debt | complete |
+| **`05-catalog`** | **complete** — descriptors with unknown-field preservation, reserved trees, the §11 enumerations, attributes, store metadata |
+| **`06-indexes`** | **complete** — the §1 layout, §3 null/sparse, §4 arrays and the 1024 cap, §5 field paths, the §7 scans, §8 same-batch maintenance |
+| `14-security` | complete except Argon2id |
+| `07`–`09`, `10`, `12`, `13` | not started |
 
-7 393 lines of library, 3 923 of test, 754 of benchmark.
+New files: `lib/src/cow.dart` (copy-on-write B+trees), `lib/src/manifest.dart`
+(tree 6), `lib/src/catalog.dart`, `lib/src/index.dart`, `lib/src/database.dart`.
+New vectors: `conformance/vectors/index/entries.json` and `catalog/trees.json`.
+New benchmark: `bench/p10_read_tail.dart`.
 
----
-
-## 5. Honest limits
-
-- **The engine is the smallest one that can measure P8 honestly.** It has a
-  memtable, an L0 and a levelled last level. It does **not** have tiered
-  intermediate levels, range partitioning, range deletes, TTL, transactions, or
-  the manifest as a copy-on-write tree. Those are orthogonal to P8 and are not
-  built. `spec/04-segments.md` §3, §5.1–5.3 and §9 are therefore unexercised.
-- **Argon2id is still absent.** Same reasoning as phase 1's: a memory-hard KDF
-  whose vectors cannot be checked here would have other SDKs match its errors.
-  Every layout it lives in is implemented, and `Keyslot.kdfRaw` — a
-  host-supplied key, which §3.3 defines — exercises the whole wrap path without
-  it. P11 cannot be measured until it exists.
-- **One machine, one runtime, in-memory extents.** No file I/O, no OS page
-  cache. Value-log reads go through a bounded LRU over real page-granular
-  offsets, which is what makes the P8 numbers mean something, but a real device
-  will differ. Only the counter-based results are portable.
-- **`dart2js` is unsupported.** `int` is a double on the web and `ByteData` has
-  no `getUint64`, so `U128`, `NitriteId`, CFH-64 and every 64-bit field break.
-  `spec/00-conventions.md` §7 anticipates this; a web target needs a `BigInt`
-  build and will be slow. The rollout plan's Flutter-web ambition should be
-  costed against that.
-- **The conformance vectors are generated by the implementation they test.**
-  They are self-verifying and hash-pinned, which catches regression, not
-  misreading. Only a second independent implementation catches misreading, and
-  that is phase 3.
+**319 tests**, up from 259.
 
 ---
 
-## 6. What phase 3 should do first
+## 5. Two things the new code deliberately does not do
 
-1. **Port `test/conformance_test.dart` to Rust and Java.** It consumes only JSON
-   and the public encode/decode paths. Until a second implementation reads
-   these vectors, "portable" is a claim, not a result.
-2. **Add Argon2id** in whichever SDK can verify it, then measure P11.
-3. **Build the tiered levels and range partitioning**, then measure P10 — the
-   bounded read tail is the one structural claim with no measurement at all.
-4. **Measure P2 and P3 in Rust**, against Fjall and RocksDB, with threads.
-5. **Re-run the aged-scan test at 10⁶ documents and on a real device.** The
-   20 000-document result is clean, but P8 is a claim about databases that get
-   old and large, and only one of those two has been tested.
+- **Freed pages are recorded, not reclaimed.** The free tree
+  (`01-container.md` §6) is keyed by `commit_id` and only becomes interesting
+  once `min_retained_commit` does, which needs the snapshot set of
+  `10-transactions.md` §8 — and there are no snapshots here.
+  `PageStore.freedPages` makes the cost visible instead of hiding it.
+- **An underfull copy-on-write page is never merged with a sibling.** Only an
+  empty page is unlinked and a one-child root collapsed. Both are space effects
+  and neither is a correctness one, and a reserved tree is small by
+  construction (§3.3).
+
+---
+
+## 6. Honest limits, carried forward and added to
+
+- **Argon2id is still absent.** Same reasoning as phases 1 and 2: a memory-hard
+  KDF whose vectors cannot be checked here would have other SDKs match its
+  errors. `Keyslot.kdfRaw` exercises the whole wrap path without it.
+- **No concurrency, so `spec/10-transactions.md` §2 is untested.** Not
+  under-tested — *untested*. Dart has no threads; the chapter's whole content is
+  what happens when several of them write at once. Snapshot isolation,
+  conflict detection and recovery are equally unbuilt, and `Engine` reads at the
+  latest seq with no snapshot set at all. This is the largest single gap.
+- **Extents are in memory.** The manifest and the reserved trees now live in a
+  real `PageStore` with page identity and page-granular counters; segment
+  extents do not. Only the counter-based results are portable.
+- **The conformance vectors are still generated by the implementation they
+  test.** Self-verifying and hash-pinned, which catches regression, not
+  misreading. Only a second implementation catches misreading.
+- **`dart2js` is unsupported**, unchanged: `int` is a double on the web.
+
+---
+
+## 7. What phase 4 should do first
+
+1. **Port `test/conformance_test.dart` to Rust.** It consumes only JSON and the
+   public encode/decode paths, and it is now large enough to be worth porting:
+   CKE, CVE, documents, container, filter, security derivation, **index
+   entries** and **catalog descriptors**. Until a second implementation reads
+   these, "portable" is a claim.
+2. **Build `10-transactions.md` in Rust and measure P3.** It is the only chapter
+   this SDK cannot even partially exercise, and the write-concurrency claim is
+   the design's headline.
+3. **Add Argon2id where it can be verified, then measure P11.**
+4. **Measure P2 against Fjall and RocksDB.**
+5. **Re-run the aged scan at 10⁶ on a real device.** 2×10⁵ found a real defect
+   that 2×10⁴ did not; there is no reason to assume that stops.
+6. **Range deletes (§2.5) and TTL (§9)**, which are the two remaining pieces of
+   `04` that the read path has stubs for.
 
 ---
 
@@ -292,17 +313,18 @@ from another database fails to unwrap (threat T3), and crypto-erase works.
 cd reference/dart/cryptand
 dart pub get
 dart analyze                              # clean
-dart test                                 # 259 tests
+dart test                                 # 319 tests
+
 dart run tool/generate_vectors.dart       # regenerates ../../conformance/vectors
 dart test test/conformance_test.dart      # verifies them
 
 dart run bench/p1_height.dart
 dart run bench/p5_paged_scan.dart
 dart run bench/p4_p6_decode.dart
-dart run bench/p8_aged_scan.dart
+dart run bench/p8_aged_scan.dart          # 20 000 docs
+dart run bench/p8_aged_scan.dart 200000   # the size that found the defect
+dart run bench/p10_read_tail.dart         # ~75 s
 dart run bench/filter_fpr.dart
 ```
 
-`tool/experiments/` holds the one-off scripts this report cites as evidence —
-the hash entropy and blocked-Bloom comparisons, the value-log fragmentation
-diagnosis, and the locality/write-amplification sweep.
+`tool/experiments/` holds the one-off scripts phases 1 and 2 cite as evidence.

@@ -12,12 +12,14 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:cryptand/src/catalog.dart';
 import 'package:cryptand/src/cke.dart';
 import 'package:cryptand/src/container.dart';
 import 'package:cryptand/src/crc32c.dart';
 import 'package:cryptand/src/cve.dart';
 import 'package:cryptand/src/errors.dart';
 import 'package:cryptand/src/filter.dart';
+import 'package:cryptand/src/index.dart';
 import 'package:cryptand/src/segment.dart';
 import 'package:cryptand/src/security.dart';
 import 'package:cryptand/src/u128.dart';
@@ -449,6 +451,72 @@ void main() {
       final sw = rc['starts_with_abc']! as Map<String, Object?>;
       expect(hex(KeyRange.startsWith('abc').lower), sw['lower']);
       expect(hex(KeyRange.startsWith('abc').upper!), sw['upper']);
+    });
+  });
+
+  group('index/entries', () {
+    final v = load('index/entries');
+
+    test('every case reproduces its keys byte for byte', () {
+      for (final c in v['cases']! as List) {
+        final m = c as Map<String, Object?>;
+        final idx = IndexDescriptor(
+          indexType: m['index_type']! as String,
+          dataTree: 20,
+          fields: [for (final f in m['fields']! as List) f as String],
+          sparse: m['sparse']! as bool,
+        );
+        final doc = build(m['document']! as Map<String, Object?>) as CDoc;
+        final id = build(m['nitrite_id']! as Map<String, Object?>);
+        final got = [for (final k in indexKeysFor(idx, doc, id)) hex(k)];
+        expect(got, m['keys'], reason: m['note'] as String);
+      }
+    });
+
+    test('the cap and the field-path escapes are what the vector says', () {
+      expect(kMaxIndexEntriesPerDocument, v['cap_per_document']);
+      final esc = v['field_path_escapes']! as Map<String, Object?>;
+      for (final e in esc.entries) {
+        if (e.key == 'note') continue;
+        expect(splitFieldPath(e.key), e.value, reason: e.key);
+      }
+    });
+  });
+
+  group('catalog/trees', () {
+    final v = load('catalog/trees');
+
+    test('reserved tree ids match the vector', () {
+      final ids = v['reserved_tree_ids']! as Map<String, Object?>;
+      expect(ids['catalog'], TreeId.catalog);
+      expect(ids['manifest'], TreeId.manifest);
+      expect(ids['vlog_stats'], TreeId.vlogStats);
+      expect(ids['change_feed'], TreeId.changeFeed);
+      expect(ids['first_user_tree'], TreeId.firstUserTree);
+    });
+
+    test('the five portable index-type names are exactly these', () {
+      expect((v['index_type_names']! as Map<String, Object?>)['values'],
+          IndexType.portable.toList()..sort());
+    });
+
+    test('levelled kinds match the vector', () {
+      expect(v['levelled_kinds'], TreeKind.levelled.toList()..sort());
+    });
+
+    test('a descriptor re-encodes to the same bytes', () {
+      for (final t in v['trees']! as List) {
+        final m = t as Map<String, Object?>;
+        final name = m['name']! as String;
+        expect(hex(encodeKey(CStr(name))), m['name_key'], reason: name);
+        final bytes = unhex(m['descriptor_without_created']! as String);
+        final back = TreeDescriptor.decode(bytes);
+        expect(back.treeId, m['tree_id'], reason: name);
+        expect(back.kind, m['kind'], reason: name);
+        expect(back.levelled, m['levelled'], reason: name);
+        expect(hex(back.encode()), m['descriptor_without_created'],
+            reason: '$name must round-trip byte for byte');
+      }
     });
   });
 }

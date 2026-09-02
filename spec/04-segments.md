@@ -416,6 +416,32 @@ Cost: a compaction producing a tiered level must respect the group's key
 boundaries, which occasionally forces a split. That is cheap — segments are
 bulk-built anyway — and it converts an unbounded read tail into a bounded one.
 
+**The two bounds fix the output segment size, and an implementation that picks
+it freely cannot satisfy both.** A tiered level holds up to `tier_width`
+size-similar segments arranged in `overlap_bound` disjoint runs, so a run
+occupies `tier_width / overlap_bound` segments; a run at L1 is `l0_trigger`
+memtables and a run at level *L* is `overlap_bound` runs of the level below.
+A conforming writer therefore sizes its outputs so that
+
+```
+run_entries(1)    = l0_trigger × memtable_entries
+run_entries(L)    = overlap_bound × run_entries(L−1)
+segment_entries(L) = ceil( run_entries(L) ÷ (tier_width ÷ overlap_bound) )
+```
+
+This is a **writer** rule, not a format rule — the paragraph below still holds,
+a reader MUST NOT depend on the policy — but it is stated because the reference
+implementation's first version used one fixed output size at every level, and
+every tiered level then crossed `tier_width` after its *second* run and
+compacted immediately. No level ever held more than one run, so range
+partitioning had no opportunity to do anything, and the read-tail measurement
+that follows would have been meaningless.
+
+**Plain tiering is this policy with `overlap_bound = tier_width`**, and nothing
+else changed: `tier_width` runs of one whole-range segment each. That equality
+is worth stating because it makes the comparison in §4.1 a change of one
+superblock field rather than a different engine.
+
 A conforming reader MUST NOT depend on the policy. It reads the manifest and
 resolves by `seq`. An implementation MAY use a different policy — pure levelled,
 pure tiered, adaptive — and the files it writes stay readable by everyone,
@@ -526,9 +552,38 @@ Worst realistic case at `level_count = 4` (L0 … L3, L3 disjoint):
 
 The read tail is therefore unaffected by §2.4's correction: at 0.026 expected
 extra descents, `segments_probed_per_lookup` p99 is still 1 and p99.9 is still
-2. The bounded-read-tail property comes from range-partitioned tiers and
-manifest pruning; the filter is what stops the residue, and it has an order of
-magnitude of headroom for that job.
+2.
+
+**Two things about that arithmetic, both learned by measuring it.**
+
+*First, it counts only false positives, so it holds only for a reader that takes
+the early exit of §4.* A reader that examines every candidate — which is what §4
+*requires* of a reader without the level-discipline proof — also probes every
+segment that legitimately holds an older version of the key, and under an
+update-heavy load that is routinely two or three. Measured on the reference
+implementation over 20 000 uniform-random point reads after random-order inserts
+plus updates: **p99 1 and p99.9 2 with the early exit at every size from 10⁴ to
+2×10⁵ documents, against p99 3 and p99.9 4 at 25 000 documents without it.** The
+bound belongs to the early exit, and `design/performance-model.md` §5.4 now says
+so.
+
+*Second, the attribution in the sentence this paragraph replaced was backwards
+at the desktop shape.* It read: "the bounded-read-tail property comes from
+range-partitioned tiers and manifest pruning; the filter is what stops the
+residue." Measured at 2×10⁵ documents, mean segments probed per lookup:
+
+| | filter on | filter off |
+|---|---|---|
+| range-partitioned (`overlap_bound` 2) | **1.01** | 3.91 |
+| plain tiered (`overlap_bound` = `tier_width` = 4) | 1.01 | 5.55 |
+
+With the filter on, range partitioning is worth nothing in the mean and one step
+in the tail (p99 1 vs 2, max 2 vs 3); with the filter off it is worth 1.64
+probes. At `tier_width = 4` it is **manifest pruning and the filter** that
+produce the bound and range partitioning that stops the residue — the reverse of
+what was written. Range partitioning earns its keep as `tier_width` grows, which
+is exactly when a `server` profile (`tier_width = 6`) or a filterless build needs
+it; it is not what delivers p99 = 1 on a phone or a desktop.
 
 ## 5. Compaction
 
