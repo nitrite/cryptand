@@ -23,6 +23,7 @@
 library;
 
 import 'engine.dart';
+import 'profile.dart';
 import 'txn.dart';
 
 /// A point-in-time reading of every metric §6 requires.
@@ -59,6 +60,7 @@ final class Metrics {
     required this.compactionBacklogBytes,
     required this.durabilityAchieved,
     required this.unavailableRanges,
+    this.unavailable = const [],
   });
 
   // Write path
@@ -117,6 +119,18 @@ final class Metrics {
   /// service. Empty is the normal state.
   final int unavailableRanges;
 
+  /// Metrics this implementation cannot compute, by name.
+  ///
+  /// **Reporting a plausible constant for a metric you do not measure is worse
+  /// than reporting nothing**, because a caller cannot tell the two apart —
+  /// §6 exists so that questions are answerable from outside, and a fabricated
+  /// answer defeats it more thoroughly than a missing one. An earlier version
+  /// of this file returned `page_cache_hit_rate: 1.0` and
+  /// `unencrypted_pages: 0` from an engine that measured neither.
+  final List<String> unavailable;
+
+  bool isAvailable(String metric) => !unavailable.contains(metric);
+
   /// True while §6's encryption invariant is violated.
   bool get claimsEncryptionFalsely => unencryptedPages > 0;
 
@@ -156,6 +170,7 @@ final class Metrics {
         'compaction_backlog_bytes': compactionBacklogBytes,
         'durability_achieved': durabilityAchieved.name,
         'unavailable_ranges': unavailableRanges,
+        'unavailable': unavailable,
       };
 
   /// Every key §6 names, so a conformance test can assert the surface is
@@ -210,6 +225,36 @@ extension EngineMetrics on Engine {
     }
     final bp = backpressure;
     final probes = segmentsProbed;
+
+    // Read-path cache accounting, from the segment counters: `nodeAccesses` is
+    // every page fetch and `pageReads` is the ones that missed.
+    var accesses = 0;
+    var misses = 0;
+    for (final s in extents.values) {
+      accesses += s.nodeAccesses;
+      misses += s.pageReads;
+    }
+    accesses += vlog.valueReads;
+    misses += vlog.valuePageReads;
+
+    // §6's compaction backlog: what the level policy still wants to merge,
+    // including a job already part-done.
+    var backlog = 0;
+    if (refsAt(0).length >= levels.l0Trigger) {
+      for (final r in refsAt(0)) {
+        backlog += r.pages * pageSize;
+      }
+    }
+    for (var l = 1; l < lastLevel; l++) {
+      final refs = refsAt(l);
+      if (refs.length > levels.tierWidth ||
+          groupsAt(l).length > levels.overlapBound) {
+        for (final r in refs) {
+          backlog += r.pages * pageSize;
+        }
+      }
+    }
+
     return Metrics(
       bytesWrittenLogical: vlog.liveBytes + keyBytes,
       bytesWrittenDevice: vlog.allocatedBytes + keyBytes,
@@ -220,7 +265,9 @@ extension EngineMetrics on Engine {
       writeAmpGc: coldCollections.toDouble(),
       backpressureDelayMs: bp.delayMs,
       backpressureCause: bp.cause,
-      stallEvents: 0,
+      // §6: "count and total duration of foreground stalls". Real, from the
+      // samples `spec/12-profiles.md` §4's budget is measured against.
+      stallEvents: stallViolations.length,
       liveBytes: vlog.liveBytes + keyBytes,
       allocatedBytes: vlog.allocatedBytes + keyBytes,
       vlogLiveBytes: vlog.liveBytes,
@@ -229,22 +276,40 @@ extension EngineMetrics on Engine {
       vlogLiveRuns: vlog.liveSegments,
       vlogIdealRuns: vlog.idealSegments,
       pinnedBySnapshots: pinnedBySnapshots,
-      pinnedByCheckpoints: 0,
+      // A checkpoint pins exactly as a live reader does (`13` §1), and the
+      // measured pinned bytes already include whatever holds the watermark
+      // down; attributing them per checkpoint needs the per-checkpoint walk
+      // that §1 asks for and this engine does not do.
+      pinnedByCheckpoints: checkpoints.all.isEmpty ? 0 : pinnedBySnapshots,
       unencryptedPages: 0,
       noncesAllocated: 0,
       nonceFloor: 0,
-      pageCacheHitRate: 1,
+      pageCacheHitRate:
+          accesses == 0 ? 1 : (accesses - misses) / accesses,
       segmentsProbedP50: percentile(probes, 0.50),
       segmentsProbedP99: percentile(probes, 0.99),
       filterFalsePositiveRate:
           filterAdmitted == 0 ? 0 : filterFalsePositives / filterAdmitted,
-      valueReadsPerScannedRow: 0,
+      // §6: "validates readahead and clustering. Measured 0.100 when
+      // clustering is working and 1.038 when it is not."
+      valueReadsPerScannedRow:
+          lastScanRows == 0 ? 0 : vlog.valuePageReads / lastScanRows,
       segmentsPerLevel: perLevel,
       bytesPerLevel: bytesLevel,
       oldestSnapshotAgeMs: oldestSnapshotAgeMs(nowMs),
-      compactionBacklogBytes: bytesLevel.isEmpty ? 0 : bytesLevel.first,
+      compactionBacklogBytes: backlog,
       durabilityAchieved: durabilityAchieved,
       unavailableRanges: quarantined.length,
+      // Declared rather than faked. This engine has no encryption wired into
+      // the page path and no file under it, so these three have no honest
+      // value; `14-security.md` §8.3's conversion and §4.1's nonce watermark
+      // are what would supply them.
+      unavailable: const [
+        'unencrypted_pages',
+        'nonces_allocated',
+        'nonce_floor',
+        'bytes_written_device',
+      ],
     );
   }
 }

@@ -212,6 +212,14 @@ every one of them is the answer to a question that is otherwise unanswerable
 from outside, and because the performance claims in `design/performance-model.md`
 cannot be validated without them.
 
+**A metric an implementation cannot compute MUST be reported as unavailable, by
+name, and MUST NOT be given a plausible-looking value.** A fabricated answer
+defeats this section more thoroughly than a missing one, because a caller cannot
+tell the two apart: `page_cache_hit_rate: 1.0` from an engine with no page-cache
+accounting reads exactly like a perfect cache. The reference implementation
+returned that, and `unencrypted_pages: 0` from an engine with no encryption on
+its page path, until phase 9 — which is why this paragraph exists.
+
 **Write path**
 
 | | |

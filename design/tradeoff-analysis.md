@@ -723,6 +723,91 @@ A production implementation reclaiming pages under `min_retained_commit` gets th
 same property from the retention rule instead — and a checkpoint that pins
 retention is exactly what makes that safe.
 
+### 8.7 Phase 8 — the verifier, repair, profiles, and a mandatory test that failed
+
+Phase 8 built the verification pass of `04-segments.md` §11, the manifest
+rebuild of `13-operations.md` §3, and `12-profiles.md` — which between them
+close the last two mandatory conformance tests this SDK can run.
+
+| | defect | fix |
+|---|---|---|
+| ⚠ 38 | **`11-conformance.md` §6's mandatory profile round-trip test asks for a conversion the format forbids.** It named `mobile → desktop → mobile`; `12-profiles.md` §6 says `page_size` "cannot change. It is fixed at creation", and `mobile` is 4 KiB while `desktop` is 8 KiB. **The mandatory test could not be run by a conforming implementation** | §6 now requires the two profiles to share a `page_size`, names `mobile ↔ tablet` as the usable 4 KiB pair, and suggests additionally asserting that the forbidden change is *refused* |
+| 39 | **A scan sourced its cursors from the extent map rather than from the manifest**, so it read segments the manifest had retired. Invisible while compaction keeps the two in step — and wrong the moment they are not, which phase 7's checkpoints made reachable: after a restore the manifest points at an older root while every later segment's bytes are still present, so a scan returned the data the restore was supposed to abandon | scans go through the manifest; implementation-level, but it is the same *shape* as defect 33 and worth counting |
+| 40 | **`group` was written into every segment header as 0 while the manifest recorded the real value.** Caught by §11.5, the header-against-manifest check — on its first run, against a database the engine had just written | the group is decided before the outputs are built rather than after |
+
+**Defect 40 is the one that justifies a written rule.** `13-operations.md` §3
+says a verifier "MUST check header-against-manifest agreement on every
+duplicated field, or the redundancy rots unnoticed until the day it is needed".
+That is exactly what had happened: the rot was total — *every* segment above the
+last level disagreed — and nothing noticed, because nothing had ever compared
+them. And the consequence was not cosmetic: `rebuildManifest` reads `group` back
+out of the headers, so a repair would have re-filed two disjoint runs into one
+group, which then overlaps, which breaks §4's early exit. **A repair that
+silently corrupts the level structure is worse than no repair.**
+
+It is also a small vindication of the format's own design: `group` is duplicated
+into the header *for no other reason* than the rebuild, the spec says so, and
+the first time anything checked the duplication it found it broken.
+
+### A mandatory conformance test that this implementation failed, and now passes
+
+`12-profiles.md` §4's foreground stall budget is normative for every profile,
+and phase 8 measured the reference implementation **failing it**: a `put` that
+filled the memtable ran the flush and the whole compaction cascade
+synchronously, at **22.3 ms against `mobile`'s 8 ms budget**, 2.8× over.
+
+Phase 9 fixed it by building what §5.2 has always required — a compaction
+decomposed into `compaction_step_bytes` steps with a yield between them, held
+as a resumable job whose partial output is published only when it finishes.
+Measured after: **worst 3.10 ms, p99.9 2.46 ms, 0 of 4000 puts over the
+budget**, with a control confirming the bound is what does it (unbounded steps
+on the same workload: 10.03 ms worst, 1 violation).
+
+Two honest notes attach to that number. The first measurement of the fixed
+engine still showed a single 21.7 ms `put` — at index 199, the *first* flush,
+while the identical flush a moment later cost 0.7 ms. That is Dart's JIT
+compiling the segment builder on first execution, not the decomposition;
+Flutter ships release builds AOT-compiled, so it does not arise on the target
+this profile exists for, but on a JIT runtime the first write of a cold process
+really does stall and the benchmark warms the path deliberately rather than
+quietly. The second is that §5 of `12-profiles.md` says thermal behaviour "is
+measured, not modelled" on a real mid-range device, and this is a desktop.
+
+### 8.8 Phase 9 — clearing the board
+
+Phase 9 fixed everything phases 1–8 had left outstanding rather than merely
+recorded. Two items:
+
+**`04-segments.md` §5.2's stepwise compaction, which was the only mandatory
+conformance test this implementation failed.** Built as a resumable
+[CompactionJob]; the foreground path now does `compaction_step_bytes` of merging
+and returns. §5.2's own argument is what makes the state cheap to hold — "the
+partially built output is just a prefix — abandoning it costs the work done and
+nothing else, and no reader can see it" — and that is now exercised directly: a
+test abandons a part-done job mid-cascade and asserts that no reader can tell.
+
+It also changed an API boundary in a way worth recording, because it is §4's
+distinction made real: **a `flush` no longer drains the level policy.** Bounded
+work happens on the caller; a caller who wants the shape settled calls
+`drainCompaction()`, which is the "explicitly requested bulk operation" §4
+exempts. P10's benchmark had been relying on the implicit drain and had to be
+told to ask — and P10 *improved* once it did, from p99.9 2 to p99.9 1 at three
+of the five sizes, because the settled shape is reached more cleanly than the
+old cascade-inside-flush reached it.
+
+**Metrics that reported plausible constants for quantities nothing measured.**
+`13-operations.md` §6 exists so that questions are answerable from outside, and
+a fabricated answer defeats that more thoroughly than a missing one:
+`page_cache_hit_rate` returned 1.0 and `unencrypted_pages` returned 0 from an
+engine that measured neither. Four are now really measured
+(`page_cache_hit_rate`, `value_reads_per_scanned_row`,
+`compaction_backlog_bytes`, `stall_events`) and the four that cannot be are
+**declared unavailable by name** rather than given a value.
+
+That second item is not a spec defect — §6 lists what to expose and says nothing
+about what to do when you cannot. But it is worth a sentence in §6, because "MUST
+expose" invites exactly the failure it got here.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

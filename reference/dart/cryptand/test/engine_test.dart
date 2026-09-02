@@ -282,6 +282,10 @@ void main() {
         e.put(17, CNitriteId(snowflakeId(k)), docBytes(dict, k));
       }
       e.flush();
+      // Settle the level policy: since stepwise compaction (section 5.2) a
+      // flush only does a bounded amount of it, so the shape this test is
+      // about has to be asked for explicitly.
+      e.drainCompaction();
       return e;
     }
 

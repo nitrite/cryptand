@@ -189,7 +189,7 @@ Read in this order.
 
 ## Status
 
-**Phases 1 through 7 of the reference implementation are built**, in pure Dart,
+**Phases 1 through 9 of the reference implementation are built**, in pure Dart,
 at [`reference/dart/cryptand/`](reference/dart/cryptand/): the container, CVE,
 CKE, segments and cursors, the segment filter, the two-tier value log with
 compaction and clustered promotion, the security chapter including a verified
@@ -199,12 +199,13 @@ tree**, the **catalog**, **secondary indexes**, and — new in phase 4 —
 which completes `spec/14-security.md`, **`spec/10-transactions.md` apart from its concurrent write protocol**, and — new in
 phase 6 — **range deletes and TTL** (which complete `spec/04-segments.md`) plus,
 from `spec/13-operations.md`, **corruption containment, the required metrics,
-checkpoints and planner statistics**. **410 tests**, and a conformance vector set at
+checkpoints, planner statistics and repair**, plus **the verification pass** and
+**`spec/12-profiles.md`**. **440 tests, no skips**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code has found **twenty-nine defects in these documents** — a headline
+Building the code has found **thirty-two defects in these documents** — a headline
 invariant that was literally false, a page header whose field table did not fit
 its own declared size, a nonce rule that did nothing, filter rates quoted from
 the wrong formula, "unknown tags round-trip" that no reader could implement —
@@ -220,7 +221,7 @@ versions**, under 338 passing tests, until snapshot retention exposed it.
 | | predicted | measured |
 |---|---|---|
 | **P8** aged scan | ≤ 1.5×, v/row < 0.3 | **1.00×** / 0.100 at 2×10⁴ and 2×10⁵ documents, **1.04×** / 0.104 at **10⁶** — after adding cold-tier collection, then after fixing when it is triggered |
-| **P10** read tail | p99 ≤ 2, p99.9 ≤ 3 | **p99 1, p99.9 2** from 10⁴ to 2×10⁵ documents — but only with §4's early exit, and it is the *filter* rather than range partitioning that delivers it |
+| **P10** read tail | p99 ≤ 2, p99.9 ≤ 3 | **p99 1, p99.9 1–2** from 10⁴ to 2×10⁵ documents — but only with §4's early exit, and it is the *filter* rather than range partitioning that delivers it |
 | **P5** paged scan | 1.0–1.2× | **1.07×**, with the `nitrite-rust` defect reproduced at 15.7× |
 | **P1** height ≤ 4 below | 613 M docs | **619 M**, interior 1.88 MiB per 10⁷ |
 | **P6** density | CVE:JSON 1 : 1.53 | **1 : 1.70** — denser than claimed |

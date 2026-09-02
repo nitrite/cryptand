@@ -24,6 +24,62 @@ import 'txn.dart';
 import 'value.dart';
 import 'vlog.dart';
 
+/// One compaction in progress, `spec/04-segments.md` §5.2.
+///
+/// A compaction job is **decomposable into steps of at most
+/// `compaction_step_bytes`, between which it can yield**. That is a normative
+/// MUST and it is what `spec/12-profiles.md` §4's foreground stall budget rests
+/// on: on a runtime with no threads to move compaction to, the only way not to
+/// block the caller for 22 ms is to do 256 KiB of the work and come back.
+///
+/// The reason it is cheap to hold this state is §5.2's own: "Because segments
+/// are built bottom-up from a sorted stream, the partially built output is just
+/// a prefix — abandoning it costs the work done and nothing else, and no reader
+/// can see it." Nothing here is published until [Engine.finishCompaction], so a
+/// job may be dropped at any point without touching a live structure.
+final class CompactionJob {
+  CompactionJob({
+    required this.inputs,
+    required this.target,
+    required this.levelled,
+    required this.group,
+    required this.sources,
+    required this.out,
+    required this.retained,
+    required this.published,
+    required this.nowMs,
+    required this.recluster,
+  });
+
+  final List<SegmentRef> inputs;
+  final int target;
+  final bool levelled;
+  final int group;
+  final List<SegmentCursor> sources;
+  final List<VlogPointer> dead = [];
+  final List<Segment> outputs = [];
+
+  SegmentBuilder out;
+  Uint8List? lastUserKey;
+  int newestSeq = 0;
+  int pinned = 0;
+
+  final int retained;
+  final int published;
+  final int nowMs;
+  final bool recluster;
+
+  /// Logical bytes merged, which is what the step budget is measured in.
+  int bytesMerged = 0;
+  int steps = 0;
+  bool exhausted = false;
+
+  /// The input segment ids, so a job can be abandoned when the manifest moves
+  /// underneath it (§5: "A job whose input segments were removed by another
+  /// job in the meantime MUST abort and be rescheduled").
+  Set<int> get inputIds => {for (final r in inputs) r.segmentId};
+}
+
 /// One buffered write, before it reaches a segment.
 final class _Pending {
   _Pending(this.internalKey, this.valueKind, this.value, {this.expiryMs});
@@ -303,7 +359,15 @@ final class Engine {
 
   int _nextSeq = 1;
   int _nextSegmentId = 1;
-  bool _recluster = false;
+
+  /// The compaction in flight, if any. At most one, because this SDK is
+  /// single-writer (`spec/11-conformance.md` §1.1); §5.1's parallel jobs on
+  /// disjoint ranges need threads.
+  CompactionJob? _job;
+
+  /// Whether a compaction is part-done. Exposed because a caller pacing
+  /// maintenance needs to know there is work outstanding.
+  bool get hasPendingCompaction => _job != null;
 
   int get lastLevel => levels.levelCount - 1;
 
@@ -409,6 +473,9 @@ final class Engine {
     final segBefore = _nextSegmentId;
     final commitBefore = commitId;
 
+    // §5.2: a job whose inputs the manifest no longer names must be abandoned,
+    // and abandoning costs only the work done.
+    abandonCompaction();
     manifest.tree.root = c.manifestRoot;
     _levelCache.clear();
     visibleSeq = c.seq;
@@ -507,6 +574,10 @@ final class Engine {
   int get valuePageReads => vlog.valuePageReads;
   int get valueReads => vlog.valueReads;
 
+  /// Rows returned by the most recent [scanDocuments], so
+  /// `value_reads_per_scanned_row` has a denominator.
+  int lastScanRows = 0;
+
   /// `segments_probed_per_lookup` (`spec/13-operations.md` §6), one sample per
   /// [get]. This is the metric prediction P10 bounds.
   final List<int> segmentsProbed = [];
@@ -535,6 +606,7 @@ final class Engine {
     }
     return n;
   }
+
 
   // -------------------------------------------------------------------------
   // Write path
@@ -770,8 +842,16 @@ final class Engine {
     // from 34 to 369 while its value side was untouched.
     visibleSeq = _nextSeq - 1;
     _emit(const StoreEvent(StoreEventKind.flushed));
-    maybeCompact();
+    // §5.2: bounded work on the caller's thread. Whatever is left resumes on
+    // the next flush, or on an explicit [drainCompaction].
+    maybeCompact(budgetBytes: compactionStepBytes);
   }
+
+  /// `compaction_step_bytes`, `spec/12-profiles.md` §1.
+  ///
+  /// Settable so a test can shrink it; the profile default is what a real
+  /// caller gets.
+  int compactionStepBytes = 256 << 10;
 
   /// Entries per output segment at [level].
   ///
@@ -791,11 +871,12 @@ final class Engine {
     return (runEntries / perRun).ceil();
   }
 
-  SegmentBuilder _builder({required int level}) => SegmentBuilder(
+  SegmentBuilder _builder({required int level, int group = 0}) =>
+      SegmentBuilder(
         pageSize: pageSize,
         segmentId: _nextSegmentId++,
         level: level,
-        group: 0,
+        group: group,
         // §2.4: 16 bits above the last level, 10 at it. The upper levels hold
         // little data, so a high rate there is nearly free and it is what
         // bounds the read tail.
@@ -827,6 +908,20 @@ final class Engine {
   /// lookup is not what the chapter describes and it dominates everything else
   /// when measured. The mirror is rebuilt from tree 6 whenever the manifest
   /// changes, so tree 6 stays the authority.
+  /// Every segment the manifest currently names, quarantined ones excluded.
+  ///
+  /// The manifest is the authority on what is live; [extents] merely holds the
+  /// bytes. Every scan and every lookup goes through here.
+  Iterable<Segment> get liveSegments sync* {
+    for (var l = 0; l <= lastLevel; l++) {
+      for (final r in refsAt(l)) {
+        if (quarantined.containsKey(r.segmentId)) continue;
+        final seg = extents[r.segmentId];
+        if (seg != null) yield seg;
+      }
+    }
+  }
+
   List<SegmentRef> refsAt(int level) {
     final cached = _levelCache[level];
     if (cached != null) return cached;
@@ -835,31 +930,84 @@ final class Engine {
 
   final Map<int, List<SegmentRef>> _levelCache = {};
 
+  /// Drops the in-memory manifest mirror. Repair rewrites tree 6 underneath
+  /// the engine, so the mirror has to be told.
+  void clearLevelCache() => _levelCache.clear();
+
   /// Group ids in use at [level].
   Set<int> groupsAt(int level) => {for (final r in refsAt(level)) r.group};
 
   /// Runs the level policy of §3.1 until every bound holds.
-  void maybeCompact() {
+  ///
+  /// **Bounded when [budgetBytes] is given** — that is `spec/04-segments.md`
+  /// §5.2, and it is what keeps a `put` inside `spec/12-profiles.md` §4's
+  /// foreground stall budget. Work left over is picked up by the next call;
+  /// nothing is published until a job finishes, so stopping is free.
+  void maybeCompact({int? budgetBytes}) {
+    var spent = 0;
+
+    // Finish what is already in flight before starting anything new.
+    final pending = _job;
+    if (pending != null) {
+      final before = pending.bytesMerged;
+      final done = stepCompaction(pending,
+          budgetBytes: budgetBytes == null ? null : budgetBytes - spent);
+      spent += pending.bytesMerged - before;
+      if (!done) return;
+      finishCompaction(pending);
+      _job = null;
+      if (budgetBytes != null && spent >= budgetBytes) return;
+    }
+
     var guard = 0;
     while (guard++ < 1000) {
-      if (refsAt(0).length >= levels.l0Trigger) {
-        _compactFrom(0);
-        continue;
+      final next = _pickCompaction();
+      if (next == null) return;
+      final job = beginCompaction(next.$1, next.$2);
+      if (job == null) return;
+      final done =
+          stepCompaction(job, budgetBytes: budgetBytes == null ? null : budgetBytes - spent);
+      spent += job.bytesMerged;
+      if (!done) {
+        _job = job; // resume on the next call
+        return;
       }
-      var moved = false;
-      for (var l = 1; l < lastLevel; l++) {
-        final refs = refsAt(l);
-        if (refs.length > levels.tierWidth ||
-            groupsAt(l).length > levels.overlapBound) {
-          _compactFrom(l);
-          moved = true;
-          break;
-        }
-      }
-      if (!moved) return;
+      finishCompaction(job);
+      if (budgetBytes != null && spent >= budgetBytes) return;
     }
     throw StateError('compaction did not converge');
   }
+
+  /// The next compaction the level policy wants, or null when every bound
+  /// holds. `(inputs, target)`.
+  (List<SegmentRef>, int)? _pickCompaction() {
+    if (refsAt(0).length >= levels.l0Trigger) {
+      final inputs = refsAt(0);
+      return (inputs, lastLevel <= 1 ? lastLevel : 1);
+    }
+    for (var l = 1; l < lastLevel; l++) {
+      final refs = refsAt(l);
+      if (refs.length > levels.tierWidth ||
+          groupsAt(l).length > levels.overlapBound) {
+        return (refs, l + 1 >= lastLevel ? lastLevel : l + 1);
+      }
+    }
+    return null;
+  }
+
+  /// Runs the level policy to quiescence.
+  ///
+  /// An **explicitly requested bulk operation**, which `spec/12-profiles.md`
+  /// §4 exempts from the stall budget — the ordinary write path uses the
+  /// bounded form instead.
+  void drainCompaction() => maybeCompact();
+
+  /// Drops a part-done compaction, §5.2.
+  ///
+  /// "The partially built output is just a prefix — abandoning it costs the
+  /// work done and nothing else, and no reader can see it." Called whenever
+  /// the manifest moves under a job: a checkpoint restore, or a repair.
+  void abandonCompaction() => _job = null;
 
   /// Merges everything down into the last level.
   ///
@@ -868,6 +1016,7 @@ final class Engine {
   /// hang off (§6.3, §6.8).
   void compact() {
     flush();
+    drainCompaction();
     for (var l = 0; l < lastLevel; l++) {
       if (refsAt(l).isNotEmpty) _compactInto(refsAt(l), lastLevel);
     }
@@ -893,15 +1042,23 @@ final class Engine {
     }
   }
 
-  /// Compacts every segment at [level] into the next level.
-  void _compactFrom(int level) {
-    final inputs = refsAt(level);
-    if (inputs.isEmpty) return;
-    _compactInto(inputs, level + 1 >= lastLevel ? lastLevel : level + 1);
-  }
-
+  /// Runs a whole compaction to completion. The bulk path.
+  ///
+  /// Used by [compact], which `spec/12-profiles.md` §4 exempts from the stall
+  /// budget because the application asked for it explicitly. The incremental
+  /// path is [beginCompaction] + [stepCompaction] + [finishCompaction].
   void _compactInto(List<SegmentRef> inputs, int target,
       {bool forceRecluster = false}) {
+    final job = beginCompaction(inputs, target, forceRecluster: forceRecluster);
+    if (job == null) return;
+    while (!stepCompaction(job)) {}
+    finishCompaction(job);
+  }
+
+  /// Sets a compaction up without doing any of its work, §5.2.
+  CompactionJob? beginCompaction(List<SegmentRef> inputs, int target,
+      {bool forceRecluster = false}) {
+    if (inputs.isEmpty) return null;
     final levelled = target == lastLevel;
     final all = <SegmentRef>[...inputs];
     final seen = {for (final r in inputs) r.segmentId};
@@ -917,14 +1074,7 @@ final class Engine {
       // ranges — one holds `~11 … ~5`, the other `~4 … ~1`. An overlap test on
       // internal keys reports them as non-overlapping, the merge leaves both
       // in place, and the last level stops being disjoint while every
-      // structural check still passes. §3.1's "segments partition the key
-      // space with no overlap" is about the key space, not the version space.
-      //
-      // The consequence is a wrong answer, not a slow one: §4's early exit
-      // relies on at most one segment per group covering a key, so the lookup
-      // stops at whichever of the two it reaches first and returns a stale
-      // version. This was invisible until snapshot retention (§5 condition 2)
-      // began keeping superseded versions at all.
+      // structural check still passes (`04-segments.md` §3.1.1).
       final lo = _userLow(_minOf(inputs));
       final hi = _maxOf(inputs);
       for (final r in refsAt(lastLevel)) {
@@ -937,128 +1087,154 @@ final class Engine {
     }
 
     // §6.8 step 1: collection is triggered by whichever bound is breached
-    // first — the space target, or the locality debt. The second is the one an
-    // earlier draft did not have, and the two have the same cause (surplus
-    // runs) without being the same quantity.
-    _recluster = levelled &&
+    // first — the space target, or the locality debt. The two have the same
+    // cause (surplus runs) without being the same quantity.
+    final recluster = levelled &&
         (forceRecluster ||
             vlog.allocatedBytes > vlog.liveBytes * vlogSpaceTargetPct / 100 ||
             vlog.localityDebt * 100 > localityDebtPct);
 
-    final sources = <SegmentCursor>[
-      for (final r in all) extents[r.segmentId]!.cursor()..seekFirst(),
-    ];
-    final dead = <VlogPointer>[];
-    final outputs = <Segment>[];
-    var out = _builder(level: target);
-    Uint8List? lastUserKey;
-    var newestSeq = 0;
+    // **The group is decided before the outputs are built, not after.**
+    // `group` is written into each segment's header (§2.1) *and* into its
+    // manifest key (§3.2), and `13-operations.md` §3 rebuilds the manifest by
+    // reading it back out of the headers — so a header that disagrees makes the
+    // rebuild silently re-file two disjoint runs into one group, which then
+    // overlaps and breaks §4's early exit. The verifier of `verify.dart` is
+    // what caught that, which is the rot `13-operations.md` §3 says the check
+    // exists to prevent.
+    final group = levelled ? 0 : _freeGroup(target);
 
-    // §5's conditions 2 and 3. Condition 3 — "the compaction includes every
-    // segment that could hold an older version" — holds only at the last
-    // level, which is what `levelled` tests. Condition 2 is this watermark:
-    // a version may be dropped only once the version that supersedes it is
-    // itself visible to every live snapshot. Without it a compaction silently
-    // removes the version a long-running reader is entitled to see, and the
-    // reader's next lookup returns a *newer* row than its snapshot — the same
-    // class of wrong answer as resolving by segment order.
-    final retained = minRetainedSeq;
-    final published = visibleSeq;
-    // §9: "compaction drops expired entries under the rule in §5" — and §5
-    // adds that the deadline must be older than the oldest live snapshot's
-    // wall-clock floor, so a snapshot taken before the expiry still sees it.
-    final compactionNowMs = _liveSnapshots.isEmpty
+    // §9: an expired entry may be dropped only when its deadline is older than
+    // the oldest live snapshot's wall-clock floor.
+    final floor = _liveSnapshots.isEmpty
         ? nowMs
         : _liveSnapshots
             .map((s) => s.takenAtMs == 0 ? nowMs : s.takenAtMs)
             .reduce((a, b) => a < b ? a : b);
-    if (levelled) pinnedBySnapshots = 0;
-    var pinned = 0;
 
-    void rotate() {
-      if (out.entryCount == 0) return;
-      outputs.add(Segment(out.build(), pageSize));
-      out = _builder(level: target);
-    }
+    return CompactionJob(
+      inputs: all,
+      target: target,
+      levelled: levelled,
+      group: group,
+      sources: [
+        for (final r in all) extents[r.segmentId]!.cursor()..seekFirst(),
+      ],
+      out: _builder(level: target, group: group),
+      // §5's conditions 2 and 3: a version may be dropped only at the last
+      // level, and only once the version superseding it is visible to every
+      // live snapshot.
+      retained: minRetainedSeq,
+      published: visibleSeq,
+      nowMs: floor,
+      recluster: recluster,
+    );
+  }
+
+  /// Merges at most [budgetBytes] and returns true when the job is finished.
+  ///
+  /// §5.2: "A step boundary is any point between two output leaf pages." This
+  /// yields at a **user-key** boundary, which is stricter — two versions of one
+  /// key must not be split across output segments (§3.1) — and is therefore
+  /// always a legal place to stop.
+  bool stepCompaction(CompactionJob job, {int? budgetBytes}) {
+    if (job.exhausted) return true;
+    job.steps++;
+    final startBytes = job.bytesMerged;
 
     while (true) {
       // Pick the smallest internal key across the sources. Newest-first is
       // built into the key: seq is inverted (§1), so the first entry seen for
       // a user key is the newest version of it.
       SegmentCursor? pick;
-      for (final c in sources) {
+      for (final c in job.sources) {
         if (!c.isValid) continue;
         if (pick == null || compareKeys(c.key(), pick.key()) < 0) pick = c;
       }
-      if (pick == null) break;
+      if (pick == null) {
+        job.exhausted = true;
+        return true;
+      }
 
       final rec = pick.record();
       final parsed = parseInternalKey(rec.internalKey);
       final userKey = Uint8List.sublistView(
           rec.internalKey, 0, rec.internalKey.length - 9);
-      final isNewest =
-          lastUserKey == null || compareKeys(lastUserKey, userKey) != 0;
+      final isNewest = job.lastUserKey == null ||
+          compareKeys(job.lastUserKey!, userKey) != 0;
 
       if (isNewest) {
-        lastUserKey = Uint8List.fromList(userKey);
-        newestSeq = parsed.seq;
+        // The only legal step boundary, checked before anything is consumed.
+        if (budgetBytes != null && job.bytesMerged - startBytes >= budgetBytes) {
+          return false;
+        }
+        job.lastUserKey = Uint8List.fromList(userKey);
+        job.newestSeq = parsed.seq;
         // A segment boundary is only legal between user keys: two versions of
         // one key in two segments of the same disjoint run would break the
         // "at most one segment per group covers a key" invariant of §3.1.
-        if (out.entryCount >= segmentEntriesAt(target)) rotate();
-        if (levelled &&
+        if (job.out.entryCount >= segmentEntriesAt(job.target)) _rotate(job);
+        if (job.levelled &&
             (rec.op == Op.delete ||
-                _isExpired(rec, compactionNowMs) && rec.op != Op.rangeDelete) &&
-            rec.seq <= retained) {
+                _isExpired(rec, job.nowMs) && rec.op != Op.rangeDelete) &&
+            rec.seq <= job.retained) {
           // §5: a tombstone may be dropped when the compaction reaches the
           // last level **and** its own seq is at or below the oldest live
           // snapshot's. The second half is not optional: a snapshot older than
           // the tombstone still sees the versions it hides, so dropping the
           // tombstone alone would resurrect them for every later reader.
         } else {
-          out.add(_promote(rec, parsed.treeId, dead));
+          job.out.add(_promote(rec, parsed.treeId, job.dead, job.recluster));
         }
-      } else if (levelled && newestSeq <= retained) {
-        // §5 condition 3 holds only at the last level, so a superseded
-        // version may be dropped only here — and only once the version that
-        // supersedes it is itself visible to every live snapshot (condition 2).
-        // A tiered compaction keeps every version, which is what makes tiering
-        // cheap on the write side.
+      } else if (job.levelled && job.newestSeq <= job.retained) {
+        // §5 condition 3 holds only at the last level, so a superseded version
+        // may be dropped only here — and only once the version that supersedes
+        // it is itself visible to every live snapshot (condition 2). A tiered
+        // compaction keeps every version, which is what makes tiering cheap on
+        // the write side.
         if (rec.valueKind == ValueKind.vlog) {
           // §6.7 lets liveness be decremented only when a compaction has
           // *observed* the value superseded, which is here.
-          dead.add(VlogPointer.decode(rec.value));
+          job.dead.add(VlogPointer.decode(rec.value));
         }
       } else {
-        if (levelled && newestSeq <= published) {
+        if (job.levelled && job.newestSeq <= job.published) {
           // Kept only because a snapshot older than the superseding version is
           // live: without it, §5 would have dropped this entry here.
-          pinned += rec.value.length + rec.internalKey.length;
+          job.pinned += rec.value.length + rec.internalKey.length;
         }
-        out.add(SegEntry(rec.internalKey, rec.valueKind, rec.value,
+        job.out.add(SegEntry(rec.internalKey, rec.valueKind, rec.value,
             expiryMs: rec.expiryMs));
       }
+      job.bytesMerged += rec.internalKey.length + rec.value.length;
       pick.next();
     }
-    rotate();
+  }
 
-    for (final r in all) {
+  void _rotate(CompactionJob job) {
+    if (job.out.entryCount == 0) return;
+    job.outputs.add(Segment(job.out.build(), pageSize));
+    job.out = _builder(level: job.target, group: job.group);
+  }
+
+  /// Publishes a finished job: retire the inputs, add the outputs, §5 and §5.2.
+  void finishCompaction(CompactionJob job) {
+    _rotate(job);
+    for (final r in job.inputs) {
       _retire(r);
     }
-    final group = levelled ? 0 : _freeGroup(target);
-    for (final s in outputs) {
+    for (final s in job.outputs) {
       extents[s.header.segmentId] = s;
-      manifest.add(SegmentRef.of(s, level: target, group: group));
+      manifest.add(SegmentRef.of(s, level: job.target, group: job.group));
     }
-    _levelCache.remove(target);
+    _levelCache.remove(job.target);
 
-    if (levelled) pinnedBySnapshots = pinned;
-    if (_recluster) coldCollections++;
-    _recluster = false;
+    if (job.levelled) pinnedBySnapshots = job.pinned;
+    if (job.recluster) coldCollections++;
     _emit(StoreEvent(StoreEventKind.compacted,
-        detail: 'level $target, ${outputs.length} segments, '
-            '${all.length} inputs'));
-    for (final p in dead) {
+        detail: 'level ${job.target}, ${job.outputs.length} segments, '
+            '${job.inputs.length} inputs, ${job.steps} steps'));
+    for (final p in job.dead) {
       vlog.markDead(p);
     }
     vlog
@@ -1122,7 +1298,8 @@ final class Engine {
   static bool _isExpired(SegRecord rec, int nowMs) =>
       rec.expiryMs != null && rec.expiryMs! <= nowMs;
 
-  SegEntry _promote(SegRecord rec, int treeId, List<VlogPointer> dead) {
+  SegEntry _promote(
+      SegRecord rec, int treeId, List<VlogPointer> dead, bool recluster) {
     if (rec.valueKind != ValueKind.vlog || !policy.clusteredPromotion) {
       return SegEntry(rec.internalKey, rec.valueKind, rec.value,
           expiryMs: rec.expiryMs);
@@ -1133,7 +1310,7 @@ final class Engine {
       return SegEntry(rec.internalKey, rec.valueKind, rec.value,
           expiryMs: rec.expiryMs);
     }
-    if (seg.tier == VlogTier.cold && !_recluster) {
+    if (seg.tier == VlogTier.cold && !recluster) {
       // Already clustered within its own generation, and the log is inside its
       // space target, so leave it: §6.3's "values are written at most twice".
       return SegEntry(rec.internalKey, rec.valueKind, rec.value,
@@ -1425,8 +1602,16 @@ final class Engine {
     ]..sort(compareKeys);
     var pi = 0;
 
+    // **Sourced from the manifest, not from the extent map.** The manifest is
+    // what says which segments are live (§3.2); `extents` is only where their
+    // bytes are. A scan that walked the extent map would read segments the
+    // manifest has retired — which is invisible while the two are kept in step
+    // by compaction, and wrong the moment they are not: after a checkpoint
+    // restore (`13-operations.md` §1) the manifest points at an older root
+    // while every later segment's bytes are still present, so an extent-driven
+    // scan would return data the restore was supposed to abandon.
     final sources = <SegmentCursor>[
-      for (final s in extents.values) s.cursor()..seekCeiling(lower),
+      for (final seg in liveSegments) seg.cursor()..seekCeiling(lower),
     ];
 
     Uint8List? lastUserKey;
@@ -1522,7 +1707,7 @@ final class Engine {
     final entries = <SegRecord>[];
     final seen = <String>{};
     final sources = <SegmentCursor>[
-      for (final s in extents.values) s.cursor()..seekFirst(),
+      for (final seg in liveSegments) seg.cursor()..seekFirst(),
     ];
     while (true) {
       SegmentCursor? pick;
@@ -1561,6 +1746,7 @@ final class Engine {
       }
     }
 
+    lastScanRows = entries.length;
     return ScanResult(
       rows: entries.length,
       bytes: bytes,

@@ -1,15 +1,165 @@
-# Cryptand reference implementation — phase 7 report
+# Cryptand reference implementation — phase 9 report
 
 **Implementation:** pure Dart 3.12, `reference/dart/cryptand/`
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 410 tests green, `dart analyze` clean, conformance vectors byte-exact and self-verifying
+**Status:** 440 tests green, **no skips**, `dart analyze` clean, conformance vectors byte-exact and self-verifying, `dart analyze` clean, conformance vectors byte-exact and self-verifying
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-4 Phase 9 — clearing the board
+
+Phase 9 fixed what earlier phases had recorded rather than repaired. Two items,
+and after them **no test is skipped and no mandatory conformance test this SDK
+can run is failing**.
+
+### The foreground stall budget: 22.3 ms → 3.10 ms
+
+`12-profiles.md` §4 is normative for every profile and phase 8 measured this
+implementation failing it at **22.3 ms against `mobile`'s 8 ms**, because a
+`put` that filled the memtable ran the flush *and* the whole compaction cascade
+synchronously on the caller.
+
+Built `04-segments.md` §5.2: a compaction is now a resumable [CompactionJob]
+that merges `compaction_step_bytes` and yields. §5.2's own argument is what makes
+holding that state cheap — "the partially built output is just a prefix —
+abandoning it costs the work done and nothing else, and no reader can see it" —
+and a test now exercises exactly that, abandoning a part-done job mid-cascade
+and asserting no reader can tell.
+
+| | worst put | over an 8 ms budget |
+|---|---|---|
+| before (cascade on the caller) | 22.3 ms | many |
+| **after, 256 KiB steps** | **3.10 ms** | **0 of 4000** |
+| control: unbounded steps | 10.03 ms | 1 of 4000 |
+
+The control matters: without it the test would pass on any fast enough machine
+and prove nothing about the decomposition.
+
+**One honest note.** The first measurement of the *fixed* engine still showed a
+single 21.7 ms `put` — at index 199, the first flush, while the identical flush
+a moment later cost 0.7 ms. That is Dart's JIT compiling the segment builder on
+first execution, not the decomposition. Flutter ships release builds
+AOT-compiled so it does not arise on the target, but on a JIT runtime the first
+write of a cold process really does stall; the test warms the path deliberately
+and says why, rather than quietly.
+
+### An API boundary moved, and P10 improved because of it
+
+A `flush` no longer drains the level policy — that is §4's bulk/foreground
+distinction made real. Bounded work happens on the caller; a caller wanting the
+shape settled calls `drainCompaction()`, the "explicitly requested bulk
+operation" §4 exempts.
+
+P10's benchmark had been relying on the implicit drain. Told to ask for it, P10
+**improved**:
+
+| documents | phase 8 p99 / p99.9 | phase 9 p99 / p99.9 | settled shape |
+|---|---|---|---|
+| 10 000 | 1 / 1 | 1 / 1 | L1: 4 seg, 2 groups |
+| 25 000 | 1 / 2 | 1 / 2 | L0 3, L2 4 |
+| 50 000 | 1 / 2 | **1 / 1** | L3 4 |
+| 100 000 | 1 / 2 | **1 / 1** | L3 7 |
+| 200 000 | 1 / 2 | **1 / 1** | L3 13 |
+
+The settled shape is reached more cleanly than the old cascade-inside-flush
+reached it. P8 is unchanged at 1.00× / 0.100, at 2×10⁴ and at 2×10⁵.
+
+### Metrics that were reporting numbers nothing measured
+
+`13-operations.md` §6 exists so that questions are answerable from outside, and
+**a fabricated answer defeats that more thoroughly than a missing one**:
+`page_cache_hit_rate` returned 1.0 and `unencrypted_pages` returned 0 from an
+engine that measured neither. `page_cache_hit_rate: 1.0` reads exactly like a
+perfect cache.
+
+Four are now really measured — `page_cache_hit_rate` from the segment
+node-access and page-read counters, `value_reads_per_scanned_row` from the last
+scan, `compaction_backlog_bytes` from what the level policy still wants, and
+`stall_events` from §4's own samples. The four that cannot be are **declared
+unavailable by name**.
+
+§6 now carries the rule, because "MUST expose" invites exactly the failure it
+got here.
+
+---
+
+## 0.-3 Phase 8 — the verifier, repair, profiles, and a test that failed
+
+| | |
+|---|---|
+| **the verifier** (`04` §11, `01` §9) | the invariants, including §11.6's disjointness check — the one that would have caught phase 5's worst defect — and §11.5's header-against-manifest agreement |
+| **repair** (`13` §3) | the manifest rebuilt by scanning segment headers, which is §3's central bet |
+| **profiles** (`12`) | the behavioural constants, host hints, `set_profile`, `reprofile` |
+
+That closes the last two mandatory conformance tests this SDK can run — and one
+of them fails.
+
+### The verifier caught a live bug on its first run, in the repair path
+
+`13-operations.md` §3: "A verifier MUST check header-against-manifest agreement
+on every duplicated field, **or the redundancy rots unnoticed until the day it
+is needed**."
+
+It had rotted. **Every segment above the last level carried `group = 0` in its
+header while its manifest entry recorded the real group.** The builder was
+constructed before the group was chosen. Nothing had ever compared the two, so
+nothing noticed.
+
+The consequence is not cosmetic. `rebuildManifest` reads `group` back out of the
+headers — that is the *only* reason `group` is in a header at all
+(`04-segments.md` §2.1) — so a repair would have re-filed two disjoint runs into
+one group, which then overlaps, which breaks §4's early exit. **A repair that
+silently corrupts the level structure is worse than no repair.** Fixed: the
+group is decided before the outputs are built.
+
+Two things about this are worth stating. The spec predicted the failure mode
+exactly, in the sentence quoted above. And the format's own redundancy design
+was vindicated on the first occasion anything checked it.
+
+### A second defect, made reachable by phase 7
+
+**Scans sourced their cursors from the extent map rather than from the
+manifest**, so they read segments the manifest had retired. Harmless while
+compaction keeps the two in step — and wrong the moment they are not, which
+checkpoints made reachable: after a `restore` the manifest points at an older
+root while every later segment's bytes are still present, so a scan returned
+exactly the data the restore was supposed to abandon. Verified before and after:
+100 rows before the fix, 50 after, 50 expected.
+
+Same shape as phase 5's defect 33 — a rule that held under an assumption nobody
+wrote down, here "the manifest and the extent map agree".
+
+### A spec contradiction the mandatory test exposed
+
+`11-conformance.md` §6 required: "create under `mobile`, write, call
+`set_profile(desktop)`…". `12-profiles.md` §6 says `page_size` **cannot
+change** — and `mobile` is 4 KiB while `desktop` is 8 KiB. **The mandatory test
+asked for the one conversion the format refuses**, and no conforming
+implementation could have run it. §6 now requires the two profiles to share a
+page size and names `mobile ↔ tablet` as the usable pair.
+
+### The mandatory test this implementation failed — **fixed in phase 9**
+
+`12-profiles.md` §4's foreground stall budget is normative for every profile,
+and phase 8 measured this implementation failing it: **22.3 ms against
+`mobile`'s 8 ms budget**, because a `put` that filled the memtable ran the flush
+and the whole compaction cascade synchronously on the caller.
+
+The cause was `04-segments.md` §5.2's stepwise, interruptible compaction, listed
+as unbuilt since phase 3. Phase 8's contribution was to **measure** it against
+the budget rather than note it as missing, and to write the mandatory test.
+Phase 9 built §5.2 and the test passes at 3.10 ms (§0.-4).
+
+The part of the write path that was already decomposed passed even then: a `put`
+that did not trigger a flush stayed far inside the budget, which located the
+problem precisely at the compaction cascade.
 
 ---
 
@@ -501,19 +651,27 @@ and the filter pages live in the extent.
 | `04-segments` §1, §2 (filter and **range deletes**), §8, **§9 TTL** | complete |
 | `04-segments` §3 — level policy, manifest as a copy-on-write tree, internal trees | **complete** |
 | `04-segments` §4 — read resolution, manifest pruning, filter pruning, early exit, **`rd_sources`** | **complete** |
-| `04-segments` §5 — compaction, entry dropping, tombstone dropping, **retention** | complete except §5.1 parallelism (no threads) and §5.2 interruptibility |
+| `04-segments` §5 — compaction, entry dropping, tombstone dropping, **retention**, **§5.2 stepwise interruptible steps** | complete except §5.1 parallelism, which needs threads |
 | `04-segments` §6 — two-tier value log, promotion, collection, debt | complete |
 | **`05-catalog`** | **complete** — descriptors with unknown-field preservation, reserved trees, the §11 enumerations, attributes, store metadata |
 | **`06-indexes`** | **complete** — the §1 layout, §3 null/sparse, §4 arrays and the 1024 cap, §5 field paths, the §7 scans, §8 same-batch maintenance |
 | `14-security` | **complete**, Argon2id included and vector-verified |
 | **`10-transactions`** | **complete except §2** — the concurrent write protocol needs threads Dart does not have |
-| **`13-operations`** §1 checkpoints, §4 containment, §6 metrics, §9 statistics | **complete**; §2 backup, §3 repair, §5 API, §7 change feed, §8 multi-process not started |
+| **`13-operations`** §1 checkpoints, **§3 repair**, §4 containment, §6 metrics, §9 statistics | **complete**; §2 backup, §5 API, §7 change feed, §8 multi-process not started |
+| **`12-profiles`** | **complete**, §4's budget measured and **met** (§0.-4) |
+| **`01-container` §9 / `04-segments` §11** — the verification pass | **complete** for the invariants this engine can express |
 | `07`–`09`, `12` | not started |
 
 New in phase 3: `lib/src/cow.dart` (copy-on-write B+trees),
 `lib/src/manifest.dart` (tree 6), `lib/src/catalog.dart`, `lib/src/index.dart`,
 `lib/src/database.dart`, `bench/p10_read_tail.dart`, and the
 `index/entries.json` and `catalog/trees.json` vectors.
+
+New in phase 9: `CompactionJob` and the stepwise driver in `lib/src/engine.dart`,
+plus honest reporting in `lib/src/metrics.dart`.
+
+New in phase 8: `lib/src/verify.dart`, `lib/src/repair.dart`,
+`lib/src/profile.dart`, `test/verify_repair_test.dart`, `test/profile_test.dart`.
 
 New in phase 7: `lib/src/checkpoint.dart`, `lib/src/stats.dart`,
 `test/checkpoint_stats_test.dart`, and `Collection.analyze` / `statsOf` /
@@ -532,7 +690,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 `conformance/vectors/security/derivation.json`, and `deriveKek` /
 `unlockWithPassword` in `lib/src/security.dart`.
 
-**410 tests**, up from 259 at the end of phase 2.
+**440 tests**, up from 259 at the end of phase 2. **No skips.**
 
 ---
 
@@ -590,7 +748,9 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 6. ~~Range deletes and TTL.~~ **Done** (§0.-1). ~~Checkpoints and planner
    statistics.~~ **Done** (§0.-2). What is left of `13` is backup, repair, the
    compaction API, the change feed and multi-process readers; chapters `07`–`09`
-   and `12` are untouched.
+   are untouched. ~~`04` §5.2's stepwise compaction.~~ **Done** (§0.-4). The
+   highest-value remaining item is now `10-transactions.md` §2 and prediction
+   P3, both of which need threads.
 
 ---
 
@@ -600,7 +760,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 cd reference/dart/cryptand
 dart pub get
 dart analyze                              # clean
-dart test                                 # 410 tests
+dart test                                 # 440 tests, no skips
 
 dart run tool/generate_vectors.dart       # regenerates ../../conformance/vectors
 dart test test/conformance_test.dart      # verifies them

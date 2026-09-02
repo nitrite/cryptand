@@ -74,6 +74,13 @@ Shape run(int docs,
         encodeValue(benchDoc(k), dict: dict));
   }
   e.flush();
+  // Let the level policy settle. This is NOT `compact()` -- that would flatten
+  // everything into the disjoint last level and make the claim vacuous. It is
+  // the background cascade a real engine runs on its own; since phase 9 a
+  // `flush` only does `compaction_step_bytes` of it on the caller's thread
+  // (spec/04-segments.md section 5.2), so a benchmark that wants the settled
+  // shape has to ask for it.
+  e.drainCompaction();
 
   final shape = StringBuffer();
   for (var l = 0; l <= e.lastLevel; l++) {

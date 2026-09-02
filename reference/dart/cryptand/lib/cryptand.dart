@@ -50,7 +50,14 @@ export 'src/database.dart' show Collection, Database, kFormatVersion;
 export 'src/cve.dart'
     show DocFlags, DocView, NameDict, decodeValue, encodeValue, readValue, writeDoc, writeValue;
 export 'src/engine.dart'
-    show Engine, LevelPolicy, LocalityPolicy, ScanResult, percentile;
+    show
+        CompactionJob,
+        Engine,
+        LevelPolicy,
+        LocalityPolicy,
+        ScanResult,
+        percentile;
+export 'src/verify.dart' show EngineVerify, Finding, VerifyReport;
 export 'src/txn.dart'
     show
         Backpressure,
@@ -105,6 +112,14 @@ export 'src/security.dart'
         wrapMasterKey,
         superblockMac,
         verifySuperblockMac;
+export 'src/profile.dart'
+    show
+        EngineProfile,
+        HostHints,
+        InvalidProfileChange,
+        ProfileBehaviour,
+        StallSample;
+export 'src/repair.dart' show EngineRepair, RepairReport;
 export 'src/stats.dart'
     show HistogramBucket, HyperLogLog, IndexStats, StatsBuilder;
 export 'src/segment.dart'

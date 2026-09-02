@@ -166,12 +166,67 @@ void main() {
       expect(e.metrics().spaceAmplification, greaterThanOrEqualTo(1.0));
     });
 
-    test('unencrypted_pages gates the encryption claim', () {
-      // Section 6: "An implementation MUST NOT report a database as encrypted
-      // while this is above 0."
+    test('a metric this engine cannot compute is declared, not faked', () {
+      // Reporting a plausible constant for a metric you do not measure is
+      // worse than reporting nothing: section 6 exists so that questions are
+      // answerable from outside, and a fabricated answer defeats that more
+      // thoroughly than a missing one. An earlier version of metrics.dart
+      // returned page_cache_hit_rate 1.0 and unencrypted_pages 0 from an
+      // engine that measured neither.
       final e = Engine();
-      expect(e.metrics().unencryptedPages, 0);
-      expect(e.metrics().claimsEncryptionFalsely, isFalse);
+      final m = e.metrics();
+      expect(m.unavailable, contains('unencrypted_pages'));
+      expect(m.isAvailable('unencrypted_pages'), isFalse);
+      expect(m.isAvailable('locality_debt'), isTrue);
+      expect(m.isAvailable('segments_probed_per_lookup_p99'), isTrue);
+    });
+
+    test('page_cache_hit_rate is measured from the segment counters', () {
+      final e = Engine(memtableEntries: 100, vlogMin: 1024);
+      for (var i = 0; i < 500; i++) {
+        e.put(tree, CNitriteId(i), doc(dict, i));
+      }
+      e.compact();
+      e.resetCounters();
+      // A cold read misses; reading the same key again hits the page cache.
+      e.get(tree, const CNitriteId(1));
+      final cold = e.metrics().pageCacheHitRate;
+      for (var i = 0; i < 50; i++) {
+        e.get(tree, const CNitriteId(1));
+      }
+      final warm = e.metrics().pageCacheHitRate;
+      expect(warm, greaterThan(cold));
+      expect(warm, lessThanOrEqualTo(1.0));
+      expect(cold, greaterThanOrEqualTo(0.0));
+    });
+
+    test('value_reads_per_scanned_row comes from the last scan', () {
+      // Section 6 singles this out: "Measured 0.100 when clustering is working
+      // and 1.038 when it is not."
+      final e = Engine(memtableEntries: 200, vlogMin: 128);
+      for (var i = 0; i < 400; i++) {
+        e.put(tree, CNitriteId(i), doc(dict, i));
+      }
+      e.compact();
+      final r = e.scanDocuments();
+      final m = e.metrics();
+      expect(m.valueReadsPerScannedRow, closeTo(r.valueReadsPerScannedRow, 1e-9));
+      expect(m.valueReadsPerScannedRow, greaterThan(0));
+    });
+
+    test('compaction_backlog_bytes is 0 when every bound holds', () {
+      final e = Engine(memtableEntries: 100, vlogMin: 1024);
+      for (var i = 0; i < 500; i++) {
+        e.put(tree, CNitriteId(i), doc(dict, i));
+      }
+      e.compact();
+      expect(e.metrics().compactionBacklogBytes, 0,
+          reason: 'nothing is waiting to be merged after a full compaction');
+    });
+
+    test('stall_events counts real budget violations', () {
+      final e = Engine(memtableEntries: 100)..setProfile(Profile.mobile);
+      expect(e.metrics().stallEvents, 0);
     });
 
     test('segments_probed_per_lookup is reported at p50 and p99', () {

@@ -347,9 +347,20 @@ Rules:
 - **A foreground-stall test is mandatory** for `mobile` and `tablet`: under
   sustained write and compaction load, no single foreground operation may exceed
   `max_foreground_stall_ms` (`12-profiles.md` §4).
-- **A profile round-trip test is mandatory**: create under `mobile`, write, call
-  `set_profile(desktop)`, compact fully, verify, then `set_profile(mobile)` and
-  verify again. Data must be identical at every step.
+- **A profile round-trip test is mandatory**: create under one profile, write,
+  `set_profile` to another **with the same `page_size`**, compact fully, verify,
+  then switch back and verify again. Data must be identical at every step.
+
+  **The two profiles must share a page size, and an earlier version of this
+  requirement did not.** It named `mobile → desktop → mobile`, which
+  `12-profiles.md` §6 forbids outright: `page_size` "cannot change. It is fixed
+  at creation", and `mobile` is 4 KiB while `desktop` is 8 KiB. The mandatory
+  test as written could not be run by a conforming implementation — it asked
+  for the one conversion the format refuses. `mobile ↔ tablet` (both 4 KiB) and
+  `desktop ↔ server` after creating at a shared size are the usable pairs; an
+  implementation MAY additionally assert that the forbidden change is *refused*,
+  which is the other half of the property and is what the reference
+  implementation does.
 - **A crash test is mandatory**: kill the process at randomized points during
   a sustained write, reopen, and assert that every acknowledged batch is
   present, no unacknowledged batch is partially present, and verification is

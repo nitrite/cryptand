@@ -422,13 +422,20 @@ spare: at the measured 0.33 % blocked-Bloom rate the expected extra descents are
 reads after random-order inserts plus updates over half the key space, at
 `desktop` shape:
 
-| documents | p50 | p99 | p99.9 | max | mean |
-|---|---|---|---|---|---|
-| 10 000 | 1 | 1 | 1 | 2 | 1.00 |
-| 25 000 | 1 | 1 | 2 | 3 | 1.01 |
-| 50 000 | 1 | 1 | 2 | 2 | 1.00 |
-| 100 000 | 1 | 1 | 2 | 2 | 1.01 |
-| 200 000 | 1 | 1 | 2 | 2 | 1.01 |
+| documents | p50 | p99 | p99.9 | max | mean | level shape |
+|---|---|---|---|---|---|---|
+| 10 000 | 1 | 1 | 1 | 2 | 1.00 | L1: 4 seg / 2 groups |
+| 25 000 | 1 | 1 | 2 | 3 | 1.01 | L0 3, L2 4 |
+| 50 000 | 1 | 1 | 1 | 1 | 1.00 | L3 4 |
+| 100 000 | 1 | 1 | 1 | 1 | 1.00 | L3 7 |
+| 200 000 | 1 | 1 | 1 | 1 | 1.00 | L3 13 |
+
+(Re-measured in phase 9 after compaction became stepwise. The benchmark now
+drains the level policy explicitly before probing — a `flush` does only
+`compaction_step_bytes` of the cascade on the caller's thread, so the settled
+shape has to be asked for. Draining is *not* `compact()`: it runs the level
+policy to quiescence, which is what a real engine's background compaction does,
+rather than flattening everything into the disjoint last level.)
 
 **The condition is the early exit of `spec/04-segments.md` §4.** This
 prediction's arithmetic counts filter false positives and nothing else, which
