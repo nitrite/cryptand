@@ -9,16 +9,20 @@
 /// XChaCha20-Poly1305 lives in `aead.dart`, verified against the published
 /// RFC 8439 and draft-irtf-cfrg-xchacha vectors.
 ///
-/// **What is still not here:** Argon2id. `REPORT.md` states the reasoning; in
-/// short, a reference implementation that ships an *unverified* KDF would have
-/// other SDKs match its errors. Every layout it lives in is implemented and
-/// tested, and `Keyslot.kdfRaw` — a host-supplied 32-byte key, which
-/// section 3.3 already defines — exercises the whole wrap path without it.
+/// **Argon2id is here too**, in `argon2.dart`, verified against RFC 9106
+/// section 5.3's published vector — the pre-hashing digest and the tag, byte
+/// for byte. Phases 1 to 3 declined to ship it for one reason and it was never
+/// a language one: a memory-hard KDF whose output has not been checked against
+/// published vectors must not ship, because a subtly wrong KDF still "works"
+/// and every SDK that follows it reproduces the error. [deriveKek] is the
+/// password path; `Keyslot.kdfRaw` remains the path for a key the host already
+/// holds, which section 3.3 defines.
 library;
 
 import 'dart:typed_data';
 
 import 'aead.dart';
+import 'argon2.dart';
 import 'bytes.dart';
 import 'container.dart';
 import 'errors.dart';
@@ -645,6 +649,61 @@ Keyslot wrapMasterKey({
     wrapTag: r.tag,
     label: label,
   );
+}
+
+/// Derives a slot's key-encryption key from a password, section 3.2.
+///
+/// **On open, the parameters come from the slot, never from a policy.** §3.2:
+/// "an implementation that cannot meet them MUST fail rather than derive a
+/// different key" — deriving under weaker parameters would silently produce a
+/// different KEK and report "wrong password" for a correct one. The superblock
+/// MAC (§6) is what stops an attacker lowering the numbers in the first place.
+Uint8List deriveKek({
+  required Keyslot slot,
+  required List<int> password,
+}) {
+  if (slot.kdf == Keyslot.kdfRaw) {
+    throw const InvalidArgumentException(
+        'a kdf=0 slot takes 32 host-supplied key bytes, not a password');
+  }
+  if (slot.kdf != Keyslot.kdfArgon2id) {
+    throw InvalidArgumentException('unknown kdf ${slot.kdf}');
+  }
+  return argon2id(
+    password: password,
+    salt: slot.salt,
+    memoryKiB: slot.mCostKib,
+    passes: slot.tCost,
+    parallelism: slot.parallelism,
+    tagLength: 32,
+  ).tag;
+}
+
+/// Tries every occupied slot against [password], section 3.3.
+///
+/// Each Argon2id slot costs a full derivation, which is the price of not
+/// telling an attacker which slot they nearly matched: §3.3 requires that a
+/// failure across all slots be indistinguishable from "no such slot".
+Uint8List? unlockWithPassword({
+  required Uint8List keyslotArea,
+  required List<int> password,
+  required Uint8List databaseUuid,
+}) {
+  for (var i = 0; i < Sb.keyslotCount; i++) {
+    final raw = Uint8List.sublistView(
+        keyslotArea, i * Keyslot.size, (i + 1) * Keyslot.size);
+    final slot = Keyslot.decode(raw, i);
+    if (slot.state != Keyslot.occupied || slot.kdf != Keyslot.kdfArgon2id) {
+      continue;
+    }
+    final key = unwrapMasterKey(
+        slot: slot,
+        kek: deriveKek(slot: slot, password: password),
+        databaseUuid: databaseUuid,
+        slotIndex: i);
+    if (key != null) return key;
+  }
+  return null;
 }
 
 /// Unwraps a master key, or null when [kek] is wrong for this slot.

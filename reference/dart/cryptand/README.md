@@ -1,4 +1,4 @@
-# Cryptand — Dart reference implementation (phase 3)
+# Cryptand — Dart reference implementation (phase 4)
 
 Pure Dart implementation of the Cryptand File Format, CFF v1.0.
 
@@ -7,7 +7,7 @@ the spec disagree, the spec wins and this code is wrong
 (`spec/11-conformance.md` §7).
 
 Read **[REPORT.md](REPORT.md)** first: it states what is implemented, the
-nineteen spec defects this work has found across three phases, and every place a
+twenty-four spec defects this work has found across four phases, and every place a
 measurement differs from a claim in `../../design/`.
 
 ## Quick start
@@ -30,7 +30,9 @@ dart pub get && dart test
 | `lib/src/container.dart` | superblock, page header, open procedure, profiles (`spec/01`) |
 | `lib/src/segment.dart` | internal keys, bulk builder, B+tree pages, cursor (`spec/04`) |
 | `lib/src/filter.dart` | blocked Bloom (`spec/04` §2.4) — see REPORT.md on the hash |
-| `lib/src/security.dart` | SHA-256, HMAC, HKDF, subkeys, nonces, keyslots, superblock MAC (`spec/14`) |
+| `lib/src/security.dart` | SHA-256, HMAC, HKDF, subkeys, nonces, keyslots, superblock MAC, the password path (`spec/14`) |
+| `lib/src/blake2b.dart` | **BLAKE2b** (RFC 7693) — present only because Argon2id is defined over it |
+| `lib/src/argon2.dart` | **Argon2id** (RFC 9106), pure Dart, no dependency (`spec/14` §2, §3.2) |
 | `lib/src/vlog.dart` | the two-tier value log, promotion and collection (`spec/04` §6) |
 | `lib/src/cow.dart` | **copy-on-write B+trees** — the reserved trees (`spec/04` §3.3, `spec/05` §2) |
 | `lib/src/manifest.dart` | **tree 6**, the segment index the read path prunes with (`spec/04` §3.2) |
@@ -43,7 +45,7 @@ dart pub get && dart test
 `tool/generate_vectors.dart` produces `../../conformance/vectors/`, and
 `tool/experiments/` keeps the one-off scripts REPORT.md cites as evidence.
 
-## The three tests that matter most
+## The four tests that matter most
 
 - `test/cke_test.dart` — asserts CKE's ordering invariant over the full cross
   product of the numeric torture set, against an **independent** exact
@@ -51,6 +53,11 @@ dart pub get && dart test
 - `test/conformance_test.dart` — reads the generated vectors back and checks
   every assertion. It touches only JSON and the public encode/decode paths,
   which is what makes it the first thing to port to Rust and Java.
+
+- `test/argon2_test.dart` and `test/blake2b_test.dart` — the answer to "isn't
+  naming an algorithm a language dependency?". They reproduce RFC 9106 §5.3 and
+  RFC 7693 Appendix A from published bytes, which is what lets any SDK arrive at
+  the same keys without consulting this code. See REPORT.md §0.1.
 
 - `test/engine_test.dart` — the two mandatory tests of `spec/11-conformance.md`
   §6 that this SDK can run: the **aged scan** (§6's four MUSTs, and the size at

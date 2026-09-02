@@ -47,10 +47,14 @@ committer, and concurrent compaction on disjoint key ranges. An implementation t
 writers is **not** Level 0, because the format's write-throughput properties are
 what it exists for and a serialized writer silently forfeits them.
 
-The one exception is a platform without threads. A single-isolate Dart
+The one exception is a runtime without shared-memory threads. Such an
 implementation MAY declare `Level 0 (single-writer)`, MUST still produce
-byte-identical files, and MUST say so in `writer_id`. It is a platform
-limitation, not a format variant.
+byte-identical files, and MUST say so in `writer_id`. It is a runtime
+limitation, not a format variant, and it is a **declared capability** rather
+than a failure — `00-conventions.md` §1.1 is the general rule, and this is its
+main instance. A single-isolate Dart or a JavaScript implementation is the
+worked example, but the declaration is written against the capability, not
+against either language.
 
 ### 1.2 Reduced write profiles
 
@@ -353,9 +357,18 @@ Rules:
 
 ## 7. Reference implementation
 
-One reference implementation, in Rust, because `nitrite-rust` already has the
-closest analogues (`ordered_key.rs`, `disk_rtree`, `nitrite-vector`) and Rust
-compiles to a CLI that Java and Dart CI can invoke.
+**Non-normative. Nothing in this chapter requires a particular language of
+anyone, and this section least of all** — which language the reference is
+written in is a project decision about where effort goes, not a property of the
+format. It is recorded here only so readers know what the CLI below is.
+
+The current reference is in Dart (`reference/dart/cryptand/`), which was chosen
+to implement the format in the *weakest* SDK first on the theory that whatever
+survives there ports upward. A second reference is planned in Rust, because
+`nitrite-rust` already has the closest analogues (`ordered_key.rs`,
+`disk_rtree`, `nitrite-vector`), because it compiles to a CLI that Java and Dart
+CI can invoke, and because it has the threads that `10-transactions.md` §2
+cannot be exercised without.
 
 It ships as:
 

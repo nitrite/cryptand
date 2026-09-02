@@ -531,6 +531,33 @@ P11 is the prediction most likely to be *pleasantly* confirmed: XChaCha20 is
 faster than the storage under it on every device that matters, and the honest
 cost of encryption here is a slower open, not a slower database.
 
+**Partially measured — and the open half did not confirm.**
+`reference/dart/cryptand/bench/p11_encryption.dart`, Apple M2 Pro, pure Dart,
+single-threaded, with Argon2id verified against RFC 9106 §5.3:
+
+| half | measured | against |
+|---|---|---|
+| open, `mobile` (t 3, m 64 MiB, p 1) | **405 ms** | "~250 ms on a mid-range ARM" |
+| open, `desktop` (t 4, m 256 MiB, p 4) | **2183 ms** | "~500 ms" |
+| steady state, per 4 KiB page | 53.9 µs encrypt, 53.5 µs decrypt — **73 MiB/s** | — |
+
+The open half is a real miss and `spec/14-security.md` §3.2 now carries it: the
+targets were costed against a native implementation with parallel lanes, and
+`mobile` — the profile whose whole rationale is a phone UI, and the one most
+likely to be running an interpreted or JIT runtime — is `p = 1`, so it has no
+lanes to recover with. §3.2 now names the three conforming ways out, of which
+using a hardware-backed platform keystore (`kdf = 0`) is the best on a phone and
+removes the cost entirely.
+
+The steady-state half is **not** measured against P11's terms and should not be
+read as if it were. This implementation has no storage under it — extents are in
+memory — so the ratio P11 predicts cannot be formed. 73 MiB/s is the cost of the
+*primitive* in the slowest reasonable implementation of it (scalar Dart, no
+SIMD); a vectorised ChaCha20 in Rust or Java runs several times faster. The
+number's use is as the constant a real-device measurement will divide by, and on
+that reading it is a warning: a pure-Dart SDK is cipher-bound rather than
+storage-bound, which inverts P11's premise for that SDK specifically.
+
 ## 7. Memory
 
 | engine | scales with |
@@ -662,7 +689,7 @@ write-ahead log, lazy levelling, and per-writer append streams.
 | P7 | RSS bounded by the cache budget; Hive linear in keys | **high** — Hive's behaviour is documented |
 | P9 | write p99 within 5× p50; no mobile foreground stall over 8 ms | medium — the mechanisms are specified, the constants are guesses |
 | P10 | `segments_probed_per_lookup` p99 ≤ 2 | **CONFIRMED** at p99 1 / p99.9 2, 10⁴–2×10⁵ docs — but only with §4's early exit, and it is the filter rather than range partitioning that delivers it |
-| P11 | encryption costs ≤ 5 % throughput on phone/SATA, ≤ 15 % on NVMe; the real cost is a ~250–500 ms open | high — XChaCha20 outruns the storage on every target device |
+| P11 | encryption costs ≤ 5 % throughput on phone/SATA, ≤ 15 % on NVMe; the real cost is a ~250–500 ms open | throughput half still unmeasured (needs real storage); **open half measured and MISSED** — 405 ms `mobile` / 2183 ms `desktop` in pure Dart, because the targets assumed a native KDF with parallel lanes |
 | **P8** | **aged full scans ≤ 1.5× fresh, `value_reads_per_scanned_row` < 0.3; ≥ 6× with the mechanisms disabled** | medium-high — clustering is now structural rather than scheduled, so the mechanism runs whether or not anyone remembers to trigger it |
 | — | space amplification worse than leveled RocksDB | high, and deliberate |
 | — | ~2 I/Os instead of 1 on cold whole-document reads | high, and deliberate |

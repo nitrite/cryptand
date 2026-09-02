@@ -189,18 +189,19 @@ Read in this order.
 
 ## Status
 
-**Phases 1, 2 and 3 of the reference implementation are built**, in pure Dart,
+**Phases 1 through 4 of the reference implementation are built**, in pure Dart,
 at [`reference/dart/cryptand/`](reference/dart/cryptand/): the container, CVE,
 CKE, segments and cursors, the segment filter, the two-tier value log with
 compaction and clustered promotion, the security chapter including a verified
-XChaCha20-Poly1305, and — new in phase 3 — the **level policy**, the **manifest
-as a copy-on-write tree**, the **catalog** and **secondary indexes**.
-**319 tests**, and a conformance vector set at
+XChaCha20-Poly1305, the **level policy**, the **manifest as a copy-on-write
+tree**, the **catalog**, **secondary indexes**, and — new in phase 4 —
+**BLAKE2b and Argon2id**, both verified against their RFCs' published vectors,
+which completes `spec/14-security.md`. **338 tests**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code has found **nineteen defects in these documents** — a headline
+Building the code has found **twenty-four defects in these documents** — a headline
 invariant that was literally false, a page header whose field table did not fit
 its own declared size, a nonce rule that did nothing, filter rates quoted from
 the wrong formula, "unknown tags round-trip" that no reader could implement —
@@ -218,6 +219,7 @@ named.
 | **P5** paged scan | 1.0–1.2× | **1.07×**, with the `nitrite-rust` defect reproduced at 15.7× |
 | **P1** height ≤ 4 below | 613 M docs | **619 M**, interior 1.88 MiB per 10⁷ |
 | **P6** density | CVE:JSON 1 : 1.53 | **1 : 1.70** — denser than claimed |
+| **P11** encryption | ~250–500 ms open | **MISSED on the open half** — 405 ms `mobile` / 2183 ms `desktop` in pure Dart, because the targets assumed a native KDF with parallel lanes; the throughput half needs real storage and stays unmeasured |
 | **P4** mechanism | ~10× for a projection | **11.1×** one field, 6.5× two |
 
 **Still unmeasured, and stated as such:** P2 and P3 — write amplification

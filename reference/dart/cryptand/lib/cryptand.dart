@@ -18,6 +18,8 @@ export 'src/aead.dart'
         poly1305,
         xchacha20Poly1305Decrypt,
         xchacha20Poly1305Encrypt;
+export 'src/argon2.dart' show Argon2Result, argon2id, kArgon2Version;
+export 'src/blake2b.dart' show Blake2b, blake2b;
 export 'src/bytes.dart' show ByteReader, ByteWriter, encodeUtf8Strict;
 export 'src/cke.dart'
     show
@@ -75,6 +77,7 @@ export 'src/security.dart'
         constantTimeEquals,
         decryptPagePayload,
         decryptVlogRecord,
+        deriveKek,
         deriveSubkey,
         encryptPagePayload,
         encryptVlogRecord,
@@ -83,6 +86,7 @@ export 'src/security.dart'
         kNonceGap,
         sha256,
         unlock,
+        unlockWithPassword,
         unwrapMasterKey,
         vlogAad,
         wrapMasterKey,

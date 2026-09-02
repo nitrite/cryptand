@@ -583,6 +583,50 @@ number it produces is not evidence — it is the shape of the harness. `11` §6 
 makes the write load part of the mandatory read-tail test for exactly this
 reason.
 
+### 8.3 Phase 4 — the language-independence audit, and one measured target that missed
+
+Phase 4 was prompted by a reader's question: *does a portable storage format's
+spec have implementation details in it, and does a feature require a particular
+language?* The question named Argon2id as the example.
+
+**On Argon2id the premise was wrong**, and the disproof is running code:
+Argon2id is RFC 9106, and it is now implemented in **pure Dart with no
+dependency**, alongside the BLAKE2b it is defined over, both reproducing their
+RFCs' published vectors byte for byte. Naming an algorithm is the *opposite* of
+a language dependency — a format that said "a memory-hard KDF" instead of
+Argon2id with its parameters would have two SDKs derive different keys from one
+password and neither able to open the other's file.
+
+**On the general point the question was right.** The audit found leaks, all of
+them requirements about the *host runtime* rather than about the bytes, and
+`00-conventions.md` §1.1 is new and states the rule so the question has a
+written answer next time.
+
+| | defect | fix |
+|---|---|---|
+| 28 | `10` §7 made a **language** the subject of a MUST — "a Dart implementation cannot reach `F_FULLFSYNC` without FFI and MUST therefore report `sync` on Darwin" — and made a platform syscall table normative, one of whose entries (`FileChannel.force`) is a *Java API* rather than an OS primitive | two language-neutral MUSTs (use the strongest primitive available; record what you actually performed); the table is demoted to non-normative guidance |
+| 29 | `11` §1.1's threadless carve-out was written against a language — "a single-isolate **Dart** implementation" — rather than the capability it means | written against "a runtime without shared-memory threads", with Dart and JavaScript as worked examples |
+| 30 | `11` §7 named **Rust** as *the* reference implementation inside the normative conformance chapter, two sections after the mandatory test list | marked non-normative; the reference's language is a project decision, and §7 already said the reference is not normative |
+| 31 | `14` §11 stated key-material handling as a normative table with **Java / Dart / Rust** rows | rules keyed to language *properties* — immutable or interned strings, moving collectors, deterministic destruction — with the three SDKs as a non-normative note |
+| ⚠ 32 | **`14` §3.2's Argon2id cost targets are unreachable where they matter most.** They were costed against a native implementation with parallel lanes. Measured in pure Dart on an M2 Pro: `mobile` **405 ms** against "~250 ms on a mid-range ARM", `desktop` **2183 ms** against "~500 ms". `mobile` is `p = 1`, so it has no lanes to recover with, and it is also the profile most likely to be running an interpreted or JIT runtime | §3.2 states the assumption and names three conforming ways out, of which a hardware-backed platform keystore (`kdf = 0`) is the right answer on a phone and removes the cost entirely |
+
+Defect 32 is the interesting one, because it is the first time this project has
+found a **profile constant** wrong rather than a mechanism. The others in §8.1
+and §8.2 were rules that would return a wrong answer; this one returns the right
+answer too slowly, on the device the profile exists for, in the runtime that
+device most often runs. That is a different failure mode and it is only visible
+by measuring — no amount of re-reading §3.2 would have shown it, because the
+table is arithmetically fine and simply assumed a faster implementation than the
+one the profile targets.
+
+One claim in the audit was itself wrong and is recorded because the correction
+matters: **Level 0 was said to be unreachable for a single-threaded runtime, and
+it is not.** `11` §1.1 already had the carve-out and §1.2 already had a
+`single-writer` reduced write profile. The mechanism was right; only its wording
+named a language. A format that had genuinely barred a threadless language from
+full conformance would have contradicted the proposition on the first page, and
+it does not.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

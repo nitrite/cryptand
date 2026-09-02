@@ -298,20 +298,36 @@ why `12-profiles.md` §5 lets the host defer it entirely.
 | `sync` *(default)* | `fdatasync` | `fdatasync` | OS crash and power loss on hardware that honours the flush |
 | `full` | full-device flush | full-device flush | power loss, unconditionally |
 
-**Platform specifics are normative, because getting them wrong is silent:**
+**The normative rule is an obligation, not a syscall** (`00-conventions.md`
+§1.1). Two MUSTs, and they are the whole of it:
+
+1. An implementation MUST use the **strongest durable-flush primitive its
+   platform and runtime actually provide** for the requested mode.
+2. It MUST record in `durability_achieved` **what it performed**, never what was
+   requested. An implementation that cannot reach a mode reports the mode it
+   reached and is conforming; one that claims a mode it did not reach is not.
+
+That second MUST is the load-bearing one, because the failure is silent: a file
+whose `durability_achieved` says `full` when only a page-cache flush happened
+looks perfect until the power goes out. Requesting `full` and recording `sync` is
+correct behaviour on any platform or runtime that cannot do better — including
+one whose standard library exposes no device-level flush at all.
+
+*Non-normative — the platform mapping as of writing.* Implementations are
+expected to consult their own platform documentation; this table is guidance and
+will age.
 
 | platform | `sync` | `full` |
 |---|---|---|
-| Linux | `fdatasync(2)` | `fdatasync(2)` — Linux exposes no stronger portable call, so `full` and `sync` coincide; an implementation MUST record `sync` in `durability_achieved` rather than claim `full` |
+| Linux | `fdatasync(2)` | `fdatasync(2)` — Linux exposes no stronger portable call, so `full` and `sync` coincide, and `durability_achieved` should read `sync` |
 | macOS / iOS | `fsync(2)` | `fcntl(fd, F_FULLFSYNC)` — **`fsync` alone does not flush the drive cache** |
 | Windows | `FlushFileBuffers` | `FlushFileBuffers` reaches the drive on a handle opened **without** `FILE_FLAG_NO_BUFFERING`; `full` and `sync` coincide here too |
-| Android | `fsync(2)` | `fsync(2)` + `FileChannel.force(true)` |
+| Android | `fsync(2)` | `fsync(2)`, plus whatever device-level flush the runtime exposes |
 
-The mode actually achieved is recorded in `durability_achieved`. An
-implementation MUST record what it really performed, not what was requested.
-
-**A Dart implementation cannot reach `F_FULLFSYNC` without FFI** and MUST
-therefore report `sync` as its ceiling on Darwin rather than claim `full`.
+A runtime that reaches these primitives only through a foreign-function
+interface, or not at all, reports the mode it reached under rule 2. That is a
+capability difference, not a conformance failure, and no requirement here is
+written against a particular language.
 
 `os` and `none` never risk structural corruption; they risk losing recent
 batches. That property comes from append-only and copy-on-write, and is worth

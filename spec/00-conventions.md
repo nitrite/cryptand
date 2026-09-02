@@ -10,6 +10,45 @@ MUST / MUST NOT / SHOULD / SHOULD NOT / MAY carry their RFC 2119 meanings. A
 conforming implementation is one that passes the conformance vectors for the
 levels it claims (`11-conformance.md`).
 
+### 1.1 What may and may not be normative
+
+**A normative requirement in these documents MUST be satisfiable by any language
+with the primitives of §3 and §4.** That is the whole proposition: an SDK
+written tomorrow reaches these files by implementing one document.
+
+The line is not "no algorithms" — it is *what the requirement constrains*:
+
+| constrains | status | examples |
+|---|---|---|
+| **the bytes** | normative, fully specified, named down to the parameter | CKE, CVE, CFH-64, CRC-32C, XChaCha20-Poly1305, Argon2id, HKDF-SHA256, the blocked-Bloom probe sequence, every page and header layout |
+| **the host runtime** | a **declared capability** (`11-conformance.md` §1.1, §1.2), never a bare MUST | thread counts, flush primitives, memory budgets, scheduling |
+| **why a rule exists** | non-normative | "this replaces Java's `IndexEntryKey`", frame budgets, battery |
+
+**Naming an algorithm is the opposite of a language dependency.** A format that
+said "use a memory-hard KDF" rather than Argon2id with its parameters would have
+two SDKs derive different keys from one password and neither able to open the
+other's file. Every algorithm above is a published standard with implementations
+in every mainstream language, and each is specified here to the bit for exactly
+that reason.
+
+What is *not* permitted is a MUST an implementation cannot satisfy because of
+its language or platform. Where a real platform difference exists, state the
+**obligation** in language-neutral terms and let the implementation declare what
+it achieved:
+
+> An implementation MUST use the strongest durable-flush primitive its platform
+> provides, and MUST record what it actually performed.
+
+not
+
+> ~~A Dart implementation cannot reach `F_FULLFSYNC` without FFI and MUST
+> therefore report `sync` on Darwin.~~
+
+Naming a language as an **example** of a class is fine and often clearer —
+§7's "a language without a native 64-bit integer (JavaScript) MUST use an exact
+representation" binds the class, not the example. Naming a language as the
+**subject** of a requirement is not.
+
 ## 2. Names
 
 | Term | Meaning |

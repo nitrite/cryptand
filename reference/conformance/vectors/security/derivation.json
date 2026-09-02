@@ -58,8 +58,50 @@
     },
     "wrap_aad": "database_uuid || slot_index:u8"
   },
-  "not_implemented": [
-    "XChaCha20-Poly1305 -- see REPORT.md",
-    "Argon2id -- see REPORT.md"
-  ]
+  "argon2id": {
+    "note": "RFC 9106 section 5.3, reproduced by this implementation. Carried here so another SDK checks its KDF against the same bytes rather than against this implementation.",
+    "version": 19,
+    "type": "Argon2id (y = 2)",
+    "params": {
+      "memory_kib": 32,
+      "passes": 3,
+      "parallelism": 4,
+      "tag_length": 32
+    },
+    "password": "0101010101010101010101010101010101010101010101010101010101010101",
+    "salt": "02020202020202020202020202020202",
+    "secret": "0303030303030303",
+    "associated_data": "040404040404040404040404",
+    "h0": "2889de487eb42ae500c0007ed9252f1069eadec40d5765b485de6dc2437a67b8546a2f0acc1a0882db8fcf74714b472e94df421a5da1112ffa11434370a1e997",
+    "tag": "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+  },
+  "profile_costs": {
+    "note": "spec/14-security.md section 3.2. Present so an SDK can check it derives the same KEK at each profile cost, and so the numbers have one machine-readable home.",
+    "mobile": {
+      "t_cost": 3,
+      "m_cost_kib": 65536,
+      "parallelism": 1
+    },
+    "tablet": {
+      "t_cost": 3,
+      "m_cost_kib": 131072,
+      "parallelism": 2
+    },
+    "desktop": {
+      "t_cost": 4,
+      "m_cost_kib": 262144,
+      "parallelism": 4
+    },
+    "server": {
+      "t_cost": 4,
+      "m_cost_kib": 262144,
+      "parallelism": 4
+    },
+    "writer_floor": {
+      "t_cost": 2,
+      "m_cost_kib": 16384,
+      "parallelism": 1
+    }
+  },
+  "not_implemented": []
 }

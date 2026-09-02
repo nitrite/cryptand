@@ -626,11 +626,15 @@ MUST NOT serialize compaction behind the write path.
 `compaction_step_bytes` (profile default: 256 KiB on `mobile`), between which it
 can yield.**
 
-This is not a nicety. On Flutter the database frequently shares an isolate with
-the UI, and a 16 ms frame budget means a compaction that runs to completion
-before yielding drops frames. A single-threaded implementation MUST interleave
-compaction steps with foreground work and MUST respect
-`max_foreground_stall_ms` (profile default: **8 ms** on `mobile`).
+This is not a nicety. Wherever the database shares its execution context with a
+UI — which is the normal arrangement for an embedded database on a phone, and is
+unavoidable on a runtime with no threads to move it to — a compaction that runs
+to completion before yielding drops frames, and a dropped frame is visible in a
+way a throughput difference is not. An implementation that cannot run compaction
+concurrently with foreground work MUST interleave compaction steps with it and
+MUST respect `max_foreground_stall_ms` (profile default: **8 ms** on `mobile`).
+The bound is a profile constant rather than a framework's number, so the
+requirement holds without naming one.
 
 A step boundary is any point between two output leaf pages. Because segments are
 built bottom-up from a sorted stream, the partially built output is just a

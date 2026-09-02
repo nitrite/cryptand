@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:cryptand/src/argon2.dart';
 import 'package:cryptand/src/catalog.dart';
 import 'package:cryptand/src/cke.dart';
 import 'package:cryptand/src/container.dart';
@@ -415,10 +416,60 @@ void main() {
       expect((k['size']! as int) * (k['count']! as int), 576);
     });
 
-    test('what is not implemented is declared', () {
-      final missing = (v['not_implemented']! as List).join(' ');
-      expect(missing, contains('XChaCha20-Poly1305'));
-      expect(missing, contains('Argon2id'));
+    test('the RFC 9106 Argon2id vector reproduces', () {
+      // The vector is the RFC's, not this implementation's: another SDK checks
+      // its KDF against these bytes rather than against this code, which is
+      // the whole argument of spec/00-conventions.md section 1.1.
+      final a = v['argon2id']! as Map<String, Object?>;
+      final p = a['params']! as Map<String, Object?>;
+      final r = argon2id(
+        password: unhex(a['password']! as String),
+        salt: unhex(a['salt']! as String),
+        secret: unhex(a['secret']! as String),
+        associatedData: unhex(a['associated_data']! as String),
+        memoryKiB: p['memory_kib']! as int,
+        passes: p['passes']! as int,
+        parallelism: p['parallelism']! as int,
+        tagLength: p['tag_length']! as int,
+      );
+      expect(hex(r.h0), a['h0']);
+      expect(hex(r.tag), a['tag']);
+      expect(a['version'], kArgon2Version);
+    });
+
+    test('the profile costs match spec/14-security.md section 3.2', () {
+      final c = v['profile_costs']! as Map<String, Object?>;
+      final floor = c['writer_floor']! as Map<String, Object?>;
+      // The floor is what a writer may CREATE with; checkCreateCost enforces it.
+      expect(
+          () => Keyslot.checkCreateCost(floor['t_cost']! as int,
+              floor['m_cost_kib']! as int, floor['parallelism']! as int),
+          returnsNormally);
+      expect(() => Keyslot.checkCreateCost(1, 16384, 1), throwsA(anything));
+      expect(() => Keyslot.checkCreateCost(2, 16383, 1), throwsA(anything));
+      for (final profile in ['mobile', 'tablet', 'desktop', 'server']) {
+        final m = c[profile]! as Map<String, Object?>;
+        expect(
+            () => Keyslot.checkCreateCost(m['t_cost']! as int,
+                m['m_cost_kib']! as int, m['parallelism']! as int),
+            returnsNormally,
+            reason: '$profile must be at or above the writer floor');
+      }
+    });
+
+    test('nothing in spec/14-security.md section 2 is undeclared or absent', () {
+      // This assertion used to read the other way -- it asserted that
+      // XChaCha20-Poly1305 and Argon2id were *missing*, and it kept passing
+      // for a whole phase after the AEAD landed, because the generator's list
+      // went stale and the test enforced the staleness. A test that asserts
+      // what is absent rots into asserting what is present.
+      //
+      // It now asserts the invariant that actually matters: all four
+      // primitives are implemented and each reproduces a published vector,
+      // which the tests above check one by one.
+      expect(v['not_implemented'], isEmpty);
+      expect(v['argon2id'], isNotNull);
+      expect(v['hkdf_rfc5869_case1'], isNotNull);
     });
   });
 

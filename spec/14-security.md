@@ -72,9 +72,16 @@ cipher does, and they hold even with encryption switched off:
 
 ## 2. Cryptographic primitives
 
-Exactly four, chosen so that three independent implementations can all get them
-right. Every one is in the JDK or a mainstream library for Java, has a
-maintained pure-Dart implementation, and is in a widely-audited Rust crate.
+Exactly four, chosen so that independent implementations can all get them right.
+Every one is a **published standard with a specified test-vector set**, which is
+the property that matters: an implementation is checked against the vectors, not
+against another implementation. All four have widely-used implementations across
+mainstream languages, and all four are small enough to write from the standard
+where one is not available — which is what makes them a portability asset rather
+than a dependency. Naming them is what `00-conventions.md` §1.1 requires: a
+format that said "a memory-hard KDF" instead of Argon2id with its parameters
+would have two SDKs derive different keys from one password and neither able to
+open the other's file.
 
 | purpose | primitive | why this one |
 |---|---|---|
@@ -152,6 +159,35 @@ key.
 A writer MUST reject `t_cost < 2`, `m_cost_kib < 16384` or `parallelism < 1` when
 *creating* a keyslot. On *open* it MUST use whatever the slot says — the
 superblock MAC (§6) is what prevents an attacker weakening those numbers.
+
+**The targets in that table assume a native Argon2id and, above `mobile`,
+parallel lanes.** Measured on a pure-Dart implementation (RFC 9106-verified,
+`reference/dart/cryptand/bench/p11_encryption.dart`, Apple M2 Pro,
+single-threaded): the memory-filling core runs at ~473 MiB/s, giving 405 ms for
+the `mobile` row and 2183 ms for `desktop` — against targets of ~250 ms and
+~500 ms. Native implementations run roughly 3–6× faster and parallelise lanes,
+which is what the table was costed against.
+
+This matters most exactly where it is least convenient: **`mobile` is the
+profile whose rationale is a phone UI, it is where an interpreted or JIT runtime
+is most likely, and it is `p = 1`, so there are no lanes to parallelise.** An
+implementation that cannot reach its profile's target has three conforming
+options, in order of preference:
+
+1. **Use `kdf = 0` with a platform keystore.** On a phone the OS keychain is
+   hardware-backed and is a better answer than any KDF the process can run: the
+   32 supplied bytes are the KEK, and the whole cost disappears. §3.3 already
+   defines this path.
+2. **Lower `t_cost` toward the floor of 2 when *creating*, keeping
+   `m_cost_kib` high.** Memory hardness is the property being bought; passes
+   are a linear multiplier on both the defender and the attacker, so trading
+   passes costs less than trading memory.
+3. **Accept the slower open and say so.** A one-time cost at open is the
+   honest failure mode, and `13-operations.md` §6 exposes it.
+
+What an implementation MUST NOT do is any of this **on open**: the parameters
+then come from the file, and deriving under different ones yields a different
+KEK and reports "wrong password" for a correct one.
 
 ### 3.3 Keyslots
 
@@ -665,14 +701,22 @@ are for telling application roles apart.
 
 ## 11. Key material in memory
 
-The one place three languages diverge in a way that matters.
+**The requirements here are stated against language *properties*, not against
+languages** (`00-conventions.md` §1.1). Every implementation evaluates its own
+runtime against them; the worked examples below the rules are not requirements.
 
 | | requirement |
 |---|---|
 | **All** | Keys, passwords and derived subkeys MUST be held in mutable byte arrays and zeroed when no longer needed. An implementation MUST zero the master key and every subkey on `close()`. |
-| **Java** | `String` is immutable and interned; a password in a `String` persists until GC and may survive in a heap dump indefinitely. The API MUST accept `char[]` or `byte[]` and MUST zero it after use. `String` password parameters MUST NOT be offered. |
-| **Dart** | `String` is likewise immutable with no zeroing. Take a `Uint8List`; a Dart implementation MUST document that it cannot guarantee the VM has not copied it, because it cannot. |
-| **Rust** | Wrap key material in a type that zeroes on drop (`zeroize`) and prevent it being `Debug`-printed or cloned casually. |
+| **A runtime whose string type is immutable or interned** | MUST NOT offer a password parameter of that type. The API MUST accept a mutable byte or character sequence and MUST zero it after use. An immutable string holding a password survives until collection and may persist in a heap dump indefinitely, which no amount of care at the call site can undo. |
+| **A runtime that may relocate or copy heap objects** (a moving or copying garbage collector) | MUST document that zeroing is best-effort, because a copy the program never sees cannot be zeroed. Documenting it is the requirement; achieving what the runtime forbids is not. |
+| **A runtime with deterministic destruction** | SHOULD bind key material to a type that zeroes on release and that cannot be debug-printed or copied implicitly. |
+
+*Non-normative — how those rules land on the three current SDKs.* Java: `String`
+is immutable and interned, so take `char[]` or `byte[]`. Dart: `String` is
+likewise immutable with no zeroing, so take a `Uint8List`, and document the
+best-effort caveat the VM imposes. Rust: `zeroize` on drop, and keep the type out
+of `Debug` and `Clone`.
 
 Two more, both MUST:
 

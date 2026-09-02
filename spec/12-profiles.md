@@ -83,9 +83,11 @@ most.
 
 The rest follows from memory and thermals:
 
-- **One memtable shard, one compaction thread.** Flutter's database usually
-  shares an isolate with the UI; Dart has no threads to shard across, so
-  sharding would cost memory and buy nothing.
+- **One memtable shard, one compaction thread.** An embedded database on a
+  phone usually shares its execution context with the UI, and on a runtime with
+  no shared-memory threads there is nothing to shard *across* — sharding would
+  cost memory and buy nothing. (Flutter is the worked example; the constant is
+  chosen for the shape, not the framework.)
 - **`overlap_bound = 1`** — tiered levels are fully range-partitioned, so a
   point lookup touches exactly one segment per level. Read tail over throughput.
 - **Small segments (2 MiB) and small compaction steps (256 KiB)** so compaction
@@ -151,10 +153,12 @@ This binds:
 - `compact()` and other maintenance, which MUST be incremental and resumable;
 - segment builds during a memtable flush.
 
-On `mobile` the budget is **8 ms** — half of a 60 Hz frame — because on Flutter
-the database and the UI frequently share an isolate. An engine that stalls
-120 ms to finish a compaction is, from the user's side, indistinguishable from a
-janky app, and no amount of throughput compensates.
+On `mobile` the budget is **8 ms** — half of a 60 Hz frame — because an embedded
+database on a phone frequently shares its execution context with the UI. An
+engine that stalls 120 ms to finish a compaction is, from the user's side,
+indistinguishable from a janky app, and no amount of throughput compensates. The
+number comes from the frame, which every UI toolkit has; it is not a property of
+any one of them.
 
 Meeting the budget is what §5.2 of `04-segments.md` exists for: every long
 operation in this format decomposes into bounded steps, because every long
