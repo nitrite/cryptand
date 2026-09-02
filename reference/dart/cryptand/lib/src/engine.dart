@@ -14,6 +14,7 @@ library;
 import 'dart:typed_data';
 
 import 'bytes.dart';
+import 'changefeed.dart';
 import 'checkpoint.dart';
 import 'cke.dart';
 import 'cow.dart';
@@ -202,6 +203,7 @@ final class Engine {
         ) {
     manifest = Manifest(store);
     checkpoints = CheckpointStore(store);
+    changeFeed = ChangeFeed(store);
   }
 
   final int pageSize;
@@ -254,6 +256,23 @@ final class Engine {
 
   final ValueLog vlog;
 
+  /// `database_uuid` (`spec/01-container.md` §2).
+  ///
+  /// Load-bearing beyond identity: `spec/14-security.md` §3.4 derives every
+  /// subkey with it as the HKDF salt, so two files sharing a uuid share a
+  /// content key — which is why `13-operations.md` §2.1 forbids a backup from
+  /// copying it, with one stated exception.
+  Uint8List databaseUuid = Uint8List(16);
+
+  /// `writer_id` (`spec/01-container.md` §2) — accumulated into the `writers`
+  /// list of `05-catalog.md` §7.
+  String writerId = 'cryptand-dart';
+
+  /// Every distinct writer that has modified this file (`05-catalog.md` §7).
+  /// "A genuinely useful field the moment a file is being handed between SDKs,
+  /// and the first thing to look at when a file misbehaves."
+  final List<String> writers = ['cryptand-dart'];
+
   /// The file's page space. The manifest lives in it; segment extents do not,
   /// which `REPORT.md` §5 states as a limit of this implementation.
   final PageStore store;
@@ -263,6 +282,14 @@ final class Engine {
 
   /// Tree 8, `spec/13-operations.md` §1.
   late final CheckpointStore checkpoints;
+
+  /// Tree 9, `spec/13-operations.md` §7. Off by default: it costs a write per
+  /// mutation and most databases do not sync.
+  late final ChangeFeed changeFeed;
+
+  /// Trees whose mutations are appended to the feed —
+  /// `params.change_feed = true` (`05-catalog.md` §3.1).
+  final Set<int> changeFeedTrees = {};
 
   // -------------------------------------------------------------------------
   // Sequencing and visibility — `spec/10-transactions.md` §1, §2
@@ -640,7 +667,23 @@ final class Engine {
       ..uvar(endCke.length)
       ..bytes(endCke);
     _memtable[ik] = _Pending(ik, ValueKind.inline, w.takeBytes());
+    _feed(treeId, seq, 'range_delete', startCke, start);
     if (_memtable.length >= memtableEntries) flush();
+  }
+
+  /// §7: "Entries are appended in the same batch as the mutation, so the feed
+  /// is exactly consistent with the data." There is no window in which a
+  /// change exists and its feed entry does not, and none in which the reverse
+  /// is true — which is the only property a replication layer can build on.
+  void _feed(int treeId, int seq, String op, Uint8List cke, CValue key) {
+    if (!changeFeedTrees.contains(treeId)) return;
+    changeFeed.append(Change(
+      treeId: treeId,
+      seq: seq,
+      op: op,
+      key: cke,
+      id: key,
+    ));
   }
 
   /// Writes a tombstone.
@@ -658,6 +701,7 @@ final class Engine {
     final ik = internalKey(treeId, cke, seq, Op.put);
     _memtable[ik] = _Pending(ik, ValueKind.empty, Uint8List(0));
     _writtenAt[Transaction.keyOf(treeId, cke)] = seq;
+    _feed(treeId, seq, 'put', cke, key);
     if (_memtable.length >= memtableEntries) flush();
   }
 
@@ -718,6 +762,7 @@ final class Engine {
     }
     _memtable[ik] = _Pending(ik, kind, stored, expiryMs: expiryMs);
     _writtenAt[Transaction.keyOf(treeId, cke)] = seq;
+    _feed(treeId, seq, op == Op.delete ? 'delete' : 'put', cke, key);
     if (_memtable.length >= memtableEntries) flush();
   }
 

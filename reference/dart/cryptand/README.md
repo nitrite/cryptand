@@ -1,4 +1,4 @@
-# Cryptand — Dart reference implementation (phase 9)
+# Cryptand — Dart reference implementation (phase 10)
 
 Pure Dart implementation of the Cryptand File Format, CFF v1.0.
 
@@ -7,7 +7,7 @@ the spec disagree, the spec wins and this code is wrong
 (`spec/11-conformance.md` §7).
 
 Read **[REPORT.md](REPORT.md)** first: it states what is implemented, the
-thirty-two spec defects this work has found across nine phases, and every place a
+thirty-two spec defects this work has found across ten phases, and every place a
 measurement differs from a claim in `../../design/`.
 
 ## Quick start
@@ -44,6 +44,9 @@ dart pub get && dart test
 | `lib/src/verify.dart` | **the verification pass** (`spec/04` §11, `spec/01` §9) |
 | `lib/src/repair.dart` | **repair** — the manifest rebuilt from segment headers (`spec/13` §3) |
 | `lib/src/profile.dart` | **device profiles**, host hints, the stall budget (`spec/12`) |
+| `lib/src/backup.dart` | **backup** — full, incremental, and the uuid rules (`spec/13` §2) |
+| `lib/src/changefeed.dart` | **the change feed** (`spec/13` §7) |
+| `lib/src/spaceapi.dart` | **the space and key-management API** (`spec/13` §5) |
 | `lib/src/catalog.dart` | **the catalog** — descriptors, reserved trees, attributes (`spec/05`) |
 | `lib/src/index.dart` | **secondary indexes** — entry derivation and the §7 scans (`spec/06`) |
 | `lib/src/database.dart` | collections and repositories over the engine |

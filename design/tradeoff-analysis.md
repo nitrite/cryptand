@@ -808,6 +808,39 @@ That second item is not a spec defect — §6 lists what to expose and says noth
 about what to do when you cannot. But it is worth a sentence in §6, because "MUST
 expose" invites exactly the failure it got here.
 
+### 8.9 Phase 10 — chapter 13 finished, and no defects
+
+Phase 10 built the rest of `13-operations.md` that a single-process
+implementation can build: §2 (backup, full and incremental), §5 (the
+compaction, space and key-management API) and §7 (the change feed). Nineteen
+tests, green on the first run, **no defects found**.
+
+That is worth a sentence rather than silence, because it is the second time
+(after phase 6's range deletes and TTL) that a chapter has gone in clean, and
+the two have something in common: **both are sections that were written once and
+not revised under review.** §8.6 already noted the pattern; phase 10 is more
+evidence for it. The chapters that have produced defects — `04` §3–§6, `06` §7,
+`10` §5, `13` §9, `14` §3.2 — are the ones that were rewritten between review
+rounds, and the rewriting is where the unwritten assumptions entered.
+
+Three of §2's rules are worth recording as *implemented* rather than merely
+described, because each is a MUST whose violation is silent:
+
+- a backup MUST NOT copy the source's `database_uuid` — and the reason is not
+  tidiness: `14-security.md` §3.4 derives every subkey with the uuid as HKDF
+  salt, so two files sharing one **share a content key**, and a nonce that
+  repeats across them is a real collision;
+- the **ciphertext copy is the exception**, for exactly that reason — it is the
+  same cryptographic object, so it keeps the binding, and therefore MUST NOT be
+  opened for writing while the source is, since two writers allocating from one
+  `next_nonce` lineage collide;
+- an unencrypted backup of an encrypted database is a **silent downgrade** and
+  MUST be refused unless asked for by name.
+
+`13-operations.md` §8, multi-process readers, is the one section left. It cannot
+be built here in any meaningful sense: the whole content is a lock sidecar
+coordinating *processes*, and this implementation has no file under it.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

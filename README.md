@@ -189,20 +189,22 @@ Read in this order.
 
 ## Status
 
-**Phases 1 through 9 of the reference implementation are built**, in pure Dart,
-at [`reference/dart/cryptand/`](reference/dart/cryptand/): the container, CVE,
-CKE, segments and cursors, the segment filter, the two-tier value log with
-compaction and clustered promotion, the security chapter including a verified
-XChaCha20-Poly1305, the **level policy**, the **manifest as a copy-on-write
-tree**, the **catalog**, **secondary indexes**, and — new in phase 4 —
-**BLAKE2b and Argon2id**, both verified against their RFCs' published vectors,
-which completes `spec/14-security.md`, **`spec/10-transactions.md` apart from its concurrent write protocol**, and — new in
-phase 6 — **range deletes and TTL** (which complete `spec/04-segments.md`) plus,
-from `spec/13-operations.md`, **corruption containment, the required metrics,
-checkpoints, planner statistics and repair**, plus **the verification pass** and
-**`spec/12-profiles.md`**. **440 tests, no skips**, and a conformance vector set at
+**Phases 1 through 10 of the reference implementation are built**, in pure Dart,
+at [`reference/dart/cryptand/`](reference/dart/cryptand/) — **459 tests, no
+skips**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
+
+| chapter | status |
+|---|---|
+| `00` conventions, `01` container, `02` CVE, `03` CKE | complete |
+| `04` segments | complete except §5.1's parallel compaction, which needs threads |
+| `05` catalog, `06` indexes | complete |
+| `10` transactions | complete except §2, the concurrent write protocol — Dart has no shared-memory threads |
+| `11` conformance, `12` profiles | complete |
+| `13` operations | complete except §8, multi-process readers |
+| `14` security | complete, Argon2id and BLAKE2b verified against RFC 9106 and RFC 7693 |
+| `07` full text, `08` spatial, `09` vector | not started — the optional feature levels |
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
 Building the code has found **thirty-two defects in these documents** — a headline

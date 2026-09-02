@@ -1,15 +1,68 @@
-# Cryptand reference implementation — phase 9 report
+# Cryptand reference implementation — phase 10 report
 
 **Implementation:** pure Dart 3.12, `reference/dart/cryptand/`
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 440 tests green, **no skips**, `dart analyze` clean, conformance vectors byte-exact and self-verifying, `dart analyze` clean, conformance vectors byte-exact and self-verifying
+**Status:** 459 tests green, **no skips**, `dart analyze` clean, conformance vectors byte-exact and self-verifying, `dart analyze` clean, conformance vectors byte-exact and self-verifying
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-5 Phase 10 — chapter 13 finished
+
+Built the rest of `13-operations.md` that a single-process implementation can:
+
+| | |
+|---|---|
+| **§2 backup** | online full and incremental, with the uuid rule, the two encrypted modes and the verify-before-success requirement |
+| **§5 space API** | `compactStep`, `collect`, `cluster`, `shrink`, `add_key`, `remove_key`, `crypto_erase` — all incremental, which §5's closing line requires and which phase 9's stepwise compaction made possible |
+| **§7 change feed** | tree 9, per-tree opt-in, appended in the same batch as the mutation |
+
+Nineteen tests, green on the first run, **no defects found**.
+
+### Three MUSTs that are now enforced rather than described
+
+Each is silent when violated, which is why they are tested rather than trusted:
+
+- **A backup MUST NOT copy the source's `database_uuid`.** Not tidiness:
+  `14-security.md` §3.4 derives every subkey with the uuid as HKDF salt, so two
+  files sharing one **share a content key**, and a nonce repeating across them
+  is a real collision. `Backup.full` refuses.
+- **The ciphertext copy is the exception, for exactly that reason** — it is the
+  same cryptographic object, so it keeps the binding. The result carries the
+  warning §2.1 requires: it MUST NOT be opened for writing while the source is,
+  because two writers allocating from one `next_nonce` lineage collide.
+- **An unencrypted backup of an encrypted database is a silent downgrade** and
+  is refused unless asked for by name, then reported in the result.
+
+### The incremental backup property, measured
+
+§2.2: "an incremental backup's size is proportional to what changed, not to
+what the changes touched." Tested directly — a second backup with nothing
+changed copies **zero** segments, and after touching 20 of 600 documents the
+delta copies strictly fewer segments than the full backup did. That is what
+immutable segments give and an in-place B-tree cannot.
+
+### A second clean chapter, and what the two have in common
+
+This is the second time a chapter has gone in with no defects — phase 6's range
+deletes and TTL were the first. Both are sections **written once and not revised
+under review**. The chapters that have produced defects are the ones rewritten
+between review rounds, which is where the unwritten assumptions entered.
+`design/tradeoff-analysis.md` §8.9 records it as evidence rather than as a
+theory.
+
+### What is left of chapter 13
+
+**§8, multi-process readers.** It cannot be built here in any meaningful sense:
+the content is a lock sidecar coordinating *processes*, and this implementation
+has no file under it. Modelling it in memory would test the data structure and
+none of the property.
 
 ---
 
@@ -657,7 +710,7 @@ and the filter pages live in the extent.
 | **`06-indexes`** | **complete** — the §1 layout, §3 null/sparse, §4 arrays and the 1024 cap, §5 field paths, the §7 scans, §8 same-batch maintenance |
 | `14-security` | **complete**, Argon2id included and vector-verified |
 | **`10-transactions`** | **complete except §2** — the concurrent write protocol needs threads Dart does not have |
-| **`13-operations`** §1 checkpoints, **§3 repair**, §4 containment, §6 metrics, §9 statistics | **complete**; §2 backup, §5 API, §7 change feed, §8 multi-process not started |
+| **`13-operations`** | **complete except §8**, multi-process readers, which needs real files and processes |
 | **`12-profiles`** | **complete**, §4's budget measured and **met** (§0.-4) |
 | **`01-container` §9 / `04-segments` §11** — the verification pass | **complete** for the invariants this engine can express |
 | `07`–`09`, `12` | not started |
@@ -666,6 +719,9 @@ New in phase 3: `lib/src/cow.dart` (copy-on-write B+trees),
 `lib/src/manifest.dart` (tree 6), `lib/src/catalog.dart`, `lib/src/index.dart`,
 `lib/src/database.dart`, `bench/p10_read_tail.dart`, and the
 `index/entries.json` and `catalog/trees.json` vectors.
+
+New in phase 10: `lib/src/backup.dart`, `lib/src/changefeed.dart`,
+`lib/src/spaceapi.dart`, `test/backup_feed_test.dart`.
 
 New in phase 9: `CompactionJob` and the stepwise driver in `lib/src/engine.dart`,
 plus honest reporting in `lib/src/metrics.dart`.
@@ -690,7 +746,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 `conformance/vectors/security/derivation.json`, and `deriveKek` /
 `unlockWithPassword` in `lib/src/security.dart`.
 
-**440 tests**, up from 259 at the end of phase 2. **No skips.**
+**459 tests**, up from 259 at the end of phase 2. **No skips.**
 
 ---
 
@@ -748,9 +804,10 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 6. ~~Range deletes and TTL.~~ **Done** (§0.-1). ~~Checkpoints and planner
    statistics.~~ **Done** (§0.-2). What is left of `13` is backup, repair, the
    compaction API, the change feed and multi-process readers; chapters `07`–`09`
-   are untouched. ~~`04` §5.2's stepwise compaction.~~ **Done** (§0.-4). The
-   highest-value remaining item is now `10-transactions.md` §2 and prediction
-   P3, both of which need threads.
+   are untouched. ~~`04` §5.2's stepwise compaction.~~ **Done** (§0.-4).
+   ~~The rest of `13`.~~ **Done** (§0.-5) except §8. The highest-value remaining
+   items are now `10-transactions.md` §2 with prediction P3, and chapters
+   `07`–`09` — the first needs threads, the other three are new subsystems.
 
 ---
 
@@ -760,7 +817,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 cd reference/dart/cryptand
 dart pub get
 dart analyze                              # clean
-dart test                                 # 440 tests, no skips
+dart test                                 # 459 tests, no skips
 
 dart run tool/generate_vectors.dart       # regenerates ../../conformance/vectors
 dart test test/conformance_test.dart      # verifies them

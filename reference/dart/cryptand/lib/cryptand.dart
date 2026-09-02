@@ -35,6 +35,8 @@ export 'src/cke.dart'
 export 'src/compare.dart' show compareNumeric, compareValues, isOrdered;
 export 'src/container.dart'
     show Feature, PageFlags, PageHeader, PageType, Profile, Sb, Superblock, TreeId;
+export 'src/backup.dart' show Backup, BackupMode, BackupResult;
+export 'src/changefeed.dart' show Change, ChangeFeed;
 export 'src/catalog.dart'
     show
         Attributes,
@@ -120,6 +122,7 @@ export 'src/profile.dart'
         ProfileBehaviour,
         StallSample;
 export 'src/repair.dart' show EngineRepair, RepairReport;
+export 'src/spaceapi.dart' show EngineSpaceApi, MaintenanceStep;
 export 'src/stats.dart'
     show HistogramBucket, HyperLogLog, IndexStats, StatsBuilder;
 export 'src/segment.dart'
