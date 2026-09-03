@@ -1002,6 +1002,86 @@ it `data` and made `grep` treat it as binary and print nothing. A search for the
 filter generator returned no matches and very nearly produced a wrong finding —
 that the filter vector was not generated at all. The literals are now escapes.
 
+### 8.14 Phase 16 — P3 measured, and a claim that belongs to the host
+
+Phase 16 built `reference/rust/cryptand-write`: `10-transactions.md` §2's
+writer and committer, §2.2's requirements and §2.3's three ordering invariants,
+over real files with real threads. It closes the item every report since phase 5
+has carried — Dart has no shared-memory threads, so **P3 could not be measured
+at all**. Twelve tests; the interesting ones are the three invariants, each of
+which produces a database that opens cleanly and is wrong when violated.
+
+**P3's own-scaling half is CONFIRMED, and better than predicted — in a durable
+mode.** 1 → 32 writer threads, 512-byte values, `sync`:
+
+| threads | disjoint | scale | overlapping | scale | p50 |
+|---|---|---|---|---|---|
+| 1 | 388 /s | 1.00× | 347 /s | 1.00× | 3.0 ms |
+| 4 | 915 | 2.36× | 738 | 2.13× | 4.2 ms |
+| 8 | 1 782 | 4.59× | 1 696 | 4.89× | 4.3 ms |
+| 16 | 3 184 | 8.20× | 2 891 | 8.33× | 5.1 ms |
+| 32 | 5 749 | **14.80×** | 5 439 | **15.68×** | 5.6 ms |
+
+It does not plateau at the 8–16 threads the prediction expected, and p50 stays
+flat while throughput rises 15×: that is §2.4's group commit, one barrier
+amortized over a growing commit group. The overlapping case tracks the disjoint
+one within 6 %, so memtable-shard collisions are not a factor at this width.
+
+| | defect | fix |
+|---|---|---|
+| ⚠ 44 | **P3 does not name a durability mode, and the answer inverts with it.** Under `os` — the same protocol with the barrier removed — throughput peaks at **two** threads and falls to 0.84× by 32. Both numbers are honest measurements of "insert throughput versus writer threads"; they disagree because in a durable mode the shared cost is a barrier that amortizes, and in a non-durable one it is the host's write path, which does not | P3 states the durable configuration, and reports the non-durable one as a separate line rather than as the same prediction |
+| ⚠ 45 | **§2.1 credits the design with a property of the host.** "N writers drive N independent append streams into the device" is asserted as a consequence of having no write-ahead log. Measured on macOS/APFS at 512-byte records, concurrent `pwrite` at disjoint offsets in one file runs **380 757/s at one thread and 97 542/s at 32** — and spreading the identical writes over **one file per thread** degrades the same way, 629 266 → 159 039. So the format's one-file rule is not the cause, and the parallel-stream claim is a statement about the operating system's write path, which `00-conventions.md` §1.1 says must be a declared capability rather than an asserted property | §2.1 states the *obligation* — never funnel writers through one journal offset or one shared buffer — and reports what the design actually buys where the write path does not scale: the group-commit amortization above |
+| 46 | §2.1's cost table says the shared counter is "~20 ns even at 64 threads". Measured: 11.1 ns at 1 thread, 51.9 at 8, **59.9 at 64** | the figure is 3× optimistic and now says so. It changes nothing — 60 ns is 0.02 % of a batch — and the *shape* of the claim survives, which is the point of measuring it |
+
+**Defect 45 is the phase's real result, and it is the same shape as defect 28.**
+Phase 4 found a normative MUST written against a language ("a Dart
+implementation cannot reach `F_FULLFSYNC`…"); this is a performance claim
+written against an operating system. §1.1's rule was formulated for the first
+and applies unchanged to the second: state the obligation, let the
+implementation declare what it achieved. What makes this one costlier to have
+missed is that the parallel-stream argument is the **headline** of the write
+design — it is the sentence that justifies having no write-ahead log at all.
+
+The justification survives, but for a different reason than the one written
+down. With no WAL there is no journal offset to serialize on and no group-commit
+leader, so a commit group's cost is one barrier over *n* batches no matter how
+many threads produced them — which is exactly the 14.8× above. The parallel
+streams may or may not materialise, depending on the platform; the absent
+journal is a property of the format and is there on every platform.
+
+**Where the ceiling actually is, decomposed rather than guessed:**
+
+| shared thing | 1 thread | 32 threads | |
+|---|---|---|---|
+| the one `fetch_add` | 11.1 ns | 59.9 ns (at 64) | not the ceiling |
+| the committer handoff — one mutex-guarded queue plus a notify | 35 320 088 /s | 22 601 597 /s | 60–100× above the achieved rate; not the ceiling |
+| `pwrite`, one file | 380 757 /s | 97 542 /s | **the ceiling** |
+| `pwrite`, one file per thread | 629 266 /s | 159 039 /s | the same ceiling, so not the one-file rule |
+
+**And P3's own stated fragility is real, and now has a number on it.** The
+prediction warns: "if the committer becomes the bottleneck (one thread building
+segments for many writers), scaling stops early." This crate builds no segments,
+so the benchmark injects the cost rather than pretending it away — 1 versus 16
+writers under `sync`:
+
+| committer work per batch | scale at 16 writers |
+|---|---|
+| 0 µs | **9.23×** |
+| 25 µs | 8.72× |
+| 100 µs | 6.68× |
+| 400 µs | **3.49×** |
+
+Segment building has to stay under roughly 100 µs per batch for the mitigation
+in §2.1 — each memtable shard flushing its **own** L0 segment, so segment
+building parallelizes too — to be optional rather than required. That mitigation
+is in the format; an implementation still has to do it.
+
+*A note on method, since this project keeps relearning it.* The first version of
+that sweep ran under `os`, where scaling is already flat, so every row read
+about 1× and the knob appeared to do nothing — a control that cannot fail,
+measuring nothing, for the fourth time in this project's benchmarks. The sweep
+belongs in the configuration that scales.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

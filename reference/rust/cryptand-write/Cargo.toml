@@ -1,0 +1,9 @@
+[package]
+name = "cryptand-write"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cryptand-conformance = { path = "../cryptand-conformance" }
+
+[dev-dependencies]

@@ -171,6 +171,7 @@ Read in this order.
 | [`adoption/rollout.md`](adoption/rollout.md) | How the three SDKs get there from here, and how existing files migrate |
 | [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md) | **Reference implementation report (phase 15)** — what is built, the spec defects building it has found, and every measurement against a claim in `design/` |
 | [`reference/rust/cryptand-conformance/`](reference/rust/cryptand-conformance/) | **The second implementation** — an independent Rust reader of the byte layer, written from `spec/` alone, that passes nine of the ten conformance vector groups |
+| [`reference/rust/cryptand-write/`](reference/rust/cryptand-write/) | **The write protocol** — `10-transactions.md` §2 with real threads, where prediction **P3** is measured |
 
 ### Specification chapters
 
@@ -213,16 +214,17 @@ set catches regression, and only a second reader catches misreading.
 | `07` full text | complete — the analyzer against Unicode's suites, `porter2` against Snowball's vocabulary |
 | `08` spatial | complete — ISO WKB, the in-container R-tree, and §4's exact second phase |
 | `09` vector | complete — the durable layout and §8's search contract; the graph *algorithms* are deliberately not in the format |
-| `10` transactions | complete except §2, the concurrent write protocol — Dart has no shared-memory threads |
+| `10` transactions | complete — §1 and §3–§10 in Dart; §2, the concurrent write protocol, in Rust (`reference/rust/cryptand-write`), where P3 measures **14.8×** over 32 writer threads |
 | `11` conformance, `12` profiles | complete |
 | `13` operations | complete except §8, multi-process readers — a lock sidecar coordinating processes |
 | `14` security | complete, Argon2id and BLAKE2b verified against RFC 9106 and RFC 7693 |
 
-**Everything not done needs something this runtime does not have**: threads
-(`10` §2 with prediction P3, `04` §5.1) or separate processes (`13` §8).
+**What is left needs an engine underneath it**: `04` §5.1's parallel compaction
+and `13` §8's multi-process readers. The threads half is done — `10` §2 and P3
+are built and measured in Rust.
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code has found **forty-three defects in these documents** — a headline
+Building the code has found **forty-six defects in these documents** — a headline
 invariant that was literally false, a page header whose field table did not fit
 its own declared size, a nonce rule that did nothing, filter rates quoted from
 the wrong formula, "unknown tags round-trip" that no reader could implement —
@@ -232,10 +234,16 @@ read-tail bound turned out to belong to a read path the prediction never named,
 and the last level's disjointness rule was stated over the wrong key space — a
 levelled level that had quietly stopped being disjoint returned **stale
 versions**, under 338 passing tests, until snapshot retention exposed it. The
-two most recent came from the second implementation: a conformance vector whose
+two before last came from the second implementation: a conformance vector whose
 field name promised more bytes than it carried, in the one structure whose
 failure mode is silent key loss, and a decoder reject rule that both
-implementations followed and neither had read.
+implementations followed and neither had read. The most recent is the write
+design's **headline claim** — "N writers drive N independent append streams into
+the device" — which measurement showed to be a property of the operating
+system's write path rather than of the format, false on at least one mainstream
+platform, and not recoverable by any file layout. The argument for having no
+write-ahead log survives, but the reason is the group-commit barrier that
+amortizes over a whole commit group, not the parallel streams.
 
 **Confirmed by measurement:**
 
@@ -248,6 +256,7 @@ implementations followed and neither had read.
 | **P6** density | CVE:JSON 1 : 1.53 | **1 : 1.70** — denser than claimed |
 | **P11** encryption | ~250–500 ms open | **MISSED on the open half** — 405 ms `mobile` / 2183 ms `desktop` in pure Dart, because the targets assumed a native KDF with parallel lanes; the throughput half needs real storage and stays unmeasured |
 | **P4** mechanism | ~10× for a projection | **11.1×** one field, 6.5× two |
+| **P3** write concurrency | near-linear to 8–16 threads | **14.8×** at 32 writer threads with p50 flat — but **only in a durable mode**; without the barrier it peaks at two threads, and that number measures the host's write path, not this design |
 
 **Still unmeasured, and stated as such:** P2 and P3 — write amplification
 against Fjall and RocksDB, and write concurrency — because they need those

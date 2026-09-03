@@ -210,10 +210,23 @@ benchmark must exercise both.
 | MVStore | one store-wide commit lock |
 | Hive | one box, one isolate |
 
-**Prediction P3.** Insert throughput scales near-linearly with writer threads up
-to the device's useful queue depth (8–16 on NVMe), then becomes device-bound.
-At 16 writer threads: **≥ 2× RocksDB**, **≥ 3× Fjall** as `nitrite-rust`
-configures it, **≥ 5× MVStore**.
+**Prediction P3.** *In a durable mode* (`sync` or `full` — see below for why
+that qualifier is load-bearing), insert throughput scales near-linearly with
+writer threads, because one commit barrier is amortized over a commit group that
+grows with the thread count. At 16 writer threads: **≥ 2× RocksDB**,
+**≥ 3× Fjall** as `nitrite-rust` configures it, **≥ 5× MVStore**.
+
+**The qualifier is not a hedge, and an earlier draft's omission of it made the
+prediction unmeasurable.** Measured on the reference write-protocol
+implementation (`reference/rust/cryptand-write`, macOS/APFS, 512-byte values),
+1 → 32 writer threads: **14.8×** under `sync`, and **0.84×** — that is,
+*negative* scaling past two threads — under `os`. Both are honest measurements
+of "insert throughput versus writer threads". They disagree because the shared
+cost is different: in a durable mode it is a barrier, which amortizes, and in a
+non-durable one it is the host's write path, which on that platform does not
+scale with threads no matter how the writes are laid out. Report the
+non-durable configuration as its own line; it is a measurement of the operating
+system, not of this design.
 
 *Measure:* 1, 2, 4, 8, 16, 32 writer threads inserting disjoint and overlapping
 key ranges; report throughput, p50/p99 latency, and CPU seconds per operation.
@@ -224,6 +237,12 @@ memtable-shard collisions show up.
 building segments for many writers), scaling stops early. The mitigation is in
 the format — each memtable shard flushes its **own** L0 segment, so segment
 building parallelizes too — but an implementation has to actually do that.
+
+Measured, by injecting the per-batch cost a committer that builds segments would
+pay (1 versus 16 writers, `sync`): **9.23×** at zero, 8.72× at 25 µs per batch,
+6.68× at 100 µs, **3.49×** at 400 µs. So the fragility is real and it has a
+budget: segment building above roughly 100 µs per batch makes the parallel-flush
+mitigation mandatory rather than optional.
 
 ## 5. Read cost
 

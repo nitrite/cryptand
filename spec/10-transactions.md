@@ -76,7 +76,7 @@ committer (one, background):
 
 | shared thing | cost |
 |---|---|
-| `next_seq` | one `fetch_add`; ~20 ns even at 64 threads |
+| `next_seq` | one `fetch_add`; measured 11 ns at one thread and **60 ns at 64** — 0.02 % of a batch's cost, and flat from 8 threads up. (An earlier draft said "~20 ns even at 64 threads", which was 3× optimistic.) |
 | `next_nonce` (encrypted files only) | one `fetch_add` per encrypted page or record, same cost, plus one extra superblock write per 2²⁰ allocations (`14-security.md` §4.1) |
 | value-log segment tail | one `fetch_add` to reserve a byte range, then a `pwrite` straight to the reserved offset — no shared buffer, no lock, and no two writers touching the same bytes |
 | memtable shard | independent per shard; a concurrent skip list or a sharded map |
@@ -89,10 +89,31 @@ grow with concurrency.
 **There is no single write-ahead log.** A conventional LSM funnels every writer
 through one sequential journal file, so writers serialize on that file's offset
 and on the group-commit leader. Cryptand's durability records are the value-log
-segments and the L0 segments themselves, of which there are as many as the
-implementation opens — so *N* writers drive *N* independent append streams into
-the device. On NVMe, where a single append stream cannot saturate the device,
-that is the difference between using the hardware and not.
+segments and the L0 segments themselves. The obligation this places on an
+implementation is the normative part, and it is the whole of it:
+
+> An implementation MUST NOT route concurrent writers through a shared write
+> buffer, a shared file offset, or a group-commit leader. A writer reserves a
+> disjoint byte range and writes into it (`04-segments.md` §6.2).
+
+**Two consequences, and they are not equally portable.** The first is a property
+of the format and holds everywhere: a commit group costs **one barrier over *n*
+batches**, however many threads produced them, because there is no journal to
+serialize on and no leader to elect. Measured on the reference write-protocol
+implementation, that is 1 → 32 writer threads at **14.8×** with p50 latency
+flat.
+
+The second — that *N* writers thereby drive *N* independent append streams into
+the device, which on NVMe is the difference between using the hardware and not —
+is a property of the **host's write path**, not of this document, and
+`00-conventions.md` §1.1 forbids stating it as a bare fact. It is false on at
+least one mainstream platform: on macOS/APFS at 512-byte records, concurrent
+positional writes at disjoint offsets fall from 380 757/s at one thread to
+97 542/s at 32, and spreading the identical writes over one file per thread
+degrades the same way — so the container's one-file rule is not the cause and no
+file layout recovers it. Where the write path does scale, the design is in a
+position to use it; where it does not, the first consequence still stands. An
+implementation SHOULD report which it observed.
 
 ### 2.2 Requirements
 

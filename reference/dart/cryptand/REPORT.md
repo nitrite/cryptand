@@ -1,18 +1,109 @@
-# Cryptand reference implementation — phase 15 report
+# Cryptand reference implementation — phase 16 report
 
-**Implementations:** pure Dart 3.12, `reference/dart/cryptand/`; and, since
-phase 15, a second one in Rust, `reference/rust/cryptand-conformance/`
+**Implementations:** pure Dart 3.12, `reference/dart/cryptand/`; a second one in
+Rust that reads the vectors, `reference/rust/cryptand-conformance/` (phase 15);
+and the write protocol, `reference/rust/cryptand-write/` (phase 16)
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 546 Dart tests green, **no skips**, `dart analyze` clean; 41 Rust
-tests green; conformance vectors byte-exact, self-verifying, and — as of phase
-15 — **read by an implementation that did not generate them**
+**Status:** 546 Dart tests green, **no skips**, `dart analyze` clean; 53 Rust
+tests green; conformance vectors byte-exact, self-verifying, and read by an
+implementation that did not generate them. **Every prediction that can be
+measured without a competing engine has now been measured, P3 included.**
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-10 Phase 16 — P3, and a claim that belongs to the host
+
+Phase 16 built `reference/rust/cryptand-write`: `10-transactions.md` §2's writer
+and committer, §2.2's requirements, and §2.3's three ordering invariants, on
+real files with real threads. It closes the item every report since phase 5 has
+carried — **P3 could not be measured in Dart at all**, because Dart has no
+shared-memory threads.
+
+Twelve tests. The three that matter are the ordering invariants, because each
+one produces a database that opens cleanly and is wrong:
+
+- a reserved-but-never-written range **pins every later range below the
+  watermark**, and filling the hole releases the whole prefix at once;
+- a batch is invisible until the committer's barrier, and a `sync` write is
+  never acknowledged before it;
+- three simulated crashed sessions never reissue a nonce, and no allocated
+  value ever reaches the durably published floor.
+
+### P3 is confirmed, in a durable mode, and better than predicted
+
+1 → 32 writer threads, 512-byte values, `sync`, disjoint keys: **388 → 5 749
+batches/s, 14.80×**. Overlapping keys: **15.68×**, within 6 % of disjoint, so
+memtable-shard collisions are not a factor at this width. p50 latency stays
+between 3.0 and 5.6 ms across the whole sweep.
+
+It does not plateau at the 8–16 threads the prediction expected. Flat latency
+with 15× the throughput is §2.4's group commit: one barrier amortized over a
+commit group that grows with the thread count.
+
+### Defect 44 — the same prediction inverts without a durability mode
+
+Run the identical protocol under `os`, with the barrier removed, and throughput
+peaks at **two** threads and falls to 0.84× by 32. Both numbers honestly measure
+"insert throughput versus writer threads". P3 named neither mode, so it had two
+answers.
+
+### Defect 45 — §2.1 credited the design with a property of the host
+
+"*N* writers drive *N* independent append streams into the device" is written as
+a consequence of having no write-ahead log. It is not; it is a statement about
+the operating system's write path. Decomposed with no engine around it, on
+macOS/APFS at 512-byte records:
+
+| shared thing | 1 thread | 32 threads | |
+|---|---|---|---|
+| the one `fetch_add` | 11.1 ns | 59.9 ns (at 64) | not the ceiling |
+| the committer handoff | 35 320 088 /s | 22 601 597 /s | 60–100× above the achieved rate |
+| `pwrite`, one file | 380 757 /s | 97 542 /s | **the ceiling** |
+| `pwrite`, **one file per thread** | 629 266 /s | 159 039 /s | the same ceiling |
+
+The one-file rule of `00-conventions.md` §2 is **not** the cause — spreading the
+identical writes over one file per thread degrades identically. On this host,
+small buffered writes do not scale with threads whatever the layout.
+
+This is defect 28's shape exactly. Phase 4 found a normative MUST written
+against a *language*; this is a performance claim written against an *operating
+system*, and §1.1's rule — state the obligation, let the implementation declare
+what it achieved — was formulated for the first and applies unchanged to the
+second. §2.1 now states the obligation (never route writers through a shared
+buffer, a shared offset, or a group-commit leader) and separates what the format
+guarantees everywhere from what the host may or may not provide.
+
+**The no-WAL argument survives, for a different reason than the one written
+down.** With no journal there is no offset to serialize on and no leader to
+elect, so a commit group costs one barrier over *n* batches on every platform.
+That is the 14.8×. The parallel streams are a bonus where the platform delivers
+them.
+
+### P3's own fragility, with a budget on it
+
+The prediction warns that a committer building segments for many writers stops
+scaling early. This crate builds no segments, so the benchmark **injects** the
+cost rather than pretending it away — 1 versus 16 writers, `sync`: **9.23×** at
+zero, 8.72× at 25 µs per batch, 6.68× at 100 µs, **3.49×** at 400 µs. Above
+roughly 100 µs per batch, §2.1's parallel-flush mitigation stops being optional.
+
+The first version of that sweep ran under `os`, where nothing scales, so every
+row read about 1× and the knob looked inert — **a control that cannot fail, for
+the fourth time in this project's benchmarks.** The sweep belongs in the
+configuration that scales.
+
+### What this crate is not
+
+Not an engine: no B+tree, no manifest, no compaction, no L0 flush, no
+backpressure, no isolation levels. `04-segments.md` §5.1's parallel compaction
+and `13-operations.md` §8's multi-process readers remain unbuilt.
 
 ---
 
@@ -1006,6 +1097,10 @@ New in phase 11: `lib/src/unicode.dart`, `lib/src/unicode_tables.dart`
 `test/fulltext_test.dart`, the `analyzer/` vector set, and the two Unicode
 conformance files under `reference/conformance/unicode/`.
 
+New in phase 16: `reference/rust/cryptand-write/` — `engine`, `vlog`, `prefix`
+and `nonce`, `tests/protocol.rs`, and the two benchmarks `p3_write_scale` and
+`p3_bottleneck`. Nothing in this package changed.
+
 New in phase 15: the second implementation,
 `reference/rust/cryptand-conformance/` — nine modules and
 `tests/conformance.rs`, the port of `test/conformance_test.dart`. Nothing in
@@ -1064,12 +1159,12 @@ the specification now has an implementation.
   end for the first time. What remains unproven about it is only what a vector
   cannot prove: that the *cost* is right on a real device, which §0.1 shows it
   is not, for `mobile`, in this runtime.
-- **`spec/10-transactions.md` §2 is untested, and only §2.** Dart has no
-  shared-memory threads, so *N* writers contending on one counter cannot be
-  exercised and prediction P3 cannot be measured. Everything else in the chapter
-  is built and tested (§0.0). This implementation declares
+- **`spec/10-transactions.md` §2 is untested *in Dart*, and only §2.** Dart has
+  no shared-memory threads, so this implementation declares
   `Level 0 (single-writer)`, which `11` §1.1 defines, and writes byte-identical
-  files.
+  files. Since phase 16 the chapter's §2 is built and measured in Rust
+  (`reference/rust/cryptand-write`, §0.-10), so P3 is no longer unmeasured — it
+  is measured somewhere else.
 - **Extents are in memory.** The manifest and the reserved trees now live in a
   real `PageStore` with page identity and page-granular counters; segment
   extents do not. Only the counter-based results are portable.
@@ -1089,8 +1184,10 @@ the specification now has an implementation.
    implementation, and porting them found two defects — one of which
    (a vector field name that lies about its own width) no self-generated vector
    set could have surfaced.
-2. **Measure P3 in Rust.** `10-transactions.md` §2 is now the only part of the
-   chapter left, and the write-concurrency claim is the design's headline.
+2. ~~**Measure P3 in Rust.**~~ **Done** (§0.-10). Confirmed at 14.8× over 32
+   writer threads in a durable mode, and it found three defects — including a
+   headline claim that turned out to belong to the operating system rather than
+   to the design.
 3. ~~Add Argon2id, then measure P11.~~ **Done** (§0.1). What is left of P11 is
    its steady-state half, which needs real storage.
 4. **Measure P2 against Fjall and RocksDB.**
@@ -1129,11 +1226,16 @@ dart run bench/p11_encryption.dart        # ~10 s; Argon2id costs dominate
 dart run bench/filter_fpr.dart
 ```
 
-The second implementation, which reads the same vectors:
+The Rust workspace — the second implementation, which reads the same vectors,
+and the write protocol:
 
 ```bash
-cd reference/rust/cryptand-conformance
-cargo test                                # 41 tests
+cd reference/rust
+cargo test                                     # 41 + 12 tests
+
+cd cryptand-write
+cargo run --release --bin p3_write_scale       # P3; the sync rows take minutes
+cargo run --release --bin p3_bottleneck        # where scaling actually stops
 ```
 
 `tool/experiments/` holds the one-off scripts phases 1 and 2 cite as evidence.
