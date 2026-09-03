@@ -110,6 +110,16 @@ export 'src/rtree.dart'
         SpatialEntry,
         entryStride,
         maxEntriesFor;
+export 'src/vector.dart'
+    show
+        Adjacency,
+        Codebook,
+        RegionDType,
+        VectorIndex,
+        VectorMetric,
+        VectorRegion,
+        VectorRegionHeader,
+        vectorDistance;
 export 'src/wkb.dart'
     show
         Coord,

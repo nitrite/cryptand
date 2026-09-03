@@ -1,15 +1,78 @@
-# Cryptand reference implementation — phase 11 report
+# Cryptand reference implementation — phase 13 report
 
 **Implementation:** pure Dart 3.12, `reference/dart/cryptand/`
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 492 tests green, **no skips**, `dart analyze` clean, conformance vectors byte-exact and self-verifying, `dart analyze` clean, conformance vectors byte-exact and self-verifying
+**Status:** 533 tests green, **no skips**, `dart analyze` clean, conformance vectors byte-exact and self-verifying, `dart analyze` clean, conformance vectors byte-exact and self-verifying
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-7 Phases 12 and 13 — spatial, vector, and the end of the chapter list
+
+Phase 12 built `spec/08-spatial.md`, phase 13 built `spec/09-vector.md`, and
+**neither found a defect**. With them, **every chapter of the specification has
+an implementation.**
+
+### Spatial (`08`)
+
+ISO WKB with EWKB rejection, the in-container R-tree of §2.1, a quadratic
+split, and the exact predicates §4's two-phase rule requires. 21 tests.
+
+Two rules are the ones that matter, because a plausible implementation of either
+is silently wrong:
+
+- **§1's EWKB rejection.** PostGIS sets high bits of the same type word ISO uses
+  *additively* — "a `PointZ` is `1001` in ISO and `0x80000001` in EWKB, and a
+  decoder that guesses wrong reads coordinates as garbage". A reader accepting
+  both produces geometry that decodes cleanly and means nothing. All three flag
+  bits are refused, with the reason in the error.
+- **§4's two-phase rule.** "An implementation MUST NOT return box-level results
+  as if they were exact." The test uses a triangle whose bounding box contains
+  the origin and whose area does not: phase one returns it, phase two rejects
+  it. A box-only implementation returns a wrong answer that looks entirely
+  reasonable — which is why the rule is normative rather than advisory.
+
+§2.2's structural invariants are verified rather than assumed: all leaves at one
+depth, and every internal box the **exact** union of its children — "a box that
+is merely a superset is a defect because it silently degrades every query".
+
+§2.2 also declines to specify the split algorithm, and §2.3 says why that is
+safe: "two implementations inserting the same documents will produce different
+(equally valid) trees. A conformance test therefore compares **query results**,
+never tree shape." So this implementation picks quadratic split and the tests
+assert results.
+
+### Vector (`09`)
+
+The `VECTOR_REGION` layout, the adjacency record, the codebook, the two
+slot↔document maps and §8's search contract. 20 tests.
+
+The chapter's principle is why this is a few hundred lines rather than a vector
+database: **"specify the durable layout, not the algorithm."** There is no HNSW
+construction here, no Vamana, no recall tuning — none of that is in the format.
+§8 is explicit: "Recall is not specified. Two conforming implementations may
+return different neighbours for the same query."
+
+Three things §9 *does* specify, all tested:
+
+- **Deletes are correct immediately.** §6: removing both mappings makes a
+  document disappear from search before consolidation touches the graph — "the
+  FreshDiskANN property `nitrite-vector` already implements".
+- **The brute-force fallback.** §8: an implementation that will not traverse a
+  graph another SDK built "MUST then fall back to a brute-force scan of the
+  vector region, which is always possible and always correct, rather than
+  returning nothing". That is what lets a Flutter app open a database whose
+  vector index only a Rust service maintains — §9's "specific interchange
+  scenario this whole format exists for".
+- **No mmap anywhere.** §2: "An implementation that cannot `mmap` reads
+  positionally. Dart does exactly this... No part of this format requires mmap."
+  The region here is read positionally and the layout is identical.
 
 ---
 
@@ -783,12 +846,17 @@ and the filter pages live in the extent.
 | **`12-profiles`** | **complete**, §4's budget measured and **met** (§0.-4) |
 | **`01-container` §9 / `04-segments` §11** — the verification pass | **complete** for the invariants this engine can express |
 | **`07-fulltext`** | **complete** except `porter2` stemming, which §2.1 makes a refusal rather than an approximation |
-| `08`–`09` | not started |
+| **`08-spatial`** | **complete** — WKB, the R-tree, the §4 queries and their exact phase |
+| **`09-vector`** | **complete** — the durable layout of §2–§6 and §8's search contract; the graph *algorithms* are explicitly not part of the format |
 
 New in phase 3: `lib/src/cow.dart` (copy-on-write B+trees),
 `lib/src/manifest.dart` (tree 6), `lib/src/catalog.dart`, `lib/src/index.dart`,
 `lib/src/database.dart`, `bench/p10_read_tail.dart`, and the
 `index/entries.json` and `catalog/trees.json` vectors.
+
+New in phases 12 and 13: `lib/src/wkb.dart`, `lib/src/geometry_ops.dart`,
+`lib/src/rtree.dart`, `lib/src/vector.dart`, `test/spatial_test.dart`,
+`test/vector_test.dart`.
 
 New in phase 11: `lib/src/unicode.dart`, `lib/src/unicode_tables.dart`
 (generated), `lib/src/analyzer.dart`, `lib/src/fulltext.dart`,
@@ -821,7 +889,8 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 `conformance/vectors/security/derivation.json`, and `deriveKek` /
 `unlockWithPassword` in `lib/src/security.dart`.
 
-**492 tests**, up from 259 at the end of phase 2. **No skips.**
+**533 tests**, up from 259 at the end of phase 2. **No skips.** Every chapter of
+the specification now has an implementation.
 
 ---
 
@@ -881,8 +950,10 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
    compaction API, the change feed and multi-process readers; chapters `07`–`09`
    are untouched. ~~`04` §5.2's stepwise compaction.~~ **Done** (§0.-4).
    ~~The rest of `13`.~~ **Done** (§0.-5) except §8. The highest-value remaining
-   items are now `10-transactions.md` §2 with prediction P3, and chapters
-   `08`–`09` — the first needs threads, the other two are new subsystems.
+   items are now the three that need something this runtime does not have:
+   `10-transactions.md` §2 with prediction P3 (threads), `13-operations.md` §8
+   (processes), and `07-fulltext.md` §2.4's `porter2` (a published algorithm
+   deliberately declared rather than approximated).
 
 ---
 
@@ -892,7 +963,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 cd reference/dart/cryptand
 dart pub get
 dart analyze                              # clean
-dart test                                 # 492 tests, no skips
+dart test                                 # 533 tests, no skips
 
 dart run tool/generate_vectors.dart       # regenerates ../../conformance/vectors
 dart test test/conformance_test.dart      # verifies them

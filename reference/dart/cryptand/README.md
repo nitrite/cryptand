@@ -1,4 +1,4 @@
-# Cryptand — Dart reference implementation (phase 11)
+# Cryptand — Dart reference implementation (phase 13)
 
 Pure Dart implementation of the Cryptand File Format, CFF v1.0.
 
@@ -7,7 +7,7 @@ the spec disagree, the spec wins and this code is wrong
 (`spec/11-conformance.md` §7).
 
 Read **[REPORT.md](REPORT.md)** first: it states what is implemented, the
-thirty-two spec defects this work has found across eleven phases, and every place a
+thirty-two spec defects this work has found across thirteen phases, and every place a
 measurement differs from a claim in `../../design/`.
 
 ## Quick start
@@ -50,6 +50,10 @@ dart pub get && dart test
 | `lib/src/unicode.dart` | **NFKC, UAX #29 and simple case mapping** at Unicode 15.1 (`spec/07` §2.2) |
 | `lib/src/analyzer.dart` | **`cryptand.std.v1`** — the eight-step pipeline (`spec/07` §2) |
 | `lib/src/fulltext.dart` | **postings blocks and the term dictionary** (`spec/07` §1, §4) |
+| `lib/src/wkb.dart` | **ISO WKB geometry**, with EWKB refused (`spec/08` §1) |
+| `lib/src/geometry_ops.dart` | **the exact predicates** — §4's second phase (`spec/08` §4) |
+| `lib/src/rtree.dart` | **the in-container R-tree** (`spec/08` §2) |
+| `lib/src/vector.dart` | **the vector region, adjacency and search contract** (`spec/09`) |
 | `lib/src/catalog.dart` | **the catalog** — descriptors, reserved trees, attributes (`spec/05`) |
 | `lib/src/index.dart` | **secondary indexes** — entry derivation and the §7 scans (`spec/06`) |
 | `lib/src/database.dart` | collections and repositories over the engine |

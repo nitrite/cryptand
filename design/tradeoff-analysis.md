@@ -884,6 +884,45 @@ evidence attached: an implementation that *cannot* do this MUST NOT write to a
 full-text index. That rule now has a measurable meaning — run the two suites, and
 if either reports a failure, the implementation is in the class §2.1 excludes.
 
+### 8.11 Phases 12 and 13 — spatial and vector, and the end of the chapter list
+
+Phase 12 built `08-spatial.md` — ISO WKB, the in-container R-tree, the exact
+predicates — and phase 13 built `09-vector.md` — the `VECTOR_REGION` layout, the
+adjacency record, the codebook, the slot↔document maps and §8's search
+contract. **No defects found in either.**
+
+With those, **every chapter of the specification has an implementation**, and
+the remaining gaps are all of one kind: they need something the runtime does not
+have (threads for `10` §2, processes for `13` §8) or they are a published
+algorithm deliberately declared rather than approximated (`porter2` in `07`
+§2.4).
+
+Two rules are worth recording as enforced rather than described, because both
+are cases where a plausible implementation is silently wrong:
+
+- **`08` §1's EWKB rejection.** PostGIS signals Z, M and SRID by setting high
+  bits of the same type word ISO uses additively, so "a `PointZ` is `1001` in
+  ISO and `0x80000001` in EWKB, and a decoder that guesses wrong reads
+  coordinates as garbage". A reader that accepted both would produce geometry
+  that decodes without error and means nothing. All three flag bits are refused.
+- **`08` §4's two-phase rule.** "An implementation MUST NOT return box-level
+  results as if they were exact." The test that proves it uses a triangle whose
+  bounding box contains the origin and whose area does not: the candidate phase
+  returns it, the exact phase rejects it, and a box-only implementation would
+  return a wrong answer that looks entirely reasonable.
+
+`09` earns a note of its own for what it *did not* require. The chapter's
+principle — "specify the durable layout, not the algorithm" — is why a vector
+index fits in a few hundred lines here: there is no HNSW construction, no
+Vamana, no recall tuning, because none of that is in the format. What is in the
+format is the region, the adjacency record, the two maps, and the rule that
+makes interchange work at all: an implementation that will not traverse another
+SDK's graph "MUST then fall back to a brute-force scan of the vector region,
+which is always possible and always correct, rather than returning nothing."
+That fallback is what lets a Flutter app open a database whose vector index only
+a Rust service knows how to build — which §9 calls "the specific interchange
+scenario this whole format exists for".
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

@@ -193,9 +193,8 @@ Read in this order.
 
 ## Status
 
-**Phases 1 through 11 of the reference implementation are built**, in pure Dart,
-at [`reference/dart/cryptand/`](reference/dart/cryptand/) — **492 tests, no
-skips**, and a conformance vector set at
+**Every chapter of the specification is implemented**, in pure Dart at [`reference/dart/cryptand/`](reference/dart/cryptand/) across
+thirteen phases — **533 tests, no skips**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
 
@@ -204,12 +203,18 @@ byte-exact and self-verifying.
 | `00` conventions, `01` container, `02` CVE, `03` CKE | complete |
 | `04` segments | complete except §5.1's parallel compaction, which needs threads |
 | `05` catalog, `06` indexes | complete |
+| `07` full text | complete except `porter2` stemming, which §2.1 makes a refusal rather than an approximation |
+| `08` spatial | complete — ISO WKB, the in-container R-tree, and §4's exact second phase |
+| `09` vector | complete — the durable layout and §8's search contract; the graph *algorithms* are deliberately not in the format |
 | `10` transactions | complete except §2, the concurrent write protocol — Dart has no shared-memory threads |
 | `11` conformance, `12` profiles | complete |
-| `13` operations | complete except §8, multi-process readers |
+| `13` operations | complete except §8, multi-process readers — a lock sidecar coordinating processes |
 | `14` security | complete, Argon2id and BLAKE2b verified against RFC 9106 and RFC 7693 |
-| `07` full text | complete except `porter2` stemming, which §2.1 makes a refusal rather than an approximation |
-| `08` spatial, `09` vector | not started — the remaining optional feature levels |
+
+**Everything not done needs something this runtime does not have** — threads
+(`10` §2, `04` §5.1), separate processes (`13` §8) — or is a published algorithm
+the format requires an implementation to *declare rather than approximate*
+(`07` §2.4's `porter2`, which `07` §2.1 turns into a refusal).
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
 Building the code has found **thirty-two defects in these documents** — a headline
