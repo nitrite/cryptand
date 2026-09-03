@@ -100,6 +100,25 @@ export 'src/unicode.dart'
         wordBoundaries,
         wordBreakProperty;
 export 'src/unicode_tables.dart' show unicodeVersion;
+export 'src/geometry_ops.dart' show Spatial;
+export 'src/rtree.dart'
+    show
+        RTree,
+        RTreeEntry,
+        RTreeFlags,
+        RTreeNode,
+        SpatialEntry,
+        entryStride,
+        maxEntriesFor;
+export 'src/wkb.dart'
+    show
+        Coord,
+        Envelope,
+        EwkbFlags,
+        Geometry,
+        GeometryType,
+        decodeWkb,
+        encodeWkb;
 export 'src/filter.dart'
     show BlockedBloom, Hash64, blockCountFor, cfh64, kBlockBits, probesFor;
 export 'src/limits.dart';
