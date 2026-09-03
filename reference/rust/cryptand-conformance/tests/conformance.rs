@@ -446,7 +446,11 @@ fn the_recorded_filter_blocks_reproduce_bit_for_bit() {
         .collect();
     let f = filter::BlockedBloom::build(&keys, bits, keys.len() as u64);
     assert_eq!(hex(&f.blocks), v["blocks"].as_str().unwrap());
-    assert_eq!(hex(&f.encode_payload()[..16]), v["header_bytes"].as_str().unwrap());
+    // The whole 20-byte header of §2.4, not a prefix of it: the blocks begin
+    // at byte 20, and a reader that assumed 16 would misalign every block.
+    let header = v["header_bytes"].as_str().unwrap();
+    assert_eq!(header.len() / 2, 20);
+    assert_eq!(hex(&f.encode_payload()[..20]), header);
     // A filter's failure mode is a silent false negative, so check there is none.
     assert!(keys.iter().all(|k| f.may_contain(k)));
 }
@@ -752,4 +756,17 @@ fn the_store_metadata_key_is_a_cke_string() {
     let v = load("catalog/trees");
     let key = cke::encode(&Value::Str("$store".to_string())).unwrap();
     assert_eq!(hex(&key), v["store_metadata_key"].as_str().unwrap());
+}
+
+/// Not a vector: a key whose ordering region is fractional but whose type code
+/// says integer. `03-key-encoding.md` §7's reject list does not mention it, so
+/// two conforming decoders may disagree; this one refuses rather than truncate.
+#[test]
+fn an_integer_type_code_over_a_fractional_region_is_refused() {
+    // sign positive, e = 0, mantissa 0xC0 -> 1.5, type code 0x02 (I32).
+    let key = unhex("30034000c0000002");
+    assert!(cke::decode_all(&key).is_err());
+    // The same bytes with an F64 type code are a perfectly good 1.5.
+    let f = cke::decode_all(&unhex("30034000c000000b")).unwrap();
+    assert_eq!(f, Value::Float { w: NumType::F64, v: 1.5 });
 }

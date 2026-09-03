@@ -373,7 +373,7 @@ void main() {
       final f = BlockedBloom.build(keys,
           bitsPerKey: r['bits_per_key']! as int, distinctKeys: keys.length);
       expect(hex(f.blocks), v['blocks']);
-      expect(hex(Uint8List.sublistView(f.encodePayload(), 0, 16)),
+      expect(hex(Uint8List.sublistView(f.encodePayload(), 0, 20)),
           v['header_bytes']);
     });
   });

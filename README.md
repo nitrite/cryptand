@@ -169,7 +169,8 @@ Read in this order.
 | [`design/tradeoff-analysis.md`](design/tradeoff-analysis.md) | What the write-path design costs reads, durability, space, memory, latency and complexity — the full accounting |
 | [`spec/`](spec/) | The normative format specification — this is the contract |
 | [`adoption/rollout.md`](adoption/rollout.md) | How the three SDKs get there from here, and how existing files migrate |
-| [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md) | **Reference implementation report (phase 3)** — what is built, the nineteen spec defects building it has found across three phases, and every measurement against a claim in `design/` |
+| [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md) | **Reference implementation report (phase 15)** — what is built, the spec defects building it has found, and every measurement against a claim in `design/` |
+| [`reference/rust/cryptand-conformance/`](reference/rust/cryptand-conformance/) | **The second implementation** — an independent Rust reader of the byte layer, written from `spec/` alone, that passes nine of the ten conformance vector groups |
 
 ### Specification chapters
 
@@ -194,9 +195,15 @@ Read in this order.
 ## Status
 
 **Every chapter of the specification is implemented**, in pure Dart at [`reference/dart/cryptand/`](reference/dart/cryptand/) across
-fourteen phases — **546 tests, no skips**, and a conformance vector set at
+fifteen phases — **546 tests, no skips**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
+
+Since phase 15 the vectors are also read by a **second implementation** that did
+not generate them — [`reference/rust/cryptand-conformance/`](reference/rust/cryptand-conformance/),
+41 tests over nine of the ten vector groups, written from `spec/` alone. That is
+what makes "portable" a measurement rather than a claim: a self-generated vector
+set catches regression, and only a second reader catches misreading.
 
 | chapter | status |
 |---|---|
@@ -215,7 +222,7 @@ byte-exact and self-verifying.
 (`10` §2 with prediction P3, `04` §5.1) or separate processes (`13` §8).
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code has found **thirty-three defects in these documents** — a headline
+Building the code has found **forty-three defects in these documents** — a headline
 invariant that was literally false, a page header whose field table did not fit
 its own declared size, a nonce rule that did nothing, filter rates quoted from
 the wrong formula, "unknown tags round-trip" that no reader could implement —
@@ -224,7 +231,11 @@ was missing a mechanism and the metric meant to detect that was blind to it, the
 read-tail bound turned out to belong to a read path the prediction never named,
 and the last level's disjointness rule was stated over the wrong key space — a
 levelled level that had quietly stopped being disjoint returned **stale
-versions**, under 338 passing tests, until snapshot retention exposed it.
+versions**, under 338 passing tests, until snapshot retention exposed it. The
+two most recent came from the second implementation: a conformance vector whose
+field name promised more bytes than it carried, in the one structure whose
+failure mode is silent key loss, and a decoder reject rule that both
+implementations followed and neither had read.
 
 **Confirmed by measurement:**
 

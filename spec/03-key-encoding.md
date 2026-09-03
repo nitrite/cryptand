@@ -319,7 +319,17 @@ second lookup.
 A decoder MUST reject: an unknown group tag, a truncated body, a non-canonical
 escape (`0x00` followed by anything but `0x00` or `0x01`), a mantissa whose
 first byte is below `0x80`, an empty mantissa, a numeric type code of `0x0D` or
-above (§4.3), and temporal subclass `0x02` (§5).
+above (§4.3), temporal subclass `0x02` (§5), and **an integer type code over an
+ordering region that is not an integer** — one whose mantissa has a fractional
+part at that exponent, or whose exponent exceeds the declared width.
+
+The last one is not hypothetical bookkeeping. `m x 2^e` is a ratio, so a region
+encoding `1.5` is well-formed; only the type code says it must be a whole
+number. A decoder that instead truncated or rounded would return a value no
+writer ever encoded, and two decoders that chose differently would disagree
+about what the same bytes mean. Refusing is the only answer that keeps §1's
+injectivity, and it was added after two independent implementations were found
+to be refusing it already — without the spec asking them to.
 
 **Three** decodings are lossy, by design, and an implementation MUST NOT treat
 any of them as a defect. Each is a case where §8 of `02-value-encoding.md`

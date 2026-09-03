@@ -953,6 +953,55 @@ found nothing wrong because §2.2 was right, and Snowball's vocabulary found thi
 because §2.4 was not. A published test corpus does not only check the
 implementation.
 
+### 8.13 Phase 15 — a second implementation reads the vectors
+
+Phase 15 is the first phase that did not add a chapter. It built an independent
+Rust implementation of the format's byte layer — `reference/rust/cryptand-conformance`
+— written from `spec/` and checked against the vectors the Dart implementation
+generated. Until it ran, "portable" was a claim: **the vectors were produced by
+the implementation they test, so they caught regression but never misreading.**
+
+Forty-one tests over nine of the ten vector groups (CKE, the numeric torture
+set, CVE, strings, documents, the container, the filter, security derivation,
+index entries and the catalog) reproduced byte for byte. The analyzer group is
+not ported — it needs the Unicode 15.1 tables and `porter2` again, and it is a
+phase of its own.
+
+| | defect | fix |
+|---|---|---|
+| ⚠ 42 | **`filter/blocked_bloom.json` called 16 bytes `header_bytes` when the filter page header is 20.** The generator wrote `payload[0..16]`, stopping four bytes into the `u64 distinct_keys`. A consuming SDK that trusted the field's *name* rather than re-deriving §2.4's layout builds a 16-byte header, so every 64-byte block lands four bytes early: probes read the wrong bits and the filter returns false **negatives**, which is the one filter failure mode that loses data silently | record all 20 bytes, plus a `header_note` naming each field and stating that the blocks begin at byte 20 |
+| 43 | **`03-key-encoding.md` §7's MUST-reject list was incomplete.** A key whose type code says integer over an ordering region that is not an integer (`m x 2^e` with a fractional part at that exponent, or an exponent above the declared width) was not named, so truncating, rounding and refusing were all conforming | §7 now requires refusal, with the reason: a decoder that rounded would return a value no writer encoded, and two decoders that chose differently would disagree about the same bytes |
+
+**Defect 42 is the one that argues for this whole phase.** It is not a mistake
+about the bytes — the recorded bytes are correct as far as they go — it is a
+mistake about *what the vector says they are*, and no amount of re-running the
+generating implementation could surface it, because that implementation knows
+what it meant. A vector's field name is part of its contract with a reader who
+has nothing else.
+
+Defect 43 arrived the other way round. Both implementations already refused the
+malformed key, independently, with almost the same error message — the spec was
+simply silent about a case two careful readers happened to agree on. Agreement
+by coincidence is not portability; a third implementation reading the same §7
+would have been free to truncate. The rule is now written down.
+
+**The remaining finding is not a defect and is the phase's main result:**
+everything else reproduced on the first run. CKE's escaped byte strings, the
+complemented negative ordering region, the exponent bias, the document field
+table's sort-by-resolved-name-bytes rule, the `name_ref` inline index, the
+20-byte filter header, HKDF's `database_uuid` salt, the 56-bit nonce offset, the
+index cartesian product with its `\.` path escape, and the catalog descriptor's
+byte-exact re-encode were all recovered from the specification alone by a reader
+that never saw the Dart source. That is the strongest available evidence for
+`00-conventions.md` §1.1, and the first that does not come from the
+implementation being tested.
+
+One process note, since it cost time: `tool/generate_vectors.dart` contained two
+literal NUL bytes (in the `'a\u0000b'` string cases), which made `file(1)` call
+it `data` and made `grep` treat it as binary and print nothing. A search for the
+filter generator returned no matches and very nearly produced a wrong finding —
+that the filter vector was not generated at all. The literals are now escapes.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

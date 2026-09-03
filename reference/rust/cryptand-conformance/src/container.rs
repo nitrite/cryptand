@@ -139,9 +139,8 @@ impl PageHeader {
         if b.len() < PAGE_HEADER_BYTES {
             return corrupt("page header shorter than 40 bytes");
         }
-        if u32le(b, ph::RESERVED) != 0 {
-            return corrupt("reserved page-header bytes are not zero");
-        }
+        // `00-conventions.md` §5: a reserved field MUST be written as zero
+        // and MUST be ignored on read -- so a non-zero one is not an error.
         Ok(PageHeader {
             checksum: u32le(b, ph::CHECKSUM),
             page_type: b[ph::PAGE_TYPE],
