@@ -1,15 +1,68 @@
-# Cryptand reference implementation — phase 13 report
+# Cryptand reference implementation — phase 14 report
 
 **Implementation:** pure Dart 3.12, `reference/dart/cryptand/`
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 533 tests green, **no skips**, `dart analyze` clean, conformance vectors byte-exact and self-verifying, `dart analyze` clean, conformance vectors byte-exact and self-verifying
+**Status:** 546 tests green, **no skips**, `dart analyze` clean, conformance vectors byte-exact and self-verifying, `dart analyze` clean, conformance vectors byte-exact and self-verifying
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-8 Phase 14 — the stemmer, and a version that was not pinned
+
+Implemented `07-fulltext.md` §2.4's `porter2` stemmer — Snowball English, the
+one thing every previous phase left as a deliberate refusal. Verified against
+**Snowball's own 42 649-word vocabulary, zero failures**, on the first run. The
+corpus is committed under `reference/conformance/snowball/`.
+
+### The defect the corpus found
+
+**§2.4 named an algorithm family, not a release.** It wrote `porter2:<lang>`
+and justified it with "an unambiguous published algorithm" — which is true of a
+given Snowball *release* and not of the name. The algorithm's own change log
+records behavioural changes at 3.0.0 (`past`/`paste`, `universe`/`university`,
+`lateral`/`later`, `emerge`/`emergency`, `organ`/`organic`, `-ogist` → `-og`)
+and again at 3.1.0 — and one 3.1.0 entry **reverses** a 3.0.0 one:
+
+> "Removed exception for skis as the algorithm gives the same stem without it!"
+> — Snowball 3.0.0
+> "Restored exception for skis which is needed." — Snowball 3.1.0
+
+Two SDKs on different releases stem the same word to different terms, which is
+an index that disagrees about what documents exist — the failure the chapter
+opens by naming. §2.4 now stores `porter2:<lang>:<snowball version>`, requires
+an implementation to record and check its release, and makes a new release a
+new stemmer name.
+
+**This is the most self-inflicted defect the project has found.** §2.2 of the
+*same chapter*, two subsections earlier, gets it exactly right for Unicode:
+pins 15.1, explains that a moved boundary silently changes what an index
+contains, and requires `cryptand.std.v2` rather than a silent upgrade. §2.4 then
+names a second versioned external algorithm and omits the same precaution.
+
+The generalisation, since the format names four external algorithms: **every
+dependency on an external specification needs its version in the file, not
+merely its name.** RFC 8439 and RFC 9106 are safe by accident — frozen documents
+rather than evolving projects — which is a property of those references, not a
+rule the format can rely on.
+
+### Two of my own test assertions were wrong, and the corpus caught both
+
+- I expected `internal` → `intern`. The oracle says `internal`, and that is
+  precisely what 3.1.0's `inter` R1 exception exists to do — the test now
+  asserts the non-conflation rather than the stem.
+- I expected `luxuriated` → `luxuriate`, quoting §2.2's worked example. That
+  example is the *intermediate* after step 1b; later steps remove `ate` in R2,
+  and the true stem is `luxuri`.
+
+Both are worth recording because they are the same shape as the fixture bug in
+phase 7: a plausible expectation, written from the prose rather than from the
+authority, that a real corpus rejects immediately.
 
 ---
 
@@ -845,7 +898,7 @@ and the filter pages live in the extent.
 | **`13-operations`** | **complete except §8**, multi-process readers, which needs real files and processes |
 | **`12-profiles`** | **complete**, §4's budget measured and **met** (§0.-4) |
 | **`01-container` §9 / `04-segments` §11** — the verification pass | **complete** for the invariants this engine can express |
-| **`07-fulltext`** | **complete** except `porter2` stemming, which §2.1 makes a refusal rather than an approximation |
+| **`07-fulltext`** | **complete**, `porter2` included and verified against Snowball's 42 649-word vocabulary |
 | **`08-spatial`** | **complete** — WKB, the R-tree, the §4 queries and their exact phase |
 | **`09-vector`** | **complete** — the durable layout of §2–§6 and §8's search contract; the graph *algorithms* are explicitly not part of the format |
 
@@ -853,6 +906,9 @@ New in phase 3: `lib/src/cow.dart` (copy-on-write B+trees),
 `lib/src/manifest.dart` (tree 6), `lib/src/catalog.dart`, `lib/src/index.dart`,
 `lib/src/database.dart`, `bench/p10_read_tail.dart`, and the
 `index/entries.json` and `catalog/trees.json` vectors.
+
+New in phase 14: `lib/src/porter2.dart`, `test/porter2_test.dart`, and
+Snowball's vocabulary under `reference/conformance/snowball/`.
 
 New in phases 12 and 13: `lib/src/wkb.dart`, `lib/src/geometry_ops.dart`,
 `lib/src/rtree.dart`, `lib/src/vector.dart`, `test/spatial_test.dart`,
@@ -889,7 +945,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 `conformance/vectors/security/derivation.json`, and `deriveKek` /
 `unlockWithPassword` in `lib/src/security.dart`.
 
-**533 tests**, up from 259 at the end of phase 2. **No skips.** Every chapter of
+**546 tests**, up from 259 at the end of phase 2. **No skips.** Every chapter of
 the specification now has an implementation.
 
 ---
@@ -963,7 +1019,7 @@ the specification now has an implementation.
 cd reference/dart/cryptand
 dart pub get
 dart analyze                              # clean
-dart test                                 # 533 tests, no skips
+dart test                                 # 546 tests, no skips
 
 dart run tool/generate_vectors.dart       # regenerates ../../conformance/vectors
 dart test test/conformance_test.dart      # verifies them

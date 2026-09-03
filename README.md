@@ -194,7 +194,7 @@ Read in this order.
 ## Status
 
 **Every chapter of the specification is implemented**, in pure Dart at [`reference/dart/cryptand/`](reference/dart/cryptand/) across
-thirteen phases — **533 tests, no skips**, and a conformance vector set at
+fourteen phases — **546 tests, no skips**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
 
@@ -203,7 +203,7 @@ byte-exact and self-verifying.
 | `00` conventions, `01` container, `02` CVE, `03` CKE | complete |
 | `04` segments | complete except §5.1's parallel compaction, which needs threads |
 | `05` catalog, `06` indexes | complete |
-| `07` full text | complete except `porter2` stemming, which §2.1 makes a refusal rather than an approximation |
+| `07` full text | complete — the analyzer against Unicode's suites, `porter2` against Snowball's vocabulary |
 | `08` spatial | complete — ISO WKB, the in-container R-tree, and §4's exact second phase |
 | `09` vector | complete — the durable layout and §8's search contract; the graph *algorithms* are deliberately not in the format |
 | `10` transactions | complete except §2, the concurrent write protocol — Dart has no shared-memory threads |
@@ -211,13 +211,11 @@ byte-exact and self-verifying.
 | `13` operations | complete except §8, multi-process readers — a lock sidecar coordinating processes |
 | `14` security | complete, Argon2id and BLAKE2b verified against RFC 9106 and RFC 7693 |
 
-**Everything not done needs something this runtime does not have** — threads
-(`10` §2, `04` §5.1), separate processes (`13` §8) — or is a published algorithm
-the format requires an implementation to *declare rather than approximate*
-(`07` §2.4's `porter2`, which `07` §2.1 turns into a refusal).
+**Everything not done needs something this runtime does not have**: threads
+(`10` §2 with prediction P3, `04` §5.1) or separate processes (`13` §8).
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code has found **thirty-two defects in these documents** — a headline
+Building the code has found **thirty-three defects in these documents** — a headline
 invariant that was literally false, a page header whose field table did not fit
 its own declared size, a nonce rule that did nothing, filter rates quoted from
 the wrong formula, "unknown tags round-trip" that no reader could implement —

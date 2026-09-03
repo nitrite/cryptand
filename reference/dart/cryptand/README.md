@@ -1,4 +1,4 @@
-# Cryptand — Dart reference implementation (phase 13)
+# Cryptand — Dart reference implementation (phase 14)
 
 Pure Dart implementation of the Cryptand File Format, CFF v1.0.
 
@@ -7,7 +7,7 @@ the spec disagree, the spec wins and this code is wrong
 (`spec/11-conformance.md` §7).
 
 Read **[REPORT.md](REPORT.md)** first: it states what is implemented, the
-thirty-two spec defects this work has found across thirteen phases, and every place a
+thirty-three spec defects this work has found across fourteen phases, and every place a
 measurement differs from a claim in `../../design/`.
 
 ## Quick start
@@ -50,6 +50,7 @@ dart pub get && dart test
 | `lib/src/unicode.dart` | **NFKC, UAX #29 and simple case mapping** at Unicode 15.1 (`spec/07` §2.2) |
 | `lib/src/analyzer.dart` | **`cryptand.std.v1`** — the eight-step pipeline (`spec/07` §2) |
 | `lib/src/fulltext.dart` | **postings blocks and the term dictionary** (`spec/07` §1, §4) |
+| `lib/src/porter2.dart` | **the Snowball English stemmer**, version-pinned (`spec/07` §2.4) |
 | `lib/src/wkb.dart` | **ISO WKB geometry**, with EWKB refused (`spec/08` §1) |
 | `lib/src/geometry_ops.dart` | **the exact predicates** — §4's second phase (`spec/08` §4) |
 | `lib/src/rtree.dart` | **the in-container R-tree** (`spec/08` §2) |

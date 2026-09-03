@@ -36,6 +36,7 @@ export 'src/compare.dart' show compareNumeric, compareValues, isOrdered;
 export 'src/container.dart'
     show Feature, PageFlags, PageHeader, PageType, Profile, Sb, Superblock, TreeId;
 export 'src/analyzer.dart' show Analyzer, Stemmer, Token;
+export 'src/porter2.dart' show porter2Stem, snowballVersion;
 export 'src/backup.dart' show Backup, BackupMode, BackupResult;
 export 'src/changefeed.dart' show Change, ChangeFeed;
 export 'src/catalog.dart'

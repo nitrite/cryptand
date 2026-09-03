@@ -117,12 +117,37 @@ of which SDK's list was in scope when it was created.
 ### 2.4 Stemming
 
 ```
-analyzer_params.stemmer = "none" | "porter2:<lang>"
+analyzer_params.stemmer = "none" | "porter2:<lang>:<snowball version>"
 ```
 
 `porter2` (Snowball) is specified because it has an unambiguous published
 algorithm and existing implementations in every relevant language. Anything else
 is a custom analyzer with its own name.
+
+**The version is part of the name, and an earlier draft left it out.** That
+draft wrote `porter2:<lang>` and justified it with "an unambiguous published
+algorithm" — which is true of a given Snowball *release* and not of the family
+name. Snowball's own change log for English records behavioural changes at
+3.0.0 (`past`/`paste`, `universe`/`university`, `lateral`/`later`,
+`emerge`/`emergency`, `organ`/`organic`, `-ogist` → `-og`, and an `evening`
+exception) and again at 3.1.0 — and one 3.1.0 entry **reverses** a 3.0.0 one:
+"Removed exception for skis as the algorithm gives the same stem without it!",
+then "Restored exception for skis which is needed."
+
+Two SDKs on different Snowball releases therefore stem the same word to
+different terms, which is an index that disagrees about what documents exist —
+the precise failure this chapter opens by naming. It is also the identical
+hazard §2.2 already handles for Unicode, and it gets the identical treatment:
+
+- a writer MUST store the release, e.g. `porter2:en:3.1.0`;
+- an implementation MUST record which release it implements, and MUST refuse to
+  write an index pinning a release it does not have;
+- a new Snowball release is a **new stemmer name**, not a silent upgrade, for
+  the same reason a new Unicode release requires `cryptand.std.v2`.
+
+An implementation MUST reject an unpinned `porter2:<lang>`: it cannot be made
+to mean one thing, and guessing a release is how two SDKs come to disagree
+without either of them being able to detect it.
 
 ### 2.5 Custom analyzers
 

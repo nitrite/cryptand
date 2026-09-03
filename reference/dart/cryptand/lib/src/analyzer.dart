@@ -20,6 +20,7 @@
 library;
 
 import 'errors.dart';
+import 'porter2.dart';
 import 'unicode.dart';
 import 'unicode_tables.dart' show unicodeVersion;
 
@@ -49,13 +50,35 @@ final class Token {
 }
 
 /// §2.4.
+///
+/// **The version is part of the name, and §2.4 originally did not say so.**
+/// "`porter2` (Snowball) is specified because it has an unambiguous published
+/// algorithm" — which is true of a given Snowball *release* and not of the name
+/// alone. The algorithm's own change log records behavioural changes at 3.0.0
+/// (`past`/`paste`, `universe`/`university`, `lateral`/`later`,
+/// `emerge`/`emergency`, `organ`/`organic`, `-ogist` → `-og`) and at 3.1.0 —
+/// and one of those *reverses* a 3.0.0 change: "Removed exception for skis",
+/// then "Restored exception for skis which is needed".
+///
+/// Two SDKs on different Snowball releases therefore produce different stems,
+/// hence different terms, hence indexes that disagree about what documents
+/// exist — the exact failure §2 exists to prevent, and the one §2.2 already
+/// solved for Unicode by pinning 15.1. So the stored form is
+/// `porter2:<lang>:<snowball version>`.
 class Stemmer {
   static const String none = 'none';
 
-  /// §2.4: "`porter2` (Snowball) is specified because it has an unambiguous
-  /// published algorithm and existing implementations in every relevant
-  /// language."
+  /// The pinned form this build implements.
+  static const String porter2English = 'porter2:en:$snowballVersion';
+
   static bool isPorter2(String s) => s.startsWith('porter2:');
+
+  /// `(language, version)` for a `porter2:…` name, or null when unpinned.
+  static (String, String)? parsePorter2(String s) {
+    final parts = s.split(':');
+    if (parts.length != 3 || parts[0] != 'porter2') return null;
+    return (parts[1], parts[2]);
+  }
 }
 
 /// The analyzer named in a full-text index descriptor.
@@ -74,10 +97,35 @@ final class Analyzer {
           'analyzer "$name" is not registered in this implementation; it can '
           'neither write nor query this index (spec/07-fulltext.md section 2.5)');
     }
-    if (stemmer != Stemmer.none && !Stemmer.isPorter2(stemmer)) {
-      throw InvalidArgumentException(
-          'stemmer "$stemmer" is neither "none" nor "porter2:<lang>" '
-          '(spec/07-fulltext.md section 2.4)');
+    if (stemmer != Stemmer.none) {
+      if (!Stemmer.isPorter2(stemmer)) {
+        throw InvalidArgumentException(
+            'stemmer "$stemmer" is neither "none" nor '
+            '"porter2:<lang>:<version>" (spec/07-fulltext.md section 2.4)');
+      }
+      final parsed = Stemmer.parsePorter2(stemmer);
+      if (parsed == null) {
+        throw InvalidArgumentException(
+            'stemmer "$stemmer" does not pin a Snowball version. Snowball '
+            'releases stem the same word differently — 3.0.0 removed the '
+            '"skis" exception and 3.1.0 restored it — so an unpinned name '
+            'cannot make two SDKs agree on what terms a document has. Use '
+            '"porter2:<lang>:<version>", e.g. '
+            '"${Stemmer.porter2English}" (spec/07-fulltext.md section 2.4)');
+      }
+      if (parsed.$1 != 'en') {
+        throw UnsupportedFeatureException(
+            'this build implements Snowball English only; the index asks for '
+            '"${parsed.$1}". Per section 2.1 an implementation that cannot '
+            'reproduce the named analyzer MUST NOT write to the index');
+      }
+      if (parsed.$2 != snowballVersion) {
+        throw UnsupportedFeatureException(
+            'this build implements Snowball $snowballVersion; the index pins '
+            '${parsed.$2}. Refusing it — a rule that changed between those '
+            'releases would silently change what terms a document has '
+            '(spec/07-fulltext.md section 2.4)');
+      }
     }
   }
 
@@ -163,17 +211,7 @@ final class Analyzer {
   List<Token> analyzeValue(Object? value) =>
       value is String ? analyze(value) : const [];
 
-  String _stem(String s) {
-    if (stemmer == Stemmer.none) return s;
-    // §2.4 names porter2 as the only specified stemmer. Implementing it is a
-    // separate published algorithm; declaring it unimplemented is the honest
-    // state, and §2.1's rule then applies — this analyzer configuration is
-    // neither writable nor queryable here.
-    throw UnsupportedFeatureException(
-        'stemmer "$stemmer" is specified but not implemented in this build; '
-        'per spec/07-fulltext.md section 2.1 an implementation that cannot '
-        'reproduce the named analyzer MUST NOT write to the index');
-  }
+  String _stem(String s) => stemmer == Stemmer.none ? s : porter2Stem(s);
 
   /// §2.3: the stored form is "sorted, NFKC, lowercased".
   static List<String> canonicalStopwords(Iterable<String> words) {

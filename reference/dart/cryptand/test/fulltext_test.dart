@@ -172,11 +172,18 @@ void main() {
           throwsA(isA<UnsupportedFeatureException>()));
     });
 
-    test('a declared but unimplemented stemmer refuses to write', () {
-      // Section 2.1: "An implementation that cannot reproduce the named
-      // analyzer exactly MUST NOT write to the index."
-      final p = Analyzer(stemmer: 'porter2:en');
-      expect(() => p.analyze('running'),
+    test('the stemmer runs, and only at a pinned Snowball version', () {
+      final p = Analyzer(stemmer: Stemmer.porter2English);
+      expect(p.analyze('running').single.text, 'run');
+      expect(p.analyze('generously').single.text, 'generous');
+
+      // Section 2.4 as corrected: an unpinned name cannot make two SDKs agree,
+      // because Snowball releases stem the same word differently.
+      expect(() => Analyzer(stemmer: 'porter2:en'),
+          throwsA(isA<InvalidArgumentException>()));
+      expect(() => Analyzer(stemmer: 'porter2:en:2.2.0'),
+          throwsA(isA<UnsupportedFeatureException>()));
+      expect(() => Analyzer(stemmer: 'porter2:fr:$snowballVersion'),
           throwsA(isA<UnsupportedFeatureException>()));
       expect(() => Analyzer(stemmer: 'snowball:en'),
           throwsA(isA<InvalidArgumentException>()));

@@ -923,6 +923,36 @@ That fallback is what lets a Flutter app open a database whose vector index only
 a Rust service knows how to build — which §9 calls "the specific interchange
 scenario this whole format exists for".
 
+### 8.12 Phase 14 — the stemmer, and a version that was not pinned
+
+Phase 14 implemented `07-fulltext.md` §2.4's `porter2` stemmer, which every
+previous phase had left as a deliberate refusal. It is verified against
+Snowball's **own 42 649-word vocabulary**, zero failures, and it found a defect.
+
+| | defect | fix |
+|---|---|---|
+| ⚠ 41 | **§2.4 named an algorithm family, not a release.** It wrote `porter2:<lang>` and justified it with "an unambiguous published algorithm" — true of a given Snowball *release*, not of the name. Snowball's change log records behavioural changes at 3.0.0 (`past`/`paste`, `universe`/`university`, `lateral`/`later`, `emerge`/`emergency`, `organ`/`organic`, `-ogist` → `-og`) and 3.1.0, and one 3.1.0 entry **reverses** a 3.0.0 one — "Removed exception for skis", then "Restored exception for skis which is needed" | the stored form is `porter2:<lang>:<snowball version>`, an implementation records and checks its release, and a new release is a new stemmer name — §2.2's Unicode treatment, applied to the other pinned algorithm in the same chapter |
+
+**Defect 41 is the most self-inflicted one this project has found**, and that is
+what makes it worth recording. §2.2 of the *same chapter*, two subsections
+earlier, gets this exactly right: it pins Unicode 15.1, explains that a moved
+boundary silently changes what documents an index contains, and requires
+`cryptand.std.v2` rather than a silent upgrade. §2.4 then names a second
+versioned external algorithm and omits the same precaution.
+
+The generalisation is worth stating because the format names four external
+algorithms in total: **every dependency on an external specification needs its
+version in the file, not merely its name.** Unicode had it. Snowball did not.
+RFC 8439 and RFC 9106 are safe by accident — they are frozen documents rather
+than evolving projects — which is a property of those particular references and
+not a rule the format can rely on.
+
+It is also the second time a defect has been found by *implementing against the
+authority's own conformance data* rather than by reasoning: the Unicode suites
+found nothing wrong because §2.2 was right, and Snowball's vocabulary found this
+because §2.4 was not. A published test corpus does not only check the
+implementation.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.
