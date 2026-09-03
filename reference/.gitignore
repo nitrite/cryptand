@@ -7,6 +7,9 @@
 # Build outputs
 build/
 
+# Rust build outputs
+target/
+
 # IDE/editor files
 .idea/
 .vscode/

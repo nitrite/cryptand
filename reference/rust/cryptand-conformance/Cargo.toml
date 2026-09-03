@@ -1,0 +1,15 @@
+[package]
+name = "cryptand-conformance"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+blake2 = "0.10"
+
+[dev-dependencies]
+serde_json = "1"
