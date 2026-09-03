@@ -22,6 +22,8 @@ import 'cow.dart';
 import 'cve.dart';
 import 'engine.dart';
 import 'errors.dart';
+import 'analyzer.dart';
+import 'fulltext.dart';
 import 'index.dart';
 import 'stats.dart';
 import 'value.dart';
@@ -247,6 +249,224 @@ final class Collection {
       }
     }
     return best;
+  }
+
+  /// Creates a full-text index, `spec/07-fulltext.md` §1.
+  ///
+  /// Three trees — `term_dict`, `term_index` and `postings` — all carrying
+  /// `owner = <data tree name>`, so `05-catalog.md` §11's "what indexes does X
+  /// have?" finds them together. The **postings** tree is the index's
+  /// identity: §1 says so, and it is what [fullTextSearch] is handed.
+  TreeDescriptor createFullTextIndex(
+    List<String> fields, {
+    Analyzer? analyzer,
+    bool positions = true,
+    String? indexName,
+  }) {
+    final a = analyzer ?? Analyzer();
+    a.requireUnicode(Analyzer.unicodeVersionImplemented);
+
+    final base = indexName ?? 'fts:$name:${fields.join(",")}';
+    final dict = db.catalog.create('$base:term_dict',
+        kind: TreeKind.termDict, owner: name, params: {'index_type': const CStr(IndexType.fullText)});
+    final rev = db.catalog.create('$base:term_index',
+        kind: TreeKind.termIndex, owner: name, params: {'index_type': const CStr(IndexType.fullText)});
+    final post = db.catalog.create(base,
+        kind: TreeKind.postings,
+        owner: name,
+        params: {
+          'index_type': const CStr(IndexType.fullText),
+          'data_tree': CInt.of(NumType.u32, treeId),
+          'fields': CArray([for (final f in fields) CStr(f)]),
+          'analyzer': CStr(a.name),
+          'analyzer_params': CDoc({
+            if (a.stopwords.isNotEmpty)
+              'stopwords': CArray([
+                for (final w in Analyzer.canonicalStopwords(a.stopwords))
+                  CStr(w)
+              ]),
+            'stemmer': CStr(a.stemmer),
+          }),
+          'term_dict': CInt.of(NumType.u32, dict.treeId),
+          'term_index': CInt.of(NumType.u32, rev.treeId),
+          'positions': CBool(positions),
+        });
+
+    for (final (id, doc) in all) {
+      _indexDocumentText(post, a, fields, doc, id, positions);
+    }
+    return post;
+  }
+
+  Analyzer _analyzerOf(TreeDescriptor postings) {
+    final p = postings.params;
+    final ap = (p['analyzer_params'] as CDoc?) ?? CDoc(const {});
+    final words = (ap['stopwords'] as CArray?)
+            ?.items
+            .map((e) => (e as CStr).value)
+            .toList() ??
+        const <String>[];
+    return Analyzer(
+      name: (p['analyzer']! as CStr).value,
+      stopwords: words,
+      stemmer: (ap['stemmer'] as CStr?)?.value ?? Stemmer.none,
+    );
+  }
+
+  void _indexDocumentText(TreeDescriptor postings, Analyzer a,
+      List<String> fields, CDoc doc, CValue id, bool positions) {
+    final byTerm = <String, List<int>>{};
+    for (final path in fields) {
+      for (final v in resolvePath(doc, path)) {
+        for (final t in a.analyzeValue(v is CStr ? v.value : null)) {
+          (byTerm[t.text] ??= []).add(t.position);
+        }
+      }
+    }
+    if (byTerm.isEmpty) return;
+
+    final p = postings.params;
+    final dictId = ((p['term_dict']! as CInt).magnitude).lo;
+    final revId = ((p['term_index']! as CInt).magnitude).lo;
+    final docId = (id as CNitriteId).id;
+
+    for (final entry in byTerm.entries) {
+      final term = entry.key;
+      final pos = entry.value..sort();
+      final termId = _internTerm(dictId, revId, term);
+
+      // Read the block this document belongs in, add the posting, write back.
+      // §4.4: an update rewrites the block it touches, not the posting list.
+      final existing = _blocksOf(postings, termId);
+      final merged = <Posting>[
+        for (final b in existing)
+          for (final q in b.postings)
+            if (q.docId != docId) q,
+        Posting(docId, pos.length, positions ? pos : const []),
+      ]..sort((x, y) => x.docId.compareTo(y.docId));
+
+      for (final b in existing) {
+        _e.remove(postings.treeId,
+            decodeKey(PostingsBlock.keyFor(termId, b.firstDoc)));
+      }
+      for (final b in PostingsBlock.split(merged, hasPositions: positions)) {
+        _e.put(postings.treeId,
+            decodeKey(PostingsBlock.keyFor(termId, b.firstDoc)), b.encode());
+      }
+      _updateTermStats(dictId, term, termId, merged);
+    }
+  }
+
+  int _internTerm(int dictId, int revId, String term) {
+    final existing = _e.get(dictId, CStr(term));
+    if (existing != null) return TermEntry.decode(existing).id;
+    // §1: "term_id is allocated append-only and never reused (same discipline
+    // as name_id)."
+    final next = _e.scanTree(revId).length + 1;
+    _e.put(dictId, CStr(term), const TermEntry(0, 0, 0).encode());
+    _e.put(revId, CInt.of(NumType.u32, next), encodeValue(CStr(term)));
+    _e.put(dictId, CStr(term), TermEntry(next, 0, 0).encode());
+    return next;
+  }
+
+  void _updateTermStats(
+      int dictId, String term, int termId, List<Posting> all) {
+    var ttf = 0;
+    for (final p in all) {
+      ttf += p.freq;
+    }
+    _e.put(dictId, CStr(term), TermEntry(termId, all.length, ttf).encode());
+  }
+
+  List<PostingsBlock> _blocksOf(TreeDescriptor postings, int termId) {
+    final lower = PostingsBlock.keyFor(termId, -0x8000000000000000);
+    final upper = PostingsBlock.keyFor(termId + 1, -0x8000000000000000);
+    return [
+      for (final e in _e.scanTree(postings.treeId,
+          range: KeyRange(lower, upper)))
+        PostingsBlock.decode(e.value)
+    ];
+  }
+
+  /// The `term_dict` entry for a term, or null.
+  TermEntry? termEntry(TreeDescriptor postings, String term) {
+    final dictId =
+        ((postings.params['term_dict']! as CInt).magnitude).lo;
+    final v = _e.get(dictId, CStr(term));
+    return v == null ? null : TermEntry.decode(v);
+  }
+
+  /// Every posting for a term, in document order.
+  List<Posting> postingsFor(TreeDescriptor postings, String term) {
+    final e = termEntry(postings, term);
+    if (e == null) return const [];
+    return [for (final b in _blocksOf(postings, e.id)) ...b.postings];
+  }
+
+  /// A full-text search. §3: the query is analyzed with the same analyzer.
+  ///
+  /// Returns the matching document ids. **Scoring is not part of the format**
+  /// (§3): "Two SDKs may legitimately rank the same result set differently;
+  /// they MUST NOT disagree about the set." So this returns a set, in document
+  /// order, and leaves ranking to the caller.
+  List<CValue> fullTextSearch(TreeDescriptor postings, String query) {
+    final a = _analyzerOf(postings);
+    final terms = a.analyze(query).map((t) => t.text).toSet();
+    if (terms.isEmpty) return const [];
+    Set<int>? acc;
+    for (final t in terms) {
+      final ids = {for (final p in postingsFor(postings, t)) p.docId};
+      acc = acc == null ? ids : acc.intersection(ids);
+    }
+    final out = (acc ?? <int>{}).toList()..sort();
+    return [for (final id in out) CNitriteId(id)];
+  }
+
+  /// A phrase query. §4.3: an implementation MUST reject one against an index
+  /// without positions "rather than approximate it with a conjunction".
+  List<CValue> phraseSearch(TreeDescriptor postings, String phrase) {
+    final positions = (postings.params['positions'] as CBool?)?.value ?? false;
+    if (!positions) {
+      throw const UnsupportedFeatureException(
+          'this full-text index has positions = false, so a phrase query '
+          'cannot be answered; approximating it with a conjunction would '
+          'return the wrong set (spec/07-fulltext.md section 4.3)');
+    }
+    final a = _analyzerOf(postings);
+    final tokens = a.analyze(phrase);
+    if (tokens.isEmpty) return const [];
+
+    final perTerm = <String, Map<int, List<int>>>{};
+    for (final t in tokens) {
+      perTerm[t.text] ??= {
+        for (final p in postingsFor(postings, t.text)) p.docId: p.positions
+      };
+    }
+    Set<int>? candidates;
+    for (final m in perTerm.values) {
+      final ids = m.keys.toSet();
+      candidates = candidates == null ? ids : candidates.intersection(ids);
+    }
+
+    final out = <int>[];
+    for (final docId in (candidates ?? <int>{}).toList()..sort()) {
+      final first = perTerm[tokens.first.text]![docId]!;
+      for (final start in first) {
+        var ok = true;
+        for (final t in tokens.skip(1)) {
+          final want = start + (t.position - tokens.first.position);
+          if (!perTerm[t.text]![docId]!.contains(want)) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) {
+          out.add(docId);
+          break;
+        }
+      }
+    }
+    return [for (final id in out) CNitriteId(id)];
   }
 
   void _writeIndexEntries(

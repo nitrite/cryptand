@@ -1,15 +1,84 @@
-# Cryptand reference implementation — phase 10 report
+# Cryptand reference implementation — phase 11 report
 
 **Implementation:** pure Dart 3.12, `reference/dart/cryptand/`
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 459 tests green, **no skips**, `dart analyze` clean, conformance vectors byte-exact and self-verifying, `dart analyze` clean, conformance vectors byte-exact and self-verifying
+**Status:** 492 tests green, **no skips**, `dart analyze` clean, conformance vectors byte-exact and self-verifying, `dart analyze` clean, conformance vectors byte-exact and self-verifying
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-6 Phase 11 — full text, checked against Unicode's own suites
+
+Built `spec/07-fulltext.md`: the `cryptand.std.v1` analyzer, the three trees
+(`term_dict`, `term_index`, `postings`), the §4.2 block layout, term and phrase
+queries, and the `analyzer/` conformance vector set `11-conformance.md` §6
+names. **No defects found.**
+
+### The part that matters is what it was checked against
+
+The chapter's first paragraph: "Full text is the hardest thing in this format to
+make portable, and the reason is not the postings — it is the **analyzer**."
+The top-level `README.md` calls full-text tokenization one of the **two
+genuinely hard parts** of the whole proposition.
+
+Dart's standard library supplies **none** of what §2.2 requires — no NFKC, no
+UAX #29 word segmentation, no `Simple_Lowercase_Mapping`. `String.toLowerCase()`
+is close, and close is precisely what produces two indexes that disagree about
+what documents exist. So all three were implemented against tables generated
+from the **Unicode 15.1.0 UCD** (the release §2.2 pins) and verified against
+Unicode's published conformance suites:
+
+| suite | cases | failures |
+|---|---|---|
+| `NormalizationTest-15.1.0` — NFC and NFKC | **19 074** | **0** |
+| `WordBreakTest-15.1.0` — UAX #29 word boundaries | **1 826** | **0** |
+
+Both on the first run. Both data files are committed under
+`reference/conformance/unicode/`, so the check is reproducible rather than a
+claim, and `test/fulltext_test.dart` runs them as ordinary tests.
+
+**This is the strongest evidence this project has produced for
+`00-conventions.md` §1.1** — that naming an algorithm is what makes a format
+portable rather than what constrains it. Phase 4 showed it for Argon2id, where
+the vector set is a handful of cases. Full text is where the argument is hardest
+to believe, because the analyzer is eight steps over the entire Unicode
+character database — and a language whose runtime offers none of the required
+operations still reproduced all 20 900 published cases from the specification
+alone.
+
+### The three traps §2.2 names, each tested
+
+- **Locale-sensitive lowercasing.** `I` → `i`, never `ı`, because the mapping
+  is table-driven rather than `String.toLowerCase()`.
+- **Full case folding is not simple lowercasing.** `STRAẞE` → `straße`, not
+  `strasse`. The test asserts both the equality and the inequality.
+- **Unicode version drift.** The tables report `15.1.0`, and
+  `Analyzer.requireUnicode` refuses an index pinning anything else — §2.2's
+  "MUST refuse to write an index whose analyzer pins a version they do not
+  have".
+
+### One design detail worth flagging to implementers
+
+§2.2 step 8 makes a token's position "the index of the segment among the
+segments emitted from step 3, **before filtering**". So dropping a stopword
+leaves a **gap** rather than shifting everything after it — which is what makes
+a phrase query mean the same thing whether or not a stopword list was
+configured. It is easy to miss and impossible to detect later without
+re-indexing, so it has its own test and its own conformance case.
+
+### What is not implemented, and why that is the specified behaviour
+
+`porter2` stemming (§2.4). Declaring it and not having it is not a gap to paper
+over: §2.1 says an implementation that cannot reproduce the named analyzer
+exactly MUST NOT write to the index, so `Analyzer(stemmer: 'porter2:en')`
+**throws** rather than tokenizing approximately. That is the specified failure —
+loud and specific — and it is tested as such.
 
 ---
 
@@ -713,12 +782,18 @@ and the filter pages live in the extent.
 | **`13-operations`** | **complete except §8**, multi-process readers, which needs real files and processes |
 | **`12-profiles`** | **complete**, §4's budget measured and **met** (§0.-4) |
 | **`01-container` §9 / `04-segments` §11** — the verification pass | **complete** for the invariants this engine can express |
-| `07`–`09`, `12` | not started |
+| **`07-fulltext`** | **complete** except `porter2` stemming, which §2.1 makes a refusal rather than an approximation |
+| `08`–`09` | not started |
 
 New in phase 3: `lib/src/cow.dart` (copy-on-write B+trees),
 `lib/src/manifest.dart` (tree 6), `lib/src/catalog.dart`, `lib/src/index.dart`,
 `lib/src/database.dart`, `bench/p10_read_tail.dart`, and the
 `index/entries.json` and `catalog/trees.json` vectors.
+
+New in phase 11: `lib/src/unicode.dart`, `lib/src/unicode_tables.dart`
+(generated), `lib/src/analyzer.dart`, `lib/src/fulltext.dart`,
+`test/fulltext_test.dart`, the `analyzer/` vector set, and the two Unicode
+conformance files under `reference/conformance/unicode/`.
 
 New in phase 10: `lib/src/backup.dart`, `lib/src/changefeed.dart`,
 `lib/src/spaceapi.dart`, `test/backup_feed_test.dart`.
@@ -746,7 +821,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 `conformance/vectors/security/derivation.json`, and `deriveKek` /
 `unlockWithPassword` in `lib/src/security.dart`.
 
-**459 tests**, up from 259 at the end of phase 2. **No skips.**
+**492 tests**, up from 259 at the end of phase 2. **No skips.**
 
 ---
 
@@ -807,7 +882,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
    are untouched. ~~`04` §5.2's stepwise compaction.~~ **Done** (§0.-4).
    ~~The rest of `13`.~~ **Done** (§0.-5) except §8. The highest-value remaining
    items are now `10-transactions.md` §2 with prediction P3, and chapters
-   `07`–`09` — the first needs threads, the other three are new subsystems.
+   `08`–`09` — the first needs threads, the other two are new subsystems.
 
 ---
 
@@ -817,7 +892,7 @@ New in phase 4: `lib/src/blake2b.dart`, `lib/src/argon2.dart`,
 cd reference/dart/cryptand
 dart pub get
 dart analyze                              # clean
-dart test                                 # 459 tests, no skips
+dart test                                 # 492 tests, no skips
 
 dart run tool/generate_vectors.dart       # regenerates ../../conformance/vectors
 dart test test/conformance_test.dart      # verifies them

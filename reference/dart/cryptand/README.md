@@ -1,4 +1,4 @@
-# Cryptand — Dart reference implementation (phase 10)
+# Cryptand — Dart reference implementation (phase 11)
 
 Pure Dart implementation of the Cryptand File Format, CFF v1.0.
 
@@ -7,7 +7,7 @@ the spec disagree, the spec wins and this code is wrong
 (`spec/11-conformance.md` §7).
 
 Read **[REPORT.md](REPORT.md)** first: it states what is implemented, the
-thirty-two spec defects this work has found across ten phases, and every place a
+thirty-two spec defects this work has found across eleven phases, and every place a
 measurement differs from a claim in `../../design/`.
 
 ## Quick start
@@ -47,6 +47,9 @@ dart pub get && dart test
 | `lib/src/backup.dart` | **backup** — full, incremental, and the uuid rules (`spec/13` §2) |
 | `lib/src/changefeed.dart` | **the change feed** (`spec/13` §7) |
 | `lib/src/spaceapi.dart` | **the space and key-management API** (`spec/13` §5) |
+| `lib/src/unicode.dart` | **NFKC, UAX #29 and simple case mapping** at Unicode 15.1 (`spec/07` §2.2) |
+| `lib/src/analyzer.dart` | **`cryptand.std.v1`** — the eight-step pipeline (`spec/07` §2) |
+| `lib/src/fulltext.dart` | **postings blocks and the term dictionary** (`spec/07` §1, §4) |
 | `lib/src/catalog.dart` | **the catalog** — descriptors, reserved trees, attributes (`spec/05`) |
 | `lib/src/index.dart` | **secondary indexes** — entry derivation and the §7 scans (`spec/06`) |
 | `lib/src/database.dart` | collections and repositories over the engine |
@@ -63,6 +66,11 @@ dart pub get && dart test
 - `test/conformance_test.dart` — reads the generated vectors back and checks
   every assertion. It touches only JSON and the public encode/decode paths,
   which is what makes it the first thing to port to Rust and Java.
+
+- `test/fulltext_test.dart` — the strongest form of the same answer. Dart has
+  no NFKC, no UAX #29 and no `Simple_Lowercase_Mapping`, and all three are
+  reproduced against Unicode's own suites: **19 074 normalization cases and
+  1 826 word-break cases, zero failures**.
 
 - `test/argon2_test.dart` and `test/blake2b_test.dart` — the answer to "isn't
   naming an algorithm a language dependency?". They reproduce RFC 9106 §5.3 and

@@ -841,6 +841,49 @@ described, because each is a MUST whose violation is silent:
 be built here in any meaningful sense: the whole content is a lock sidecar
 coordinating *processes*, and this implementation has no file under it.
 
+### 8.10 Phase 11 — full text, and the claim the whole project rests on
+
+Phase 11 built `07-fulltext.md`: the `cryptand.std.v1` analyzer, the three
+trees, the postings block layout, and the `analyzer/` conformance vector set
+`11-conformance.md` §6 names. **No defects found.**
+
+The chapter opens by saying the analyzer is the hard part — "Two implementations
+that tokenize `"Bäckerei-Straße 12"` differently will produce two indexes that
+disagree about what documents exist" — and `README.md` names full-text
+tokenization as one of the **two genuinely hard parts** of the whole
+proposition. So the result worth recording is not that it was built, it is what
+it was checked against.
+
+Dart's standard library supplies **none** of what §2.2 requires: no NFKC, no
+UAX #29 word segmentation, no `Simple_Lowercase_Mapping`. `String.toLowerCase()`
+is close, and close is exactly what produces two indexes that disagree. All
+three were therefore implemented against tables generated from the **Unicode
+15.1.0 UCD** — the release §2.2 pins — and verified against Unicode's own
+published conformance suites:
+
+| suite | cases | failures |
+|---|---|---|
+| `NormalizationTest-15.1.0` (NFC and NFKC) | **19 074** | **0** |
+| `WordBreakTest-15.1.0` (UAX #29) | **1 826** | **0** |
+
+Both passed on the first run, and both data files are now committed under
+`reference/conformance/unicode/` so the check is reproducible rather than
+anecdotal.
+
+**This is the strongest evidence the project has produced for its central
+claim.** §1.1 of `00-conventions.md` argues that naming an algorithm is what
+makes a format portable rather than what constrains it; phase 4 demonstrated it
+for Argon2id, where the vector set is a handful of cases. Full text is the case
+where the argument is hardest to believe — the analyzer is a pipeline of eight
+steps over the entire Unicode character database — and it holds there too: a
+language whose runtime offers none of the required operations reproduced all
+20 900 published cases from the specification alone.
+
+The corollary is the one §2.1 already states and is worth repeating with the
+evidence attached: an implementation that *cannot* do this MUST NOT write to a
+full-text index. That rule now has a measurable meaning — run the two suites, and
+if either reports a failure, the implementation is in the class §2.1 excludes.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

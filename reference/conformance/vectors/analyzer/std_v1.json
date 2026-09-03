@@ -1,0 +1,703 @@
+{
+  "format": "Cryptand File Format",
+  "format_version": "1.0",
+  "generator": "cryptand-dart/0.1.0-phase1",
+  "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+  "chapter": "spec/07-fulltext.md section 2.2",
+  "analyzer": "cryptand.std.v1",
+  "unicode_version": "15.1.0",
+  "pipeline": [
+    "decode UTF-8; non-string values skipped",
+    "NFKC",
+    "UAX #29 word boundaries; keep segments with >=1 Alphabetic or Numeric_Type != None",
+    "Simple_Lowercase_Mapping (NOT full folding, NOT locale-sensitive)",
+    "drop segments longer than 64 code points",
+    "drop stopwords",
+    "apply the stemmer",
+    "emit with the PRE-FILTER segment index as the position"
+  ],
+  "cases": [
+    {
+      "note": "the chapter opening example",
+      "stopwords": [],
+      "input_cps": [
+        66,
+        228,
+        99,
+        107,
+        101,
+        114,
+        101,
+        105,
+        45,
+        83,
+        116,
+        114,
+        97,
+        223,
+        101,
+        32,
+        49,
+        50
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            98,
+            228,
+            99,
+            107,
+            101,
+            114,
+            101,
+            105
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            115,
+            116,
+            114,
+            97,
+            223,
+            101
+          ],
+          "position": 1
+        },
+        {
+          "text_cps": [
+            49,
+            50
+          ],
+          "position": 2
+        }
+      ]
+    },
+    {
+      "note": "simple lowercasing, not full folding: SS vs ss",
+      "stopwords": [],
+      "input_cps": [
+        83,
+        84,
+        82,
+        65,
+        7838,
+        69
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            115,
+            116,
+            114,
+            97,
+            223,
+            101
+          ],
+          "position": 0
+        }
+      ]
+    },
+    {
+      "note": "the Turkish I: locale-independent",
+      "stopwords": [],
+      "input_cps": [
+        73,
+        32,
+        304,
+        32,
+        305
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            105
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            105
+          ],
+          "position": 1
+        },
+        {
+          "text_cps": [
+            305
+          ],
+          "position": 2
+        }
+      ]
+    },
+    {
+      "note": "NFKC folds a ligature before segmenting",
+      "stopwords": [],
+      "input_cps": [
+        64257,
+        108,
+        101,
+        32,
+        64258,
+        111,
+        119
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            102,
+            105,
+            108,
+            101
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            102,
+            108,
+            111,
+            119
+          ],
+          "position": 1
+        }
+      ]
+    },
+    {
+      "note": "NFKC folds a circled digit to a numeric",
+      "stopwords": [],
+      "input_cps": [
+        9312,
+        32,
+        9313
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            49
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            50
+          ],
+          "position": 1
+        }
+      ]
+    },
+    {
+      "note": "decomposed and composed forms agree",
+      "stopwords": [],
+      "input_cps": [
+        99,
+        97,
+        102,
+        101,
+        769,
+        32,
+        99,
+        97,
+        102,
+        233
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            99,
+            97,
+            102,
+            233
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            99,
+            97,
+            102,
+            233
+          ],
+          "position": 1
+        }
+      ]
+    },
+    {
+      "note": "punctuation-only segments are dropped",
+      "stopwords": [],
+      "input_cps": [
+        97,
+        32,
+        45,
+        45,
+        32,
+        98,
+        32,
+        43,
+        43,
+        32,
+        99
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            97
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            98
+          ],
+          "position": 1
+        },
+        {
+          "text_cps": [
+            99
+          ],
+          "position": 2
+        }
+      ]
+    },
+    {
+      "note": "an apostrophe stays inside a word (WB6/WB7)",
+      "stopwords": [],
+      "input_cps": [
+        100,
+        111,
+        110,
+        39,
+        116
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            100,
+            111,
+            110,
+            39,
+            116
+          ],
+          "position": 0
+        }
+      ]
+    },
+    {
+      "note": "a decimal stays one token (WB11/WB12)",
+      "stopwords": [],
+      "input_cps": [
+        51,
+        46,
+        49,
+        52,
+        32,
+        49,
+        44,
+        48,
+        48,
+        48
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            51,
+            46,
+            49,
+            52
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            49,
+            44,
+            48,
+            48,
+            48
+          ],
+          "position": 1
+        }
+      ]
+    },
+    {
+      "note": "CJK segments per UAX #29",
+      "stopwords": [],
+      "input_cps": [
+        26481,
+        20140,
+        37117,
+        12399,
+        26085,
+        26412
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            26481
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            20140
+          ],
+          "position": 1
+        },
+        {
+          "text_cps": [
+            37117
+          ],
+          "position": 2
+        },
+        {
+          "text_cps": [
+            12399
+          ],
+          "position": 3
+        },
+        {
+          "text_cps": [
+            26085
+          ],
+          "position": 4
+        },
+        {
+          "text_cps": [
+            26412
+          ],
+          "position": 5
+        }
+      ]
+    },
+    {
+      "note": "a regional-indicator pair is one segment (WB15/16)",
+      "stopwords": [],
+      "input_cps": [
+        102,
+        108,
+        97,
+        103,
+        32,
+        127471,
+        127477,
+        32,
+        101,
+        110,
+        100
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            102,
+            108,
+            97,
+            103
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            101,
+            110,
+            100
+          ],
+          "position": 1
+        }
+      ]
+    },
+    {
+      "note": "ZWJ joins an emoji sequence (WB3c)",
+      "stopwords": [],
+      "input_cps": [
+        97,
+        32,
+        128104,
+        8205,
+        128105,
+        32,
+        98
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            97
+          ],
+          "position": 0
+        },
+        {
+          "text_cps": [
+            98
+          ],
+          "position": 1
+        }
+      ]
+    },
+    {
+      "note": "a 65 code point segment is dropped, 64 survives",
+      "stopwords": [],
+      "input_cps": [
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        120,
+        32,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121,
+        121
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120,
+            120
+          ],
+          "position": 0
+        }
+      ]
+    },
+    {
+      "note": "stopwords leave a POSITION GAP, not a shift",
+      "stopwords": [
+        "a",
+        "the"
+      ],
+      "input_cps": [
+        116,
+        104,
+        101,
+        32,
+        113,
+        117,
+        105,
+        99,
+        107,
+        32,
+        97,
+        32,
+        98,
+        114,
+        111,
+        119,
+        110,
+        32,
+        102,
+        111,
+        120
+      ],
+      "tokens": [
+        {
+          "text_cps": [
+            113,
+            117,
+            105,
+            99,
+            107
+          ],
+          "position": 1
+        },
+        {
+          "text_cps": [
+            98,
+            114,
+            111,
+            119,
+            110
+          ],
+          "position": 3
+        },
+        {
+          "text_cps": [
+            102,
+            111,
+            120
+          ],
+          "position": 4
+        }
+      ]
+    }
+  ]
+}

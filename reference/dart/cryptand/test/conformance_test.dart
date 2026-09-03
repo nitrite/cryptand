@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:cryptand/src/analyzer.dart';
 import 'package:cryptand/src/argon2.dart';
 import 'package:cryptand/src/catalog.dart';
 import 'package:cryptand/src/cke.dart';
@@ -568,6 +569,53 @@ void main() {
         expect(hex(back.encode()), m['descriptor_without_created'],
             reason: '$name must round-trip byte for byte');
       }
+    });
+  });
+
+  group('analyzer/std_v1', () {
+    final v = load('analyzer/std_v1');
+
+    test('every case reproduces its token and position stream', () {
+      // spec/11-conformance.md section 6 names this set, and section 07 section 2
+      // says why it matters more than the postings: an analyzer that differs
+      // between languages produces "an index that is silently wrong in a way
+      // no checksum catches".
+      for (final c in v['cases']! as List) {
+        final m = c as Map<String, Object?>;
+        final a = Analyzer(
+            stopwords: [for (final w in m['stopwords']! as List) w as String]);
+        final input = String.fromCharCodes(
+            [for (final cp in m['input_cps']! as List) cp as int]);
+        final got = a.analyze(input);
+        final want = m['tokens']! as List;
+        expect(got.length, want.length, reason: m['note'] as String);
+        for (var i = 0; i < got.length; i++) {
+          final w = want[i] as Map<String, Object?>;
+          expect(got[i].text,
+              String.fromCharCodes(
+                  [for (final cp in w['text_cps']! as List) cp as int]),
+              reason: '${m["note"]} token $i');
+          expect(got[i].position, w['position'],
+              reason: '${m["note"]} position $i');
+        }
+      }
+    });
+
+    test('the analyzer name and Unicode version are pinned', () {
+      expect(v['analyzer'], Analyzer.std);
+      expect(v['unicode_version'], Analyzer.unicodeVersionImplemented);
+      // Section 2.2: a build without the pinned version must refuse to write.
+      expect(() => Analyzer().requireUnicode('16.0.0'),
+          throwsA(isA<UnsupportedFeatureException>()));
+    });
+
+    test('the pipeline the vectors were generated from is recorded', () {
+      // So another SDK implementing from the JSON alone knows what order the
+      // eight steps run in -- the positions depend on it.
+      final steps = v['pipeline']! as List;
+      expect(steps.length, 8);
+      expect(steps[1], contains('NFKC'));
+      expect(steps.last, contains('PRE-FILTER'));
     });
   });
 }

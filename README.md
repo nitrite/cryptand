@@ -43,7 +43,11 @@ The genuinely hard parts are not technical. They are (a) keeping three
 codebases in lockstep on a byte contract, and (b) full-text tokenization, which
 is only reproducible across languages if the analyzer is *specified* rather than
 delegated to whatever the host ecosystem provides. Both are addressed
-(`spec/11-conformance.md`, `spec/07-fulltext.md`).
+(`spec/11-conformance.md`, `spec/07-fulltext.md`) — and (b) is now
+**demonstrated**: Dart supplies none of NFKC, UAX #29 or
+`Simple_Lowercase_Mapping`, and the reference implementation reproduces all
+**19 074** normalization and **1 826** word-break cases of Unicode's own
+conformance suites from the specification alone.
 
 ## The engine
 
@@ -189,8 +193,8 @@ Read in this order.
 
 ## Status
 
-**Phases 1 through 10 of the reference implementation are built**, in pure Dart,
-at [`reference/dart/cryptand/`](reference/dart/cryptand/) — **459 tests, no
+**Phases 1 through 11 of the reference implementation are built**, in pure Dart,
+at [`reference/dart/cryptand/`](reference/dart/cryptand/) — **492 tests, no
 skips**, and a conformance vector set at
 [`reference/conformance/vectors/`](reference/conformance/) that is generated,
 byte-exact and self-verifying.
@@ -204,7 +208,8 @@ byte-exact and self-verifying.
 | `11` conformance, `12` profiles | complete |
 | `13` operations | complete except §8, multi-process readers |
 | `14` security | complete, Argon2id and BLAKE2b verified against RFC 9106 and RFC 7693 |
-| `07` full text, `08` spatial, `09` vector | not started — the optional feature levels |
+| `07` full text | complete except `porter2` stemming, which §2.1 makes a refusal rather than an approximation |
+| `08` spatial, `09` vector | not started — the remaining optional feature levels |
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
 Building the code has found **thirty-two defects in these documents** — a headline

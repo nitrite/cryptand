@@ -35,6 +35,7 @@ export 'src/cke.dart'
 export 'src/compare.dart' show compareNumeric, compareValues, isOrdered;
 export 'src/container.dart'
     show Feature, PageFlags, PageHeader, PageType, Profile, Sb, Superblock, TreeId;
+export 'src/analyzer.dart' show Analyzer, Stemmer, Token;
 export 'src/backup.dart' show Backup, BackupMode, BackupResult;
 export 'src/changefeed.dart' show Change, ChangeFeed;
 export 'src/catalog.dart'
@@ -85,6 +86,20 @@ export 'src/index.dart'
         resolvePath,
         splitFieldPath,
         uniquenessApplies;
+export 'src/fulltext.dart'
+    show Posting, PostingsBlock, TermEntry, kPostingsBlockMax;
+export 'src/unicode.dart'
+    show
+        combiningClass,
+        hasNumericType,
+        isAlphabetic,
+        isExtendedPictographic,
+        nfc,
+        nfkc,
+        simpleLowercaseMapping,
+        wordBoundaries,
+        wordBreakProperty;
+export 'src/unicode_tables.dart' show unicodeVersion;
 export 'src/filter.dart'
     show BlockedBloom, Hash64, blockCountFor, cfh64, kBlockBits, probesFor;
 export 'src/limits.dart';
