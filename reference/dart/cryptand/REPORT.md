@@ -1,20 +1,80 @@
-# Cryptand reference implementation — phase 16 report
+# Cryptand reference implementation — phase 17 report
 
 **Implementations:** pure Dart 3.12, `reference/dart/cryptand/`; a second one in
 Rust that reads the vectors, `reference/rust/cryptand-conformance/` (phase 15);
-and the write protocol, `reference/rust/cryptand-write/` (phase 16)
+and the write protocol plus multi-process readers,
+`reference/rust/cryptand-write/` (phases 16–17)
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 546 Dart tests green, **no skips**, `dart analyze` clean; 53 Rust
+**Status:** 546 Dart tests green, **no skips**, `dart analyze` clean; 65 Rust
 tests green; conformance vectors byte-exact, self-verifying, and read by an
 implementation that did not generate them. **Every prediction that can be
-measured without a competing engine has now been measured, P3 included.**
+measured without a competing engine has been measured, P3 included, and every
+section of the specification now has an implementation.**
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-11 Phase 17 — multi-process readers, and two header fields no rule read
+
+`13-operations.md` §8 was the last section of the specification with no
+implementation anywhere. It is a protocol between **processes**, so no amount of
+Dart or of single-process Rust could reach it; phase 17 built it in
+`reference/rust/cryptand-write` and tested it with processes it spawns.
+
+Twelve tests. The arithmetic — a live slot pins the retention floor, a stale one
+does not, a reclaimed reader learns it from its own heartbeat, a claimer reuses
+a stale slot — runs in-process, because it is about the protocol's rules rather
+than its concurrency. Four tests spawn real reader processes: three claim
+distinct slots and move the writer's `min_retained_commit` to the oldest commit
+any of them pinned; one stops beating and is reclaimed, lifting the floor; and
+twelve racing processes produce twelve distinct slots.
+
+### Defect 47 — the header declared two fields and no rule read them
+
+`writer_pid` and `writer_heartbeat_ms` are in §8's header diagram and appear
+nowhere in its four rules. That is not a tidiness complaint, because rule 3
+attributed slot reclamation to the writer alone, and the two gaps meet:
+
+> The writing process dies — or was never there, which is two `dbinspect`
+> sessions against a file no application currently holds. Nothing reclaims
+> stale slots. They accumulate. After `slot_count` reader opens, **every later
+> reader silently falls to volatile mode**, for a reason it cannot see, against
+> a database where volatile mode is protecting against a reclamation that will
+> never happen.
+
+This is the chapter's own principle turned against it: rule 4 requires a
+volatile reader to *report* the mode, exactly because reading without a pin is a
+downgrade someone must know about. Fixed by making a stale slot a free slot **to
+a claimer** (rule 1), and by giving the two header fields a stated job (rule 5).
+
+### Defect 48 — one volatile mode, two ways in, one of them unwritten
+
+Rule 4 said "a reader that cannot write the sidecar (read-only filesystem)". It
+said nothing about a sidecar whose slots are all held by live readers, so error,
+block and silent degradation were all conforming. Rule 4 now covers both and
+requires the implementation to say **which** — which is why this implementation's
+volatile mode carries a reason rather than a flag.
+
+### Defect 49 — the sidecar is host-local and never said so
+
+It depends on the platform's advisory file locking and on a clock shared between
+the processes reading it. A network filesystem gives neither, quietly. §8 now
+puts a database opened concurrently from two hosts outside `MULTIPROC_READ`.
+
+### One clarification worth having
+
+§8 says a reader claims a slot "with a compare-and-swap". A plain file has no
+cross-process atomic word, so the claim's read-scan-write runs under an
+exclusive advisory lock on the sidecar — taken once per reader open, never on
+the heartbeat path. The spec's word is right; an implementer looking for a
+`compare_exchange` will not find one, and now the reference implementation shows
+what satisfies it.
 
 ---
 
@@ -1097,6 +1157,10 @@ New in phase 11: `lib/src/unicode.dart`, `lib/src/unicode_tables.dart`
 `test/fulltext_test.dart`, the `analyzer/` vector set, and the two Unicode
 conformance files under `reference/conformance/unicode/`.
 
+New in phase 17: `multiproc.rs`, `src/bin/mp_reader.rs` and
+`tests/multiproc.rs` in `reference/rust/cryptand-write/`. Nothing in this
+package changed.
+
 New in phase 16: `reference/rust/cryptand-write/` — `engine`, `vlog`, `prefix`
 and `nonce`, `tests/protocol.rs`, and the two benchmarks `p3_write_scale` and
 `p3_bottleneck`. Nothing in this package changed.
@@ -1231,7 +1295,7 @@ and the write protocol:
 
 ```bash
 cd reference/rust
-cargo test                                     # 41 + 12 tests
+cargo test                                     # 41 + 24 tests
 
 cd cryptand-write
 cargo run --release --bin p3_write_scale       # P3; the sync rows take minutes

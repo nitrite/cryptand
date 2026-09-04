@@ -1082,6 +1082,39 @@ about 1× and the knob appeared to do nothing — a control that cannot fail,
 measuring nothing, for the fourth time in this project's benchmarks. The sweep
 belongs in the configuration that scales.
 
+### 8.15 Phase 17 — multi-process readers, and two header fields no rule read
+
+Phase 17 built `13-operations.md` §8's lock sidecar in
+`reference/rust/cryptand-write`, with **real processes** — the last part of the
+specification that no implementation had touched, and one that cannot be
+exercised any other way. Twelve tests: the protocol's arithmetic in-process,
+and slot claiming, retention pinning, heartbeat expiry and a claim race run
+across separate spawned processes.
+
+The chapter is small and its rules are individually right. What it was missing
+is what happens when the shape it assumes is not there.
+
+| | defect | fix |
+|---|---|---|
+| ⚠ 47 | **The sidecar header declares `writer_pid` and `writer_heartbeat_ms`, and no rule in §8 read either.** They are not decorative: with rule 3 attributing reclamation to the writer alone, a database whose writing process has died — or that never had one, which is two `dbinspect` sessions against a file no application currently holds — reclaims nothing. Stale slots accumulate, and after `slot_count` reader opens **every later reader silently falls to volatile mode**, for a reason it cannot see, against a database where volatile mode protects against a reclamation that will never happen | rule 1 makes a stale slot a free slot **to a claimer**, so reclamation is not the writer's alone; rule 5 gives the two header fields their purpose — the writer refreshes on the same schedule, and a reader treats an absent or aged-out writer as "no live writer" and reports it |
+| 48 | **Rule 4's volatile mode was written for one cause and reached by two.** "A reader that cannot write the sidecar (read-only filesystem)" says nothing about a sidecar whose slots are all held, so an implementation could error, block, or silently degrade, and two SDKs could each be conforming while behaving differently | rule 4 covers both, and requires the implementation to report **which** — a downgrade whose cause is invisible is the failure mode this chapter exists to prevent |
+| 49 | **§8 never says the sidecar is host-local.** It depends on the platform's advisory locking and on a clock shared between the processes reading it, and a network filesystem gives neither. Nothing stopped an implementation from claiming `MULTIPROC_READ` across two hosts, where both mechanisms fail quietly | §8 puts a database opened concurrently from two hosts outside `MULTIPROC_READ`, SHOULD-refuses it, and forbids reporting a coordination that was not achieved |
+
+**Defect 47 is the chapter's own principle turned on it.** Rule 4 requires a
+volatile reader to *report* the mode, precisely because reading without a pin is
+a downgrade someone must know about. The gap made that report arrive for an
+invisible reason, at a moment when it was also unnecessary — the worst of both,
+and reachable by nothing more exotic than the writing application exiting.
+
+**A note on what "compare-and-swap" means on a file.** §8 says a reader claims a
+slot with a CAS. A plain file offers no cross-process atomic word, so the claim's
+read-scan-write runs under an exclusive advisory lock on the sidecar. That is
+the CAS, it is taken once per reader open and never on the heartbeat path, and
+twelve processes racing for twelve slots produced twelve distinct slots. The
+spec's word is the right one; it is worth writing down that it is satisfied by a
+lock rather than by an instruction, because an implementer looking for
+`compare_exchange` will not find one.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

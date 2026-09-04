@@ -99,6 +99,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cryptand"
+version = "1.0.0"
+dependencies = [
+ "argon2",
+ "blake2",
+ "chacha20poly1305",
+ "hkdf",
+ "hmac",
+ "lz4_flex",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "cryptand-conformance"
 version = "0.1.0"
 dependencies = [
@@ -199,6 +213,12 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 
 [[package]]
 name = "memchr"

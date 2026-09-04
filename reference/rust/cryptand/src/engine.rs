@@ -1,0 +1,2194 @@
+//! The engine: memtables, L0 flush, the level policy of `04-segments.md` §3.1,
+//! read resolution (§4), compaction (§5), the value log (§6) and cursors (§8),
+//! over the container of `01-container.md` and the commit protocol of
+//! `10-transactions.md`.
+//!
+//! Everything structural lives here; `store.rs` layers the concurrent write
+//! path of `10-transactions.md` §2 on top without duplicating any of it.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
+
+use crate::catalog::{tree_id, Attributes, Catalog};
+use crate::cke;
+use crate::codec;
+use crate::container::{
+    feature, page_flags, page_type, Durability, PageHeader, Profile, Superblock, PAGE_HEADER_BYTES,
+};
+use crate::cow::CowTree;
+use crate::cve;
+use crate::error::{corrupt, invalid, Error, Result};
+use crate::manifest::{Manifest, SegmentRef};
+use crate::pager::{FreeExtent, Pager};
+use crate::profile::ProfileConstants;
+use crate::security::KeyRing;
+use crate::segment::{
+    encode_range_delete_payload, internal_key, op, parse_internal_key, user_part, user_prefix,
+    value_kind, RangeDelete, SegEntry, SegRecord, Segment, SegmentBuilder,
+};
+use crate::value::{NumType, Value};
+use crate::vlog::{
+    self, encode_record, Heat, Tier, VlogHead, VlogPointer, VlogRecord, VlogStats, DATA_OFFSET,
+};
+
+/// One memtable entry, before it becomes a segment cell.
+#[derive(Clone, Debug)]
+pub struct MemEntry {
+    pub value_kind: u8,
+    pub value: Vec<u8>,
+    pub expiry_ms: Option<u64>,
+}
+
+/// `10-transactions.md` §1 — a sequence number plus **all nine** superblock
+/// roots. A snapshot that omits one is not a consistent view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Snapshot {
+    pub seq: u64,
+    pub commit_id: u64,
+    pub catalog_root: u64,
+    pub freelist_root: u64,
+    pub attributes_root: u64,
+    pub manifest_root: u64,
+    pub vlog_stats_root: u64,
+    pub checkpoint_root: u64,
+    pub changefeed_root: u64,
+    pub created_ms: i64,
+}
+
+/// `10-transactions.md` §9.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreEvent {
+    Opened,
+    Commit { commit_id: u64, visible_seq: u64 },
+    Flushed { segment_id: u64, entries: u64 },
+    Compacted { from: u8, to: u8, bytes: u64 },
+    Backpressure { delay_ms: u64, bound: String },
+    Closing,
+    Closed,
+}
+
+/// §3.1's policy. A conforming reader MUST NOT depend on it
+/// (`11-conformance.md` §1.3); it is recorded here because a writer needs one.
+#[derive(Clone, Copy, Debug)]
+pub struct LevelPolicy {
+    pub l0_trigger: u8,
+    pub tier_width: u8,
+    pub overlap_bound: u8,
+    pub level_count: u8,
+    pub fanout: u8,
+}
+
+impl LevelPolicy {
+    pub fn last_level(&self) -> u8 {
+        self.level_count.saturating_sub(1)
+    }
+    /// **Plain tiering is this policy with `overlap_bound = tier_width`** — the
+    /// control is one superblock field.
+    pub fn plain_tiered(self) -> LevelPolicy {
+        LevelPolicy { overlap_bound: self.tier_width, ..self }
+    }
+}
+
+/// §5.2 — a compaction job, decomposable into steps of at most
+/// `compaction_step_bytes`, between which it can yield.
+pub struct CompactionJob {
+    pub inputs: Vec<SegmentRef>,
+    pub target_level: u8,
+    pub target_group: u8,
+    entries: Vec<SegEntry>,
+    cursor: usize,
+    builder: Option<SegmentBuilder>,
+    outputs: Vec<(Vec<u8>, u64)>,
+    per_output: u64,
+    pub bytes_written: u64,
+}
+
+impl CompactionJob {
+    pub fn input_ids(&self) -> HashSet<u64> {
+        self.inputs.iter().map(|r| r.segment_id).collect()
+    }
+}
+
+/// The engine's measured counters. `13-operations.md` §6 forbids a fabricated
+/// value, so a counter that is not measured is simply absent here.
+#[derive(Clone, Debug, Default)]
+pub struct Counters {
+    pub bytes_written_logical: u64,
+    pub bytes_written_device: u64,
+    pub write_amp_value: u64,
+    pub write_amp_key_index: u64,
+    pub write_amp_gc: u64,
+    pub stall_events: u64,
+    pub stall_total_ms: u64,
+    pub page_cache_hits: u64,
+    pub page_cache_misses: u64,
+    pub segments_probed: Vec<u32>,
+    pub filter_probes: u64,
+    pub filter_false_positives: u64,
+    pub value_reads: u64,
+    pub scanned_rows: u64,
+    pub pinned_by_snapshots: u64,
+    pub pinned_by_checkpoints: u64,
+    pub nonces_allocated: u64,
+    pub unencrypted_pages: u64,
+    pub encrypted_pages: u64,
+}
+
+pub struct Engine {
+    pub pager: Pager,
+    pub sb: Superblock,
+    pub manifest: Manifest,
+    pub catalog: Catalog,
+    pub attributes: Attributes,
+    /// Tree 1.
+    pub freelist: CowTree,
+    /// Tree 7 (`04-segments.md` §6.7).
+    pub vlog_stats_tree: CowTree,
+    /// Tree 8 (`13-operations.md` §1).
+    pub checkpoints: CowTree,
+    /// Tree 9 (`13-operations.md` §7).
+    pub changefeed: CowTree,
+
+    /// §2 step 5's shards: writers to different shards never meet.
+    memtable: Vec<BTreeMap<Vec<u8>, MemEntry>>,
+    memtable_bytes: usize,
+    pub memtable_entry_limit: usize,
+
+    pub policy: LevelPolicy,
+    pub profile: ProfileConstants,
+    /// Whether a lookup stops at the first candidate that holds the key. §4
+    /// permits it only under the level-discipline proof, which this policy
+    /// satisfies; it is a switch because §4.1's bound belongs to the early exit.
+    pub early_exit: bool,
+    pub filters: bool,
+    /// Whether `compact()` drives `locality_debt` back under its bound when it
+    /// finishes. On by default because §6.8 makes collection half of §6.9's
+    /// bound rather than optional maintenance; off is the control that shows
+    /// what promotion alone buys.
+    pub auto_collect: bool,
+
+    /// Open segment extents, cached by `segment_id`.
+    segments: HashMap<u64, Arc<Segment>>,
+    /// `13-operations.md` §4 — segments a checksum failure has taken out of
+    /// service, and the key range each covered.
+    pub quarantined: HashMap<u64, SegmentRef>,
+
+    /// Value-log segments: open ones by heat class, and every one's stats.
+    pub vlog_open: BTreeMap<u8, u64>,
+    pub vlog_cold_open: Option<u64>,
+    pub vlog_stats: BTreeMap<u64, VlogStats>,
+    vlog_tail: BTreeMap<u64, u64>,
+    /// Value-log segments whose tree-7 entry has changed since the last commit.
+    /// `10-transactions.md` §2.3 invariant 2 puts the durable `bytes`
+    /// watermark in tree 7 precisely so advancing it is an ordinary
+    /// transactional write, not a rewrite of a write-once head page.
+    vlog_dirty: HashSet<u64>,
+
+    /// §9's wall clock, injectable so a backwards jump can be tested.
+    pub now_ms: u64,
+
+    pub visible_seq: u64,
+    pub next_seq: u64,
+    live_snapshots: Vec<Snapshot>,
+    written_at: HashMap<Vec<u8>, u64>,
+    pub events: Vec<StoreEvent>,
+    pub durability_achieved: Durability,
+    pub counters: Counters,
+    pub keys: Option<KeyRing>,
+    /// `(min seq, min commit_id)` over tree 8, cached; see
+    /// [`Engine::refresh_checkpoint_floors`].
+    checkpoint_floor: (Option<u64>, Option<u64>),
+    /// `11-conformance.md` §5 — trees whose `params.change_feed` is true.
+    pub changefeed_trees: HashSet<u32>,
+    job: Option<CompactionJob>,
+    closed: bool,
+}
+
+impl Engine {
+    // ---------------------------------------------------------------
+    // Creation, open, close
+    // ---------------------------------------------------------------
+
+    pub fn create_in_memory(profile: Profile) -> Result<Engine> {
+        let pc = ProfileConstants::of(profile);
+        let pager = Pager::in_memory(pc.page_size);
+        Engine::bootstrap(pager, pc)
+    }
+
+    pub fn create(path: &Path, profile: Profile) -> Result<Engine> {
+        let pc = ProfileConstants::of(profile);
+        let pager = Pager::create(path, pc.page_size)?;
+        Engine::bootstrap(pager, pc)
+    }
+
+    fn bootstrap(pager: Pager, pc: ProfileConstants) -> Result<Engine> {
+        let mut sb = Superblock {
+            page_size_log2: pc.page_size.trailing_zeros() as u16,
+            profile: pc.profile.code(),
+            vlog_min: pc.vlog_min,
+            blob_threshold: pc.blob_threshold,
+            vlog_segment_bytes: pc.vlog_segment_bytes,
+            vlog_space_target_pct: pc.vlog_space_target_pct,
+            locality_debt_pct: pc.locality_debt_pct,
+            l0_trigger: pc.l0_trigger,
+            tier_width: pc.tier_width,
+            overlap_bound: pc.overlap_bound,
+            fanout: pc.fanout,
+            level_count: pc.level_count,
+            memtable_shards: pc.memtable_shards,
+            filter_bits_upper: pc.filter_bits_upper,
+            filter_bits_last: pc.filter_bits_last,
+            readahead_window: pc.readahead_window,
+            segment_target_bytes: pc.segment_target_bytes,
+            created_utc_ms: now_millis(),
+            modified_utc_ms: now_millis(),
+            writer_id: format!("cryptand-rust/{}", env!("CARGO_PKG_VERSION")),
+            ..Default::default()
+        };
+        crate::limits::check_vlog_min(sb.vlog_min, pc.page_size)?;
+        sb.database_uuid = random_uuid_v4();
+        sb.set_feature(feature::CORE, true);
+        let shards = pc.memtable_shards.max(1) as usize;
+        let mut e = Engine {
+            pager,
+            manifest: Manifest::new(0),
+            catalog: Catalog::new(0, 0, tree_id::FIRST_USER_TREE as u64),
+            attributes: Attributes::new(0),
+            freelist: CowTree::new(tree_id::FREE_SPACE, 0),
+            vlog_stats_tree: CowTree::new(tree_id::VLOG_STATS, 0),
+            checkpoints: CowTree::new(tree_id::CHECKPOINTS, 0),
+            changefeed: CowTree::new(tree_id::CHANGE_FEED, 0),
+            memtable: (0..shards).map(|_| BTreeMap::new()).collect(),
+            memtable_bytes: 0,
+            memtable_entry_limit: pc.memtable_entries,
+            policy: LevelPolicy {
+                l0_trigger: sb.l0_trigger,
+                tier_width: sb.tier_width,
+                overlap_bound: sb.overlap_bound,
+                level_count: sb.level_count,
+                fanout: sb.fanout,
+            },
+            profile: pc,
+            early_exit: true,
+            filters: true,
+            auto_collect: true,
+            segments: HashMap::new(),
+            quarantined: HashMap::new(),
+            vlog_open: BTreeMap::new(),
+            vlog_cold_open: None,
+            vlog_stats: BTreeMap::new(),
+            vlog_tail: BTreeMap::new(),
+            vlog_dirty: HashSet::new(),
+            now_ms: 0,
+            visible_seq: 0,
+            next_seq: 1,
+            live_snapshots: Vec::new(),
+            written_at: HashMap::new(),
+            events: Vec::new(),
+            durability_achieved: Durability::None,
+            counters: Counters::default(),
+            keys: None,
+            checkpoint_floor: (None, None),
+            changefeed_trees: HashSet::new(),
+            job: None,
+            closed: false,
+            sb,
+        };
+        e.events.push(StoreEvent::Opened);
+        e.write_store_metadata()?;
+        e.commit(Durability::Sync)?;
+        Ok(e)
+    }
+
+    /// `01-container.md` §2.1 and `10-transactions.md` §4 — no log replay.
+    pub fn open(path: &Path, key: Option<&[u8]>) -> Result<Engine> {
+        // Read both slots without knowing the page size yet: slot A is always
+        // at offset 0 and is exactly 4096 bytes.
+        let mut probe = Pager::open(path, 4096, u64::MAX)?;
+        let a = Superblock::parse(&probe.read_at(0, 4096)?).ok();
+        let page_size = match &a {
+            Some(sb) => sb.page_size(),
+            None => 4096,
+        };
+        let mut probe = Pager::open(path, page_size, u64::MAX)?;
+        let b = Superblock::parse(&probe.read_at(page_size as u64, 4096)?).ok();
+        // Step 3: the valid slot with the greater commit_id.
+        let sb = match (a, b) {
+            (Some(x), Some(y)) => {
+                if x.commit_id >= y.commit_id {
+                    x
+                } else {
+                    y
+                }
+            }
+            (Some(x), None) => x,
+            (None, Some(y)) => y,
+            (None, None) => {
+                return corrupt("neither superblock slot is valid: not a Cryptand database")
+            }
+        };
+        sb.check_features()?;
+        crate::limits::check_vlog_min(sb.vlog_min, sb.page_size())?;
+
+        // Step 4: unwrap and verify `sb_mac` before acting on any other field.
+        let keys = if sb.cipher != 0 {
+            let Some(k) = key else { return Err(Error::CannotUnlock) };
+            let ring = KeyRing::unlock(&sb, k)?;
+            ring.verify_superblock(&sb)?;
+            Some(ring)
+        } else {
+            None
+        };
+
+        let pager = Pager::open(path, sb.page_size(), sb.page_count)?;
+        let pc = ProfileConstants::from_superblock(&sb);
+        let shards = sb.memtable_shards.max(1) as usize;
+        let mut e = Engine {
+            pager,
+            manifest: Manifest::new(sb.manifest_root),
+            catalog: Catalog::new(sb.catalog_root, 0, sb.next_tree_id),
+            attributes: Attributes::new(sb.attributes_root),
+            freelist: CowTree::new(tree_id::FREE_SPACE, sb.freelist_root),
+            vlog_stats_tree: CowTree::new(tree_id::VLOG_STATS, sb.vlog_stats_root),
+            checkpoints: CowTree::new(tree_id::CHECKPOINTS, sb.checkpoint_root),
+            changefeed: CowTree::new(tree_id::CHANGE_FEED, sb.changefeed_root),
+            memtable: (0..shards).map(|_| BTreeMap::new()).collect(),
+            memtable_bytes: 0,
+            memtable_entry_limit: pc.memtable_entries,
+            policy: LevelPolicy {
+                l0_trigger: sb.l0_trigger,
+                tier_width: sb.tier_width,
+                overlap_bound: sb.overlap_bound,
+                level_count: sb.level_count,
+                fanout: sb.fanout,
+            },
+            profile: pc,
+            early_exit: true,
+            filters: true,
+            auto_collect: true,
+            segments: HashMap::new(),
+            quarantined: HashMap::new(),
+            vlog_open: BTreeMap::new(),
+            vlog_cold_open: None,
+            vlog_stats: BTreeMap::new(),
+            vlog_tail: BTreeMap::new(),
+            vlog_dirty: HashSet::new(),
+            now_ms: 0,
+            visible_seq: sb.visible_seq,
+            next_seq: sb.next_seq,
+            live_snapshots: Vec::new(),
+            written_at: HashMap::new(),
+            events: Vec::new(),
+            durability_achieved: Durability::from_code(sb.durability_achieved),
+            counters: Counters::default(),
+            keys,
+            checkpoint_floor: (None, None),
+            changefeed_trees: HashSet::new(),
+            job: None,
+            closed: false,
+            sb,
+        };
+        e.pager.min_retained_commit = e.sb.min_retained_commit;
+        e.reload_freelist()?;
+        e.reload_vlog_stats()?;
+        e.reload_tree_index()?;
+        e.reload_changefeed_trees()?;
+        e.refresh_checkpoint_floors()?;
+        // `01-container.md` §2.1 step 8 and `14-security.md` §4.1 and §4.3.
+        if e.sb.cipher != 0 {
+            e.publish_nonce_floor()?;
+        }
+        e.seal_unsealed_vlog_segments()?;
+        e.events.push(StoreEvent::Opened);
+        Ok(e)
+    }
+
+    fn reload_tree_index(&mut self) -> Result<()> {
+        // §2: tree 3's root lives in its catalog descriptor, and is
+        // bootstrapped by scanning the catalog if the descriptor is missing.
+        let root = match self.catalog.get(&mut self.pager, "$tree_index")? {
+            Some(d) => d.root().unwrap_or(0),
+            None => 0,
+        };
+        self.catalog.by_id.root = root;
+        if root == 0 {
+            self.catalog.rebuild_tree_index(&mut self.pager)?;
+        }
+        Ok(())
+    }
+
+    fn reload_changefeed_trees(&mut self) -> Result<()> {
+        self.changefeed_trees.clear();
+        for (_, d) in self.catalog.all(&mut self.pager)? {
+            if d.param_bool("change_feed") {
+                self.changefeed_trees.insert(d.tree_id());
+            }
+        }
+        Ok(())
+    }
+
+    fn reload_freelist(&mut self) -> Result<()> {
+        let mut extents = Vec::new();
+        for (k, v) in self.freelist.scan(&mut self.pager, None, None)? {
+            let key = cke::decode_all(&k)?;
+            let Value::Array(items) = key else { continue };
+            let num = |v: &Value| match v {
+                Value::Int { mag, .. } => *mag as u64,
+                _ => 0,
+            };
+            let pages = match cve::decode_all(&v, &|_| None)?.field("pages") {
+                Some(Value::Int { mag, .. }) => *mag as u32,
+                _ => 0,
+            };
+            extents.push(FreeExtent {
+                commit_id: num(&items[0]),
+                start_page: num(&items[1]),
+                pages,
+            });
+        }
+        self.pager.set_free_list(extents);
+        Ok(())
+    }
+
+    fn reload_vlog_stats(&mut self) -> Result<()> {
+        self.vlog_stats.clear();
+        for (k, v) in self.vlog_stats_tree.scan(&mut self.pager, None, None)? {
+            let id = match cke::decode_all(&k)? {
+                Value::Int { mag, .. } => mag as u64,
+                _ => continue,
+            };
+            self.vlog_stats.insert(id, decode_vlog_stats(id, &v)?);
+        }
+        Ok(())
+    }
+
+    /// `14-security.md` §4.3 and `10-transactions.md` §4: on open, every
+    /// unsealed value-log segment is sealed at its durable watermark and a
+    /// fresh segment is opened for new writes. Unencrypted this is harmless
+    /// housekeeping; encrypted, re-appending would reuse a nonce.
+    fn seal_unsealed_vlog_segments(&mut self) -> Result<()> {
+        let ids: Vec<u64> =
+            self.vlog_stats.iter().filter(|(_, s)| !s.sealed).map(|(&id, _)| id).collect();
+        for id in ids {
+            if let Some(s) = self.vlog_stats.get_mut(&id) {
+                s.sealed = true;
+            }
+            self.write_vlog_stats(id)?;
+        }
+        self.vlog_open.clear();
+        self.vlog_cold_open = None;
+        Ok(())
+    }
+
+    /// `14-security.md` §4.1 rule 1 — on open, before allocating anything,
+    /// durably publish `persisted_next_nonce + 2^20`.
+    fn publish_nonce_floor(&mut self) -> Result<()> {
+        self.sb.next_nonce = self.sb.next_nonce.saturating_add(crate::security::NONCE_GAP);
+        self.write_superblock(Durability::Sync)
+    }
+
+    pub fn close(&mut self, flush_memtable: bool) -> Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        self.events.push(StoreEvent::Closing);
+        if flush_memtable {
+            self.flush()?;
+        }
+        self.seal_unsealed_vlog_segments()?;
+        self.commit(Durability::Sync)?;
+        if let Some(k) = &mut self.keys {
+            k.zeroize();
+        }
+        self.closed = true;
+        self.events.push(StoreEvent::Closed);
+        Ok(())
+    }
+
+    fn write_store_metadata(&mut self) -> Result<()> {
+        // §7 — replaces `$nitrite_store_info`.
+        let writers = Value::Array(vec![Value::Str(self.sb.writer_id.clone())]);
+        let fields = vec![
+            ("created".to_string(), Value::Timestamp(self.sb.created_utc_ms)),
+            ("format_version".to_string(), Value::Str("1.0".into())),
+            ("nitrite_version".to_string(), Value::Str(env!("CARGO_PKG_VERSION").into())),
+            (
+                "schema_version".to_string(),
+                Value::Int { w: NumType::U32, neg: false, mag: 1 },
+            ),
+            ("writers".to_string(), writers),
+        ];
+        let mut attrs = std::mem::replace(&mut self.attributes, Attributes::new(0));
+        let r = attrs.put(&mut self.pager, crate::catalog::STORE_ATTRIBUTES_KEY, fields);
+        self.attributes = attrs;
+        r
+    }
+
+    // ---------------------------------------------------------------
+    // §2 — sequencing and the write path
+    // ---------------------------------------------------------------
+
+    fn shard_of(&self, key: &[u8]) -> usize {
+        let h = crate::hash::cfh64(key);
+        (h % self.memtable.len() as u64) as usize
+    }
+
+    pub fn allocate_seq(&mut self, n: u64) -> u64 {
+        let base = self.next_seq;
+        self.next_seq += n;
+        base
+    }
+
+    pub fn put(&mut self, tree: u32, key: &Value, value: &[u8]) -> Result<u64> {
+        self.write(tree, key, op::PUT, value, None)
+    }
+
+    pub fn put_with_expiry(&mut self, tree: u32, key: &Value, value: &[u8], expiry_ms: u64) -> Result<u64> {
+        self.write(tree, key, op::PUT, value, Some(expiry_ms))
+    }
+
+    pub fn remove(&mut self, tree: u32, key: &Value) -> Result<u64> {
+        self.write(tree, key, op::DELETE, &[], None)
+    }
+
+    /// An index entry: `06-indexes.md` §1's `value = EMPTY`.
+    pub fn put_empty(&mut self, tree: u32, key: &Value) -> Result<u64> {
+        let cke_key = cke::encode(key)?;
+        crate::limits::check_key_len(&cke_key, self.pager.page_size)?;
+        let seq = self.allocate_seq(1);
+        let ik = internal_key(tree, &cke_key, seq, op::PUT);
+        self.insert_mem(ik, MemEntry { value_kind: value_kind::EMPTY, value: Vec::new(), expiry_ms: None });
+        self.feed(tree, seq, "insert", &cke_key)?;
+        Ok(seq)
+    }
+
+    /// §2.5 — `[start, end)` deleted at one seq. This is what makes `clear()`,
+    /// `drop()` and rollback of a bulk insert O(1) writes rather than O(n)
+    /// tombstones.
+    pub fn remove_range(&mut self, tree: u32, start: &Value, end: &Value) -> Result<u64> {
+        let s = user_prefix(tree, &cke::encode(start)?);
+        let e = user_prefix(tree, &cke::encode(end)?);
+        if e <= s {
+            return invalid("a range delete needs end > start");
+        }
+        let seq = self.allocate_seq(1);
+        let ik = internal_key(tree, &cke::encode(start)?, seq, op::RANGE_DELETE);
+        self.insert_mem(
+            ik,
+            MemEntry {
+                value_kind: value_kind::INLINE,
+                value: encode_range_delete_payload(&e),
+                expiry_ms: None,
+            },
+        );
+        Ok(seq)
+    }
+
+    fn write(&mut self, tree: u32, key: &Value, op_code: u8, value: &[u8], expiry_ms: Option<u64>) -> Result<u64> {
+        if self.closed {
+            return invalid("the database is closed");
+        }
+        let cke_key = cke::encode(key)?;
+        crate::limits::check_key_len(&cke_key, self.pager.page_size)?;
+        let seq = self.allocate_seq(1);
+        let ik = internal_key(tree, &cke_key, seq, op_code);
+        self.counters.bytes_written_logical += (cke_key.len() + value.len()) as u64;
+
+        let entry = if op_code == op::DELETE {
+            MemEntry { value_kind: value_kind::EMPTY, value: Vec::new(), expiry_ms }
+        } else if vlog::separate(value.len(), self.sb.vlog_min, self.inline_values(tree)) {
+            let p = self.append_value(tree, &cke_key, value, Heat::First)?;
+            MemEntry { value_kind: value_kind::VLOG, value: p.encode().to_vec(), expiry_ms }
+        } else {
+            MemEntry { value_kind: value_kind::INLINE, value: value.to_vec(), expiry_ms }
+        };
+        if expiry_ms.is_some() {
+            self.sb.set_feature(feature::TTL, true);
+        }
+        self.insert_mem(ik, entry);
+        let feed_op = if op_code == op::DELETE { "delete" } else { "insert" };
+        self.feed(tree, seq, feed_op, &cke_key)?;
+        Ok(seq)
+    }
+
+    fn inline_values(&self, _tree: u32) -> bool {
+        false
+    }
+
+    /// Takes one already-sequenced row from a concurrent writer's shard
+    /// (`store.rs`). The seq was allocated by the shared counter, so the
+    /// engine adopts it rather than issuing a new one.
+    pub fn adopt_entry(&mut self, ik: Vec<u8>, e: MemEntry) {
+        self.insert_mem(ik, e);
+    }
+
+    fn insert_mem(&mut self, ik: Vec<u8>, e: MemEntry) {
+        self.memtable_bytes += ik.len() + e.value.len() + 16;
+        let user = user_part(&ik).to_vec();
+        let seq = parse_internal_key(&ik).map(|p| p.seq).unwrap_or(0);
+        self.written_at.insert(user, seq);
+        let s = self.shard_of(&ik);
+        self.memtable[s].insert(ik, e);
+    }
+
+    fn memtable_len(&self) -> usize {
+        self.memtable.iter().map(|m| m.len()).sum()
+    }
+
+    /// `13-operations.md` §7 — appended in the same batch as the mutation, so
+    /// the feed is exactly consistent with the data.
+    fn feed(&mut self, tree: u32, seq: u64, op_name: &str, cke_key: &[u8]) -> Result<()> {
+        if !self.changefeed_trees.contains(&tree) {
+            return Ok(());
+        }
+        let key = cke::encode(&Value::Array(vec![
+            Value::Int { w: NumType::U32, neg: false, mag: tree as u128 },
+            Value::Int { w: NumType::U64, neg: false, mag: seq as u128 },
+        ]))?;
+        let v = cve::encode(&Value::Doc(vec![
+            ("op".into(), Value::Str(op_name.into())),
+            ("key".into(), Value::Bytes(cke_key.to_vec())),
+        ]));
+        let mut t = std::mem::replace(&mut self.changefeed, CowTree::new(tree_id::CHANGE_FEED, 0));
+        t.commit_id = self.sb.commit_id;
+        let r = t.put(&mut self.pager, &key, &v);
+        self.changefeed = t;
+        self.sb.set_feature(feature::CHANGEFEED, false);
+        r
+    }
+
+    // ---------------------------------------------------------------
+    // §6 — the value log
+    // ---------------------------------------------------------------
+
+    fn open_vlog_segment(&mut self, tier: Tier, heat: Heat) -> Result<u64> {
+        let page_size = self.pager.page_size as u64;
+        let want = self.sb.vlog_segment_bytes as u64;
+        let pages = (want + DATA_OFFSET as u64).div_ceil(page_size).max(2) as u32;
+        let start = self.pager.alloc_extent(pages)?;
+        let id = self.sb.next_vlog_segment_id;
+        self.sb.next_vlog_segment_id += 1;
+        let capacity = pages as u64 * page_size - DATA_OFFSET as u64;
+        let nonce_base = if self.sb.cipher != 0 { self.allocate_nonce()? } else { 0 };
+        let head = VlogHead {
+            segment_id: id,
+            created_seq: self.next_seq,
+            capacity,
+            data_offset: DATA_OFFSET,
+            tier,
+            heat,
+            codec: codec::NONE,
+            encrypted: self.sb.cipher != 0,
+            nonce_base,
+        };
+        let page = head.encode(self.pager.page_size, pages);
+        self.pager.write_page(start, &page)?;
+        self.vlog_stats.insert(
+            id,
+            VlogStats {
+                segment_id: id,
+                bytes: 0,
+                records: 0,
+                sealed: false,
+                clustered: tier == Tier::Cold,
+                min_key: None,
+                max_key: None,
+                start_page: start,
+                pages,
+                live_bytes: 0,
+                live_records: 0,
+                tier: tier as u8,
+                heat: heat as u8,
+                created_seq: self.next_seq,
+                last_gc_seq: 0,
+            },
+        );
+        self.vlog_tail.insert(id, 0);
+        match tier {
+            Tier::Hot => {
+                self.vlog_open.insert(heat as u8, id);
+            }
+            Tier::Cold => self.vlog_cold_open = Some(id),
+        }
+        Ok(id)
+    }
+
+    /// §6.2's reserve-then-write append. The number of open segments is
+    /// bounded by the number of **heat classes**, not by the number of
+    /// writers, so write-path memory is O(1) in concurrency.
+    pub fn append_value(&mut self, tree: u32, cke_key: &[u8], value: &[u8], heat: Heat) -> Result<VlogPointer> {
+        self.append_into(Tier::Hot, heat, tree, cke_key, value)
+    }
+
+    /// §6.3 — promotion writes into the COLD tier, in key order, so the cold
+    /// log is key-clustered by construction.
+    pub fn append_cold(&mut self, tree: u32, cke_key: &[u8], value: &[u8]) -> Result<VlogPointer> {
+        self.append_into(Tier::Cold, Heat::First, tree, cke_key, value)
+    }
+
+    fn append_into(&mut self, tier: Tier, heat: Heat, tree: u32, cke_key: &[u8], value: &[u8]) -> Result<VlogPointer> {
+        let record = if self.sb.cipher != 0 {
+            let counter = self.allocate_nonce()?;
+            let seg = self.current_vlog(tier, heat)?;
+            let offset = *self.vlog_tail.get(&seg).unwrap();
+            let ring = self.keys.as_ref().unwrap();
+            let ct = ring.encrypt_vlog(seg, DATA_OFFSET as u64 + offset, tree, counter, cke_key, value)?;
+            vlog::encode_record_encrypted(tree, counter, &ct)
+        } else {
+            encode_record(tree, cke_key, value)
+        };
+        let mut seg = self.current_vlog(tier, heat)?;
+        if self.vlog_stats[&seg].bytes + record.len() as u64 > self.vlog_stats[&seg].pages as u64 * self.pager.page_size as u64 - DATA_OFFSET as u64 {
+            self.seal_vlog(seg)?;
+            seg = self.open_vlog_segment(tier, heat)?;
+        }
+        let stats = self.vlog_stats.get(&seg).unwrap();
+        let start_page = stats.start_page;
+        let offset = *self.vlog_tail.get(&seg).unwrap();
+        let at = start_page * self.pager.page_size as u64 + DATA_OFFSET as u64 + offset;
+        self.pager.write_at(at, &record)?;
+        self.vlog_tail.insert(seg, offset + record.len() as u64);
+        {
+            let s = self.vlog_stats.get_mut(&seg).unwrap();
+            // The watermark advances only over a contiguous prefix of
+            // completed reservations (§6.2, `10-transactions.md` §2.3); this
+            // writer completes each reservation before returning, so the
+            // prefix is the tail.
+            s.bytes = offset + record.len() as u64;
+            s.records += 1;
+            s.live_bytes += record.len() as u64;
+            s.live_records += 1;
+            if s.min_key.is_none() || s.min_key.as_deref() > Some(cke_key) {
+                s.min_key = Some(cke_key.to_vec());
+            }
+            // §6.3: the implementation MUST set `clustered` only when the
+            // ordering actually holds. A cold segment is written in key order
+            // by promotion and by a sorted bulk write, so it starts clustered
+            // and an out-of-order append clears the flag.
+            if s.tier == Tier::Cold as u8 && s.max_key.as_deref() > Some(cke_key) {
+                s.clustered = false;
+            }
+            if s.max_key.as_deref() < Some(cke_key) {
+                s.max_key = Some(cke_key.to_vec());
+            }
+        }
+        self.vlog_dirty.insert(seg);
+        self.counters.write_amp_value += record.len() as u64;
+        Ok(VlogPointer {
+            segment_id: seg,
+            offset: DATA_OFFSET + offset as u32,
+            len: record.len() as u32,
+        })
+    }
+
+    fn current_vlog(&mut self, tier: Tier, heat: Heat) -> Result<u64> {
+        let existing = match tier {
+            Tier::Hot => self.vlog_open.get(&(heat as u8)).copied(),
+            Tier::Cold => self.vlog_cold_open,
+        };
+        match existing {
+            Some(id) => Ok(id),
+            None => self.open_vlog_segment(tier, heat),
+        }
+    }
+
+    pub fn seal_vlog(&mut self, id: u64) -> Result<()> {
+        if let Some(s) = self.vlog_stats.get_mut(&id) {
+            s.sealed = true;
+        }
+        self.write_vlog_stats(id)?;
+        if self.vlog_cold_open == Some(id) {
+            self.vlog_cold_open = None;
+        }
+        self.vlog_open.retain(|_, v| *v != id);
+        Ok(())
+    }
+
+    pub fn mark_clustered(&mut self, id: u64, clustered: bool) -> Result<()> {
+        if let Some(s) = self.vlog_stats.get_mut(&id) {
+            s.clustered = clustered;
+        }
+        self.write_vlog_stats(id)
+    }
+
+    fn write_vlog_stats(&mut self, id: u64) -> Result<()> {
+        let Some(s) = self.vlog_stats.get(&id).cloned() else { return Ok(()) };
+        let key = cke::encode(&Value::Int { w: NumType::U64, neg: false, mag: id as u128 })?;
+        let v = encode_vlog_stats(&s);
+        let mut t = std::mem::replace(&mut self.vlog_stats_tree, CowTree::new(tree_id::VLOG_STATS, 0));
+        t.commit_id = self.sb.commit_id;
+        let r = t.put(&mut self.pager, &key, &v);
+        self.vlog_stats_tree = t;
+        r
+    }
+
+    pub fn read_vlog(&mut self, p: &VlogPointer) -> Result<Vec<u8>> {
+        self.counters.value_reads += 1;
+        self.pager.page_reads += 1;
+        self.read_vlog_uncounted(p)
+    }
+
+    /// The same read without the metric, for the coalescing path that counts
+    /// I/Os rather than dereferences.
+    pub fn read_vlog_uncounted(&mut self, p: &VlogPointer) -> Result<Vec<u8>> {
+        let Some(stats) = self.vlog_stats.get(&p.segment_id).cloned() else {
+            return corrupt(format!("VLOG pointer names unknown segment {}", p.segment_id));
+        };
+        vlog::check_pointer_in_bounds(p, &stats, DATA_OFFSET)?;
+        let at = stats.start_page * self.pager.page_size as u64 + p.offset as u64;
+        let raw = self.pager.read_at(at, p.len as usize)?;
+        let encrypted = self.sb.cipher != 0;
+        let rec = vlog::decode_record(&raw, encrypted)?;
+        if encrypted {
+            let ring = self.keys.as_ref().unwrap();
+            let (_k, v) = ring.decrypt_vlog(
+                p.segment_id,
+                p.offset as u64,
+                rec.tree_id,
+                rec.nonce.unwrap_or(0),
+                &raw,
+            )?;
+            Ok(v)
+        } else {
+            Ok(rec.value)
+        }
+    }
+
+    pub fn read_vlog_record(&mut self, p: &VlogPointer) -> Result<VlogRecord> {
+        let Some(stats) = self.vlog_stats.get(&p.segment_id).cloned() else {
+            return corrupt(format!("VLOG pointer names unknown segment {}", p.segment_id));
+        };
+        let at = stats.start_page * self.pager.page_size as u64 + p.offset as u64;
+        let raw = self.pager.read_at(at, p.len as usize)?;
+        vlog::decode_record(&raw, self.sb.cipher != 0)
+    }
+
+    fn allocate_nonce(&mut self) -> Result<u64> {
+        // §4.1 rules 2 and 3: allocate from the persisted watermark upward and
+        // never reach the published value; on reaching it, publish another gap
+        // and only then continue.
+        let n = self.counters.nonces_allocated;
+        self.counters.nonces_allocated += 1;
+        let base = self.sb.next_nonce - crate::security::NONCE_GAP;
+        if n >= crate::security::NONCE_GAP {
+            self.sb.next_nonce += crate::security::NONCE_GAP;
+            self.counters.nonces_allocated = 0;
+            self.write_superblock(Durability::Sync)?;
+            return Ok(self.sb.next_nonce - crate::security::NONCE_GAP);
+        }
+        Ok(base + n)
+    }
+
+    // ---------------------------------------------------------------
+    // §2 step D — the flush, and the level policy of §3.1
+    // ---------------------------------------------------------------
+
+    pub fn filter_bits_at(&self, level: u8) -> u16 {
+        if !self.filters {
+            return 0;
+        }
+        if level == self.policy.last_level() {
+            self.sb.filter_bits_last as u16
+        } else {
+            self.sb.filter_bits_upper as u16
+        }
+    }
+
+    /// §3.1's output-size rule. Both bounds require it, and an implementation
+    /// that picks the size freely cannot satisfy them: a fixed size makes
+    /// every tiered level compact after its *second* run, so no level ever
+    /// holds more than one run.
+    pub fn segment_entries_at(&self, level: u8) -> u64 {
+        let l0 = self.memtable_entry_limit as u64;
+        if level == 0 {
+            return l0;
+        }
+        let ob = self.policy.overlap_bound.max(1) as u64;
+        let mut run = self.policy.l0_trigger.max(1) as u64 * l0;
+        for _ in 1..level {
+            run *= ob;
+        }
+        let segments_per_run = (self.policy.tier_width.max(1) as u64 / ob).max(1);
+        run.div_ceil(segments_per_run).max(1)
+    }
+
+    /// §2 step D. `10-transactions.md` §8: `visible_seq` advances whenever a
+    /// batch's records become durable, which for a single writer is this
+    /// flush — an engine whose watermark never advances retains every
+    /// superseded version forever.
+    pub fn flush(&mut self) -> Result<()> {
+        if self.memtable_len() == 0 {
+            self.visible_seq = self.next_seq.saturating_sub(1);
+            return Ok(());
+        }
+        let mut all: Vec<(Vec<u8>, MemEntry)> = Vec::with_capacity(self.memtable_len());
+        for shard in &mut self.memtable {
+            all.extend(std::mem::take(shard).into_iter());
+        }
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        self.memtable_bytes = 0;
+
+        let mut b = SegmentBuilder::new(
+            self.pager.page_size,
+            self.sb.next_segment_id,
+            0,
+            0,
+            self.filter_bits_at(0),
+        )?;
+        self.sb.next_segment_id += 1;
+        for (ik, e) in all {
+            b.add(SegEntry { internal_key: ik, value_kind: e.value_kind, value: e.value, expiry_ms: e.expiry_ms })?;
+        }
+        let entries = b.entry_count();
+        let seg_id = b.segment_id;
+        self.publish_segment(b, 0, 0)?;
+        self.visible_seq = self.next_seq.saturating_sub(1);
+        self.events.push(StoreEvent::Flushed { segment_id: seg_id, entries });
+        Ok(())
+    }
+
+    fn publish_segment(&mut self, b: SegmentBuilder, level: u8, group: u8) -> Result<SegmentRef> {
+        let extent = b.build()?;
+        let pages = (extent.len() / self.pager.page_size) as u32;
+        let start = self.pager.alloc_extent(pages)?;
+        self.pager.write_extent(start, &extent)?;
+        self.counters.write_amp_key_index += extent.len() as u64;
+        let seg = Segment::open(extent, self.pager.page_size)?;
+        let r = SegmentRef::of(&seg, level, group, start);
+        self.segments.insert(r.segment_id, Arc::new(seg));
+        let mut m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+        m.tree.commit_id = self.sb.commit_id;
+        let res = m.add(&mut self.pager, &r);
+        self.manifest = m;
+        res?;
+        Ok(r)
+    }
+
+    pub fn segment(&mut self, r: &SegmentRef) -> Result<Arc<Segment>> {
+        if let Some(s) = self.segments.get(&r.segment_id) {
+            self.counters.page_cache_hits += 1;
+            return Ok(s.clone());
+        }
+        self.counters.page_cache_misses += 1;
+        let extent = self.pager.read_extent(r.start_page, r.pages)?;
+        let s = Arc::new(Segment::open(extent, self.pager.page_size)?);
+        self.segments.insert(r.segment_id, s.clone());
+        Ok(s)
+    }
+
+    /// Every manifest entry at `level`, **quarantined ones included**.
+    ///
+    /// `13-operations.md` §4 step 4 is why: a read that lands inside a
+    /// quarantined range MUST fail with a specific corruption error naming the
+    /// range, "never with a wrong or empty answer". Dropping the entry here
+    /// would make the read silently resolve against whatever survives lower
+    /// down, which is exactly the wrong answer that rule forbids.
+    pub fn refs_at(&mut self, level: u8) -> Result<Vec<SegmentRef>> {
+        let m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+        let r = m.level(&mut self.pager, level);
+        self.manifest = m;
+        r
+    }
+
+    /// The subset a compaction may read.
+    pub fn healthy_refs_at(&mut self, level: u8) -> Result<Vec<SegmentRef>> {
+        Ok(self
+            .refs_at(level)?
+            .into_iter()
+            .filter(|s| !self.quarantined.contains_key(&s.segment_id))
+            .collect())
+    }
+
+    pub fn all_refs(&mut self) -> Result<Vec<SegmentRef>> {
+        let m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+        let r = m.all(&mut self.pager);
+        self.manifest = m;
+        r
+    }
+
+    // ---------------------------------------------------------------
+    // §4 — read resolution
+    // ---------------------------------------------------------------
+
+    /// §4's candidate order: L0 newest-flush-first, then strictly increasing
+    /// level; within a level, **descending `segment_id`** is newest-first,
+    /// because `segment_id` is globally unique and never reused. (`max_seq`
+    /// cannot serve: §4 disqualifies it as a per-segment aggregate.)
+    pub fn candidates_for(&mut self, user_key_prefix: &[u8]) -> Result<Vec<SegmentRef>> {
+        let mut out = Vec::new();
+        for level in 0..=self.policy.last_level() {
+            let mut refs = self.refs_at(level)?;
+            refs.sort_by(|a, b| b.segment_id.cmp(&a.segment_id));
+            for r in refs {
+                if r.covers(user_key_prefix) {
+                    out.push(r);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn get(&mut self, tree: u32, key: &Value) -> Result<Option<Vec<u8>>> {
+        self.get_at(tree, key, None)
+    }
+
+    pub fn get_at(&mut self, tree: u32, key: &Value, at: Option<&Snapshot>) -> Result<Option<Vec<u8>>> {
+        let cke_key = cke::encode(key)?;
+        let prefix = user_prefix(tree, &cke_key);
+        let ceiling = at.map(|s| s.seq);
+        let mut probes = 0u32;
+
+        // The memtable holds every write since the last flush; a point read
+        // that skipped it would not see them.
+        let mut best: Option<SegRecord> = self.memtable_lookup(&prefix, ceiling);
+
+        let cands = self.candidates_for(&prefix)?;
+        for r in &cands {
+            if self.quarantined.contains_key(&r.segment_id) {
+                return Err(Error::Unavailable(format!(
+                    "segment {} is quarantined and covers this key",
+                    r.segment_id
+                )));
+            }
+            let seg = self.segment(r)?;
+            if self.filters && !r.has_range_deletes {
+                self.counters.filter_probes += 1;
+                if !seg.may_contain(&prefix) {
+                    continue;
+                }
+            }
+            probes += 1;
+            if let Some(rec) = seg.lookup(&prefix, ceiling)? {
+                let newer = best.as_ref().map_or(true, |b| rec.seq() > b.seq());
+                if newer {
+                    best = Some(rec);
+                }
+                // §4: an implementation MAY stop early only when it can prove
+                // no unexamined candidate can hold a newer version of *this*
+                // key. Level discipline is that proof, and `candidates_for`
+                // emits candidates in exactly that order.
+                if self.early_exit {
+                    break;
+                }
+            } else {
+                self.counters.filter_false_positives += 1;
+            }
+        }
+        self.counters.segments_probed.push(probes);
+
+        // §4: a segment that may hold a covering RANGE_DELETE MUST NOT be
+        // pruned by its filter, because the filter holds point keys only.
+        let rd = self.range_delete_seq(tree, &prefix, ceiling)?;
+        let Some(best) = best else { return Ok(None) };
+        if rd > best.seq() {
+            return Ok(None);
+        }
+        if best.op() == op::DELETE || self.expired(&best) {
+            return Ok(None);
+        }
+        self.resolve_value(&best).map(Some)
+    }
+
+    fn expired(&self, rec: &SegRecord) -> bool {
+        // §9: expiry is evaluated at read time, so it is exact regardless of
+        // when compaction runs; a backwards clock jump resurrects entries.
+        matches!(rec.expiry_ms, Some(x) if x <= self.now_ms)
+    }
+
+    pub fn resolve_value(&mut self, rec: &SegRecord) -> Result<Vec<u8>> {
+        match rec.value_kind {
+            value_kind::VLOG => {
+                let p = VlogPointer::parse(&rec.value)?;
+                self.read_vlog(&p)
+            }
+            _ => Ok(rec.value.clone()),
+        }
+    }
+
+    fn memtable_lookup(&self, prefix: &[u8], ceiling: Option<u64>) -> Option<SegRecord> {
+        let mut best: Option<SegRecord> = None;
+        for shard in &self.memtable {
+            for (ik, e) in shard.range(prefix.to_vec()..) {
+                if !ik.starts_with(prefix) || ik.len() != prefix.len() + 9 {
+                    break;
+                }
+                let Ok(parsed) = parse_internal_key(ik) else { continue };
+                // As in `Segment::lookup`: a RANGE_DELETE shares the internal
+                // key shape of a point key and is resolved separately.
+                if parsed.op == op::RANGE_DELETE {
+                    continue;
+                }
+                let seq = parsed.seq;
+                if let Some(c) = ceiling {
+                    if seq > c {
+                        continue;
+                    }
+                }
+                if best.as_ref().map_or(true, |b| seq > b.seq()) {
+                    best = Some(SegRecord {
+                        internal_key: ik.clone(),
+                        value_kind: e.value_kind,
+                        value: e.value.clone(),
+                        expiry_ms: e.expiry_ms,
+                    });
+                }
+            }
+        }
+        best
+    }
+
+    /// Every range delete over `tree`, hoisted once per scan rather than per
+    /// row — a per-row lookup makes a scan O(rows x segments).
+    pub fn range_deletes_for(&mut self, tree: u32) -> Result<Vec<RangeDelete>> {
+        let mut out = Vec::new();
+        for shard in &self.memtable {
+            for (ik, e) in shard.iter() {
+                let p = parse_internal_key(ik)?;
+                if p.op != op::RANGE_DELETE || p.tree_id != tree {
+                    continue;
+                }
+                out.push(RangeDelete {
+                    tree_id: tree,
+                    start: user_part(ik).to_vec(),
+                    end: crate::segment::decode_range_delete_payload(&e.value)?,
+                    seq: p.seq,
+                });
+            }
+        }
+        let refs = self.all_refs()?;
+        for r in refs {
+            if !r.has_range_deletes {
+                continue;
+            }
+            let seg = self.segment(&r)?;
+            for rd in seg.range_deletes()? {
+                if rd.tree_id == tree {
+                    out.push(rd);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn range_delete_seq(&mut self, tree: u32, prefix: &[u8], ceiling: Option<u64>) -> Result<u64> {
+        let mut best = 0u64;
+        for rd in self.range_deletes_for(tree)? {
+            if !rd.covers(prefix) {
+                continue;
+            }
+            if let Some(c) = ceiling {
+                if rd.seq > c {
+                    continue;
+                }
+            }
+            best = best.max(rd.seq);
+        }
+        Ok(best)
+    }
+
+    // ---------------------------------------------------------------
+    // §8 — scans
+    // ---------------------------------------------------------------
+
+    /// Every live entry of one tree, in key order, at `at` (or the current
+    /// snapshot). `value()` is lazy in the cursor sense: a key-only scan never
+    /// touches the value log, so `values` selects that.
+    pub fn scan_tree(
+        &mut self,
+        tree: u32,
+        lower: Option<&[u8]>,
+        upper: Option<&[u8]>,
+        at: Option<&Snapshot>,
+        values: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let ceiling = at.map(|s| s.seq).unwrap_or(u64::MAX);
+        let rds = self.range_deletes_for(tree)?;
+        // Collect every version, then collapse per user key.
+        let mut best: BTreeMap<Vec<u8>, SegRecord> = BTreeMap::new();
+        let consider = |best: &mut BTreeMap<Vec<u8>, SegRecord>, rec: SegRecord| {
+            if rec.seq() > ceiling {
+                return;
+            }
+            let uk = rec.user_key().to_vec();
+            match best.get(&uk) {
+                Some(b) if b.seq() >= rec.seq() => {}
+                _ => {
+                    best.insert(uk, rec);
+                }
+            }
+        };
+        for shard in &self.memtable {
+            for (ik, e) in shard.iter() {
+                let p = parse_internal_key(ik)?;
+                if p.tree_id != tree || p.op == op::RANGE_DELETE {
+                    continue;
+                }
+                consider(
+                    &mut best,
+                    SegRecord {
+                        internal_key: ik.clone(),
+                        value_kind: e.value_kind,
+                        value: e.value.clone(),
+                        expiry_ms: e.expiry_ms,
+                    },
+                );
+            }
+        }
+        let refs = self.all_refs()?;
+        for r in refs {
+            if self.quarantined.contains_key(&r.segment_id) {
+                continue;
+            }
+            let seg = self.segment(&r)?;
+            for rec in seg.iter() {
+                let rec = rec?;
+                let p = parse_internal_key(&rec.internal_key)?;
+                if p.tree_id != tree || p.op == op::RANGE_DELETE {
+                    continue;
+                }
+                consider(&mut best, rec);
+            }
+        }
+
+        let mut out = Vec::new();
+        // §8.1 — a cursor that dereferences values MUST issue its value-log
+        // reads in non-decreasing (segment, offset) order within a sliding
+        // window of at least `readahead_window` entries. Collecting the
+        // pointers for a window and sorting them is exactly that.
+        let window = self.sb.readahead_window.max(1) as usize;
+        let mut pending: Vec<(usize, VlogPointer)> = Vec::new();
+        let mut rows: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        for (uk, rec) in best {
+            let cke_key = &uk[4..];
+            if let Some(l) = lower {
+                if cke_key < l {
+                    continue;
+                }
+            }
+            if let Some(u) = upper {
+                if cke_key >= u {
+                    continue;
+                }
+            }
+            let rd = rds
+                .iter()
+                .filter(|d| d.covers(&uk) && d.seq <= ceiling)
+                .map(|d| d.seq)
+                .max()
+                .unwrap_or(0);
+            if rd > rec.seq() || rec.op() == op::DELETE || self.expired(&rec) {
+                continue;
+            }
+            self.counters.scanned_rows += 1;
+            if !values {
+                rows.push((cke_key.to_vec(), None));
+                continue;
+            }
+            if rec.value_kind == value_kind::VLOG {
+                pending.push((rows.len(), VlogPointer::parse(&rec.value)?));
+                rows.push((cke_key.to_vec(), None));
+                if pending.len() >= window {
+                    self.drain_readahead(&mut pending, &mut rows)?;
+                }
+            } else {
+                rows.push((cke_key.to_vec(), Some(rec.value.clone())));
+            }
+        }
+        self.drain_readahead(&mut pending, &mut rows)?;
+        for (k, v) in rows {
+            out.push((k, v.unwrap_or_default()));
+        }
+        Ok(out)
+    }
+
+    /// §8.1 — sort the window by `(vlog_segment_id, offset)` and **coalesce
+    /// reads of records that fall in the same page**. The coalescing is what
+    /// `value_reads_per_scanned_row` measures: over a `clustered` cold segment
+    /// the scattered reads become strictly sequential, and the metric falls
+    /// from ~1 per row to ~1 per page of rows.
+    fn drain_readahead(
+        &mut self,
+        pending: &mut Vec<(usize, VlogPointer)>,
+        rows: &mut [(Vec<u8>, Option<Vec<u8>>)],
+    ) -> Result<()> {
+        pending.sort_by_key(|(_, p)| (p.segment_id, p.offset));
+        let page_size = self.pager.page_size as u64;
+        let mut last: Option<(u64, u64)> = None; // (segment, page index in extent)
+        for (i, p) in pending.drain(..) {
+            let page = p.offset as u64 / page_size;
+            let same_page = last == Some((p.segment_id, page));
+            let v = self.read_vlog_uncounted(&p)?;
+            if !same_page {
+                self.counters.value_reads += 1;
+                self.pager.page_reads += 1;
+                last = Some((p.segment_id, page));
+            }
+            rows[i].1 = Some(v);
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // §5 — compaction
+    // ---------------------------------------------------------------
+
+    pub fn groups_at(&mut self, level: u8) -> Result<Vec<u8>> {
+        let mut g: Vec<u8> = self.refs_at(level)?.into_iter().map(|r| r.group).collect();
+        g.sort_unstable();
+        g.dedup();
+        Ok(g)
+    }
+
+    /// Picks the level with the worst overshoot and starts a job, or returns
+    /// `None`.
+    ///
+    /// The picker is an implementation choice (`11-conformance.md` §1.3), but
+    /// *which* level it picks is not free of consequences: always draining L0
+    /// first lets a deeper level accumulate segments without bound, and §4.1's
+    /// read-tail bound is stated over `overlap_bound` segments per level. So
+    /// the deepest level over its bound wins ties.
+    pub fn pick_compaction(&mut self) -> Result<Option<CompactionJob>> {
+        let last = self.policy.last_level();
+        let mut best: Option<(f64, u8, Vec<SegmentRef>)> = None;
+        for level in 0..last {
+            let refs = self.healthy_refs_at(level)?;
+            let bound = if level == 0 {
+                self.policy.l0_trigger.max(1)
+            } else {
+                self.policy.tier_width.max(1)
+            } as usize;
+            if refs.len() < bound {
+                continue;
+            }
+            let score = refs.len() as f64 / bound as f64;
+            let better = match &best {
+                None => true,
+                Some((s, l, _)) => score > *s || (score == *s && level > *l),
+            };
+            if better {
+                best = Some((score, level, refs));
+            }
+        }
+        match best {
+            Some((_, level, refs)) => self.begin_compaction(refs, (level + 1).min(last)),
+            None => Ok(None),
+        }
+    }
+
+    /// §5 — merges inputs by internal key, drops what is unreachable, and
+    /// writes new output segments. The outcome is normative, the mechanism is
+    /// not: after a compaction every `get` at every live snapshot returns
+    /// exactly what it returned before.
+    pub fn begin_compaction(&mut self, inputs: Vec<SegmentRef>, target: u8) -> Result<Option<CompactionJob>> {
+        if inputs.is_empty() {
+            return Ok(None);
+        }
+        let target = target.min(self.policy.last_level());
+        let last = self.policy.last_level();
+        // §3.1.1 — the last level is **levelled**: its segments partition the
+        // user key space with no overlap. A compaction into it must therefore
+        // take every last-level segment whose user-key range overlaps the
+        // inputs, or the level quietly stops being disjoint and §4's early exit
+        // starts returning stale versions while every checksum stays valid.
+        let mut inputs = inputs;
+        if target == last {
+            let have: HashSet<u64> = inputs.iter().map(|r| r.segment_id).collect();
+            let lo = inputs.iter().map(|r| user_part(&r.min_key).to_vec()).min().unwrap_or_default();
+            let hi = inputs.iter().map(|r| user_part(&r.max_key).to_vec()).max().unwrap_or_default();
+            for r in self.healthy_refs_at(last)? {
+                if have.contains(&r.segment_id) {
+                    continue;
+                }
+                if user_part(&r.max_key) >= &lo[..] && user_part(&r.min_key) <= &hi[..] {
+                    inputs.push(r);
+                }
+            }
+        }
+        // §5 condition 3: the compaction must include every segment that could
+        // hold an older version, i.e. it reaches the last level, or no lower
+        // level overlaps the key.
+        let reaches_last = target == last;
+        let min_retained = self.min_retained_seq();
+
+        // Merge every input, newest version of a key first (§1's inverted seq
+        // makes that the natural order).
+        let mut merged: Vec<(Vec<u8>, SegRecord)> = Vec::new();
+        for r in &inputs {
+            let seg = self.segment(r)?;
+            for rec in seg.iter() {
+                let rec = rec?;
+                merged.push((rec.internal_key.clone(), rec));
+            }
+        }
+        merged.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut kept: Vec<SegEntry> = Vec::new();
+        let mut last_user: Option<Vec<u8>> = None;
+        let mut newer_visible_seq: Option<u64> = None;
+        for (ik, rec) in merged {
+            let uk = user_part(&ik).to_vec();
+            let same_key = last_user.as_deref() == Some(uk.as_slice());
+            if !same_key {
+                last_user = Some(uk.clone());
+                newer_visible_seq = None;
+            }
+            let seq = rec.seq();
+            let drop_it = if same_key {
+                // Conditions 1 and 2: a newer version exists in this
+                // compaction and its seq is <= the oldest live snapshot's.
+                matches!(newer_visible_seq, Some(ns) if ns <= min_retained) && reaches_last
+            } else {
+                false
+            };
+            if newer_visible_seq.is_none() {
+                newer_visible_seq = Some(seq);
+            }
+            if drop_it {
+                // §6.7 — `live_bytes` is decremented when a compaction observes
+                // a record superseded or deleted. Without this the hot tier's
+                // liveness never falls, so `locality_debt` reads ~100 % on a
+                // database whose values have all been promoted or superseded,
+                // and collection never fires.
+                self.release_if_vlog(&rec);
+                continue;
+            }
+            if !same_key && matches!(newer_visible_seq, Some(ns) if ns > min_retained) {
+                // Kept solely because condition 2 was not met — that is what
+                // `pinned_by_snapshots` accumulates (`13-operations.md` §6).
+                self.counters.pinned_by_snapshots +=
+                    (rec.internal_key.len() + rec.value.len()) as u64;
+            }
+            // An expired entry may be dropped when condition 3 holds and its
+            // deadline is older than the oldest live snapshot's wall clock.
+            if reaches_last {
+                if let Some(x) = rec.expiry_ms {
+                    if x <= self.now_ms && seq <= min_retained {
+                        self.release_if_vlog(&rec);
+                        continue;
+                    }
+                }
+                // A tombstone may be dropped only when its own seq is <= the
+                // oldest live snapshot's; dropping it earlier resurrects the
+                // versions it hides.
+                if (rec.op() == op::DELETE || rec.op() == op::RANGE_DELETE) && seq <= min_retained {
+                    self.release_if_vlog(&rec);
+                    continue;
+                }
+            }
+            kept.push(SegEntry {
+                internal_key: ik,
+                value_kind: rec.value_kind,
+                value: rec.value.clone(),
+                expiry_ms: rec.expiry_ms,
+            });
+        }
+
+        // §6.3 — promotion clusters a *generation* of surviving values. Each
+        // last-level compaction therefore starts a **fresh** cold segment:
+        // appending a second generation into the open one would leave a segment
+        // holding two runs, which is not key-clustered and which §6.9 counts as
+        // surplus. Merging generations back into one run is collection's job
+        // (§6.8), not promotion's.
+        if reaches_last {
+            if let Some(open) = self.vlog_cold_open {
+                self.seal_vlog(open)?;
+            }
+        }
+        let group = if target == last { 0 } else { self.free_group(target)? };
+        let per_output = self.segment_entries_at(target);
+        Ok(Some(CompactionJob {
+            inputs,
+            target_level: target,
+            target_group: group,
+            entries: kept,
+            cursor: 0,
+            builder: None,
+            outputs: Vec::new(),
+            per_output,
+            bytes_written: 0,
+        }))
+    }
+
+    fn free_group(&mut self, level: u8) -> Result<u8> {
+        let used = self.groups_at(level)?;
+        let bound = self.policy.overlap_bound.max(1);
+        for g in 0..bound {
+            if !used.contains(&g) {
+                return Ok(g);
+            }
+        }
+        Ok(used.first().copied().unwrap_or(0))
+    }
+
+    /// §5.2 — one step, bounded by `compaction_step_bytes`. A step boundary is
+    /// any point between two output leaf pages; the partially built output is
+    /// just a prefix, so abandoning it costs the work done and nothing else.
+    pub fn step_compaction(&mut self, job: &mut CompactionJob, budget_bytes: Option<u64>) -> Result<bool> {
+        let budget = budget_bytes.unwrap_or(self.profile.compaction_step_bytes as u64);
+        let mut spent = 0u64;
+        while job.cursor < job.entries.len() {
+            if job.builder.is_none() {
+                let b = SegmentBuilder::new(
+                    self.pager.page_size,
+                    self.sb.next_segment_id,
+                    job.target_level,
+                    job.target_group,
+                    self.filter_bits_at(job.target_level),
+                )?;
+                self.sb.next_segment_id += 1;
+                job.builder = Some(b);
+            }
+            let mut e = job.entries[job.cursor].clone();
+            // §6.3 — during a compaction that outputs the last level, every
+            // surviving HOT-tier value is promoted into a COLD segment. The
+            // entries arrive in internal-key order, so the cold log is
+            // key-clustered by construction.
+            if job.target_level == self.policy.last_level() && e.value_kind == value_kind::VLOG {
+                let p = VlogPointer::parse(&e.value)?;
+                let hot = self.vlog_stats.get(&p.segment_id).map(|s| s.tier == Tier::Hot as u8);
+                if hot == Some(true) {
+                    let rec = self.read_vlog_record(&p)?;
+                    let value = self.read_vlog(&p)?;
+                    let parsed = parse_internal_key(&e.internal_key)?;
+                    let np = self.append_cold(parsed.tree_id, &rec.key, &value)?;
+                    self.release_vlog(&p);
+                    e.value = np.encode().to_vec();
+                }
+            }
+            let bytes = e.internal_key.len() + e.value.len() + 16;
+            job.builder.as_mut().unwrap().add(e)?;
+            job.cursor += 1;
+            spent += bytes as u64;
+            job.bytes_written += bytes as u64;
+            let full = job.builder.as_ref().unwrap().entry_count() >= job.per_output;
+            if full {
+                self.rotate_output(job)?;
+            }
+            if spent >= budget {
+                return Ok(job.cursor < job.entries.len());
+            }
+        }
+        self.rotate_output(job)?;
+        Ok(false)
+    }
+
+    fn rotate_output(&mut self, job: &mut CompactionJob) -> Result<()> {
+        let Some(b) = job.builder.take() else { return Ok(()) };
+        if b.entry_count() == 0 {
+            return Ok(());
+        }
+        let extent = b.build()?;
+        let pages = (extent.len() / self.pager.page_size) as u32;
+        let start = self.pager.alloc_extent(pages)?;
+        self.pager.write_extent(start, &extent)?;
+        self.counters.write_amp_key_index += extent.len() as u64;
+        job.outputs.push((extent, start));
+        Ok(())
+    }
+
+    /// `10-transactions.md` §5 — publishing the manifest edit is the only
+    /// place concurrent compactions serialize, and it is microseconds.
+    pub fn finish_compaction(&mut self, mut job: CompactionJob) -> Result<()> {
+        self.rotate_output(&mut job)?;
+        let mut m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+        m.tree.commit_id = self.sb.commit_id;
+        let mut err = None;
+        // Inputs are removed **before** outputs are added: a compaction whose
+        // output shares a `min_internal_key` with one of its own inputs — which
+        // is the normal case for a last-level merge — would otherwise collide
+        // with itself in the manifest key space.
+        for r in &job.inputs {
+            m.remove(&mut self.pager, r)?;
+        }
+        for (extent, start) in std::mem::take(&mut job.outputs) {
+            match Segment::open(extent, self.pager.page_size) {
+                Ok(seg) => {
+                    let r = SegmentRef::of(&seg, job.target_level, job.target_group, start);
+                    self.segments.insert(r.segment_id, Arc::new(seg));
+                    if let Err(e) = m.add(&mut self.pager, &r) {
+                        err = Some(e);
+                    }
+                }
+                Err(e) => err = Some(e),
+            }
+        }
+        self.manifest = m;
+        if let Some(e) = err {
+            return Err(e);
+        }
+        // Input segments removed from the manifest are added to the free tree
+        // at the publishing commit_id (`01-container.md` §6).
+        for r in &job.inputs {
+            self.pager.free_extent(r.start_page, r.pages, self.sb.commit_id);
+            self.segments.remove(&r.segment_id);
+        }
+        self.events.push(StoreEvent::Compacted {
+            from: job.inputs[0].level,
+            to: job.target_level,
+            bytes: job.bytes_written,
+        });
+        Ok(())
+    }
+
+    /// Runs the whole cascade. `12-profiles.md` §4 exempts an explicitly
+    /// requested bulk operation from the foreground stall budget, and this is
+    /// one; `step_compaction` is the bounded path.
+    pub fn drain_compaction(&mut self) -> Result<()> {
+        for _ in 0..64 {
+            let Some(mut job) = self.pick_compaction()? else { break };
+            while self.step_compaction(&mut job, Some(u64::MAX))? {}
+            self.finish_compaction(job)?;
+        }
+        Ok(())
+    }
+
+    /// One bounded unit of compaction work, for the foreground path.
+    pub fn maybe_compact(&mut self, budget_bytes: Option<u64>) -> Result<()> {
+        if self.job.is_none() {
+            self.job = self.pick_compaction()?;
+        }
+        let Some(mut job) = self.job.take() else { return Ok(()) };
+        if self.step_compaction(&mut job, budget_bytes)? {
+            self.job = Some(job);
+        } else {
+            self.finish_compaction(job)?;
+        }
+        Ok(())
+    }
+
+    /// §5's full compaction to the last level.
+    pub fn compact(&mut self) -> Result<()> {
+        let last = self.policy.last_level();
+        self.flush()?;
+        loop {
+            let mut all: Vec<SegmentRef> = Vec::new();
+            for level in 0..=last {
+                all.extend(self.healthy_refs_at(level)?);
+            }
+            let above: Vec<SegmentRef> = all.iter().filter(|r| r.level < last).cloned().collect();
+            if above.is_empty() {
+                break;
+            }
+            let Some(mut job) = self.begin_compaction(all, last)? else { break };
+            while self.step_compaction(&mut job, Some(u64::MAX))? {}
+            self.finish_compaction(job)?;
+        }
+        if self.auto_collect {
+            self.collect_while_over_debt(4)?;
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // §6.8, §6.9 — garbage collection and the locality bound
+    // ---------------------------------------------------------------
+
+    fn release_if_vlog(&mut self, rec: &SegRecord) {
+        if rec.value_kind == value_kind::VLOG {
+            if let Ok(p) = VlogPointer::parse(&rec.value) {
+                self.release_vlog(&p);
+            }
+        }
+    }
+
+    fn release_vlog(&mut self, p: &VlogPointer) {
+        if let Some(s) = self.vlog_stats.get_mut(&p.segment_id) {
+            s.live_bytes = s.live_bytes.saturating_sub(p.len as u64);
+            s.live_records = s.live_records.saturating_sub(1);
+            self.vlog_dirty.insert(p.segment_id);
+        }
+    }
+
+    pub fn locality_debt(&self) -> f64 {
+        let stats: Vec<VlogStats> = self.vlog_stats.values().cloned().collect();
+        vlog::locality_debt(&stats, self.sb.vlog_segment_bytes as u64)
+    }
+
+    /// §6.8 — a collection MUST be triggered by `locality_debt` as well as by
+    /// `vlog_space_target_pct`. A space-only trigger left an aged scan at
+    /// 1.58x where a debt trigger held it at 1.00x.
+    pub fn collect(&mut self) -> Result<()> {
+        // Merge the live records of every cold segment holding live data into
+        // one clustered run. Survivors are emitted in `(tree_id, CKE(key))`
+        // order and the output keeps `clustered` (§6.8's last MUST).
+        let victims: Vec<u64> = self
+            .vlog_stats
+            .iter()
+            .filter(|(_, s)| s.live_bytes > 0 && s.tier == Tier::Cold as u8)
+            .map(|(&id, _)| id)
+            .collect();
+        if victims.len() < 2 {
+            return Ok(());
+        }
+        // Build the survivor set by walking the trees, which is what §6.8's
+        // invariant 1 requires: a record is live only if the tree's current
+        // entry for its key is a VLOG pointer to this exact (segment, offset).
+        let mut live: BTreeMap<Vec<u8>, (u32, VlogPointer, Vec<u8>)> = BTreeMap::new();
+        let refs = self.all_refs()?;
+        for r in refs {
+            let seg = self.segment(&r)?;
+            let mut hits = Vec::new();
+            for rec in seg.iter() {
+                let rec = rec?;
+                if rec.value_kind != value_kind::VLOG {
+                    continue;
+                }
+                let p = VlogPointer::parse(&rec.value)?;
+                if !victims.contains(&p.segment_id) {
+                    continue;
+                }
+                let uk = rec.user_key().to_vec();
+                let parsed = parse_internal_key(&rec.internal_key)?;
+                hits.push((uk, parsed.tree_id, p, rec.internal_key.clone()));
+            }
+            for (uk, tree, p, ik) in hits {
+                // Only the current entry counts; a superseded record carries
+                // the same key, so a key match alone is not sufficient.
+                let current = self.current_pointer(&uk)?;
+                if current == Some(p) {
+                    live.insert(uk, (tree, p, ik));
+                }
+            }
+        }
+        if live.is_empty() {
+            return Ok(());
+        }
+        let dest = self.open_vlog_segment(Tier::Cold, Heat::First)?;
+        let mut rewrites: Vec<(Vec<u8>, VlogPointer)> = Vec::new();
+        for (uk, (tree, p, _ik)) in &live {
+            let rec = self.read_vlog_record(p)?;
+            let value = self.read_vlog(p)?;
+            let np = self.append_into(Tier::Cold, Heat::First, *tree, &rec.key, &value)?;
+            self.counters.write_amp_gc += np.len as u64;
+            rewrites.push((uk.clone(), np));
+        }
+        self.mark_clustered(dest, true)?;
+        self.seal_vlog(dest)?;
+        // Step 4: write the updated pointers through the normal commit path.
+        for (uk, np) in rewrites {
+            self.rewrite_pointer(&uk, np)?;
+        }
+        for v in victims {
+            if let Some(s) = self.vlog_stats.get_mut(&v) {
+                s.live_bytes = 0;
+                s.live_records = 0;
+                s.last_gc_seq = self.next_seq;
+            }
+            self.write_vlog_stats(v)?;
+            // Step 5: the extent is freed once the rewrite commit is durable
+            // and no live snapshot predates it — `min_retained_commit` is what
+            // enforces the second half.
+            if let Some(s) = self.vlog_stats.get(&v).cloned() {
+                self.pager.free_extent(s.start_page, s.pages, self.sb.commit_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn current_pointer(&mut self, user_key: &[u8]) -> Result<Option<VlogPointer>> {
+        let tree = u32::from_be_bytes(user_key[0..4].try_into().unwrap());
+        let key = cke::decode_all(&user_key[4..])?;
+        let _ = tree;
+        let _ = key;
+        // Resolve by the ordinary read path so the liveness test uses exactly
+        // the entry a reader would see.
+        let cands = self.candidates_for(user_key)?;
+        let mut best: Option<SegRecord> = self.memtable_lookup(user_key, None);
+        for r in &cands {
+            let seg = self.segment(r)?;
+            if let Some(rec) = seg.lookup(user_key, None)? {
+                if best.as_ref().map_or(true, |b| rec.seq() > b.seq()) {
+                    best = Some(rec);
+                }
+            }
+        }
+        match best {
+            Some(rec) if rec.value_kind == value_kind::VLOG => {
+                Ok(Some(VlogPointer::parse(&rec.value)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn rewrite_pointer(&mut self, user_key: &[u8], np: VlogPointer) -> Result<()> {
+        let tree = u32::from_be_bytes(user_key[0..4].try_into().unwrap());
+        let cke_key = &user_key[4..];
+        let seq = self.allocate_seq(1);
+        let ik = internal_key(tree, cke_key, seq, op::PUT);
+        self.insert_mem(
+            ik,
+            MemEntry { value_kind: value_kind::VLOG, value: np.encode().to_vec(), expiry_ms: None },
+        );
+        Ok(())
+    }
+
+    /// §6.9's bound, enforced as an outcome. Collection is triggered when a
+    /// compaction *starts* over the bound, so a merge that begins inside it
+    /// can still end above it — hence the loop.
+    pub fn collect_while_over_debt(&mut self, max_passes: usize) -> Result<()> {
+        for _ in 0..max_passes {
+            if self.locality_debt() * 100.0 <= self.sb.locality_debt_pct as f64 {
+                return Ok(());
+            }
+            self.collect()?;
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // §8 — snapshots and retention
+    // ---------------------------------------------------------------
+
+    pub fn snapshot(&mut self) -> Snapshot {
+        let s = Snapshot {
+            seq: self.visible_seq,
+            commit_id: self.sb.commit_id,
+            catalog_root: self.catalog.tree.root,
+            freelist_root: self.freelist.root,
+            attributes_root: self.attributes.tree.root,
+            manifest_root: self.manifest.root(),
+            vlog_stats_root: self.vlog_stats_tree.root,
+            checkpoint_root: self.checkpoints.root,
+            changefeed_root: self.changefeed.root,
+            created_ms: now_millis(),
+        };
+        self.live_snapshots.push(s);
+        s
+    }
+
+    pub fn release(&mut self, s: &Snapshot) {
+        if let Some(i) = self.live_snapshots.iter().position(|x| x == s) {
+            self.live_snapshots.remove(i);
+        }
+    }
+
+    /// §8 — both floor at `visible_seq`, and that watermark has to keep moving
+    /// or retention is unbounded.
+    pub fn min_retained_seq(&self) -> u64 {
+        self.live_snapshots
+            .iter()
+            .map(|s| s.seq)
+            .chain(self.checkpoint_seqs())
+            .min()
+            .unwrap_or(self.visible_seq)
+            .min(self.visible_seq)
+    }
+
+    pub fn min_retained_commit(&self) -> u64 {
+        self.live_snapshots
+            .iter()
+            .map(|s| s.commit_id)
+            .chain(self.checkpoint_commits())
+            .min()
+            .unwrap_or(self.sb.commit_id)
+            .min(self.sb.commit_id)
+            .saturating_sub(1)
+    }
+
+    /// `13-operations.md` §1 — "A checkpoint holds `min_retained_commit` and
+    /// `min_retained_seq` down to its own values, exactly as a live reader
+    /// does. It therefore **pins space**." Without this, the pages its roots
+    /// name are reclaimed and a restore reads whatever was written over them.
+    ///
+    /// Cached rather than scanned: retention is consulted on every commit, and
+    /// tree 8 only changes when a checkpoint is created, dropped or restored.
+    pub fn refresh_checkpoint_floors(&mut self) -> Result<()> {
+        let tree = CowTree::new(tree_id::CHECKPOINTS, self.checkpoints.root);
+        let rows = tree.scan(&mut self.pager, None, None)?;
+        let (mut seq, mut commit) = (None, None);
+        for (_, v) in rows {
+            let Ok(d) = cve::decode_all(&v, &|_| None) else { continue };
+            let u = |f: &str| match d.field(f) {
+                Some(Value::Int { mag, .. }) => Some(*mag as u64),
+                _ => None,
+            };
+            if let Some(s) = u("seq") {
+                seq = Some(seq.map_or(s, |m: u64| m.min(s)));
+            }
+            if let Some(c) = u("commit_id") {
+                commit = Some(commit.map_or(c, |m: u64| m.min(c)));
+            }
+        }
+        self.checkpoint_floor = (seq, commit);
+        Ok(())
+    }
+
+    fn checkpoint_seqs(&self) -> Vec<u64> {
+        self.checkpoint_floor.0.into_iter().collect()
+    }
+
+    fn checkpoint_commits(&self) -> Vec<u64> {
+        self.checkpoint_floor.1.into_iter().collect()
+    }
+ pub fn oldest_snapshot_age_ms(&self) -> Option<i64> {
+        self.live_snapshots.iter().map(|s| now_millis() - s.created_ms).max()
+    }
+
+    pub fn live_snapshot_count(&self) -> usize {
+        self.live_snapshots.len()
+    }
+
+    // ---------------------------------------------------------------
+    // §2 steps F and G — the commit
+    // ---------------------------------------------------------------
+
+    pub fn commit(&mut self, durability: Durability) -> Result<u64> {
+        // §2.3 invariant 2 — the value-log watermark is published here, through
+        // the ordinary commit path, because tree 7 is the authority for it and
+        // the head page (written once) is not.
+        for id in std::mem::take(&mut self.vlog_dirty) {
+            self.write_vlog_stats(id)?;
+        }
+        // Trees the commit itself edits, published as roots below.
+        self.persist_freelist()?;
+        let new_commit = self.sb.commit_id + 1;
+        self.sb.commit_id = new_commit;
+        self.sb.visible_seq = self.visible_seq;
+        self.sb.next_seq = self.next_seq;
+        self.sb.next_tree_id = self.catalog.next_tree_id;
+        self.sb.catalog_root = self.catalog.tree.root;
+        self.sb.freelist_root = self.freelist.root;
+        self.sb.attributes_root = self.attributes.tree.root;
+        self.sb.manifest_root = self.manifest.root();
+        self.sb.vlog_stats_root = self.vlog_stats_tree.root;
+        self.sb.checkpoint_root = self.checkpoints.root;
+        self.sb.changefeed_root = self.changefeed.root;
+        self.sb.min_retained_commit = self.min_retained_commit();
+        self.sb.min_retained_seq = self.min_retained_seq();
+        self.sb.modified_utc_ms = now_millis();
+        self.pager.min_retained_commit = self.sb.min_retained_commit;
+        self.write_superblock(durability)?;
+        self.prune_written_at();
+        self.events.push(StoreEvent::Commit {
+            commit_id: new_commit,
+            visible_seq: self.visible_seq,
+        });
+        Ok(new_commit)
+    }
+
+    fn persist_freelist(&mut self) -> Result<()> {
+        // Pages the copy-on-write path copies orphan their predecessors; they
+        // go to the free tree at the committing commit_id.
+        let mut freed: Vec<u64> = Vec::new();
+        for t in [
+            &mut self.catalog.tree,
+            &mut self.catalog.by_id,
+            &mut self.attributes.tree,
+            &mut self.manifest.tree,
+            &mut self.vlog_stats_tree,
+            &mut self.checkpoints,
+            &mut self.changefeed,
+        ] {
+            freed.append(&mut t.freed);
+        }
+        freed.append(&mut self.freelist.freed);
+        for p in &freed {
+            self.pager.free_extent(*p, 1, self.sb.commit_id);
+        }
+        let extents = self.pager.free_list();
+        let mut t = std::mem::replace(&mut self.freelist, CowTree::new(tree_id::FREE_SPACE, 0));
+        t.commit_id = self.sb.commit_id;
+        for e in extents {
+            let key = cke::encode(&Value::Array(vec![
+                Value::Int { w: NumType::U64, neg: false, mag: e.commit_id as u128 },
+                Value::Int { w: NumType::U64, neg: false, mag: e.start_page as u128 },
+            ]))?;
+            let v = cve::encode(&Value::Doc(vec![(
+                "pages".into(),
+                Value::Int { w: NumType::U32, neg: false, mag: e.pages as u128 },
+            )]));
+            t.put(&mut self.pager, &key, &v)?;
+        }
+        self.freelist = t;
+        Ok(())
+    }
+
+    pub fn write_superblock(&mut self, durability: Durability) -> Result<()> {
+        self.sb.page_count = self.pager.page_count;
+        self.sb.durability_achieved = self.durability_achieved as u8;
+        // §2's alternate-slot rule: a crash during a superblock write leaves
+        // the previous superblock intact.
+        let offset = self.pager.slot_offset(self.sb.commit_id);
+        // C then E then G: barrier over the data before the superblock, and
+        // again after it.
+        let achieved = self.pager.sync(durability)?;
+        let mut image = self.sb.encode();
+        if let Some(ring) = &self.keys {
+            ring.seal_superblock(&mut image);
+        }
+        self.pager.write_at(offset, &image)?;
+        let achieved2 = self.pager.sync(durability)?;
+        self.durability_achieved = achieved.min(achieved2);
+        self.sb.durability_achieved = self.durability_achieved as u8;
+        Ok(())
+    }
+
+    fn prune_written_at(&mut self) {
+        let floor = self.min_retained_seq();
+        self.written_at.retain(|_, seq| *seq >= floor);
+    }
+
+    /// `10-transactions.md` §3 — conflict detection compares a transaction's
+    /// written key set against keys written by batches sequenced in between.
+    pub fn conflicts(&self, keys: &[Vec<u8>], start_seq: u64) -> bool {
+        keys.iter().any(|k| matches!(self.written_at.get(k), Some(&s) if s > start_seq))
+    }
+
+    // ---------------------------------------------------------------
+    // `13-operations.md` §4 — corruption containment
+    // ---------------------------------------------------------------
+
+    /// Takes a segment out of service after a checksum failure, steps 1–2.
+    /// The affected key range is knowable without touching the damaged extent
+    /// at all, which is what makes containment cheap.
+    pub fn quarantine(&mut self, segment_id: u64) -> Result<Option<SegmentRef>> {
+        if let Some(r) = self.quarantined.get(&segment_id) {
+            return Ok(Some(r.clone()));
+        }
+        for r in self.all_refs()? {
+            if r.segment_id == segment_id {
+                self.quarantined.insert(segment_id, r.clone());
+                self.segments.remove(&segment_id);
+                return Ok(Some(r));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn affected_trees(&self) -> HashSet<u32> {
+        self.quarantined.values().flat_map(|r| r.trees.iter().copied()).collect()
+    }
+
+    pub fn memtable_pressure(&self) -> (usize, usize) {
+        (self.memtable_len(), self.memtable_entry_limit)
+    }
+
+    pub fn page_size(&self) -> usize {
+        self.pager.page_size
+    }
+}
+
+pub fn encode_vlog_stats(s: &VlogStats) -> Vec<u8> {
+    let u = |v: u64| Value::Int { w: NumType::U64, neg: false, mag: v as u128 };
+    let mut f = vec![
+        ("bytes".to_string(), u(s.bytes)),
+        ("records".to_string(), u(s.records)),
+        ("sealed".to_string(), Value::Bool(s.sealed)),
+        ("clustered".to_string(), Value::Bool(s.clustered)),
+        ("start_page".to_string(), u(s.start_page)),
+        ("pages".to_string(), Value::Int { w: NumType::U32, neg: false, mag: s.pages as u128 }),
+        ("live_bytes".to_string(), u(s.live_bytes)),
+        ("live_records".to_string(), u(s.live_records)),
+        ("tier".to_string(), Value::Int { w: NumType::U8, neg: false, mag: s.tier as u128 }),
+        ("heat".to_string(), Value::Int { w: NumType::U8, neg: false, mag: s.heat as u128 }),
+        ("created_seq".to_string(), u(s.created_seq)),
+        ("last_gc_seq".to_string(), u(s.last_gc_seq)),
+    ];
+    // §6.7: `min_key`/`max_key` are present iff clustered.
+    if s.clustered {
+        if let Some(k) = &s.min_key {
+            f.push(("min_key".to_string(), Value::Bytes(k.clone())));
+        }
+        if let Some(k) = &s.max_key {
+            f.push(("max_key".to_string(), Value::Bytes(k.clone())));
+        }
+    }
+    cve::encode(&Value::Doc(f))
+}
+
+pub fn decode_vlog_stats(id: u64, v: &[u8]) -> Result<VlogStats> {
+    let d = cve::decode_all(v, &|_| None)?;
+    let u = |f: &str| -> u64 {
+        match d.field(f) {
+            Some(Value::Int { mag, .. }) => *mag as u64,
+            _ => 0,
+        }
+    };
+    let b = |f: &str| matches!(d.field(f), Some(Value::Bool(true)));
+    let by = |f: &str| match d.field(f) {
+        Some(Value::Bytes(x)) => Some(x.clone()),
+        _ => None,
+    };
+    Ok(VlogStats {
+        segment_id: id,
+        bytes: u("bytes"),
+        records: u("records"),
+        sealed: b("sealed"),
+        clustered: b("clustered"),
+        min_key: by("min_key"),
+        max_key: by("max_key"),
+        start_page: u("start_page"),
+        pages: u("pages") as u32,
+        live_bytes: u("live_bytes"),
+        live_records: u("live_records"),
+        tier: u("tier") as u8,
+        heat: u("heat") as u8,
+        created_seq: u("created_seq"),
+        last_gc_seq: u("last_gc_seq"),
+    })
+}
+
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// RFC 4122 v4, from the OS entropy the AEAD already needs.
+pub fn random_uuid_v4() -> [u8; 16] {
+    let mut b = crate::security::random_bytes::<16>();
+    b[6] = (b[6] & 0x0F) | 0x40;
+    b[8] = (b[8] & 0x3F) | 0x80;
+    b
+}
+
+/// A convenience for the page-level codec path, kept here because it is the
+/// only place `01-container.md` §7's order (compress, then encrypt) and §8's
+/// read order (verify checksum, decrypt, then decompress) both apply.
+pub fn encode_data_page(
+    page_size: usize,
+    page_type_id: u8,
+    tree: u32,
+    commit_id: u64,
+    payload: &[u8],
+    page_codec: u8,
+) -> Result<Vec<u8>> {
+    let mut page = vec![0u8; page_size];
+    let cap = page_size - PAGE_HEADER_BYTES;
+    let (body, flags, codec_id) = match codec::compress(page_codec, payload)? {
+        Some(c) if c.len() <= cap => (c, page_flags::COMPRESSED, page_codec as u16),
+        _ => (payload.to_vec(), 0u8, 0u16),
+    };
+    if body.len() > cap {
+        return invalid("page payload does not fit");
+    }
+    page[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + body.len()].copy_from_slice(&body);
+    PageHeader {
+        page_type: page_type_id,
+        flags,
+        codec: codec_id,
+        tree_id: tree,
+        extent_pages: 1,
+        commit_id,
+        payload_len: payload.len() as u32,
+        ..Default::default()
+    }
+    .write_into(&mut page);
+    Ok(page)
+}
+
+pub fn decode_data_page(page: &[u8], page_id: u64) -> Result<Vec<u8>> {
+    let h = PageHeader::verify(page, page_id)?;
+    let body = &page[PAGE_HEADER_BYTES..];
+    if h.compressed() {
+        codec::decompress(h.codec as u8, body, h.payload_len as usize)
+    } else {
+        Ok(body[..(h.payload_len as usize).min(body.len())].to_vec())
+    }
+}
+
+pub const _PAGE_TYPES: [u8; 3] =
+    [page_type::BTREE_LEAF, page_type::BTREE_INTERNAL, page_type::OVERFLOW];

@@ -171,7 +171,7 @@ Read in this order.
 | [`adoption/rollout.md`](adoption/rollout.md) | How the three SDKs get there from here, and how existing files migrate |
 | [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md) | **Reference implementation report (phase 15)** — what is built, the spec defects building it has found, and every measurement against a claim in `design/` |
 | [`reference/rust/cryptand-conformance/`](reference/rust/cryptand-conformance/) | **The second implementation** — an independent Rust reader of the byte layer, written from `spec/` alone, that passes nine of the ten conformance vector groups |
-| [`reference/rust/cryptand-write/`](reference/rust/cryptand-write/) | **The write protocol** — `10-transactions.md` §2 with real threads, where prediction **P3** is measured |
+| [`reference/rust/cryptand-write/`](reference/rust/cryptand-write/) | **The write protocol** — `10-transactions.md` §2 with real threads, where prediction **P3** is measured, and `13-operations.md` §8's multi-process readers with real processes |
 
 ### Specification chapters
 
@@ -216,15 +216,15 @@ set catches regression, and only a second reader catches misreading.
 | `09` vector | complete — the durable layout and §8's search contract; the graph *algorithms* are deliberately not in the format |
 | `10` transactions | complete — §1 and §3–§10 in Dart; §2, the concurrent write protocol, in Rust (`reference/rust/cryptand-write`), where P3 measures **14.8×** over 32 writer threads |
 | `11` conformance, `12` profiles | complete |
-| `13` operations | complete except §8, multi-process readers — a lock sidecar coordinating processes |
+| `13` operations | complete — §8's multi-process readers built in Rust (`reference/rust/cryptand-write`), tested with processes it spawns |
 | `14` security | complete, Argon2id and BLAKE2b verified against RFC 9106 and RFC 7693 |
 
-**What is left needs an engine underneath it**: `04` §5.1's parallel compaction
-and `13` §8's multi-process readers. The threads half is done — `10` §2 and P3
-are built and measured in Rust.
+**Every section of the specification now has an implementation.** `04` §5.1's
+parallel compaction is the one part left, and it needs an engine underneath it
+rather than a new capability.
 
 Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code has found **forty-six defects in these documents** — a headline
+Building the code has found **forty-nine defects in these documents** — a headline
 invariant that was literally false, a page header whose field table did not fit
 its own declared size, a nonce rule that did nothing, filter rates quoted from
 the wrong formula, "unknown tags round-trip" that no reader could implement —
@@ -243,7 +243,11 @@ the device" — which measurement showed to be a property of the operating
 system's write path rather than of the format, false on at least one mainstream
 platform, and not recoverable by any file layout. The argument for having no
 write-ahead log survives, but the reason is the group-commit barrier that
-amortizes over a whole commit group, not the parallel streams.
+amortizes over a whole commit group, not the parallel streams. The three after
+that came from building the multi-process reader protocol: a sidecar header
+declaring two fields no rule read, which left an abandoned database silently
+degrading every reader that opened it, and a volatile mode reachable two ways
+with only one of them written down.
 
 **Confirmed by measurement:**
 

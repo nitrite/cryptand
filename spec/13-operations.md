@@ -306,18 +306,49 @@ header:  u32 magic, u32 slot_count, u64 writer_pid, u64 writer_heartbeat_ms
 slots:   slot_count × { u64 pid, u64 commit_id, u64 heartbeat_ms }
 ```
 
-1. A reader claims a free slot with a compare-and-swap and publishes the
+1. A reader claims a slot with a compare-and-swap and publishes the
    `commit_id` it pinned, refreshing `heartbeat_ms` at least every
-   `reader_heartbeat_ms` (default 2000).
+   `reader_heartbeat_ms` (default 2000). **A stale slot (rule 3) is a free slot
+   to a claimer**, so reclamation is not the writer's alone — see the note
+   below, which is the reason that clause is normative rather than an
+   optimization.
 2. The writer computes `min_retained_commit` as the minimum over its own
-   snapshots **and** every live slot.
-3. A slot whose heartbeat is older than `3 × reader_heartbeat_ms` is reclaimed;
-   the reader MUST detect that its slot was reclaimed — its own `pid` no longer
-   present — and MUST reopen rather than continue against possibly-freed extents.
-4. A reader that cannot write the sidecar (read-only filesystem) MUST open in
-   **volatile mode**: it may read the current snapshot and MUST revalidate the
-   superblock before each operation, accepting that a long scan may fail if the
-   writer reclaims underneath it. It MUST report that it is in volatile mode.
+   snapshots **and** every live slot. A stale slot does not pin.
+3. A slot whose heartbeat is older than `3 × reader_heartbeat_ms` is stale and
+   MAY be reclaimed — by the writer, or by any reader claiming a slot. The
+   reader whose slot was reclaimed MUST detect it — its own `pid` no longer
+   present — and MUST reopen rather than continue against possibly-freed
+   extents.
+4. A reader that cannot claim a slot MUST open in **volatile mode**: it may read
+   the current snapshot and MUST revalidate the superblock before each
+   operation, accepting that a long scan may fail if the writer reclaims
+   underneath it. There are two ways to arrive here — the sidecar cannot be
+   written (a read-only filesystem), or every slot is held by a live reader —
+   and an implementation MUST report **which**, because they call for different
+   responses and because a downgrade whose cause is invisible is the silent
+   failure this chapter exists to prevent.
+5. The writer refreshes `writer_heartbeat_ms` on the same schedule it asks of
+   readers. A reader MUST treat a `writer_pid` of 0, or a writer heartbeat older
+   than `3 × reader_heartbeat_ms`, as **no live writer**, and SHOULD report it:
+   nothing will reclaim extents, so its own pin protects nothing.
+
+**Why rules 1 and 5 are not bookkeeping.** An earlier draft attributed
+reclamation only to the writer, and declared `writer_pid` and
+`writer_heartbeat_ms` in the header without giving any rule that reads them.
+Both gaps meet in one failure. When the writing process dies — or was never
+there, as for two `dbinspect` sessions against a file no application currently
+has open — nothing reclaims stale slots. They accumulate. After `slot_count`
+reader opens, every subsequent reader falls to rule 4's volatile mode, for a
+reason it cannot see, against a database where volatile mode is not even
+necessary because no writer will ever reclaim anything. Letting a claimer
+recycle a stale slot closes it, and the two header fields are what let a reader
+say so.
+
+**The sidecar coordinates processes on one host.** It relies on the platform's
+advisory file locking and on a clock shared between the processes that read it.
+A database opened concurrently from two hosts over a network filesystem
+satisfies neither, and is outside `MULTIPROC_READ`. An implementation SHOULD
+refuse, and MUST NOT report a coordination it did not achieve.
 
 The motivating case is ordinary: a CLI, a `dbinspect` bridge, or a background
 service reading a database a running application owns — today impossible with
