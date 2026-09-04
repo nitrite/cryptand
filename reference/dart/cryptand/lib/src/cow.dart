@@ -32,7 +32,24 @@ import 'segment.dart';
 final class PageStore {
   PageStore({this.pageSize = 4096}) {
     checkPageSize(pageSize);
-    _pages.add(Uint8List(pageSize)); // page 0: the superblock
+    // `spec/01-container.md` §1: page 0 is superblock slot A and page 1 is
+    // slot B. Both are reserved before anything else is allocated, so a page
+    // id means the same thing in memory as it does in a file.
+    _pages
+      ..add(Uint8List(pageSize))
+      ..add(Uint8List(pageSize));
+  }
+
+  /// Rebuilds a store from the bytes of a file, for `DatabaseFile.open`.
+  factory PageStore.fromBytes(Uint8List bytes, {required int pageSize}) {
+    checkPageSize(pageSize);
+    final s = PageStore(pageSize: pageSize);
+    s._pages.clear();
+    for (var at = 0; at + pageSize <= bytes.length; at += pageSize) {
+      s._pages.add(Uint8List.fromList(
+          Uint8List.sublistView(bytes, at, at + pageSize)));
+    }
+    return s;
   }
 
   final int pageSize;
@@ -58,6 +75,46 @@ final class PageStore {
   int alloc() {
     _pages.add(Uint8List(pageSize));
     return _pages.length - 1;
+  }
+
+  /// `spec/01-container.md` §6: allocation unit is the **extent** — one or more
+  /// contiguous pages. Returns the first page id.
+  int allocExtent(int pages) {
+    final start = _pages.length;
+    for (var i = 0; i < pages; i++) {
+      _pages.add(Uint8List(pageSize));
+    }
+    return start;
+  }
+
+  /// Writes a whole extent, head page first. The bytes MUST be a whole number
+  /// of pages.
+  void writeExtent(int startPage, Uint8List extent) {
+    if (extent.length % pageSize != 0) {
+      throw const InvalidArgumentException(
+          'an extent must be a whole number of pages');
+    }
+    for (var i = 0; i * pageSize < extent.length; i++) {
+      write(startPage + i,
+          Uint8List.sublistView(extent, i * pageSize, (i + 1) * pageSize));
+    }
+  }
+
+  Uint8List readExtent(int startPage, int pages) {
+    final out = Uint8List(pages * pageSize);
+    for (var i = 0; i < pages; i++) {
+      out.setRange(i * pageSize, (i + 1) * pageSize, read(startPage + i));
+    }
+    return out;
+  }
+
+  /// The whole page space, for `DatabaseFile.save`.
+  Uint8List toBytes() {
+    final out = Uint8List(_pages.length * pageSize);
+    for (var i = 0; i < _pages.length; i++) {
+      out.setRange(i * pageSize, (i + 1) * pageSize, _pages[i]);
+    }
+    return out;
   }
 
   void free(int pageId) {

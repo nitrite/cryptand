@@ -2,6 +2,8 @@
 name = "cryptand"
 version = "1.0.0"
 edition = "2021"
+# The files in `benches/` are plain binaries, not libtest benchmarks.
+autobenches = false
 description = "Reference implementation of the Cryptand File Format (CFF) v1.0"
 
 [dependencies]
@@ -43,3 +45,7 @@ path = "benches/p11_encryption.rs"
 [[bin]]
 name = "filter_fpr"
 path = "benches/filter_fpr.rs"
+
+[[bin]]
+name = "interop"
+path = "src/bin/interop.rs"

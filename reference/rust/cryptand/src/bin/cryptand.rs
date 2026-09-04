@@ -179,13 +179,40 @@ fn backup(path: &str, dest: &str, incremental: bool) -> cryptand::Result<ExitCod
     Ok(ExitCode::SUCCESS)
 }
 
-/// `14-security.md` §9.3 — structure-aware fuzzing of the reader. "A parser
+/// `14-security.md` §9.3 — **structure-aware** fuzzing of the reader. "A parser
 /// for a format read from untrusted sources that has never been fuzzed is not
 /// finished." Every mutation must produce a named error, never a crash, a hang,
 /// or an unbounded allocation.
+///
+/// Structure-aware matters: most of a database's bytes are unused value-log
+/// record space, so uniform bit flips land in padding and measure nothing. The
+/// targets here are the ones a hostile file would edit — the superblock's own
+/// fields, page headers, and the payloads behind them.
 fn fuzz(path: &str, iterations: u64) -> cryptand::Result<ExitCode> {
     let original = std::fs::read(path)?;
-    let tmp = std::env::temp_dir().join("cryptand-fuzz.cryptand");
+    let mut probe = cryptand::pager::Pager::open(&PathBuf::from(path), 4096, 1)?;
+    let sb = cryptand::container::Superblock::parse(&probe.read_at(0, 4096)?)
+        .or_else(|_| cryptand::container::Superblock::parse(&probe.read_at(4096, 4096)?))?;
+    let page_size = sb.page_size();
+
+    // Every page that carries a header, and the two superblock slots.
+    let mut structural: Vec<(u64, usize)> = vec![(0, 4096), (page_size as u64, 4096)];
+    let mut pager = cryptand::pager::Pager::open(&PathBuf::from(path), page_size, sb.page_count)?;
+    for p in 2..sb.page_count {
+        let Ok(raw) = pager.read_page(p) else { continue };
+        let Ok(h) = cryptand::container::PageHeader::parse(&raw) else { continue };
+        if h.page_type == 0 || h.payload_len == 0 {
+            continue;
+        }
+        // The header itself, and the first part of the payload behind it.
+        structural.push((p * page_size as u64, 40));
+        structural.push((p * page_size as u64 + 40, (h.payload_len as usize).min(256)));
+    }
+    if structural.len() <= 2 {
+        return corrupt_cli("the file holds no headed pages to fuzz");
+    }
+
+    let tmp = std::env::temp_dir().join(format!("cryptand-fuzz-{}.cryptand", std::process::id()));
     let mut state = 0x243F_6A88_85A3_08D3u64;
     let mut next = || {
         state ^= state << 13;
@@ -193,29 +220,47 @@ fn fuzz(path: &str, iterations: u64) -> cryptand::Result<ExitCode> {
         state ^= state << 17;
         state
     };
-    let mut panics = 0u64;
-    let mut opened = 0u64;
-    let mut refused = 0u64;
+    let (mut panics, mut accepted, mut refused, mut found) = (0u64, 0u64, 0u64, 0u64);
     for _ in 0..iterations {
         let mut b = original.clone();
-        let n = 1 + (next() % 8) as usize;
-        for _ in 0..n {
-            let at = (next() as usize) % b.len();
-            b[at] ^= 1 << (next() % 8);
+        for _ in 0..1 + (next() % 4) {
+            let (base, len) = structural[(next() as usize) % structural.len()];
+            let at = base as usize + (next() as usize) % len.max(1);
+            if at < b.len() {
+                b[at] ^= 1 << (next() % 8);
+            }
         }
         std::fs::write(&tmp, &b)?;
         let r = std::panic::catch_unwind(|| {
             let mut e = Engine::open(&tmp, None)?;
             let rep = e.verify()?;
-            Ok::<usize, cryptand::Error>(rep.findings.len())
+            Ok::<usize, cryptand::Error>(
+                rep.of(Class::Corruption).len() + rep.of(Class::Tampering).len(),
+            )
         });
         match r {
             Err(_) => panics += 1,
-            Ok(Ok(_)) => opened += 1,
             Ok(Err(_)) => refused += 1,
+            Ok(Ok(0)) => accepted += 1,
+            Ok(Ok(_)) => found += 1,
         }
     }
     let _ = std::fs::remove_file(&tmp);
-    println!("{iterations} mutations: {opened} opened, {refused} refused with a named error, {panics} panics");
+    println!(
+        "{iterations} structure-aware mutations:\n  \
+         {refused} refused at open with a named error\n  \
+         {found} opened and reported by the verification pass\n  \
+         {accepted} opened with nothing to report\n  \
+         {panics} panics"
+    );
+    println!(
+        "\n§9.3 requires no crash, hang, or unbounded allocation. \"Opened with \n\
+         nothing to report\" is not a failure: a flipped bit in a reserved field or \n\
+         in an unread payload changes nothing a reader is allowed to act on."
+    );
     Ok(if panics == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+fn corrupt_cli(why: &str) -> cryptand::Result<ExitCode> {
+    Err(cryptand::Error::Corrupt(why.into()))
 }

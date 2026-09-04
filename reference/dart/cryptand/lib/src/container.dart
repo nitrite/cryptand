@@ -596,7 +596,29 @@ final class PageHeader {
       ..setUint32(24, payloadLen, Endian.little)
       ..setUint32(28, 0, Endian.little) // reserved
       ..setUint64(32, nonce, Endian.little)
-      ..setUint32(0, crc32c(page, 4, page.length), Endian.little);
+      ..setUint32(0, crc32c(page, 4, checksumEnd(page, pageType)), Endian.little);
+  }
+
+  /// The end of the checksummed range for a page of [pageType].
+  ///
+  /// **A value-log head page is the one exception, and the spec does not state
+  /// it.** `spec/04-segments.md` section 6.2 fixes `data_offset` at 104, so a
+  /// segment's records begin *inside its head page* — which
+  /// `spec/01-container.md` section 1 explicitly permits ("an append into the
+  /// open tail of a value-log segment"). A checksum over the whole page would
+  /// therefore be stale from the first append onward: the page would fail its
+  /// own checksum for the entire life of the segment. Section 3's carve-out —
+  /// "a verifier MUST use the extent's mechanism for these pages" — is only
+  /// satisfiable if the head page's checksum covers its immutable header
+  /// region, `4 .. data_offset`, and the records are covered by their own
+  /// per-record `crc32c`.
+  static int checksumEnd(Uint8List page, int pageType) {
+    if (pageType == PageType.vlogSegment && page.length >= size + 36) {
+      final off = ByteData.view(page.buffer, page.offsetInBytes, page.length)
+          .getUint32(size + 32, Endian.little);
+      if (off > size && off <= page.length) return off;
+    }
+    return page.length;
   }
 
   /// Reads and verifies a page header. Throws [CorruptionException] on a
@@ -607,7 +629,7 @@ final class PageHeader {
     }
     final bd = ByteData.view(page.buffer, page.offsetInBytes, page.length);
     final stored = bd.getUint32(0, Endian.little);
-    final actual = crc32c(page, 4, page.length);
+    final actual = crc32c(page, 4, checksumEnd(page, bd.getUint8(4)));
     if (stored != actual) {
       throw CorruptionException(
           'page checksum mismatch: stored 0x${stored.toRadixString(16)}, '

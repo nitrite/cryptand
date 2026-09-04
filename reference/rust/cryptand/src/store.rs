@@ -44,7 +44,15 @@ pub struct Shared {
     pub next_nonce: AtomicU64,
     pub shards: Vec<Mutex<Shard>>,
     pub visible_seq: AtomicU64,
-    pub pending: Mutex<Vec<(u64, u64)>>,
+    /// Sequence numbers handed out, and rows that have actually landed in a
+    /// shard. `10-transactions.md` §2.3 invariant 2 in its general form: the
+    /// watermark advances **only over a contiguous prefix of completed
+    /// reservations**, and with `fetch_add` allocation the prefix is complete
+    /// exactly when these two agree. Two atomics rather than a shared list,
+    /// because §2.2 forbids routing writers through a shared buffer and a
+    /// mutex-guarded list of pending ranges is one.
+    pub issued: AtomicU64,
+    pub landed: AtomicU64,
     pub woken: Condvar,
     pub stop: AtomicBool,
     pub commits: AtomicU64,
@@ -87,7 +95,8 @@ impl Store {
             next_nonce: AtomicU64::new(engine.sb.next_nonce),
             shards: (0..shards).map(|_| Mutex::new(Shard::default())).collect(),
             visible_seq: AtomicU64::new(engine.visible_seq),
-            pending: Mutex::new(Vec::new()),
+            issued: AtomicU64::new(0),
+            landed: AtomicU64::new(0),
             woken: Condvar::new(),
             stop: AtomicBool::new(false),
             commits: AtomicU64::new(0),
@@ -115,14 +124,14 @@ impl Store {
         }
         encoded.sort_by(|a, b| a.0.cmp(&b.0));
         let base = self.shared.next_seq.fetch_add(rows.len() as u64, Ordering::SeqCst);
+        self.shared.issued.fetch_add(rows.len() as u64, Ordering::SeqCst);
         for (i, (cke_key, value)) in encoded.into_iter().enumerate() {
             let seq = base + i as u64;
             let entry = self.value_entry(tree, &cke_key, value)?;
             let ik = internal_key(tree, &cke_key, seq, op::PUT);
             self.insert(ik, entry);
         }
-        let end = base + rows.len() as u64;
-        self.shared.pending.lock().unwrap().push((base, end));
+        self.shared.landed.fetch_add(rows.len() as u64, Ordering::SeqCst);
         Ok(base)
     }
 
@@ -130,6 +139,7 @@ impl Store {
         let cke_key = crate::cke::encode(key)?;
         // Step 4: one fetch_add.
         let seq = self.shared.next_seq.fetch_add(1, Ordering::SeqCst);
+        self.shared.issued.fetch_add(1, Ordering::SeqCst);
         let entry = if op_code == op::DELETE {
             MemEntry { value_kind: value_kind::EMPTY, value: Vec::new(), expiry_ms: None }
         } else {
@@ -138,8 +148,9 @@ impl Store {
         // Step 5: publish into shard h(key) % shards.
         let ik = internal_key(tree, &cke_key, seq, op_code);
         self.insert(ik, entry);
-        // Step 6: register the range with the committer.
-        self.shared.pending.lock().unwrap().push((seq, seq + 1));
+        // Step 6: the row is now visible to the committer, and the completion
+        // count is what lets it recognise a contiguous prefix.
+        self.shared.landed.fetch_add(1, Ordering::SeqCst);
         Ok(seq)
     }
 
@@ -175,22 +186,31 @@ impl Store {
     /// engine's memtable, flushes, and publishes one superblock — **one barrier
     /// over *n* batches**, however many threads produced them.
     pub fn commit_once(&self) -> Result<u64> {
-        let batches: Vec<(u64, u64)> = std::mem::take(&mut *self.shared.pending.lock().unwrap());
+        let issued = self.shared.issued.load(Ordering::SeqCst);
         let mut drained: Vec<(Vec<u8>, MemEntry)> = Vec::new();
         for s in &self.shared.shards {
             let mut sh = s.lock().unwrap();
             drained.extend(std::mem::take(&mut sh.rows));
             sh.bytes = 0;
         }
-        if drained.is_empty() && batches.is_empty() {
+        if drained.is_empty() {
             return Ok(0);
         }
+        // A writer that took a seq and has not yet inserted leaves a hole; the
+        // watermark must not advance past it (§2.3 invariant 2).
+        let complete = self.shared.landed.load(Ordering::SeqCst) >= issued;
         let mut e = self.engine.lock().unwrap();
         e.next_seq = e.next_seq.max(self.shared.next_seq.load(Ordering::SeqCst));
         for (ik, v) in drained {
             e.adopt(ik, v);
         }
         e.flush()?;
+        if !complete {
+            // Hold the watermark where it was: the rows are in the memtable and
+            // will be published by the next commit, once every reservation
+            // below them has completed.
+            e.visible_seq = self.shared.visible_seq.load(Ordering::SeqCst);
+        }
         let id = e.commit(self.durability)?;
         // Step G: wake every writer waiting at or below visible_seq.
         self.shared.visible_seq.store(e.visible_seq, Ordering::SeqCst);
@@ -208,17 +228,17 @@ impl Store {
         self.committer = Some(std::thread::spawn(move || {
             while !shared.stop.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(window_ms));
-                let batches: Vec<(u64, u64)> =
-                    std::mem::take(&mut *shared.pending.lock().unwrap());
+                let issued = shared.issued.load(Ordering::SeqCst);
                 let mut drained: Vec<(Vec<u8>, MemEntry)> = Vec::new();
                 for s in &shared.shards {
                     let mut sh = s.lock().unwrap();
                     drained.extend(std::mem::take(&mut sh.rows));
                     sh.bytes = 0;
                 }
-                if drained.is_empty() && batches.is_empty() {
+                if drained.is_empty() {
                     continue;
                 }
+                let complete = shared.landed.load(Ordering::SeqCst) >= issued;
                 let Ok(mut e) = engine.lock() else { break };
                 e.next_seq = e.next_seq.max(shared.next_seq.load(Ordering::SeqCst));
                 for (ik, v) in drained {
@@ -226,6 +246,9 @@ impl Store {
                 }
                 if e.flush().is_err() {
                     continue;
+                }
+                if !complete {
+                    e.visible_seq = shared.visible_seq.load(Ordering::SeqCst);
                 }
                 if e.commit(durability).is_err() {
                     continue;

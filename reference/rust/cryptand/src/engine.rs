@@ -199,6 +199,9 @@ pub struct Engine {
     /// `(min seq, min commit_id)` over tree 8, cached; see
     /// [`Engine::refresh_checkpoint_floors`].
     checkpoint_floor: (Option<u64>, Option<u64>),
+    /// Free extents already written into tree 1, so a commit writes only what
+    /// is new.
+    persisted_free: HashSet<u64>,
     /// `11-conformance.md` §5 — trees whose `params.change_feed` is true.
     pub changefeed_trees: HashSet<u32>,
     job: Option<CompactionJob>,
@@ -290,6 +293,7 @@ impl Engine {
             counters: Counters::default(),
             keys: None,
             checkpoint_floor: (None, None),
+            persisted_free: HashSet::new(),
             changefeed_trees: HashSet::new(),
             job: None,
             closed: false,
@@ -384,6 +388,7 @@ impl Engine {
             counters: Counters::default(),
             keys,
             checkpoint_floor: (None, None),
+            persisted_free: HashSet::new(),
             changefeed_trees: HashSet::new(),
             job: None,
             closed: false,
@@ -404,10 +409,18 @@ impl Engine {
         Ok(e)
     }
 
+    /// §2: "Every other tree's root is in its catalog descriptor — including
+    /// tree 3's, which is bootstrapped by scanning the catalog if its
+    /// descriptor is missing."
+    ///
+    /// The descriptor has to be *written*, not only read: without it every open
+    /// rebuilds tree 3 from scratch, and the pages of the tree it replaces are
+    /// reachable from nothing and recorded in no free tree — a leak per open,
+    /// which `01-container.md` §9 step 7 finds and which nothing else would.
+    pub const TREE_INDEX_DESCRIPTOR: &'static str = "$tree_index";
+
     fn reload_tree_index(&mut self) -> Result<()> {
-        // §2: tree 3's root lives in its catalog descriptor, and is
-        // bootstrapped by scanning the catalog if the descriptor is missing.
-        let root = match self.catalog.get(&mut self.pager, "$tree_index")? {
+        let root = match self.catalog.get(&mut self.pager, Engine::TREE_INDEX_DESCRIPTOR)? {
             Some(d) => d.root().unwrap_or(0),
             None => 0,
         };
@@ -416,6 +429,48 @@ impl Engine {
             self.catalog.rebuild_tree_index(&mut self.pager)?;
         }
         Ok(())
+    }
+
+    fn publish_tree_index_root(&mut self) -> Result<()> {
+        let root = self.catalog.by_id.root;
+        if root == 0 {
+            return Ok(());
+        }
+        let mut cat = std::mem::replace(&mut self.catalog, Catalog::new(0, 0, 16));
+        let existing = cat.get(&mut self.pager, Engine::TREE_INDEX_DESCRIPTOR)?;
+        let d = match existing {
+            Some(d) if d.root() == Some(root) => {
+                self.catalog = cat;
+                return Ok(());
+            }
+            Some(d) => d.with(vec![(
+                "root",
+                Some(Value::Int { w: NumType::U64, neg: false, mag: root as u128 }),
+            )]),
+            None => crate::catalog::TreeDescriptor::create(
+                tree_id::TREE_INDEX,
+                crate::catalog::kind::INTERNAL,
+                None,
+                None,
+                Some("u32"),
+                0,
+                vec![],
+                now_millis(),
+            )
+            .with(vec![
+                ("root", Some(Value::Int { w: NumType::U64, neg: false, mag: root as u128 })),
+                ("levelled", Some(Value::Bool(false))),
+            ]),
+        };
+        // Straight into the catalog tree: `create` would allocate a fresh
+        // `tree_id`, and tree 3's is reserved (§2).
+        let r = cat.tree.put(
+            &mut self.pager,
+            &crate::catalog::name_key(Engine::TREE_INDEX_DESCRIPTOR),
+            &d.encode(),
+        );
+        self.catalog = cat;
+        r
     }
 
     fn reload_changefeed_trees(&mut self) -> Result<()> {
@@ -447,6 +502,7 @@ impl Engine {
                 pages,
             });
         }
+        self.persisted_free = extents.iter().map(|e| e.start_page).collect();
         self.pager.set_free_list(extents);
         Ok(())
     }
@@ -1935,6 +1991,7 @@ impl Engine {
     // ---------------------------------------------------------------
 
     pub fn commit(&mut self, durability: Durability) -> Result<u64> {
+        self.publish_tree_index_root()?;
         // §2.3 invariant 2 — the value-log watermark is published here, through
         // the ordinary commit path, because tree 7 is the authority for it and
         // the head page (written once) is not.
@@ -1968,9 +2025,20 @@ impl Engine {
         Ok(new_commit)
     }
 
+    /// §6's free tree, written through the ordinary commit path.
+    ///
+    /// **The free tree is the one tree whose own churn it cannot record in the
+    /// same commit**: writing an entry copies a root-to-leaf path, which
+    /// orphans pages, which are new entries, which orphan more pages. Recording
+    /// them lands in the pager's list and is persisted by the *next* commit —
+    /// a bounded one-commit lag, whose residue `01-container.md` §9 step 7
+    /// reports as a **leak** (repairable) rather than as corruption, and which
+    /// `13-operations.md` §3 reclaims.
+    ///
+    /// Only entries this commit has not already written are put, or re-putting
+    /// the whole list would copy a path per entry and the lag would grow
+    /// instead of shrinking.
     fn persist_freelist(&mut self) -> Result<()> {
-        // Pages the copy-on-write path copies orphan their predecessors; they
-        // go to the free tree at the committing commit_id.
         let mut freed: Vec<u64> = Vec::new();
         for t in [
             &mut self.catalog.tree,
@@ -1980,17 +2048,21 @@ impl Engine {
             &mut self.vlog_stats_tree,
             &mut self.checkpoints,
             &mut self.changefeed,
+            &mut self.freelist,
         ] {
             freed.append(&mut t.freed);
         }
-        freed.append(&mut self.freelist.freed);
         for p in &freed {
             self.pager.free_extent(*p, 1, self.sb.commit_id);
         }
         let extents = self.pager.free_list();
         let mut t = std::mem::replace(&mut self.freelist, CowTree::new(tree_id::FREE_SPACE, 0));
         t.commit_id = self.sb.commit_id;
+        let mut wrote = Vec::new();
         for e in extents {
+            if !self.persisted_free.insert(e.start_page) {
+                continue;
+            }
             let key = cke::encode(&Value::Array(vec![
                 Value::Int { w: NumType::U64, neg: false, mag: e.commit_id as u128 },
                 Value::Int { w: NumType::U64, neg: false, mag: e.start_page as u128 },
@@ -2000,8 +2072,10 @@ impl Engine {
                 Value::Int { w: NumType::U32, neg: false, mag: e.pages as u128 },
             )]));
             t.put(&mut self.pager, &key, &v)?;
+            wrote.push(e.start_page);
         }
         self.freelist = t;
+        let _ = wrote;
         Ok(())
     }
 

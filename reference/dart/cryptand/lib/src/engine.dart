@@ -194,17 +194,41 @@ final class Engine {
     int? segmentEntries,
     int? vlogSegmentBytes,
     int cachePages = 256,
+    PageStore? store,
+    int manifestRoot = 0,
+    int checkpointRoot = 0,
+    int changefeedRoot = 0,
   })  : segmentEntries = segmentEntries ?? memtableEntries,
-        store = PageStore(pageSize: pageSize),
+        store = store ?? PageStore(pageSize: pageSize),
         vlog = ValueLog(
           pageSize: pageSize,
           segmentBytes: vlogSegmentBytes ?? (4 << 20),
           cachePages: cachePages,
         ) {
-    manifest = Manifest(store);
-    checkpoints = CheckpointStore(store);
-    changeFeed = ChangeFeed(store);
+    manifest = Manifest(this.store, root: manifestRoot);
+    checkpoints = CheckpointStore(this.store, root: checkpointRoot);
+    changeFeed = ChangeFeed(this.store, root: changefeedRoot);
   }
+
+  /// Adopts the counters a file carries (`spec/01-container.md` §2).
+  ///
+  /// Ids are "never reused" (`spec/00-conventions.md` §7), and that has to
+  /// survive a reopen for the same reason it has to survive a crash — so the
+  /// counters are restored, never recomputed from what happens to be present.
+  void restoreCounters({
+    required int nextSeq,
+    required int nextSegmentId,
+    required int visibleSeq,
+    required int commitId,
+  }) {
+    _nextSeq = nextSeq;
+    _nextSegmentId = nextSegmentId;
+    this.visibleSeq = visibleSeq;
+    this.commitId = commitId;
+  }
+
+  int get nextSeq => _nextSeq;
+  int get nextSegmentId => _nextSegmentId;
 
   final int pageSize;
 

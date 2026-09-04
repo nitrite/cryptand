@@ -18,7 +18,7 @@ import 'dart:typed_data';
 
 import 'catalog.dart';
 import 'cke.dart';
-import 'cow.dart';
+import 'container.dart';
 import 'cve.dart';
 import 'engine.dart';
 import 'errors.dart';
@@ -32,19 +32,37 @@ import 'value.dart';
 const String kFormatVersion = 'CFF 1.0';
 
 final class Database {
-  Database({Engine? engine})
-      : engine = engine ?? Engine(),
-        _catalogStore = PageStore() {
-    catalog = Catalog(_catalogStore);
-    attributes = Attributes(_catalogStore);
-    attributes.initStore(
-        formatVersion: kFormatVersion, nitriteVersion: 'reference-dart');
+  Database({
+    Engine? engine,
+    int catalogRoot = 0,
+    int treeIndexRoot = 0,
+    int attributesRoot = 0,
+    int nextTreeId = TreeId.firstUserTree,
+    bool initStoreMetadata = true,
+  }) : engine = engine ?? Engine() {
+    // §2 of `spec/05-catalog.md`: the catalog is tree 0 and attributes are
+    // tree 2, both in the **same** page space as everything else, both rooted
+    // from the superblock. A separate store for them would have no page ids a
+    // superblock could name.
+    final store = this.engine.store;
+    catalog = Catalog(store,
+        catalogRoot: catalogRoot, treeIndexRoot: treeIndexRoot);
+    catalog.nextTreeId = nextTreeId;
+    attributes = Attributes(store, root: attributesRoot);
+    if (initStoreMetadata) {
+      attributes.initStore(
+          formatVersion: kFormatVersion, nitriteVersion: 'reference-dart');
+    }
   }
 
   final Engine engine;
-  final PageStore _catalogStore;
   late final Catalog catalog;
   late final Attributes attributes;
+
+  /// The roots a superblock publishes for this database's own trees.
+  int get catalogRoot => catalog.tree.root;
+  int get treeIndexRoot => catalog.byId.root;
+  int get attributesRoot => attributes.tree.root;
 
   /// Creates a collection, §5.
   Collection createCollection(String name) {

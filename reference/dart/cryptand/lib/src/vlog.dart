@@ -66,6 +66,8 @@ final class VlogPointer {
   String toString() => 'vlog($segmentId+$offset, $len B)';
 }
 
+const List<int> _vlogMagic = [0x43, 0x52, 0x59, 0x5F, 0x56, 0x4C, 0x47, 0x1A];
+
 /// One value-log segment: a page-aligned extent plus the mutable state that
 /// section 6.2 puts in tree 7 rather than in the head page.
 final class VlogSegment {
@@ -75,9 +77,72 @@ final class VlogSegment {
     required this.heatClass,
     required this.pageSize,
     required this.capacity,
-  }) : _buf = Uint8List(dataOffset + capacity) {
+    this.createdSeq = 0,
+  }) : _buf = Uint8List(
+            ((dataOffset + capacity + pageSize - 1) ~/ pageSize) * pageSize) {
     _writeHeadPage();
   }
+
+  /// Rebuilds a segment from the extent bytes a file holds, for
+  /// `DatabaseFile.open`. The mutable state comes from tree 7, which
+  /// section 6.7 makes the authority for it.
+  factory VlogSegment.fromExtent(Uint8List extent, int pageSize,
+      {required int bytes,
+      required int records,
+      required bool sealed,
+      required bool clustered,
+      Uint8List? minKey,
+      Uint8List? maxKey,
+      required int liveBytes,
+      required int liveRecords}) {
+    final head = PageHeader.read(extent);
+    if (head.pageType != PageType.vlogSegment) {
+      throw const CorruptionException('not a value-log head page');
+    }
+    final r = ByteReader(extent, PageHeader.size, extent.length);
+    final magic = r.bytesView(8);
+    for (var i = 0; i < 8; i++) {
+      if (magic[i] != _vlogMagic[i]) {
+        throw const CorruptionException('value-log head page magic mismatch');
+      }
+    }
+    final id = r.u64();
+    final createdSeq = r.u64();
+    final capacity = r.u64();
+    final off = r.u32();
+    final tier = r.u8();
+    final heat = r.u8();
+    if (off != dataOffset) {
+      throw CorruptionException('data_offset $off is not $dataOffset');
+    }
+    final s = VlogSegment._raw(
+        id: id,
+        tier: tier,
+        heatClass: heat,
+        pageSize: pageSize,
+        capacity: capacity,
+        createdSeq: createdSeq,
+        buf: extent);
+    s.bytes = bytes;
+    s.records = records;
+    s.sealed = sealed;
+    s.clustered = clustered;
+    s.minKey = minKey;
+    s.maxKey = maxKey;
+    s.liveBytes = liveBytes;
+    s.liveRecords = liveRecords;
+    return s;
+  }
+
+  VlogSegment._raw({
+    required this.id,
+    required this.tier,
+    required this.heatClass,
+    required this.pageSize,
+    required this.capacity,
+    required this.createdSeq,
+    required Uint8List buf,
+  }) : _buf = buf;
 
   /// Head page header (40) + the 64-byte segment header, rounded up to 8.
   static const int dataOffset = 104;
@@ -87,8 +152,12 @@ final class VlogSegment {
   final int heatClass;
   final int pageSize;
   final int capacity;
+  final int createdSeq;
 
   final Uint8List _buf;
+
+  /// The extent as a file holds it: a whole number of pages, head page first.
+  Uint8List get extent => _buf;
 
   /// Tree-7 state, section 6.7. `bytes` is the durable contiguous watermark.
   int bytes = 0;
@@ -100,6 +169,11 @@ final class VlogSegment {
   int liveBytes = 0;
   int liveRecords = 0;
 
+  /// Where a file holds this extent, or 0 when it has never been written.
+  /// Keeping it means a re-save reuses the placement rather than appending a
+  /// second copy of every segment.
+  int startPage = 0;
+
   Uint8List? _lastKey;
   bool _orderHolds = true;
 
@@ -110,9 +184,9 @@ final class VlogSegment {
     // Section 6.2: the head page is written once and never rewritten, so it
     // carries only immutable identity.
     final w = ByteWriter(64)
-      ..bytes(const [0x43, 0x52, 0x59, 0x5F, 0x56, 0x4C, 0x47, 0x1A])
+      ..bytes(_vlogMagic)
       ..u64(id)
-      ..u64(0) // created_seq
+      ..u64(createdSeq)
       ..u64(capacity)
       ..u32(dataOffset)
       ..u8(tier)
@@ -122,6 +196,19 @@ final class VlogSegment {
       ..u64(0) // nonce_base
       ..bytes(Uint8List(16));
     _buf.setRange(PageHeader.size, PageHeader.size + w.length, w.view);
+    // The head page is a page, so it carries the 40-byte header of
+    // `spec/01-container.md` section 3 like every other page. Without it a
+    // repair pass that scans the file for `VLOG_SEGMENT` pages
+    // (`spec/13-operations.md` section 3) cannot find the segment at all, and
+    // section 11's invariant 8b — head page and tree 7 agree on immutable
+    // identity — has nothing to check.
+    PageHeader(
+      pageType: PageType.vlogSegment,
+      flags: PageFlags.extentHead,
+      treeId: TreeId.noTree,
+      extentPages: pageCount,
+      payloadLen: 64,
+    ).writeInto(_buf);
   }
 
   /// Appends one record, returning its pointer, or null when full.
@@ -242,6 +329,17 @@ final class ValueLog {
 
   final Map<int, VlogSegment> segments = {};
   int _nextId = 1;
+
+  int get nextId => _nextId;
+
+  /// Registers a segment rebuilt from a file, for `DatabaseFile.open`.
+  /// Everything a file holds is sealed: section 4.3 of `spec/14-security.md`
+  /// forbids appending to a segment this session did not open, and a reopen is
+  /// by definition a new session.
+  void adopt(VlogSegment s) {
+    segments[s.id] = s;
+    if (s.id >= _nextId) _nextId = s.id + 1;
+  }
 
   /// One open segment per (tier, heat class). Section 6.2: "the number of open
   /// value-log segments is bounded by the number of **heat classes**, *not* by

@@ -302,3 +302,80 @@ fn a_backup_of_an_encrypted_database_must_be_asked_for_by_name() {
     let r = e.backup(&dest2.path, BackupMode::CiphertextCopy).unwrap();
     assert!(r.kept_source_uuid);
 }
+
+#[test]
+fn structure_aware_fuzzing_never_crashes_hangs_or_over_allocates() {
+    // §9.3 — "A parser for a format read from untrusted sources that has never
+    // been fuzzed is not finished." Structure-aware matters: most of a
+    // database's bytes are unused value-log record space, so uniform bit flips
+    // land in padding and measure nothing. These targets are the ones a hostile
+    // file would edit.
+    let t = TempDb::new("fuzz");
+    {
+        let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+        e.memtable_entry_limit = 60;
+        for i in 0..300i64 {
+            e.put(T, &Value::NitriteId(i), &vec![(i % 251) as u8; if i % 10 == 0 { 700 } else { 40 }])
+                .unwrap();
+            if e.memtable_pressure().0 >= 60 {
+                e.flush().unwrap();
+            }
+        }
+        e.close(true).unwrap();
+    }
+    let original = std::fs::read(&t.path).unwrap();
+    let page_size = 8192usize;
+
+    // The superblock slots, then every headed page's header and payload head.
+    let mut targets: Vec<(usize, usize)> = vec![(0, 4096), (page_size, 4096)];
+    {
+        let mut e = Engine::open(&t.path, None).unwrap();
+        let count = e.sb.page_count;
+        for p in 2..count {
+            let Ok(raw) = e.pager.read_page(p) else { continue };
+            let Ok(h) = cryptand::container::PageHeader::parse(&raw) else { continue };
+            if h.page_type == 0 || h.payload_len == 0 {
+                continue;
+            }
+            targets.push((p as usize * page_size, 40));
+            targets.push((p as usize * page_size + 40, (h.payload_len as usize).min(256)));
+        }
+    }
+    assert!(targets.len() > 8, "the fixture has too little structure to fuzz");
+
+    let tmp = TempDb::new("fuzz-mutant");
+    let mut rng = Rng::new(0xF0FF);
+    let (mut refused, mut reported, mut benign) = (0u32, 0u32, 0u32);
+    for _ in 0..300 {
+        let mut b = original.clone();
+        for _ in 0..1 + rng.below(4) {
+            let (base, len) = targets[rng.below(targets.len() as u64) as usize];
+            let at = base + rng.below(len.max(1) as u64) as usize;
+            if at < b.len() {
+                b[at] ^= 1 << rng.below(8);
+            }
+        }
+        std::fs::write(&tmp.path, &b).unwrap();
+        // No `catch_unwind`: a panic here fails the test, which is the point.
+        match Engine::open(&tmp.path, None) {
+            Err(_) => refused += 1,
+            Ok(mut e) => match e.verify() {
+                Err(_) => refused += 1,
+                Ok(r) => {
+                    if r.of(Class::Corruption).is_empty() && r.of(Class::Tampering).is_empty() {
+                        benign += 1;
+                    } else {
+                        reported += 1;
+                    }
+                }
+            },
+        }
+    }
+    println!(
+        "fuzz: {refused} refused at open, {reported} reported by verify, {benign} benign, 0 panics"
+    );
+    // A mutation that changes nothing a reader may act on — a reserved byte, an
+    // unread payload — is not a failure. What would be a failure is a panic,
+    // and reaching this line means there was none.
+    assert!(refused + reported > 200, "too few mutations were detected: the targets are wrong");
+}
