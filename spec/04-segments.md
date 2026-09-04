@@ -1026,17 +1026,40 @@ space-only trigger left an aged scan at 1.58× where a debt trigger held it at
 Define, over the live value-log bytes of a database:
 
 ```
-ideal_runs    = ceil(live value-log bytes / vlog_segment_bytes)
+ideal_runs    = ceil(live bytes in COLD-tier runs / vlog_segment_bytes)
 
 locality_debt = live bytes in surplus runs
                 ─────────────────────────────
                   total live value-log bytes
 ```
 
-where the **surplus runs** are found by sorting the value-log segments that
-still hold live data by live bytes, descending, and taking everything past the
-first `ideal_runs` of them. Live bytes in a run that is not key-clustered at all
-are surplus regardless of where it sorts.
+where the **surplus runs** are found by sorting the **cold-tier** value-log
+segments that still hold live data by live bytes, descending, and taking
+everything past the first `ideal_runs` of them. Live bytes in a cold-tier run
+that is not key-clustered are surplus regardless of where it sorts. The
+denominator stays *all* live value-log bytes.
+
+**The cold tier only, and an earlier draft said "the value-log segments"
+without the qualifier.** Both halves of that draft flagged a healthy database:
+
+- A hot run is unclustered by construction — §6.3 clusters a generation when it
+  is *promoted* — so the "not key-clustered is surplus regardless" clause made
+  a freshly loaded database, every live value in one hot run, read **100 %**.
+- A hot run is also the write path's *tail*: it holds everything written since
+  the last last-level compaction, and neither remedy §6.9 names can act on it.
+  Promotion (§6.3) happens at the next last-level compaction, which the level
+  policy schedules; collection (§6.8) merges cold generations. So a perfectly
+  healthy database with one clustered cold run and a live tail read **40 %**,
+  and collecting could not move it. A bound whose remedies cannot reach the
+  bytes it counts is not a bound.
+
+Both reference implementations reproduced both the first time either verified a
+fresh file. A bound a healthy database cannot satisfy is not a bound; it trains
+its reader to ignore the metric.
+
+The measurement that motivated the definition is unaffected: the nineteen runs
+below are cold generations, which is what promotion produces and what collection
+merges.
 
 **An implementation MUST keep `locality_debt` at or below `locality_debt_pct`
 (profile default: 20 %)** whenever the database is not under active write

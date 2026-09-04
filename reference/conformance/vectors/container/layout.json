@@ -37,9 +37,10 @@
       "extent_pages": 12,
       "commit_id": 16,
       "payload_len": 24,
-      "reserved": 28,
+      "stored_len": 28,
       "nonce": 32
-    }
+    },
+    "stored_len_note": "14-security.md section 5.2. The reserved u32 at offset 28 carries the number of payload bytes actually stored on the page, after compression and after encryption; 0 means 'same as payload_len'. 01-container.md section 3 defines payload_len as the uncompressed, unencrypted length while 14-security.md section 5.2 says the AEAD tag is inside payload_len -- the two cannot both hold, and a decryptor needs the exact stored length while a decompressor needs the plaintext length, so both are kept."
   },
   "crc32c": [
     {

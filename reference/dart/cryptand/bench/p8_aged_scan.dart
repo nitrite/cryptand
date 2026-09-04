@@ -129,15 +129,22 @@ void main(List<String> args) {
 
   print('');
   final on = run(const LocalityPolicy());
+  final noProm = run(const LocalityPolicy(clusteredPromotion: false));
   final off = run(LocalityPolicy.none);
   final onRatio = ratio(on.aged.totalPageReads, on.fresh.totalPageReads);
-  final offRatio = ratio(off.aged.totalPageReads, off.fresh.totalPageReads);
-  print('P8 predicts: aged/fresh <= 1.5x and v/row < 0.3 with the mechanisms');
-  print('             on, and >= 6x with them off.');
+  final promRatio = ratio(noProm.aged.totalPageReads, noProm.fresh.totalPageReads);
+  print('P8 predicts: aged/fresh <= 1.5x and v/row < 0.3 with the mechanisms on.');
   print('');
-  print('  with:    ${fmt(onRatio)}x, v/row ${fmt(on.aged.valueReadsPerScannedRow, 3)}, '
+  print('Each bound gets the control of the mechanism it depends on. aged/fresh');
+  print('is about PROMOTION, so its control turns promotion off and leaves');
+  print('readahead on. v/row is about READAHEAD, whose second half is section');
+  print("8.1's coalescing; turning everything off degrades the fresh scan by the");
+  print('same factor as the aged one, so the ratio reads ~1.00x there and says');
+  print('nothing. Measuring both against `none` hid that behind one number.');
+  print('');
+  print('  with:            ${fmt(onRatio)}x, v/row ${fmt(on.aged.valueReadsPerScannedRow, 3)}, '
       'locality debt ${fmt(on.debt * 100, 1)}%');
-  print('  without: ${fmt(offRatio)}x, v/row ${fmt(off.aged.valueReadsPerScannedRow, 3)}, '
-      'locality debt ${fmt(off.debt * 100, 1)}%');
-  print('  ratio between them: ${fmt(offRatio / onRatio)}x');
+  print('  no promotion:    ${fmt(promRatio)}x  <- the ratio control');
+  print('  no readahead:    v/row ${fmt(off.aged.valueReadsPerScannedRow, 3)}  <- the v/row control');
+  print('  ratio between them: ${fmt(promRatio / onRatio)}x');
 }

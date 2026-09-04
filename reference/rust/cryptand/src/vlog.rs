@@ -310,18 +310,30 @@ impl VlogSegment {
 /// bytes in segments without the clustered flag", and a database with nineteen
 /// individually sorted runs read 0 % while its scans had already degraded 2.1x.
 pub fn locality_debt(stats: &[VlogStats], vlog_segment_bytes: u64) -> f64 {
-    let live: Vec<&VlogStats> = stats.iter().filter(|s| s.live_bytes > 0).collect();
-    let total: u64 = live.iter().map(|s| s.live_bytes).sum();
+    let total: u64 = stats.iter().filter(|s| s.live_bytes > 0).map(|s| s.live_bytes).sum();
     if total == 0 {
         return 0.0;
     }
-    let ideal = (total.div_ceil(vlog_segment_bytes.max(1))).max(1) as usize;
-    let mut sorted: Vec<&&VlogStats> = live.iter().collect();
-    sorted.sort_by(|a, b| b.live_bytes.cmp(&a.live_bytes));
+    // **Cold-tier runs only.** A hot run is the write path's tail: it holds
+    // everything written since the last last-level compaction, it is
+    // unclustered by construction (§6.3 clusters a generation when it is
+    // *promoted*), and neither remedy §6.9 names can act on it. Counting it
+    // made a freshly loaded database read 100 %, and one with a single
+    // clustered cold run plus a live tail read 40 % that collecting could not
+    // move — a bound whose remedies cannot reach the bytes it counts is not a
+    // bound.
+    let mut cold: Vec<&VlogStats> = stats
+        .iter()
+        .filter(|s| s.live_bytes > 0 && s.tier == Tier::Cold as u8)
+        .collect();
+    if cold.is_empty() {
+        return 0.0;
+    }
+    cold.sort_by(|a, b| b.live_bytes.cmp(&a.live_bytes));
+    let cold_bytes: u64 = cold.iter().map(|s| s.live_bytes).sum();
+    let ideal = (cold_bytes.div_ceil(vlog_segment_bytes.max(1)).max(1) as usize).min(cold.len());
     let mut surplus = 0u64;
-    for (i, s) in sorted.iter().enumerate() {
-        // Live bytes in a run that is not key-clustered at all are surplus
-        // regardless of where it sorts.
+    for (i, s) in cold.iter().enumerate() {
         if i >= ideal || !s.clustered {
             surplus += s.live_bytes;
         }

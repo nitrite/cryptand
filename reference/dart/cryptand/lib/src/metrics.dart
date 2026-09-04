@@ -47,6 +47,7 @@ final class Metrics {
     required this.pinnedBySnapshots,
     required this.pinnedByCheckpoints,
     required this.unencryptedPages,
+    required this.encryptedPages,
     required this.noncesAllocated,
     required this.nonceFloor,
     required this.pageCacheHitRate,
@@ -92,6 +93,7 @@ final class Metrics {
   /// implementation MUST NOT report a database as encrypted while this is
   /// above 0."
   final int unencryptedPages;
+  final int encryptedPages;
 
   final int noncesAllocated;
   final int nonceFloor;
@@ -157,6 +159,7 @@ final class Metrics {
         'pinned_by_snapshots': pinnedBySnapshots,
         'pinned_by_checkpoints': pinnedByCheckpoints,
         'unencrypted_pages': unencryptedPages,
+        'encrypted_pages': encryptedPages,
         'nonces_allocated': noncesAllocated,
         'nonce_floor': nonceFloor,
         'page_cache_hit_rate': pageCacheHitRate,
@@ -193,6 +196,7 @@ final class Metrics {
     'pinned_by_snapshots',
     'pinned_by_checkpoints',
     'unencrypted_pages',
+    'encrypted_pages',
     'nonces_allocated',
     'nonce_floor',
     'page_cache_hit_rate',
@@ -281,9 +285,13 @@ extension EngineMetrics on Engine {
       // down; attributing them per checkpoint needs the per-checkpoint walk
       // that §1 asks for and this engine does not do.
       pinnedByCheckpoints: checkpoints.all.isEmpty ? 0 : pinnedBySnapshots,
-      unencryptedPages: 0,
-      noncesAllocated: 0,
-      nonceFloor: 0,
+      // §8.3 — "that is the one place where a reassuring answer is a
+      // dangerous one". Counted on the read path, where a page's own
+      // `flags.ENCRYPTED` says which it is, and never inferred from `cipher`.
+      unencryptedPages: store.unencryptedPages,
+      encryptedPages: store.encryptedPages,
+      noncesAllocated: nonces == null ? 0 : nonces!.next,
+      nonceFloor: nonces?.publishedWatermark ?? 0,
       pageCacheHitRate:
           accesses == 0 ? 1 : (accesses - misses) / accesses,
       segmentsProbedP50: percentile(probes, 0.50),
@@ -300,15 +308,21 @@ extension EngineMetrics on Engine {
       compactionBacklogBytes: backlog,
       durabilityAchieved: durabilityAchieved,
       unavailableRanges: quarantined.length,
-      // Declared rather than faked. This engine has no encryption wired into
-      // the page path and no file under it, so these three have no honest
-      // value; `14-security.md` §8.3's conversion and §4.1's nonce watermark
-      // are what would supply them.
-      unavailable: const [
-        'unencrypted_pages',
-        'nonces_allocated',
-        'nonce_floor',
+      // Declared rather than faked. `bytes_written_device` needs a device
+      // under the store, which an in-memory one does not have. The three
+      // encryption metrics are real when there is a cipher and honestly
+      // unavailable when there is not: a database with no page read yet has
+      // observed nothing, and reporting the 0 that reads as "fully encrypted"
+      // is exactly what §8.3 calls the dangerous answer.
+      unavailable: [
         'bytes_written_device',
+        if (keys == null) ...[
+          'unencrypted_pages',
+          'encrypted_pages',
+          'nonces_allocated',
+          'nonce_floor',
+        ] else if (store.encryptedPages + store.unencryptedPages == 0)
+          'unencrypted_pages',
       ],
     );
   }

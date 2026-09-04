@@ -90,8 +90,18 @@ fn load_dict(e: &mut Engine, dict: u32) -> (std::collections::BTreeMap<String, u
     (by_name, by_id)
 }
 
+/// `spec/14-security.md` §3.3's `kdf = 0` credential, when the gate is run
+/// over an encrypted file. A fixed key rather than a password because the
+/// subject is the *format*, not Argon2id, which the vectors already pin.
+fn key_arg() -> Option<Vec<u8>> {
+    let args: Vec<String> = std::env::args().collect();
+    let i = args.iter().position(|a| a == "--key")?;
+    let hex = args.get(i + 1)?;
+    Some((0..hex.len() / 2).map(|j| u8::from_str_radix(&hex[j * 2..j * 2 + 2], 16).unwrap()).collect())
+}
+
 fn open(path: &str) -> cryptand::Result<Db> {
-    let mut e = Engine::open(&PathBuf::from(path), None)?;
+    let mut e = Engine::open(&PathBuf::from(path), key_arg().as_deref())?;
     let data = tree_id_of(&mut e, COLLECTION)
         .ok_or_else(|| cryptand::Error::Corrupt(format!("no collection {COLLECTION}")))?;
     let dict = tree_id_of(&mut e, NAME_DICT)
@@ -180,7 +190,10 @@ fn rows(db: &mut Db) -> cryptand::Result<Vec<(i64, String, Vec<u8>)>> {
 
 fn cmd_write(path: &str) -> cryptand::Result<()> {
     let _ = std::fs::remove_file(path);
-    let mut e = Engine::create(&PathBuf::from(path), Profile::Desktop)?;
+    let mut e = match key_arg() {
+        Some(k) => Engine::create_encrypted(&PathBuf::from(path), Profile::Desktop, &k, 0, 0, 0, 0)?,
+        None => Engine::create(&PathBuf::from(path), Profile::Desktop)?,
+    };
     let now = cryptand::engine::now_millis();
     let mut cat = std::mem::replace(&mut e.catalog, Catalog::new(0, 0, 16));
     let dict = cat
@@ -306,7 +319,7 @@ fn cmd_mutate(path: &str, tag: &str) -> cryptand::Result<()> {
 }
 
 fn cmd_verify(path: &str) -> cryptand::Result<ExitCode> {
-    let mut e = Engine::open(&PathBuf::from(path), None)?;
+    let mut e = Engine::open(&PathBuf::from(path), key_arg().as_deref())?;
     let r = e.verify()?;
     println!(
         "verify: {} segments, {} entries, {} findings",
@@ -334,7 +347,7 @@ fn main() -> ExitCode {
         }
         Some("verify") if args.len() >= 2 => cmd_verify(&args[1]),
         _ => {
-            eprintln!("interop write|read|mutate <tag>|verify <file>");
+            eprintln!("interop write|read|mutate <tag>|verify <file> [--key <hex>]");
             return ExitCode::from(2);
         }
     };

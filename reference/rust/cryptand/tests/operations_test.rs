@@ -407,3 +407,30 @@ fn a_reader_slot_pins_min_retained_commit() {
     side.release(&slot).unwrap();
     assert_eq!(side.min_retained_commit(100, now).unwrap(), 100);
 }
+
+// ---------------------------------------------------------------------------
+// `01-container.md` §10 — one writing process per database.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_second_writer_is_refused_by_name_and_never_falls_back() {
+    // "a second process opening for writing MUST fail with a clear 'locked by
+    // another process' error and MUST NOT fall back to opening anyway."
+    // `flock` binds to the open file description, so a second descriptor here
+    // is refused exactly as another process's would be.
+    let t = TempDb::new("writerlock");
+    let mut a = Engine::create(&t.path, Profile::Desktop).unwrap();
+    a.put(16, &Value::NitriteId(1), b"v").unwrap();
+    a.commit(Durability::Sync).unwrap();
+
+    match Engine::open(&t.path, None) {
+        Err(cryptand::Error::Locked(m)) => assert!(m.contains("another process"), "{m}"),
+        Err(other) => panic!("the second writer must be refused as locked, got {other}"),
+        Ok(_) => panic!("a second writer opened anyway, which §10 forbids"),
+    }
+
+    // The lock is held for the writing lifetime and no longer.
+    a.close(true).unwrap();
+    let mut b = Engine::open(&t.path, None).unwrap();
+    assert_eq!(b.get(16, &Value::NitriteId(1)).unwrap().unwrap(), b"v");
+}

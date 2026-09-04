@@ -316,21 +316,32 @@ void main() {
       expect(id, e.commitId);
     });
 
-    test('the value log is sealed before anything names its records', () {
+    test('the value log is flushed, not sealed, before anything names it', () {
       // Section 2.3 invariant 1: a superblock MUST NOT name a segment whose
-      // value-log records are not already durable. The observable form of
-      // that here is ordering: sealOpen precedes the segment build.
+      // value-log records are not already durable. Step B of section 2 is what
+      // achieves it, and it **flushes** — it does not seal.
+      //
+      // This test used to assert the opposite, that every segment is sealed
+      // after a commit, and the assertion was what held the defect in place.
+      // Sealing is `spec/04-segments.md` section 6.2's terminal state, so
+      // sealing per commit gives a database one value-log run per commit — the
+      // surplus section 6.9 bounds — and a freshly written 400-document
+      // database read 45 % locality debt against a 20 % bound.
       final e = Engine(memtableEntries: 1000, vlogMin: 64);
       for (var i = 0; i < 50; i++) {
         e.put(tree, CNitriteId(i), doc(dict, i));
       }
       e.commit();
-      for (final seg in e.vlog.segments.values) {
-        expect(seg.sealed, isTrue,
-            reason: 'every value-log segment named by a commit is sealed');
-      }
+      expect(e.vlog.segments.values.any((s) => !s.sealed), isTrue,
+          reason: 'a commit leaves the open run open, so the next append '
+              'continues it rather than starting a second run');
       for (var i = 0; i < 50; i++) {
         expect(e.get(tree, CNitriteId(i)), doc(dict, i));
+      }
+      // Close is where sealing belongs (section 14.4.3).
+      e.close();
+      for (final seg in e.vlog.segments.values) {
+        expect(seg.sealed, isTrue, reason: 'close seals every open run');
       }
     });
 

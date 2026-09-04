@@ -61,7 +61,8 @@ writer thread (any number of them):
 committer (one, background):
 
   A. collect      all batches whose records are fully written
-  B. seal/flush   flush the open value-log segments' tails
+  B. flush        flush the open value-log segments' tails -- a durability
+                  barrier over the bytes appended so far, NOT a seal
   C. barrier      one fdatasync covering every write since the last commit
   D. flush        any memtable shard over its budget → bulk-build an L0
                   segment (04 §2.3), append it, and edit the manifest tree
@@ -71,6 +72,16 @@ committer (one, background):
                   next_seq, and the new roots
   G. barrier      fdatasync; wake every writer waiting at or below visible_seq
 ```
+
+**Step B flushes; it does not seal.** An earlier draft called it "seal/flush",
+and the two words name different things. Sealing is `04-segments.md` §6.2's
+terminal state — no further appends, ever — and doing it per commit retires the
+open run every time, so a database gets **one value-log run per commit**. That
+is precisely the surplus §6.9 bounds: a reference implementation that sealed at
+commit loaded 400 documents in three commits, produced three runs against an
+`ideal_runs` of one, and read **45 % locality debt on a freshly written
+database**. A segment is sealed at close, and on open for a segment a previous
+session left open (`14-security.md` §4.3) — not on the commit path.
 
 ### 2.1 Why this scales
 

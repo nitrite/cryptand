@@ -22,6 +22,8 @@ Database fresh({int memtableEntries = 200}) => Database(
     engine: Engine(memtableEntries: memtableEntries, vlogMin: 256));
 
 void main() {
+  encryptionTests();
+  lockTests();
   test('a database round-trips through a file', () {
     final path = tmp('roundtrip');
     final db = fresh();
@@ -134,7 +136,7 @@ void main() {
     }
   });
 
-  test('reading a file twice is byte-identical', () {
+  test('a reopen preserves every extent, byte for byte', () {
     final path = tmp('stable');
     final db = fresh();
     for (var i = 0; i < 100; i++) {
@@ -142,19 +144,336 @@ void main() {
     }
     db.engine.flush();
     DatabaseFile.save(db, path);
-    final a = File(path).readAsBytesSync();
 
     final reopened = DatabaseFile.open(path);
     final second = '$path.2';
     DatabaseFile.save(reopened, second);
-    final b = File(second).readAsBytesSync();
-    // The page space is rebuilt from the file, so a save of an unmutated reopen
-    // reproduces it. Only the modified timestamp differs, which lives in the
-    // superblock.
-    expect(b.length, a.length);
-    expect(
-        Uint8List.sublistView(b, 2 * 4096),
-        Uint8List.sublistView(a, 2 * 4096),
-        reason: 'the page space past the superblocks must be identical');
+
+    // **Not** a byte-for-byte comparison of the whole page space, and the
+    // earlier version of this test was one. Tree 1, the free tree of
+    // `spec/01-container.md` §6, is itself state: the first save records what
+    // the first session's copy-on-write writes orphaned, the second records
+    // what the second session's did, and the two are legitimately different.
+    // Asserting whole-file equality asserted that no free tree exists.
+    //
+    // What must hold is that every extent survives unchanged — segments are
+    // immutable (§2), so a reopen that rewrote one would be rewriting bytes
+    // that cannot have changed.
+    final back = DatabaseFile.open(second);
+    for (final r in back.engine.manifest.all) {
+      final was = reopened.engine.extents[r.segmentId];
+      expect(was, isNotNull, reason: 'segment ${r.segmentId} survived');
+      expect(back.engine.extents[r.segmentId]!.extent, was!.extent,
+          reason: 'segment ${r.segmentId} is immutable');
+    }
+    for (var i = 0; i < 100; i++) {
+      expect(back.engine.get(t, CNitriteId(i)), [i]);
+    }
+  });
+
+  test('the free tree is written, read back, and its space reused', () {
+    // `spec/01-container.md` §6 and §9 step 7. Without tree 1 in the file,
+    // another SDK reconciling reachable pages against an empty free tree
+    // reports every orphaned page as a leak, and no later session can ever
+    // reuse the space: the file only grows.
+    final path = tmp('freetree');
+    final db = fresh();
+    for (var i = 0; i < 400; i++) {
+      db.engine.put(t, CNitriteId(i), Uint8List.fromList([i & 0xFF]));
+      if (i % 100 == 99) db.engine.flush();
+    }
+    db.engine.flush();
+    // Churn the catalog so the copy-on-write trees orphan pages.
+    for (var i = 0; i < 60; i++) {
+      db.createCollection('c$i');
+    }
+    DatabaseFile.save(db, path);
+    expect(db.engine.store.freedPages, greaterThan(0),
+        reason: 'copy-on-write orphaned pages, so there is a free tree to write');
+
+    final back = DatabaseFile.open(path);
+    expect(back.engine.store.freeExtents, isNotEmpty,
+        reason: 'the free tree survived the file');
+
+    // §6's reclamation rule: an extent freed at commit N is reallocatable once
+    // N <= min_retained_commit, which a reopened database's commit id clears.
+    final before = back.engine.store.pageCount;
+    final freeBefore = back.engine.store.freedPages;
+    for (var i = 0; i < 40; i++) {
+      back.createCollection('d$i');
+    }
+    expect(back.engine.store.freedPages, lessThan(freeBefore + 40),
+        reason: 'space was reused rather than only accumulated');
+    expect(back.engine.store.pageCount - before, lessThan(freeBefore + 40),
+        reason: 'the file grew by less than the writes, because it reused');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// `spec/14-security.md` §5 — what is encrypted.
+//
+// These exist because "the file is encrypted" was true of its superblock and of
+// nothing else: every inline value, every key, every index entry and every
+// B+tree page sat in the clear under a `cipher = 1` superblock, and the file
+// layer refused to open one at all. The failure is silent by construction — the
+// database opens, reads and verifies perfectly.
+// ---------------------------------------------------------------------------
+
+void encryptionTests() {
+  const key = [
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, //
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+  ];
+
+  test('an encrypted database round-trips and refuses the wrong key', () {
+    final path = tmp('aead');
+    final db = DatabaseFile.create(path,
+        credential: key, kdf: Keyslot.kdfRaw, memtableEntries: 200);
+    for (var i = 0; i < 300; i++) {
+      db.engine.put(t, CNitriteId(i), Uint8List.fromList('v$i'.codeUnits));
+      if (i % 100 == 99) db.engine.flush();
+    }
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+
+    final back = DatabaseFile.open(path, key: key);
+    for (var i = 0; i < 300; i++) {
+      expect(String.fromCharCodes(back.engine.get(t, CNitriteId(i))!), 'v$i');
+    }
+    // §3.3 and `spec/00-conventions.md` §9: "cannot unlock", reported
+    // identically for a missing keyslot and a wrong key.
+    expect(() => DatabaseFile.open(path, key: List.filled(32, 8)),
+        throwsA(isA<CannotUnlockException>()));
+    expect(() => DatabaseFile.open(path), throwsA(isA<CannotUnlockException>()));
+  });
+
+  test('no inline value or key survives in the clear', () {
+    final path = tmp('cleartext');
+    final db = DatabaseFile.create(path,
+        credential: key, kdf: Keyslot.kdfRaw, memtableEntries: 100);
+    // Below desktop's vlog_min of 256, so these live in a segment leaf cell,
+    // which is page payload.
+    for (var i = 0; i < 80; i++) {
+      db.engine.put(t, CStr('KEYNEEDLE-${i.toString().padLeft(4, '0')}'),
+          Uint8List.fromList('VALUENEEDLE'.codeUnits));
+    }
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+
+    final raw = File(path).readAsBytesSync();
+    for (final needle in ['VALUENEEDLE', 'KEYNEEDLE-0007']) {
+      final bytes = needle.codeUnits;
+      var hits = 0;
+      for (var i = 0; i + bytes.length <= raw.length; i++) {
+        var ok = true;
+        for (var j = 0; j < bytes.length; j++) {
+          if (raw[i + j] != bytes[j]) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) hits++;
+      }
+      expect(hits, 0, reason: '"$needle" is on disk in the clear');
+    }
+    final back = DatabaseFile.open(path, key: key);
+    expect(String.fromCharCodes(back.engine.get(t, const CStr('KEYNEEDLE-0007'))!),
+        'VALUENEEDLE');
+  });
+
+  test('a separated value is encrypted per record, and its framing is not', () {
+    // §5.3: `record_len`, the counter and the trailing crc32c stay in the clear
+    // so a segment can be walked, and its damage bounded, without the key.
+    final path = tmp('vlogaead');
+    final db = DatabaseFile.create(path, credential: key, kdf: Keyslot.kdfRaw);
+    final big = Uint8List(900)..fillRange(0, 900, 0xAB);
+    for (var i = 0; i < 20; i++) {
+      db.engine.put(t, CNitriteId(i), big);
+    }
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+
+    final raw = File(path).readAsBytesSync();
+    var run = 0, longest = 0;
+    for (final b in raw) {
+      run = b == 0xAB ? run + 1 : 0;
+      if (run > longest) longest = run;
+    }
+    expect(longest, lessThan(900), reason: 'a separated value is in the clear');
+
+    final back = DatabaseFile.open(path, key: key);
+    expect(back.engine.get(t, const CNitriteId(7)), big);
+  });
+
+  test('every data page carries the encrypted flag and a distinct nonce', () {
+    // §5.2: "`flags.ENCRYPTED` MUST be set. A reader MUST NOT infer encryption
+    // from `cipher` alone." And §4: a repeated nonce is the whole failure.
+    final path = tmp('flags');
+    final db = DatabaseFile.create(path,
+        credential: key, kdf: Keyslot.kdfRaw, memtableEntries: 100);
+    for (var i = 0; i < 200; i++) {
+      db.engine.put(t, CNitriteId(i), Uint8List.fromList([i & 0xFF]));
+      if (i % 100 == 99) db.engine.flush();
+    }
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+
+    final raw = File(path).readAsBytesSync();
+    const ps = 8192;
+    final seen = <int>{};
+    var encrypted = 0;
+    for (var p = 2; (p + 1) * ps <= raw.length; p++) {
+      final page = Uint8List.sublistView(raw, p * ps, (p + 1) * ps);
+      if (page.every((b) => b == 0)) continue;
+      final PageHeader h;
+      try {
+        h = PageHeader.read(page, pageId: p);
+      } on CryptandException {
+        continue; // an interior extent page carries no header (section 3)
+      }
+      // §5.1's clear page kinds.
+      if (h.pageType == PageType.vlogSegment || h.pageType == PageType.free) {
+        continue;
+      }
+      expect(h.isEncrypted, isTrue,
+          reason: 'page $p (type ${h.pageType}) is stored in the clear');
+      expect(seen.add(h.nonce), isTrue,
+          reason: 'nonce ${h.nonce} is used by two pages');
+      encrypted++;
+    }
+    expect(encrypted, greaterThan(4), reason: 'the probe found nothing');
+  });
+
+  test('the nonce floor is published before anything is allocated', () {
+    // §4.1 rule 1: "on open, before allocating anything, a writer MUST durably
+    // publish a superblock whose next_nonce is persisted_next_nonce + 2^20."
+    // Rule 1 is what makes the watermark move for a session that writes
+    // nothing else; without it two successive crashed sessions both start at
+    // W and hand out the same values.
+    final path = tmp('nonce');
+    final db = DatabaseFile.create(path, credential: key, kdf: Keyslot.kdfRaw);
+    for (var i = 0; i < 40; i++) {
+      db.engine.put(t, CNitriteId(i), Uint8List.fromList([i]));
+    }
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+
+    final floors = <int>[];
+    for (var round = 1; round < 4; round++) {
+      // The kill: opened, written, never saved.
+      final e = DatabaseFile.open(path, key: key);
+      floors.add(e.engine.nonces!.publishedWatermark);
+      for (var i = 0; i < 40; i++) {
+        e.engine.put(t, CNitriteId(round * 1000 + i), Uint8List.fromList([i]));
+      }
+      e.engine.flush();
+    }
+    for (var i = 1; i < floors.length; i++) {
+      expect(floors[i], greaterThanOrEqualTo(floors[i - 1] + kNonceGap),
+          reason: 'the published floor did not move: $floors');
+    }
+  });
+
+  test('editing the superblock is reported as tampering, not corruption', () {
+    // §6.1's attack: set `cipher = 0` so the next writer stores plaintext.
+    // None of it touches an encrypted byte and all of it is invisible without
+    // the MAC.
+    final path = tmp('tamper');
+    final db = DatabaseFile.create(path, credential: key, kdf: Keyslot.kdfRaw);
+    db.engine.put(t, const CNitriteId(1), Uint8List.fromList('secret'.codeUnits));
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+
+    final raw = File(path).readAsBytesSync();
+    for (final slot in [0, 8192]) {
+      raw[slot + Sb.cipher] = 0;
+      final view = Uint8List.sublistView(raw, slot, slot + Sb.size);
+      ByteData.view(view.buffer, view.offsetInBytes, view.length)
+          .setUint32(Sb.checksum, crc32c(view, 0, Sb.checksum), Endian.little);
+    }
+    File(path).writeAsBytesSync(raw, flush: true);
+    // `cipher = 0` now, so the reader would not even ask for a key — which is
+    // exactly the downgrade. The MAC is what refuses it, and §6.2 requires the
+    // refusal to be its own class: "your disk has a bad sector" and "someone
+    // edited your database" call for different responses.
+    expect(() => DatabaseFile.open(path, key: key),
+        throwsA(isA<TamperException>()));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// `spec/01-container.md` §10 — one writing process per database.
+// ---------------------------------------------------------------------------
+
+void lockTests() {
+  test('a second writing process is refused by name and never falls back', () {
+    // "a second process opening for writing MUST fail with a clear 'locked by
+    // another process' error and MUST NOT fall back to opening anyway."
+    //
+    // A real second process, because `RandomAccessFile.lockSync` is a POSIX
+    // `fcntl` lock and those are held **per process**: a second handle inside
+    // this one is granted the lock, so a same-process assertion would test
+    // nothing and pass. §10's rule is about processes, and the only honest
+    // test of it is another process — the same conclusion
+    // `spec/13-operations.md` §8's multi-process readers reached.
+    final path = tmp('writerlock');
+    final db = fresh();
+    db.engine.put(t, const CNitriteId(1), Uint8List.fromList([1]));
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+
+    final held = File(path).openSync(mode: FileMode.append)
+      ..lockSync(FileLock.exclusive);
+    try {
+      final r = Process.runSync(
+          Platform.resolvedExecutable, ['run', 'tool/lock_probe.dart', path]);
+      expect(r.stdout.toString().trim(), 'locked',
+          reason: 'stderr: ${r.stderr}');
+    } finally {
+      held.closeSync();
+    }
+    // Released, and the database opens again with no cleanup step.
+    final after = Process.runSync(
+        Platform.resolvedExecutable, ['run', 'tool/lock_probe.dart', path]);
+    expect(after.stdout.toString().trim(), 'opened');
+    expect(DatabaseFile.open(path).engine.get(t, const CNitriteId(1)), [1]);
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('an encrypted database reports what it observed, never a plausible 0',
+      () {
+    // `spec/13-operations.md` §6 and `spec/14-security.md` §8.3: "that is the
+    // one place where a reassuring answer is a dangerous one". A metric that
+    // cannot be computed is reported unavailable by name.
+    const key = [
+      9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, //
+      9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9
+    ];
+    final path = tmp('metrics');
+    final db = DatabaseFile.create(path,
+        credential: key, kdf: Keyslot.kdfRaw, memtableEntries: 100);
+    for (var i = 0; i < 200; i++) {
+      db.engine.put(t, CNitriteId(i), Uint8List.fromList([i & 0xFF]));
+      if (i % 100 == 99) db.engine.flush();
+    }
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+
+    final back = DatabaseFile.open(path, key: key);
+    for (var i = 0; i < 200; i++) {
+      back.engine.get(t, CNitriteId(i));
+    }
+    final m = back.engine.metrics();
+    expect(m.isAvailable('unencrypted_pages'), isTrue);
+    expect(m.encryptedPages, greaterThan(0),
+        reason: 'pages were read and they were encrypted');
+    expect(m.unencryptedPages, 0,
+        reason: 'created encrypted, so there is no conversion mixture');
+    expect(m.claimsEncryptionFalsely, isFalse);
+    expect(m.nonceFloor, greaterThanOrEqualTo(kNonceGap));
+
+    // An unencrypted database says so by name rather than reporting 0, which
+    // would read as "fully encrypted".
+    final plain = fresh();
+    expect(plain.engine.metrics().isAvailable('unencrypted_pages'), isFalse);
   });
 }

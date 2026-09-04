@@ -120,7 +120,10 @@ fn no_nonce_is_ever_issued_twice_across_repeated_crashes() {
         }
         e.flush().unwrap();
         e.commit(Durability::Sync).unwrap();
-        std::mem::forget(e); // the kill: no close, no seal
+        // The kill: no close and no seal, but the file descriptor goes,
+        // which is what a dying process does — and `01-container.md` §10's
+        // writer lock goes with it. `mem::forget` would leak both.
+        drop(e);
     }
     let mut floors = Vec::new();
     for round in 1..4i64 {
@@ -131,7 +134,7 @@ fn no_nonce_is_ever_issued_twice_across_repeated_crashes() {
         }
         e.flush().unwrap();
         e.commit(Durability::Sync).unwrap();
-        std::mem::forget(e);
+        drop(e);
     }
     // §4.1 rule 1: each open publishes `persisted + 2^20` **before** allocating,
     // so successive sessions allocate from disjoint ranges even after a crash.
@@ -236,7 +239,7 @@ fn structure_and_checksums_are_readable_without_the_key() {
     }
     e.close(true).unwrap();
 
-    let mut pager = cryptand::pager::Pager::open(&t.path, 8192, 4).unwrap();
+    let mut pager = cryptand::pager::Pager::open_shared(&t.path, 8192, 4).unwrap();
     let a = Superblock::parse(&pager.read_slot(0).unwrap()).ok();
     let b = Superblock::parse(&pager.read_slot(1).unwrap()).ok();
     let sb = match (a, b) {
@@ -253,7 +256,7 @@ fn structure_and_checksums_are_readable_without_the_key() {
     };
     assert_eq!(sb.cipher, 1);
     assert!(sb.features_required & feature::bit(feature::CIPHER) != 0);
-    let mut pager = cryptand::pager::Pager::open(&t.path, 8192, sb.page_count).unwrap();
+    let mut pager = cryptand::pager::Pager::open_shared(&t.path, 8192, sb.page_count).unwrap();
     let mut checked = 0;
     for p in 2..sb.page_count {
         let raw = pager.read_page(p).unwrap();
@@ -378,4 +381,105 @@ fn structure_aware_fuzzing_never_crashes_hangs_or_over_allocates() {
     // unread payload — is not a failure. What would be a failure is a panic,
     // and reaching this line means there was none.
     assert!(refused + reported > 200, "too few mutations were detected: the targets are wrong");
+}
+
+// ---------------------------------------------------------------------------
+// §5.1 — what is encrypted. These exist because "the file is encrypted" was
+// true of its superblock and its value log and of nothing else: every inline
+// value, every key, every index entry and every B+tree page sat in the clear
+// under a `cipher = 1` superblock, and no test looked. The failure is silent by
+// construction — the database opens, reads and verifies perfectly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn no_inline_value_or_key_survives_in_the_clear() {
+    let (t, mut e) = encrypted("cleartext");
+    // Below `vlog_min` (256 B on desktop), so these never reach the value log:
+    // they live in a segment leaf cell, which is page payload.
+    for i in 0..80i64 {
+        e.put(T, &Value::Str(format!("KEYNEEDLE-{i:04}")), b"VALUENEEDLE").unwrap();
+    }
+    e.flush().unwrap();
+    e.close(true).unwrap();
+
+    let raw = std::fs::read(&t.path).unwrap();
+    for needle in [&b"VALUENEEDLE"[..], &b"KEYNEEDLE-0007"[..]] {
+        let hits = raw.windows(needle.len()).filter(|w| *w == needle).count();
+        assert_eq!(
+            hits,
+            0,
+            "{} occurrences of {:?} in an encrypted file",
+            hits,
+            String::from_utf8_lossy(needle)
+        );
+    }
+    // And it is still readable with the key, which is the other half.
+    let mut e = Engine::open(&t.path, Some(&[7u8; 32])).unwrap();
+    assert_eq!(e.get(T, &Value::Str("KEYNEEDLE-0007".into())).unwrap().unwrap(), b"VALUENEEDLE");
+}
+
+#[test]
+fn every_data_page_carries_the_encrypted_flag_and_a_distinct_nonce() {
+    // §5.2: "`flags.ENCRYPTED` MUST be set. A reader MUST NOT infer encryption
+    // from `cipher` alone." And §4: a repeated nonce is the whole failure.
+    use cryptand::container::{page_flags, page_type, PageHeader};
+    // Encrypted from page 2 on, not converted: §8.3's mixture is a different
+    // property with its own test.
+    let t = TempDb::new("flags");
+    let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &[7u8; 32], 0, 0, 0, 0).unwrap();
+    for i in 0..120i64 {
+        e.put(T, &Value::NitriteId(i), b"payload").unwrap();
+    }
+    e.close(true).unwrap();
+
+    let raw = std::fs::read(&t.path).unwrap();
+    let ps = 8192usize;
+    let mut seen = std::collections::HashSet::new();
+    let mut encrypted_pages = 0;
+    for p in 2..raw.len() / ps {
+        let page = &raw[p * ps..(p + 1) * ps];
+        if page.iter().all(|&b| b == 0) {
+            continue;
+        }
+        let Ok(h) = PageHeader::parse(page) else { continue };
+        // §5.1's one clear page kind.
+        if h.page_type == page_type::VLOG_SEGMENT || h.page_type == page_type::FREE {
+            continue;
+        }
+        if PageHeader::verify(page, p as u64).is_err() {
+            continue;
+        }
+        assert!(
+            h.flags & page_flags::ENCRYPTED != 0,
+            "page {p} (type {}) is stored in the clear in an encrypted database",
+            h.page_type
+        );
+        assert!(seen.insert(h.nonce), "nonce {} is used by two pages", h.nonce);
+        encrypted_pages += 1;
+    }
+    assert!(encrypted_pages > 4, "only {encrypted_pages} encrypted pages; the probe found nothing");
+}
+
+#[test]
+fn a_vector_region_slot_is_not_stored_in_the_clear() {
+    // §5.4 — "a vector region's payload: encrypted, as an extent". A region is
+    // written slot by slot, so its chunks are rewritten; each write takes a
+    // fresh counter, stored in the clear at the head of the chunk, because a
+    // fixed per-extent counter would re-encrypt a chunk under a nonce it has
+    // already used.
+    use cryptand::vector::{DType, Region};
+    let (t, mut e) = encrypted("region");
+    let mut r = Region::create(&mut e.pager, 4, DType::F32, 64).unwrap();
+    let v: Vec<f32> = vec![1.5, -2.5, 3.25, 4.125];
+    r.write_slot(&mut e.pager, 1, &v).unwrap();
+    r.write_slot(&mut e.pager, 2, &[9.0, 9.0, 9.0, 9.0]).unwrap();
+    assert_eq!(r.read_slot(&mut e.pager, 1).unwrap(), v);
+    assert_eq!(r.read_slot(&mut e.pager, 2).unwrap(), vec![9.0f32; 4]);
+    e.commit(Durability::Sync).unwrap();
+    e.close(false).unwrap();
+
+    let raw = std::fs::read(&t.path).unwrap();
+    let needle: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+    let hits = raw.windows(needle.len()).filter(|w| *w == needle.as_slice()).count();
+    assert_eq!(hits, 0, "a vector's f32 bytes are on disk in the clear");
 }

@@ -22,6 +22,20 @@ import 'cke.dart';
 import 'container.dart';
 import 'crc32c.dart';
 import 'errors.dart';
+import 'security.dart';
+
+/// `spec/14-security.md` section 5.3 — the ring and the nonce source a
+/// value-log record needs. Separate from the page cipher's window only in the
+/// sense that it draws from the same allocator: one counter, because two would
+/// be two chances to hand the same value out twice.
+final class VlogCrypto {
+  VlogCrypto(this.ring, this._allocate);
+
+  final KeyRing ring;
+  final int Function() _allocate;
+
+  int allocate() => _allocate();
+}
 
 /// Value-log tiers, section 6.1.
 class VlogTier {
@@ -216,17 +230,52 @@ final class VlogSegment {
   /// Record framing, section 6.2:
   /// `uvar record_len | u32 tree_id | uvar key_len | key | uvar value_len |
   ///  value | u32 crc32c`.
-  VlogPointer? append(int treeId, Uint8List ckeKey, Uint8List value) {
+  /// [crypto] encrypts the record per `spec/14-security.md` section 5.3:
+  /// `record_len`, the `counter` and the trailing `crc32c` stay in the clear so
+  /// a segment can be walked, and its damage bounded, without the key, while
+  /// `key_len || key || value_len || value` is one AEAD message. The counter is
+  /// stored per record — "that is the price of being able to decrypt one record
+  /// without reading the segment, which is exactly what a point read does".
+  VlogPointer? append(int treeId, Uint8List ckeKey, Uint8List value,
+      {VlogCrypto? crypto}) {
     if (sealed) {
       throw StateError('cannot append to a sealed value-log segment');
     }
-    final body = ByteWriter(value.length + ckeKey.length + 16)
-      ..u32(treeId)
-      ..uvar(ckeKey.length)
-      ..bytes(ckeKey)
-      ..uvar(value.length)
-      ..bytes(value);
-    final crc = crc32c(body.view);
+    final ByteWriter body;
+    if (crypto == null) {
+      body = ByteWriter(value.length + ckeKey.length + 16)
+        ..u32(treeId)
+        ..uvar(ckeKey.length)
+        ..bytes(ckeKey)
+        ..uvar(value.length)
+        ..bytes(value);
+    } else {
+      final pt = ByteWriter(value.length + ckeKey.length + 12)
+        ..uvar(ckeKey.length)
+        ..bytes(ckeKey)
+        ..uvar(value.length)
+        ..bytes(value);
+      final counter = crypto.allocate();
+      final r = encryptVlogRecord(
+        keys: crypto.ring,
+        segmentId: id,
+        recordOffset: dataOffset + bytes,
+        treeId: treeId,
+        nonceCounter: counter,
+        body: pt.view,
+      );
+      body = ByteWriter(r.ciphertext.length + 32)
+        ..u64(counter)
+        ..u32(treeId)
+        ..bytes(r.ciphertext)
+        ..bytes(r.tag);
+    }
+    // Section 5.3: the CRC covers the stored (ciphertext) bytes, and on an
+    // encrypted record it starts after the clear counter, so a walker that has
+    // no key still bounds the damage.
+    final crc = crypto == null
+        ? crc32c(body.view)
+        : crc32c(body.view, 8, body.length);
     final recordLen = body.length + 4;
     final head = ByteWriter(10)..uvar(recordLen);
     final total = head.length + recordLen;
@@ -266,7 +315,8 @@ final class VlogSegment {
   /// Reads a record body. [pageOf] is called for every page the read touches,
   /// so a caller can account for I/O.
   (int treeId, Uint8List key, Uint8List value) read(
-      VlogPointer ptr, void Function(int pageIndex) pageOf) {
+      VlogPointer ptr, void Function(int pageIndex) pageOf,
+      {VlogCrypto? crypto}) {
     if (ptr.segmentId != id) {
       throw CorruptionException('pointer names segment ${ptr.segmentId}, '
           'this is $id');
@@ -284,29 +334,57 @@ final class VlogSegment {
     final r = ByteReader(_buf, ptr.offset, ptr.offset + ptr.len);
     final recordLen = r.uvar();
     final bodyStart = r.position;
-    final treeId = r.u32();
-    final key = r.bytesCopy(r.uvar());
-    final value = r.bytesCopy(r.uvar());
-    final stored = ByteData.view(_buf.buffer)
-        .getUint32(bodyStart + recordLen - 4, Endian.little);
-    if (crc32c(_buf, bodyStart, bodyStart + recordLen - 4) != stored) {
+    final crcAt = bodyStart + recordLen - 4;
+    final stored = ByteData.view(_buf.buffer).getUint32(crcAt, Endian.little);
+    final crcFrom = crypto == null ? bodyStart : bodyStart + 8;
+    if (crc32c(_buf, crcFrom, crcAt) != stored) {
       throw CorruptionException('value-log record CRC mismatch at $ptr');
     }
+    if (crypto == null) {
+      final treeId = r.u32();
+      final key = r.bytesCopy(r.uvar());
+      final value = r.bytesCopy(r.uvar());
+      return (treeId, key, value);
+    }
+    final counter = r.u64();
+    final treeId = r.u32();
+    final sealed = Uint8List.sublistView(_buf, r.position, crcAt);
+    final pt = decryptVlogRecord(
+      keys: crypto.ring,
+      segmentId: id,
+      recordOffset: ptr.offset,
+      treeId: treeId,
+      nonceCounter: counter,
+      ciphertext: Uint8List.sublistView(sealed, 0, sealed.length - 16),
+      tag: Uint8List.sublistView(sealed, sealed.length - 16),
+    );
+    if (pt == null) {
+      throw CorruptionException(
+          'value-log record authentication failed at $ptr: this record has '
+          'been modified by someone without the key '
+          '(spec/14-security.md section 6.2)');
+    }
+    final pr = ByteReader(pt, 0, pt.length);
+    final key = pr.bytesCopy(pr.uvar());
+    final value = pr.bytesCopy(pr.uvar());
     return (treeId, key, value);
   }
 
   /// Iterates every record in order, for garbage collection and verification.
-  Iterable<(VlogPointer, int, Uint8List, Uint8List)> scan() sync* {
+  Iterable<(VlogPointer, int, Uint8List, Uint8List)> scan(
+      {VlogCrypto? crypto}) sync* {
     var off = dataOffset;
     final end = dataOffset + bytes;
     while (off < end) {
       final r = ByteReader(_buf, off, end);
       final recordLen = r.uvar();
       final total = (r.position - off) + recordLen;
-      final treeId = r.u32();
-      final key = r.bytesCopy(r.uvar());
-      final value = r.bytesCopy(r.uvar());
-      yield (VlogPointer(id, off, total), treeId, key, value);
+      final ptr = VlogPointer(id, off, total);
+      // The framing walks without the key either way (section 5.3 keeps
+      // `record_len`, the counter and the CRC in the clear); only the payload
+      // needs one.
+      final (treeId, key, value) = read(ptr, (_) {}, crypto: crypto);
+      yield (ptr, treeId, key, value);
       off += total;
     }
   }
@@ -321,6 +399,11 @@ final class ValueLog {
   });
 
   final int pageSize;
+
+  /// `spec/14-security.md` section 5.3's record cipher. `null` on an
+  /// unencrypted database; set by the engine when the ring is installed.
+  VlogCrypto? crypto;
+
   final int segmentBytes;
 
   /// Pages the reader may hold. Bounded, because an unbounded cache would make
@@ -396,9 +479,11 @@ final class ValueLog {
     int tier = VlogTier.hot,
     int heat = HeatClass.first,
   }) {
-    final need = value.length + ckeKey.length + 24;
+    // An encrypted record carries a clear counter and a Poly1305 tag on top
+            // of the framing (section 5.3).
+    final need = value.length + ckeKey.length + (crypto == null ? 24 : 48);
     final seg = _segmentFor(tier, heat, need);
-    final ptr = seg.append(treeId, ckeKey, value);
+    final ptr = seg.append(treeId, ckeKey, value, crypto: crypto);
     if (ptr == null) {
       throw StateError('value-log segment ${seg.id} rejected a sized append');
     }
@@ -408,8 +493,34 @@ final class ValueLog {
     return ptr;
   }
 
+  /// `spec/10-transactions.md` section 2 step B — a durability barrier over the
+  /// bytes appended so far, which for an in-memory buffer is a no-op that
+  /// exists so the commit path names the step it is performing.
+  ///
+  /// It deliberately does **not** seal: see [sealOpen].
+  void flushTails() {}
+
+  /// Seals the open **cold** run only.
+  ///
+  /// Section 6.3 clusters a *generation*: a last-level compaction promotes one
+  /// generation into one key-ordered run, so the run has to close when that
+  /// compaction ends or the next generation appends into it and the run loses
+  /// its ordering. The hot run is untouched — sealing it here retires the
+  /// write path's tail on every compaction and manufactures the surplus runs
+  /// section 6.9 bounds.
+  void sealCold() {
+    for (final k in _open.keys.toList()) {
+      final seg = _open[k]!;
+      if (seg.tier != VlogTier.cold) continue;
+      seg.seal(claimClustered: true);
+      _open.remove(k);
+    }
+  }
+
   /// Seals every open segment. `spec/14-security.md` section 4.3 makes this
-  /// mandatory on open; here it is what a flush or a close does.
+  /// mandatory on open; here it is what a close does. **Not** the commit path:
+  /// sealing per commit yields one value-log run per commit, which is the
+  /// surplus `spec/04-segments.md` section 6.9 bounds.
   void sealOpen() {
     for (final e in _open.entries) {
       e.value.seal(claimClustered: e.value.tier == VlogTier.cold);
@@ -417,16 +528,30 @@ final class ValueLog {
     _open.clear();
   }
 
-  Uint8List readValue(VlogPointer ptr) {
+  /// [coalesce] is the second half of `spec/04-segments.md` section 8.1's MUST
+  /// — "MUST coalesce reads of records that fall in the same page". It is
+  /// separable from the first half (issuing reads in `(segment, offset)` order)
+  /// because the two are worth different things, and only by separating them
+  /// can P8's control actually fail.
+  ///
+  /// It could not before. Over a clustered cold run the entries already arrive
+  /// in value order, so sorting a window is a no-op and disabling it changed
+  /// nothing: `no readahead` measured exactly the same 0.100 v/row as
+  /// `all three on`. A control that cannot fail measures nothing.
+  Uint8List readValue(VlogPointer ptr, {bool coalesce = true}) {
     valueReads++;
     final seg = segments[ptr.segmentId];
     if (seg == null) {
       throw CorruptionException('no value-log segment ${ptr.segmentId}');
     }
     final (_, _, value) = seg.read(ptr, (page) {
+      if (!coalesce) {
+        valuePageReads++;
+        return;
+      }
       final key = ptr.segmentId * 1000000 + page;
       if (!_cache.touch(key, cachePages)) valuePageReads++;
-    });
+    }, crypto: crypto);
     return value;
   }
 
@@ -465,16 +590,29 @@ final class ValueLog {
   /// *lacking the clustered flag* and therefore read 0 % on a database whose
   /// scans had already degraded 2.1x — see [clusteredFlagDebt].
   double get localityDebt {
-    final live = segments.values.where((s) => s.liveRecords > 0).toList()
-      ..sort((a, b) => b.liveBytes.compareTo(a.liveBytes));
-    final total = live.fold<int>(0, (a, s) => a + s.liveBytes);
+    final total =
+        segments.values.fold<int>(0, (a, s) => a + (s.liveRecords > 0 ? s.liveBytes : 0));
     if (total == 0) return 0;
-    final ideal = ((total + segmentBytes - 1) ~/ segmentBytes).clamp(1, live.length);
+    // **Cold-tier runs only.** A hot run is the write path's tail: it holds
+    // everything written since the last last-level compaction, it is
+    // unclustered by construction (section 6.3 clusters a generation when it
+    // is *promoted*), and neither remedy section 6.9 names can act on it.
+    // Counting it made a healthy database with one clustered cold run and a
+    // live tail read 40 %, which collecting could not move — a bound whose
+    // remedies cannot reach the bytes it counts is not a bound.
+    final live = segments.values
+        .where((s) => s.liveRecords > 0 && s.tier == VlogTier.cold)
+        .toList()
+      ..sort((a, b) => b.liveBytes.compareTo(a.liveBytes));
+    if (live.isEmpty) return 0;
+    final cold = live.fold<int>(0, (a, s) => a + s.liveBytes);
+    final ideal =
+        ((cold + segmentBytes - 1) ~/ segmentBytes).clamp(1, live.length);
     var surplus = 0;
     for (var i = ideal; i < live.length; i++) {
       surplus += live[i].liveBytes;
     }
-    // Bytes in a run that is *not* key-clustered are surplus whatever the
+    // Bytes in a cold run that is not key-clustered are surplus whatever the
     // count, since a scan cannot read them sequentially at all.
     for (var i = 0; i < ideal; i++) {
       if (!live[i].clustered) surplus += live[i].liveBytes;

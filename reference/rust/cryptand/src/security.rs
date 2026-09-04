@@ -51,6 +51,9 @@ pub fn nonce(domain: u8, counter: u64, object_id: u64, offset: u64) -> Result<[u
 /// durably before allocating anything, and never reaches the published value.
 pub const NONCE_GAP: u64 = 1 << 20;
 
+/// The Poly1305 tag XChaCha20-Poly1305 appends (`14-security.md` §5.2).
+pub const AEAD_TAG_BYTES: usize = 16;
+
 /// §3.3 — the keyslot, 4 x 144 bytes at superblock offset 3512.
 pub mod keyslot {
     pub const SIZE: usize = 144;
@@ -324,6 +327,12 @@ pub fn superblock_mac_message(image: &[u8]) -> Vec<u8> {
 }
 
 /// The unlocked key material for one file.
+///
+/// `Clone` because the page cipher lives in the pager (`14-security.md` §5.2 —
+/// the copy-on-write trees write pages without an engine in scope) while the
+/// value-log cipher lives in the engine. Both copies are zeroized by
+/// [`crate::engine::Engine::close`].
+#[derive(Clone)]
 pub struct KeyRing {
     master_key: [u8; 32],
     page_key: [u8; 32],

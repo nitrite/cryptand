@@ -15,11 +15,13 @@ import 'dart:typed_data';
 
 import 'bytes.dart';
 import 'changefeed.dart';
+import 'container.dart';
 import 'checkpoint.dart';
 import 'cke.dart';
 import 'cow.dart';
 import 'errors.dart';
 import 'manifest.dart';
+import 'security.dart';
 import 'segment.dart';
 import 'txn.dart';
 import 'value.dart';
@@ -196,6 +198,7 @@ final class Engine {
     int cachePages = 256,
     PageStore? store,
     int manifestRoot = 0,
+    int freelistRoot = 0,
     int checkpointRoot = 0,
     int changefeedRoot = 0,
   })  : segmentEntries = segmentEntries ?? memtableEntries,
@@ -206,8 +209,10 @@ final class Engine {
           cachePages: cachePages,
         ) {
     manifest = Manifest(this.store, root: manifestRoot);
+    freelist = CowTree(this.store, treeId: TreeId.freeSpace, root: freelistRoot);
     checkpoints = CheckpointStore(this.store, root: checkpointRoot);
     changeFeed = ChangeFeed(this.store, root: changefeedRoot);
+    _refreshRetention();
   }
 
   /// Adopts the counters a file carries (`spec/01-container.md` §2).
@@ -225,6 +230,7 @@ final class Engine {
     _nextSegmentId = nextSegmentId;
     this.visibleSeq = visibleSeq;
     this.commitId = commitId;
+    _refreshRetention();
   }
 
   int get nextSeq => _nextSeq;
@@ -303,6 +309,10 @@ final class Engine {
 
   /// Tree 6.
   late final Manifest manifest;
+
+  /// Tree 1, `spec/01-container.md` §6. Held across saves rather than rebuilt,
+  /// so the pages of the previous free tree are freed rather than orphaned.
+  late final CowTree freelist;
 
   /// Tree 8, `spec/13-operations.md` §1.
   late final CheckpointStore checkpoints;
@@ -442,7 +452,54 @@ final class Engine {
     return m;
   }
 
+  // -------------------------------------------------------------------------
+  // `spec/14-security.md` — the ring, and the one nonce cursor under it
+  // -------------------------------------------------------------------------
+
+  /// The unlocked key material, or null on an unencrypted database.
+  KeyRing? keys;
+
+  NonceAllocator? _nonces;
+
+  /// Installs the page cipher (section 5.2) and the value-log record cipher
+  /// (section 5.3) from **one** allocator.
+  ///
+  /// One cursor for both, because two would be two chances to hand the same
+  /// counter out twice, and section 4 opens by saying nonce uniqueness "is not
+  /// a hardening measure; it is the whole thing".
+  void installKeys(KeyRing ring, NonceAllocator nonces) {
+    keys = ring;
+    _nonces = nonces;
+    store.crypto = PageCrypto(ring, nonces);
+    vlog.crypto = VlogCrypto(ring, nonces.allocate);
+  }
+
+  NonceAllocator? get nonces => _nonces;
+
+  /// The superblock this engine was opened from, when there is a file under
+  /// it. `spec/01-container.md` §9 step 8 needs it: `sb_mac` is verified
+  /// against the fields it authenticates, and only the container has them.
+  Superblock? superblock;
+
+  /// Section 11: "an implementation MUST zero the master key and every subkey
+  /// on close()."
+  void destroyKeys() {
+    keys?.destroy();
+    keys = null;
+    store.crypto = null;
+    vlog.crypto = null;
+    _nonces = null;
+  }
+
   /// §8: bounds page reuse.
+  ///
+  /// One below the minimum, not the minimum. The reclamation rule of
+  /// `spec/01-container.md` §6 is "an extent freed at `commit_id = N` may be
+  /// reallocated once `N <= min_retained_commit`", so returning the current
+  /// commit id would make a page freed by *this* commit immediately
+  /// reallocatable — and the previous superblock still names it. That is the
+  /// one thing copy-on-write must never do: "no page that a live superblock
+  /// references is ever overwritten."
   int get minRetainedCommit {
     var m = commitId;
     for (final s in _liveSnapshots) {
@@ -451,7 +508,29 @@ final class Engine {
     for (final c in checkpoints.all) {
       if (c.commitId < m) m = c.commitId;
     }
-    return m;
+    return m > 0 ? m - 1 : 0;
+  }
+
+  /// Opens a new commit for a superblock that is about to be published.
+  ///
+  /// Publishing a superblock **is** a commit (`spec/01-container.md` §2), and
+  /// the commit id is what §6's reclamation rule is stated over: pages the new
+  /// superblock orphans are attributed to it, and everything the *previous*
+  /// commits freed becomes reallocatable. Without this a file written by
+  /// `save` alone never advances past commit 1, `min_retained_commit` stays 0,
+  /// and the free tree accumulates space no session may ever reuse.
+  int beginPublish() {
+    commitId++;
+    _refreshRetention();
+    return commitId;
+  }
+
+  /// Pushes §6's retention floor and the committing id into the page space.
+  /// The store is what allocates, so it is what has to know both.
+  void _refreshRetention() {
+    store
+      ..commitId = commitId
+      ..minRetainedCommit = minRetainedCommit;
   }
 
   // -------------------------------------------------------------------------
@@ -586,6 +665,14 @@ final class Engine {
   /// abandoned cursors are the realistic failure mode.
   void release(Snapshot s) {
     _liveSnapshots.remove(s);
+    // `spec/13-operations.md` §6: `pinned_by_snapshots` is "bytes retained
+    // because a live snapshot needs them". With no live snapshot there is
+    // nothing retaining them, whether or not a compaction has got around to
+    // collapsing the versions yet — so the answer is exactly 0, not the last
+    // figure a levelled compaction happened to record. Leaving the stale
+    // number is the same failure §6 already names: a metric that cannot be
+    // computed must be reported unavailable, never given a plausible value.
+    if (_liveSnapshots.isEmpty) pinnedBySnapshots = 0;
     _pruneWrittenAt();
   }
 
@@ -815,9 +902,16 @@ final class Engine {
   /// the commit".
   int commit({Durability durability = Durability.sync}) {
     if (_closed) throw const InvalidArgumentException('engine is closed');
-    // B/C: seal the open value-log segments and barrier over their tails
-    // BEFORE anything names them.
-    vlog.sealOpen();
+    // B/C: barrier over the open value-log segments' tails BEFORE anything
+    // names them (§2.3 invariant 1).
+    //
+    // Step B **flushes**; it does not seal. Sealing is `04-segments.md` §6.2's
+    // terminal state, and doing it here retires the open run on every commit —
+    // one value-log run per commit, which is exactly the surplus §6.9 bounds.
+    // This implementation used to seal here and read 45 % locality debt on a
+    // freshly written database. Sealing belongs at close, and at open for a
+    // segment a previous session left open (`14-security.md` §4.3).
+    vlog.flushTails();
     _barrier(durability);
 
     // D: memtable -> L0, and the manifest edit that names it.
@@ -830,6 +924,7 @@ final class Engine {
     // F/G: publish. Everything at or below `sequenced` is now durable.
     commitId++;
     visibleSeq = sequenced;
+    _refreshRetention();
     _pruneWrittenAt();
     _emit(StoreEvent(StoreEventKind.commit,
         commitId: commitId, visibleSeq: visibleSeq));
@@ -943,6 +1038,7 @@ final class Engine {
   SegmentBuilder _builder({required int level, int group = 0}) =>
       SegmentBuilder(
         pageSize: pageSize,
+        tagReserve: store.tagReserve,
         segmentId: _nextSegmentId++,
         level: level,
         group: group,
@@ -1253,7 +1349,8 @@ final class Engine {
           // the tombstone still sees the versions it hides, so dropping the
           // tombstone alone would resurrect them for every later reader.
         } else {
-          job.out.add(_promote(rec, parsed.treeId, job.dead, job.recluster));
+          job.out.add(_promote(rec, parsed.treeId, job.dead, job.recluster,
+              levelled: job.levelled));
         }
       } else if (job.levelled && job.newestSeq <= job.retained) {
         // §5 condition 3 holds only at the last level, so a superseded version
@@ -1307,9 +1404,39 @@ final class Engine {
       vlog.markDead(p);
     }
     vlog
-      ..sealOpen()
+      ..sealCold()
       ..reclaimEmpty();
+
+    // §6.9's bound is a MUST on the *state*, and promotion is what moves it:
+    // every levelled compaction lands a fresh cold generation, so a database
+    // written without anyone ever calling `compact()` accumulates one surplus
+    // run per compaction and ends over the bound with nothing looking. It read
+    // 45 % on a plainly written 400-document database, which §11's invariant
+    // 11 flags and which the writer had no way to see.
+    //
+    // Collection compacts, so the flag is what stops it recursing into itself.
+    // After **every** compaction, not only a levelled one. Promotion into the
+    // cold tier is what creates a generation, and by the time
+    // `finishCompaction` runs the job that did it no longer reports itself as
+    // levelled — so gating on `job.levelled` never fired, and a database
+    // written without anyone calling `compact()` accumulated one surplus run
+    // per compaction and ended at 45 % against a 20 % bound with nothing
+    // looking. Collection compacts, so `_collecting` is what stops the
+    // recursion.
+    if (autoCollect && !_collecting) {
+      _collecting = true;
+      try {
+        collectWhileOverDebt();
+      } finally {
+        _collecting = false;
+      }
+    }
   }
+
+  /// §6.8's collection runs automatically once §6.9's bound is exceeded.
+  /// Off only for the controls that measure what it is worth.
+  bool autoCollect = true;
+  bool _collecting = false;
 
   /// The lowest group id not in use at [level].
   ///
@@ -1367,8 +1494,25 @@ final class Engine {
   static bool _isExpired(SegRecord rec, int nowMs) =>
       rec.expiryMs != null && rec.expiryMs! <= nowMs;
 
-  SegEntry _promote(
-      SegRecord rec, int treeId, List<VlogPointer> dead, bool recluster) {
+  /// §6.3 — **during a compaction that outputs the last level**, every
+  /// surviving hot-tier value is promoted into a cold segment. The entries
+  /// arrive in internal-key order, so the cold log is key-clustered for free.
+  ///
+  /// The `levelled` gate is the whole mechanism and it was missing. Promoting
+  /// during a tiered merge produces a cold run ordered by that merge rather
+  /// than by key, and — worse — one that collection can never reach:
+  /// [collectWhileOverDebt] reclusters *last-level* segments, and a database
+  /// whose compactions never reached the last level had no last-level segments
+  /// at all. It accumulated one unreachable cold generation per compaction and
+  /// sat at 45 % locality debt against a 20 % bound, with collection running
+  /// and returning immediately every time.
+  SegEntry _promote(SegRecord rec, int treeId, List<VlogPointer> dead,
+      bool recluster,
+      {required bool levelled}) {
+    if (!levelled) {
+      return SegEntry(rec.internalKey, rec.valueKind, rec.value,
+          expiryMs: rec.expiryMs);
+    }
     if (rec.valueKind != ValueKind.vlog || !policy.clusteredPromotion) {
       return SegEntry(rec.internalKey, rec.valueKind, rec.value,
           expiryMs: rec.expiryMs);
@@ -1646,9 +1790,10 @@ final class Engine {
     return null;
   }
 
-  Uint8List _resolve(SegRecord rec) => rec.valueKind == ValueKind.vlog
-      ? vlog.readValue(VlogPointer.decode(rec.value))
-      : Uint8List.fromList(rec.value);
+  Uint8List _resolve(SegRecord rec, {bool coalesce = true}) =>
+      rec.valueKind == ValueKind.vlog
+          ? vlog.readValue(VlogPointer.decode(rec.value), coalesce: coalesce)
+          : Uint8List.fromList(rec.value);
 
   /// A key-ordered scan of one tree, optionally bounded by [range].
   ///
@@ -1810,8 +1955,11 @@ final class Engine {
         }
       }
     } else {
+      // §8.1's other half goes with it: without the window there is nothing to
+      // coalesce reads *within*, so every dereference is its own I/O. Keeping
+      // the coalescing here is what made this control inert.
       for (final e in entries) {
-        bytes += _resolve(e).length;
+        bytes += _resolve(e, coalesce: false).length;
       }
     }
 

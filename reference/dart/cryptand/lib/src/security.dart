@@ -19,12 +19,14 @@
 /// holds, which section 3.3 defines.
 library;
 
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'aead.dart';
 import 'argon2.dart';
 import 'bytes.dart';
 import 'container.dart';
+import 'crc32c.dart';
 import 'errors.dart';
 
 // ---------------------------------------------------------------------------
@@ -409,6 +411,21 @@ final class Keyslot {
   }
 }
 
+/// `spec/14-security.md` section 11 — key material comes from the platform's
+/// cryptographically secure generator, never from a seeded PRNG.
+/// `Random.secure()` is Dart's, and `00-conventions.md` section 1.1's rule
+/// about naming a *capability* rather than a language is what makes that a
+/// conforming choice rather than an implementation detail leaking into the
+/// format.
+Uint8List randomBytes(int n) {
+  final r = Random.secure();
+  final out = Uint8List(n);
+  for (var i = 0; i < n; i++) {
+    out[i] = r.nextInt(256);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Superblock MAC, section 6.2
 // ---------------------------------------------------------------------------
@@ -428,6 +445,23 @@ Uint8List superblockMac(List<int> sbMacKey, Uint8List superblock) {
     msg[i] = 0;
   }
   return hmacSha256(sbMacKey, msg);
+}
+
+/// Finishes a superblock image in place: section 6.2's `sb_mac` when the
+/// database is encrypted, then section 2's CRC over bytes `0 .. 4091` **as
+/// stored**, which must therefore be computed last.
+///
+/// One function because the order is the whole content of the rule, and two
+/// call sites getting it right independently is two chances to get it wrong.
+void sealSuperblock(Uint8List image, KeyRing? keys) {
+  if (image.length < Sb.size) {
+    throw const InvalidArgumentException('superblock is 4096 bytes');
+  }
+  if (keys != null) {
+    image.setRange(Sb.sbMac, Sb.sbMac + 32, superblockMac(keys.macKey, image));
+  }
+  ByteData.view(image.buffer, image.offsetInBytes, image.length)
+      .setUint32(Sb.checksum, crc32c(image, 0, Sb.checksum), Endian.little);
 }
 
 /// Verifies [superblock]'s MAC in constant time.

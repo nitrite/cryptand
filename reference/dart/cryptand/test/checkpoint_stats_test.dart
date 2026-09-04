@@ -141,6 +141,16 @@ void main() {
         e.put(tree, CNitriteId(i % 20), doc(dict, i));
       }
       e.flush();
+      // The fixture needs *dead* bytes, and only a compaction that reaches the
+      // last level produces them: it is what drops superseded versions and
+      // promotes the survivors, leaving the hot run's 380 older records dead
+      // but not yet reclaimed. Without it `allocated - live` is 0 and the
+      // limit has nothing to refuse — the test used to pass because promotion
+      // ran on every compaction, which `spec/04-segments.md` §6.3 confines to
+      // the last level.
+      e.compact();
+      expect(e.checkpointWouldPin(), greaterThan(0),
+          reason: 'a limit test needs something to be over the limit');
       expect(() => e.createCheckpoint('big', nowMs: 1000),
           throwsA(isA<LimitException>()));
       // Section 1: "unless the caller overrides it".

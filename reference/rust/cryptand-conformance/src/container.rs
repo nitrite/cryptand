@@ -40,7 +40,8 @@ pub mod ph {
     pub const EXTENT_PAGES: usize = 12;
     pub const COMMIT_ID: usize = 16;
     pub const PAYLOAD_LEN: usize = 24;
-    pub const RESERVED: usize = 28;
+    /// `14-security.md` §5.2 — payload bytes as stored; 0 means `payload_len`.
+    pub const STORED_LEN: usize = 28;
     pub const NONCE: usize = 32;
 }
 

@@ -26,12 +26,17 @@ pub enum Error {
     Unavailable(String),
     /// A transaction's write set collided (`10-transactions.md` §3).
     Conflict(String),
+    /// `01-container.md` §10 — another process holds the writer lock. Its own
+    /// class because §10 forbids the one alternative: "MUST NOT fall back to
+    /// opening anyway".
+    Locked(String),
     Io(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::Locked(m) => write!(f, "locked by another process: {m}"),
             Error::Corrupt(m) => write!(f, "corrupt: {m}"),
             Error::Tamper(m) => write!(f, "tampering: {m}"),
             Error::CannotUnlock => write!(f, "cannot unlock: no keyslot accepted the key"),

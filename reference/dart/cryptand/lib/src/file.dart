@@ -31,11 +31,28 @@ import 'database.dart';
 import 'engine.dart';
 import 'errors.dart';
 import 'manifest.dart';
+import 'profile.dart';
+import 'security.dart';
+import 'txn.dart';
 import 'segment.dart';
 import 'value.dart';
 import 'vlog.dart';
 
 /// Reads and writes a database file.
+String _hex(Uint8List b) {
+  final sb = StringBuffer();
+  for (final x in b) {
+    sb.write(x.toRadixString(16).padLeft(2, '0'));
+  }
+  return sb.toString();
+}
+
+/// The keyslot area a database was opened or created with, so a `save` that
+/// rewrites the superblock does not drop the credentials with it. Keyed on the
+/// engine rather than stored on it because keyslots are file-level state: an
+/// in-memory engine has none.
+final Expando<Uint8List> _keyslots = Expando('cryptand keyslots');
+
 abstract final class DatabaseFile {
   /// Lays the engine out as a file and writes it.
   ///
@@ -44,9 +61,23 @@ abstract final class DatabaseFile {
   /// manifest and tree 7 are written, which appends copy-on-write pages *after*
   /// the extents and so cannot move them; then the superblock, last, because it
   /// is what publishes all of it.
-  static void save(Database db, String path, {String? writerId}) {
+  static void save(Database db, String path,
+      {String? writerId, Uint8List? keyslots}) {
     final e = db.engine;
     final store = e.store;
+    // Publishing a superblock is a commit, and §6's reclamation rule is
+    // stated over commit ids: this is what makes the previous session's freed
+    // extents reallocatable and attributes this one's to a new id.
+    e.beginPublish();
+    // §2 of `spec/05-catalog.md`: tree 3's root lives in its own catalog
+    // descriptor. Publishing it is what stops the next open from rebuilding
+    // the tree and orphaning this one — a leak per open, and the only thing
+    // that ever finds it is another implementation's §9 step 7.
+    db.catalog.publishTreeIndex();
+    // §4.1 rule 1 applies to a *writer*, and the writer is about to place
+    // every extent below. On a file this session created, the floor was
+    // published by [create]; on one it opened, by [open]. Nothing here
+    // allocates a nonce that a published floor does not already cover.
 
     // 1. Every segment the manifest names becomes an extent at a real page id.
     final refs = e.manifest.all.toList();
@@ -90,11 +121,40 @@ abstract final class DatabaseFile {
       if (v.startPage == 0) {
         v.startPage = store.allocExtent(v.pageCount);
       }
-      store.writeExtent(v.startPage, v.extent);
+      store.writeExtentClear(v.startPage, v.extent);
       stats.put(
         encodeKey(CInt.of(NumType.u64, v.id)),
         encodeVlogStats(v, startPage: v.startPage),
       );
+    }
+
+    // 3b. Tree 1, the free tree (§6). Written last of the trees, because
+    //     writing the others is itself what frees pages. Without it a reader
+    //     — this one or another SDK's — reconciles reachable pages against an
+    //     empty free tree and reports every orphaned page as a leak (§9 step
+    //     7), and no later session can ever reuse the space.
+    //
+    //     It must equal the free list, not accumulate it: an extent *leaves*
+    //     the list when it is reclaimed, and a best-fit allocation that takes
+    //     part of one moves the remainder to a different key. A tree 1 that
+    //     only ever grows is a strict superset of the truth, and the
+    //     implementation that wrote it cannot tell — it keeps its own list in
+    //     memory. Another implementation then allocates a page tree 1 calls
+    //     free, while the live superblock still names it.
+    final free = e.freelist;
+    final want = {
+      for (final x in store.freeExtents)
+        encodeKey(CArray([
+          CInt.of(NumType.u64, x.commitId),
+          CInt.of(NumType.u64, x.startPage),
+        ])): encodeValue(CDoc({'pages': CInt.of(NumType.u32, x.pages)}))
+    };
+    final wantKeys = {for (final k in want.keys) _hex(k)};
+    for (final (k, _) in free.scan().toList()) {
+      if (!wantKeys.contains(_hex(k))) free.remove(k);
+    }
+    for (final entry in want.entries) {
+      free.put(entry.key, entry.value);
     }
 
     // 4. The superblock, last.
@@ -105,7 +165,7 @@ abstract final class DatabaseFile {
       visibleSeq: e.visibleSeq,
       nextSeq: e.nextSeq,
       catalogRoot: db.catalogRoot,
-      freelistRoot: 0,
+      freelistRoot: e.freelist.root,
       attributesRoot: db.attributesRoot,
       manifestRoot: e.manifest.root,
       vlogStatsRoot: stats.root,
@@ -115,10 +175,25 @@ abstract final class DatabaseFile {
       nextSegmentId: e.nextSegmentId,
       nextVlogSegmentId: e.vlog.nextId,
       databaseUuid: e.databaseUuid,
-      // §7 of `spec/10-transactions.md`: record what was *performed*.
-      durabilityAchieved: 2,
+      minRetainedCommit: e.minRetainedCommit,
+      minRetainedSeq: e.minRetainedSeq,
+      // §7 of `spec/10-transactions.md`: record what was **performed**. The
+      // file is written with `flush: true` below, which is `Durability.sync`;
+      // claiming more than that is the one thing §7 forbids.
+      durabilityAchieved: Durability.sync.code,
       levelCount: e.levels.levelCount,
-      profile: Profile.desktop,
+      // `spec/12-profiles.md` §3 — advisory, but it must name the profile
+      // this database actually runs, not a constant. A `mobile` database
+      // saved as `desktop` reopens with another SDK reading `desktop`'s stall
+      // budget and maintenance policy for a phone. `custom` when the engine's
+      // constants match no named profile, which §1 provides for exactly here:
+      // "a reader uses the *values* in the superblock, never the name".
+      profile: e.profile.pageSize == e.pageSize ? e.profile : Profile.custom,
+      cipher: e.keys == null ? 0 : 1,
+      featuresRequired:
+          (1 << Feature.core) | (e.keys == null ? 0 : (1 << Feature.cipher)),
+      nextNonce: e.nonces?.publishedWatermark ?? 0,
+      keyslots: keyslots ?? _keyslots[db.engine],
       vlogMin: e.vlogMin,
       l0Trigger: e.levels.l0Trigger,
       tierWidth: e.levels.tierWidth,
@@ -133,6 +208,9 @@ abstract final class DatabaseFile {
 
     final bytes = store.toBytes();
     final image = sb.encode();
+    // §6.2 — `sb_mac` authenticates the superblock; without it anyone can set
+    // `cipher = 0` or weaken an Argon2id cost and no reader can tell.
+    sealSuperblock(image, e.keys);
     // §1: slot A when `commit_id` is odd, slot B when it is even, so a crash
     // during a superblock write leaves the previous superblock intact. Both
     // slots are written here because a fresh file has no previous superblock
@@ -143,8 +221,149 @@ abstract final class DatabaseFile {
     File(path).writeAsBytesSync(bytes, flush: true);
   }
 
+  /// Creates an **encrypted** database that is encrypted from its first page.
+  ///
+  /// Without this there is no way to get one. Turning `cipher` on after the
+  /// fact is `spec/14-security.md` §8.3's *conversion*, which leaves every page
+  /// written before the switch in the clear — correct, reported by
+  /// `unencrypted_pages`, and not what asking for an encrypted database means.
+  ///
+  /// It is also the only shape in which §4.1 rule 1 can hold: the floor must be
+  /// durably published **before** the first nonce is handed out, so the file
+  /// has to exist before the first page is encrypted. [credential] is 32 raw
+  /// key bytes when [kdf] is `Keyslot.kdfRaw` — a key the host already holds,
+  /// which §3.3 defines exactly for this case and which a hardware keystore on
+  /// a phone supplies — or a password when it is `Keyslot.kdfArgon2id`.
+  static Database create(
+    String path, {
+    required List<int> credential,
+    int kdf = Keyslot.kdfArgon2id,
+    Profile profile = Profile.desktop,
+    int memtableEntries = 4096,
+    int tCost = 3,
+    int mCostKib = 65536,
+    int parallelism = 1,
+    String label = 'keyslot 0',
+  }) {
+    final uuid = randomBytes(16);
+    uuid[6] = (uuid[6] & 0x0F) | 0x40;
+    uuid[8] = (uuid[8] & 0x3F) | 0x80;
+    final master = randomBytes(32);
+    final salt = randomBytes(32);
+    final slot = wrapMasterKey(
+      masterKey: master,
+      kek: kdf == Keyslot.kdfRaw
+          ? Uint8List.fromList(credential)
+          : deriveKek(
+              slot: Keyslot(
+                state: Keyslot.occupied,
+                kdf: kdf,
+                tCost: tCost,
+                mCostKib: mCostKib,
+                parallelism: parallelism,
+                salt: salt,
+                wrapNonce: Uint8List(24),
+                wrappedKey: Uint8List(32),
+                wrapTag: Uint8List(16),
+                label: label,
+              ),
+              password: credential),
+      databaseUuid: uuid,
+      slotIndex: 0,
+      wrapNonce: randomBytes(24),
+      salt: salt,
+      kdf: kdf,
+      tCost: tCost,
+      mCostKib: mCostKib,
+      parallelism: parallelism,
+      label: label,
+    );
+    final keyslots = Uint8List(Sb.keyslotSize * Sb.keyslotCount)
+      ..setRange(0, Keyslot.size, slot.encode());
+
+    final ring = KeyRing(master, uuid);
+    final e = Engine(
+        pageSize: profile.pageSize,
+        memtableEntries: memtableEntries,
+        vlogMin: profile.vlogMin);
+    e
+      ..setProfile(profile)
+      ..databaseUuid = uuid;
+    _keyslots[e] = keyslots;
+
+    // The file, and its first superblock, before a single page is encrypted.
+    final sb = Superblock(
+      pageSize: profile.pageSize,
+      commitId: 1,
+      pageCount: 2,
+      profile: profile,
+      vlogMin: profile.vlogMin,
+      cipher: 1,
+      featuresRequired: (1 << Feature.core) | (1 << Feature.cipher),
+      databaseUuid: uuid,
+      keyslots: keyslots,
+      writerId: e.writerId,
+      createdUtcMs: DateTime.now().millisecondsSinceEpoch,
+      modifiedUtcMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    final image = sb.encode();
+    sealSuperblock(image, ring);
+    final blank = Uint8List(2 * profile.pageSize)
+      ..setRange(0, Sb.size, image)
+      ..setRange(profile.pageSize, profile.pageSize + Sb.size, image);
+    File(path).writeAsBytesSync(blank, flush: true);
+
+    // §4.1 rule 1, now that there is somewhere durable to publish to — and
+    // before the [Database] below, whose constructor writes the catalog and
+    // the store-metadata attributes. Building it first would leave those pages
+    // in the clear for the life of the file: §8.3's conversion mixture, on a
+    // database nobody converted.
+    e
+      ..superblock = sb
+      ..installKeys(
+          ring,
+          NonceAllocator.open(
+              0, (floor) => _publishNonceFloor(path, sb, ring, floor)));
+    return Database(engine: e);
+  }
+
   /// Reads a file back into an engine.
-  static Database open(String path) {
+  ///
+  /// [key] is the credential of `spec/14-security.md` §3.3: 32 raw bytes for a
+  /// `kdf = 0` slot, or a password for an Argon2id slot. An encrypted file
+  /// opened without one fails with [CannotUnlockException], which §3.3 requires
+  /// to be reported identically for a missing keyslot and a wrong password.
+  static Database open(String path, {List<int>? key}) {
+    final lock = _takeWriterLock(path);
+    try {
+      return _open(path, key);
+    } finally {
+      lock.closeSync();
+    }
+  }
+
+  /// `spec/01-container.md` §10 — "one writing **process** per database,
+  /// enforced by an exclusive advisory lock on the database file
+  /// (`flock` / `LockFileEx`) held for its writing lifetime", and "a second
+  /// process opening for writing MUST fail with a clear 'locked by another
+  /// process' error and MUST NOT fall back to opening anyway".
+  ///
+  /// The lock rides the open file handle, so it is released when the handle
+  /// closes — including when the process dies, which is what makes a crashed
+  /// writer's database openable again with no cleanup step.
+  static RandomAccessFile _takeWriterLock(String path) {
+    final f = File(path).openSync(mode: FileMode.append);
+    try {
+      f.lockSync(FileLock.exclusive);
+    } on FileSystemException catch (e) {
+      f.closeSync();
+      throw LockedException('$path is open for writing by another process, '
+          'or lies on a filesystem that cannot lock it (${e.osError?.message ?? e.message})');
+    }
+    return f;
+  }
+
+  static Database _open(String path, List<int>? key) {
     final bytes = File(path).readAsBytesSync();
     if (bytes.length < 2 * Sb.size) {
       throw const CorruptionException('file is shorter than two superblocks');
@@ -159,9 +378,37 @@ abstract final class DatabaseFile {
       Uint8List.sublistView(bytes, 0, Sb.size),
       Uint8List.sublistView(bytes, pageSize, pageSize + Sb.size),
     );
+    // §3 of `spec/11-conformance.md`: an unknown bit in `features_required`
+    // is a refusal, named.
+    for (var b = 0; b < 64; b++) {
+      if (sb.featuresRequired & (1 << b) != 0 && !Feature.names.containsKey(b)) {
+        throw UnsupportedFeatureException(
+            'this file requires unknown feature bit $b');
+      }
+    }
+    KeyRing? ring;
+    // §6.1's attack is to set `cipher = 0` so the next writer stores
+    // plaintext, and §5.2 says outright that "a reader MUST NOT infer
+    // encryption from `cipher` alone". So the keyslots and the MAC decide,
+    // not the byte the attacker can edit: a superblock that still carries
+    // either is checked, whatever `cipher` now says.
+    final claimsPlain = sb.cipher == 0;
+    final hasSlot = sb.keyslots.any((b) => b != 0);
+    final hasMac = sb.sbMac.any((b) => b != 0);
+    if (claimsPlain && (hasSlot || hasMac)) {
+      throw const TamperException(
+          'this superblock says cipher = 0 while still carrying keyslots or a '
+          'MAC: someone has tried to turn encryption off '
+          '(spec/14-security.md section 6.1)');
+    }
     if (sb.cipher != 0) {
-      throw const UnsupportedFeatureException(
-          'this reader opens unencrypted files only');
+      if (key == null) throw const CannotUnlockException();
+      final master = _unlockMaster(sb, key);
+      if (master == null) throw const CannotUnlockException();
+      ring = KeyRing(master, Uint8List.fromList(sb.databaseUuid));
+      // §6.2 — verify `sb_mac` before acting on any other field, so an
+      // attacker cannot set `cipher = 0` or weaken an Argon2id cost.
+      verifySuperblockMac(ring.macKey, sb.encode());
     }
     // §2.1 step 7: ignore everything at or beyond `page_count` — debris from
     // an interrupted commit.
@@ -184,6 +431,7 @@ abstract final class DatabaseFile {
       vlogSegmentBytes: sb.vlogSegmentBytes,
       store: store,
       manifestRoot: sb.manifestRoot,
+      freelistRoot: sb.freelistRoot,
       checkpointRoot: sb.checkpointRoot,
       changefeedRoot: sb.changefeedRoot,
     );
@@ -196,6 +444,44 @@ abstract final class DatabaseFile {
         commitId: sb.commitId,
       );
     if (!e.writers.contains(sb.writerId)) e.writers.add(sb.writerId);
+    // §6: `page_size` is fixed at creation, so a name whose page size does not
+    // match this file is advisory metadata that cannot be adopted; the values
+    // in the superblock are what the engine already runs on.
+    if (sb.profile.pageSize == sb.pageSize) e.setProfile(sb.profile);
+    e.durabilityAchieved = Durability.fromCode(sb.durabilityAchieved);
+    e.superblock = sb;
+    _keyslots[e] = Uint8List.fromList(sb.keyslots);
+
+    if (ring != null) {
+      // §4.1 rule 1: "on open, before allocating anything, a writer MUST
+      // durably publish a superblock whose `next_nonce` is
+      // `persisted_next_nonce + 2^20`." Rule 1 is what makes the watermark
+      // move even for a session that writes nothing else; without it two
+      // successive crashed sessions both start at W and hand out the same
+      // values. It is published *here*, before the segments below are read
+      // and long before anything is written.
+      e.installKeys(
+          ring,
+          NonceAllocator.open(
+              sb.nextNonce, (floor) => _publishNonceFloor(path, sb, ring, floor)));
+    }
+
+    // §6: the free tree, read back so this session reuses space rather than
+    // extending the file for ever. Read before the segment extents so that
+    // nothing has allocated yet.
+    if (sb.freelistRoot != 0) {
+      final extents = <FreeExtent>[];
+      for (final (k, v) in e.freelist.scan()) {
+        final a = decodeKey(k) as CArray;
+        final d = decodeValue(v) as CDoc;
+        extents.add(FreeExtent(
+          ((a.items[0] as CInt).magnitude).lo,
+          ((a.items[1] as CInt).magnitude).lo,
+          ((d['pages']! as CInt).magnitude).lo,
+        ));
+      }
+      store.loadFree(extents);
+    }
 
     // Segment extents, addressed by the manifest's `start_page`/`pages`.
     for (final ref in e.manifest.all) {
@@ -215,7 +501,7 @@ abstract final class DatabaseFile {
       int u(String f) => ((d[f]! as CInt).magnitude).lo;
       bool b(String f) => (d[f] as CBool?)?.value ?? false;
       Uint8List? by(String f) => (d[f] as CBytes?)?.value;
-      final extent = store.readExtent(u('start_page'), u('pages'));
+      final extent = store.readExtentClear(u('start_page'), u('pages'));
       final seg = VlogSegment.fromExtent(
         extent,
         sb.pageSize,
@@ -253,7 +539,48 @@ abstract final class DatabaseFile {
       // file holds, so it does not overwrite the store metadata another SDK
       // wrote.
       initStoreMetadata: false,
-    );
+    )..catalog.loadTreeIndex();
+  }
+
+  /// §3.3 — tries the raw-key slots with [key] as 32 key bytes, then the
+  /// Argon2id slots with it as a password. Both failures report the same
+  /// thing, which is the requirement.
+  static Uint8List? _unlockMaster(Superblock sb, List<int> key) {
+    final uuid = Uint8List.fromList(sb.databaseUuid);
+    if (key.length == 32) {
+      final k = unlock(
+          keyslotArea: sb.keyslots,
+          kek: Uint8List.fromList(key),
+          databaseUuid: uuid);
+      if (k != null) return k;
+    }
+    return unlockWithPassword(
+        keyslotArea: sb.keyslots, password: key, databaseUuid: uuid);
+  }
+
+  /// §4.1's publish: the superblock, with the new floor, made durable before
+  /// the value it names is allowed to be handed out.
+  ///
+  /// Both slots, because the floor is the one field a crash must never see go
+  /// backwards, and a slot that still holds the old value is a slot §2.1 step
+  /// 3 could pick.
+  static void _publishNonceFloor(
+      String path, Superblock sb, KeyRing? ring, int floor) {
+    final image = sb.encode();
+    final bd = ByteData.view(image.buffer, image.offsetInBytes, image.length);
+    bd.setUint64(Sb.nextNonce, floor, Endian.little);
+    sealSuperblock(image, ring);
+    final f = File(path).openSync(mode: FileMode.writeOnlyAppend);
+    try {
+      f
+        ..setPositionSync(0)
+        ..writeFromSync(image)
+        ..setPositionSync(sb.pageSize)
+        ..writeFromSync(image)
+        ..flushSync();
+    } finally {
+      f.closeSync();
+    }
   }
 }
 

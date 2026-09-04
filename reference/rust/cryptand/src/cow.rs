@@ -125,6 +125,7 @@ impl CowTree {
         let id = pager.alloc_extent(1)?;
         let page = encode_node_page(
             pager.page_size,
+            pager.payload_cap(),
             n.is_leaf,
             &n.keys,
             &n.payloads,
@@ -322,7 +323,8 @@ impl CowTree {
     /// Writes the copied path back up, splitting where a page no longer fits.
     fn publish(&mut self, pager: &mut Pager, mut path: Vec<(u64, CowNode, usize)>) -> Result<()> {
         let mut level = path.len() - 1;
-        let mut replacements = self.split(pager.page_size, path[level].1.clone())?;
+        let cap = pager.payload_cap() + crate::container::PAGE_HEADER_BYTES;
+        let mut replacements = self.split(cap, path[level].1.clone())?;
         if path[level].0 != 0 {
             self.freed.push(path[level].0);
         }
@@ -348,7 +350,7 @@ impl CowTree {
                 parent.payloads.insert(at, child_payload(*id, n.subtree_entries()));
                 at += 1;
             }
-            replacements = self.split(pager.page_size, parent.clone())?;
+            replacements = self.split(cap, parent.clone())?;
             level -= 1;
         }
 

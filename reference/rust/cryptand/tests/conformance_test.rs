@@ -376,7 +376,7 @@ fn the_page_header_is_40_bytes_at_the_recorded_offsets() {
         ("extent_pages", ph::EXTENT_PAGES),
         ("commit_id", ph::COMMIT_ID),
         ("payload_len", ph::PAYLOAD_LEN),
-        ("reserved", ph::RESERVED),
+        ("stored_len", ph::STORED_LEN),
         ("nonce", ph::NONCE),
     ] {
         assert_eq!(offs[name].as_u64().unwrap() as usize, got, "page header offset of {name}");

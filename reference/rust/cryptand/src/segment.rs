@@ -202,6 +202,7 @@ pub fn node_page_bytes(keys: &[Vec<u8>], payloads: &[Vec<u8>]) -> usize {
 /// bytes to drift.
 pub fn encode_node_page(
     page_size: usize,
+    payload_size: usize,
     is_leaf: bool,
     keys: &[Vec<u8>],
     payloads: &[Vec<u8>],
@@ -210,9 +211,11 @@ pub fn encode_node_page(
     commit_id: u64,
 ) -> Result<Vec<u8>> {
     check_page_size(page_size)?;
+    if payload_size > page_size - PAGE_HEADER_BYTES {
+        return invalid("payload_size exceeds the page");
+    }
     let mut page = vec![0u8; page_size];
     let base = PAGE_HEADER_BYTES;
-    let payload_size = page_size - base;
     let count = keys.len();
     let prefix_len = page_prefix(keys);
 
@@ -685,7 +688,22 @@ pub struct SegmentBuilder {
 }
 
 impl SegmentBuilder {
+    /// `tag_reserve` is `14-security.md` §5.2's AEAD tag: 16 on an encrypted
+    /// database, 0 otherwise. It has to be subtracted here, before a single
+    /// cell is placed, because a page filled to `page_size - 40` has nowhere
+    /// left to put a tag.
     pub fn new(page_size: usize, segment_id: u64, level: u8, group: u8, filter_bits: u16) -> Result<SegmentBuilder> {
+        SegmentBuilder::with_reserve(page_size, 0, segment_id, level, group, filter_bits)
+    }
+
+    pub fn with_reserve(
+        page_size: usize,
+        tag_reserve: usize,
+        segment_id: u64,
+        level: u8,
+        group: u8,
+        filter_bits: u16,
+    ) -> Result<SegmentBuilder> {
         check_page_size(page_size)?;
         Ok(SegmentBuilder {
             page_size,
@@ -694,7 +712,7 @@ impl SegmentBuilder {
             group,
             single_tree: None,
             filter_bits_per_key: filter_bits,
-            payload_size: page_size - PAGE_HEADER_BYTES,
+            payload_size: page_size - PAGE_HEADER_BYTES - tag_reserve,
             pages: Vec::new(),
             leaf: None,
             pending: Default::default(),
@@ -812,6 +830,7 @@ impl SegmentBuilder {
     fn emit_page(&mut self, p: &PendingPage) -> Result<u64> {
         let page = encode_node_page(
             self.page_size,
+            self.payload_size,
             p.is_leaf,
             &p.keys,
             &p.payloads,
@@ -929,7 +948,7 @@ impl SegmentBuilder {
         );
         let payload = f.encode_payload();
         let first = self.pages.len() as u64 + 1;
-        let capacity = self.page_size - PAGE_HEADER_BYTES;
+        let capacity = self.payload_size;
         let mut off = 0usize;
         while off < payload.len() {
             let n = (payload.len() - off).min(capacity);
@@ -981,7 +1000,8 @@ impl SegmentBuilder {
         // so they cost a candidate, never a correct answer.
         let mut min_key = self.min_key.clone().unwrap_or_default();
         let mut max_key = self.max_key.clone().unwrap_or_default();
-        let budget = (self.page_size - base)
+        let budget = self
+            .payload_size
             .saturating_sub(w.len() + 8 + self.tree_span.len() * 12 + 8);
         if min_key.len() + max_key.len() > budget {
             let half = (budget / 2).min(min_key.len());

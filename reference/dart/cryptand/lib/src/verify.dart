@@ -25,6 +25,9 @@ library;
 import 'dart:typed_data';
 
 import 'cke.dart';
+import 'container.dart';
+import 'errors.dart';
+import 'security.dart';
 import 'engine.dart';
 import 'manifest.dart';
 import 'segment.dart';
@@ -262,6 +265,62 @@ extension EngineVerify on Engine {
         }
       }
     }
+  }
+
+  /// `spec/01-container.md` §9 step 8 — "when the file is encrypted **and a
+  /// key is supplied**, verifies `sb_mac`, every page's AEAD tag, and that no
+  /// `(key, nonce)` pair occurs twice anywhere in the file".
+  ///
+  /// It exists because the other implementation's verifier is what caught the
+  /// last defect here: a superblock whose `sb_mac` no longer described its own
+  /// fields opened, read and verified perfectly on this side, because this
+  /// side did not look. A verifier that checks less than the format specifies
+  /// is a verifier that certifies whatever it happens to implement.
+  List<Finding> verifyEncryption() {
+    final f = <Finding>[];
+    final sb = superblock;
+    final ring = keys;
+    if (sb == null || sb.cipher == 0 || ring == null) return f;
+    try {
+      verifySuperblockMac(ring.macKey, sb.encode());
+    } on TamperException catch (e) {
+      f.add(Finding('01 §9.8', e.message));
+    }
+    // Every page's tag, and §4's uniqueness over the nonces they carry. A
+    // repeated `(key, nonce)` "discloses their XOR and leaks the Poly1305
+    // authentication key, which turns tampering detection off" — so it is
+    // checked over the whole page space, not sampled.
+    final seen = <int>{};
+    for (var p = 2; p < store.pageCount; p++) {
+      final Uint8List raw;
+      try {
+        raw = store.readClear(p);
+      } on CryptandException {
+        continue;
+      }
+      if (raw.every((b) => b == 0)) continue;
+      final PageHeader h;
+      try {
+        h = PageHeader.read(raw, pageId: p);
+      } on CryptandException {
+        continue; // an interior extent page carries no header (§3)
+      }
+      if (!h.isEncrypted) continue;
+      if (!seen.add(h.nonce)) {
+        f.add(Finding('14 §4', 'nonce ${h.nonce} is used by more than one page',
+            segmentId: null));
+      }
+      try {
+        store.read(p); // decrypts, which is the tag check
+      } on TamperException catch (e) {
+        f.add(Finding('01 §9.8', 'page $p: ${e.message}'));
+      } on CryptandException {
+        // A checksum failure is corruption and belongs to step 2, which has
+        // already reported it; §9 is explicit that the two are not the same
+        // class.
+      }
+    }
+    return f;
   }
 
   /// §11.11 — `locality_debt` is at or below `locality_debt_pct`.

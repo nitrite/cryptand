@@ -457,7 +457,7 @@ fn a_crash_at_a_randomized_point_leaves_a_structurally_valid_database() {
                         break;
                     }
                 }
-                std::mem::forget(e);
+                drop(e);
             }
             let mut e = Engine::open(&t.path, None).unwrap();
             let r = e.verify().unwrap();

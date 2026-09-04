@@ -82,6 +82,26 @@ final class UnavailableRangeException extends CryptandException {
 /// A transaction's write set collided with a batch sequenced after it began.
 /// `spec/10-transactions.md` section 3: "On conflict the transaction aborts;
 /// the format does not define automatic retry."
+/// `spec/14-security.md` section 3.3 and `spec/00-conventions.md` section 9:
+/// an encrypted file, and no keyslot accepted the credential.
+///
+/// One class for both causes on purpose — section 3.3 requires that "a failure
+/// across all slots be indistinguishable from 'no such slot'", so a missing
+/// key, a wrong key and a keyslot lifted from another database all read the
+/// same to a caller.
+final class CannotUnlockException extends CryptandException {
+  const CannotUnlockException()
+      : super('cannot unlock: no keyslot accepted the key');
+}
+
+/// `spec/01-container.md` section 10 — another process holds the writer lock.
+///
+/// Its own class because section 10 forbids the one alternative: an
+/// implementation "MUST NOT fall back to opening anyway".
+final class LockedException extends CryptandException {
+  const LockedException(super.message);
+}
+
 final class ConflictException extends CryptandException {
   const ConflictException(super.message, {this.key});
 

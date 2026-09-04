@@ -77,7 +77,11 @@ pub mod ph {
     pub const EXTENT_PAGES: usize = 12;
     pub const COMMIT_ID: usize = 16;
     pub const PAYLOAD_LEN: usize = 24;
-    pub const RESERVED: usize = 28;
+    /// `14-security.md` §5.2 — the number of payload bytes actually
+    /// *stored* on the page, after compression and after encryption.
+    /// Zero means "same as `payload_len`", which is every page that is
+    /// neither compressed nor encrypted, so no existing byte moves.
+    pub const STORED_LEN: usize = 28;
     pub const NONCE: usize = 32;
 }
 
@@ -549,6 +553,14 @@ pub struct PageHeader {
     pub extent_pages: u32,
     pub commit_id: u64,
     pub payload_len: u32,
+    /// `14-security.md` §5.2. `01-container.md` §3 defines `payload_len` as the
+    /// "uncompressed, unencrypted payload length" while §5.2 says the AEAD tag
+    /// "is inside `payload_len`" — the two cannot both hold, and neither is
+    /// implementable alone: a decryptor needs the exact stored length (Poly1305
+    /// covers exactly the ciphertext) and a decompressor needs the plaintext
+    /// length. Both are kept, `payload_len` meaning what §3 says and this
+    /// field, in the reserved u32 at offset 28, meaning what §5.2 needs.
+    pub stored_len: u32,
     pub nonce: u64,
 }
 
@@ -566,6 +578,7 @@ impl PageHeader {
             extent_pages: u32le(b, ph::EXTENT_PAGES),
             commit_id: u64le(b, ph::COMMIT_ID),
             payload_len: u32le(b, ph::PAYLOAD_LEN),
+            stored_len: u32le(b, ph::STORED_LEN),
             nonce: u64le(b, ph::NONCE),
         })
     }
@@ -580,6 +593,7 @@ impl PageHeader {
         put_u32(page, ph::EXTENT_PAGES, self.extent_pages);
         put_u64(page, ph::COMMIT_ID, self.commit_id);
         put_u32(page, ph::PAYLOAD_LEN, self.payload_len);
+        put_u32(page, ph::STORED_LEN, self.stored_len);
         put_u64(page, ph::NONCE, self.nonce);
         let end = PageHeader::checksum_range_end(page, self);
         let crc = crc32c(&page[4..end]);
@@ -624,5 +638,14 @@ impl PageHeader {
     }
     pub fn compressed(&self) -> bool {
         self.flags & page_flags::COMPRESSED != 0
+    }
+    /// The bytes actually on the page, which is what a cipher and a codec both
+    /// have to be handed.
+    pub fn stored(&self) -> usize {
+        if self.stored_len != 0 {
+            self.stored_len as usize
+        } else {
+            self.payload_len as usize
+        }
     }
 }

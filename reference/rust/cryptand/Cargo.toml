@@ -27,7 +27,7 @@ name = "p1_height"
 path = "benches/p1_height.rs"
 
 [[bin]]
-name = "p3_write_scale"
+name = "p3_engine_write_scale"
 path = "benches/p3_write_scale.rs"
 
 [[bin]]

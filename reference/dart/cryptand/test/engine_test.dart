@@ -212,13 +212,32 @@ void main() {
 
     test('with the mechanisms off it degrades, which is what makes the test '
         'meaningful', () {
-      final off = age(LocalityPolicy.none);
-      final ratio = off.aged.totalPageReads / off.fresh.totalPageReads;
-      printOnFailure('${off.aged}  ratio $ratio');
+      // The two bounds have two different mechanisms under them, and the
+      // control for each has to be the one it depends on.
+      //
+      // `aged/fresh` is about **promotion**: ageing scatters the live values,
+      // and clustered promotion is what re-orders them. Its control therefore
+      // turns promotion off and leaves readahead on.
+      //
+      // `value_reads_per_scanned_row` is about **readahead**, whose second
+      // half is section 8.1's "MUST coalesce reads of records that fall in the
+      // same page". Turning everything off degrades the *fresh* scan by the
+      // same factor as the aged one, so the ratio reads ~1.00x while every
+      // dereference is its own I/O — informative about v/row, useless as a
+      // control for the ratio. Measuring both against `none` used to hide
+      // that behind one number.
+      final noPromotion = age(const LocalityPolicy(clusteredPromotion: false));
+      final ratio =
+          noPromotion.aged.totalPageReads / noPromotion.fresh.totalPageReads;
+      printOnFailure('${noPromotion.aged}  ratio $ratio');
       expect(ratio, greaterThan(4.0),
-          reason: 'a test that passes with the mechanisms disabled is not '
-              'testing them');
-      expect(off.aged.valueReadsPerScannedRow, greaterThan(0.5));
+          reason: 'a test that passes with promotion disabled is not testing '
+              'promotion');
+
+      final off = age(LocalityPolicy.none);
+      printOnFailure('${off.aged}');
+      expect(off.aged.valueReadsPerScannedRow, greaterThan(0.5),
+          reason: 'without readahead every dereference is its own I/O');
     });
 
     test('collection is what merges the generations, not promotion alone', () {

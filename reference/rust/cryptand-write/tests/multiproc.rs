@@ -4,6 +4,8 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use cryptand_write::multiproc::{
     attach, sidecar_path, ReaderMode, Sidecar, VolatileReason, DEFAULT_READER_HEARTBEAT_MS,
@@ -41,6 +43,7 @@ fn writer(dir: &Dir, slots: u32) -> Sidecar {
     Sidecar::create(&sidecar_path(&dir.db()), slots, INTERVAL).unwrap()
 }
 
+#[allow(dead_code)] // the readers of §8 are real processes; see `mp_reader`
 fn reader(dir: &Dir) -> Sidecar {
     Sidecar::open(&sidecar_path(&dir.db()), INTERVAL).unwrap()
 }
@@ -189,6 +192,27 @@ fn separate_processes_claim_distinct_slots_and_pin_the_retention_floor() {
     let dir = Dir::new();
     let sc = writer(&dir, 8);
     let commits = [900u64, 400, 1200];
+    // §8 rule 5: a reader reports `writer=absent` when the writer's heartbeat
+    // has gone stale, and it is right to. This test is about a **live**
+    // writer's retention floor, so the writer has to beat — and it never did.
+    // One heartbeat at creation stays fresh for `STALE_MULTIPLIER * INTERVAL`
+    // = 600 ms, which is longer than spawning three processes takes on an idle
+    // machine and shorter than it takes under a loaded `cargo test
+    // --workspace`. So the reader printed an extra `writer=absent` line and the
+    // assertion below read it where it expected `released`. A test whose result
+    // depends on how busy the machine is has not measured the protocol.
+    let beating = Arc::new(AtomicBool::new(true));
+    let beater = {
+        let sidecar = Sidecar::open(&sidecar_path(&dir.db()), INTERVAL).unwrap();
+        let stop = beating.clone();
+        std::thread::spawn(move || {
+            while stop.load(Ordering::Relaxed) {
+                let _ = sidecar.refresh_writer(cryptand_write::multiproc::now_ms());
+                std::thread::sleep(std::time::Duration::from_millis(INTERVAL / 2));
+            }
+        })
+    };
+
     let mut children = Vec::new();
     let mut indices = Vec::new();
     for c in commits {
@@ -215,6 +239,9 @@ fn separate_processes_claim_distinct_slots_and_pin_the_retention_floor() {
         assert_eq!(line(&mut out), "released");
         assert!(child.wait().unwrap().success());
     }
+    beating.store(false, Ordering::Relaxed);
+    beater.join().unwrap();
+
     assert!(
         sc.slots().unwrap().iter().all(|s| s.is_free()),
         "every reader released its slot on exit"
@@ -247,7 +274,7 @@ fn a_reader_process_that_stops_beating_is_reclaimed_and_the_floor_lifts() {
 fn racing_processes_never_double_claim_a_slot() {
     let dir = Dir::new();
     let slots = 12u32;
-    let sc = writer(&dir, slots);
+    let _sc = writer(&dir, slots);
     let mut children = Vec::new();
     for i in 0..slots {
         children.push(spawn_reader(&dir, 1_000 + i as u64, 2_000, &[]));

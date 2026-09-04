@@ -285,11 +285,53 @@ final class Catalog {
     }
   }
 
+  /// The catalog entry that carries tree 3's own root, §2: "every other tree's
+  /// root is in its catalog descriptor — **including tree 3's**, which is
+  /// bootstrapped by scanning the catalog if its descriptor is missing."
+  static const String treeIndexDescriptor = r'$tree_index';
+
   /// Bootstraps tree 3 by scanning the catalog, §2.
   void rebuildTreeIndex() {
     for (final (name, d) in all.toList()) {
       byId.put(_idKey(d.treeId), encodeValue(CStr(name)));
     }
+  }
+
+  /// Adopts tree 3's persisted root, or rebuilds it when there is none.
+  ///
+  /// The descriptor has to be *read*, not only written: without it every open
+  /// rebuilds tree 3 from scratch, and the pages of the tree it replaces are
+  /// reachable from nothing and recorded in no free tree — a leak per open,
+  /// which `spec/01-container.md` §9 step 7 finds and which nothing else would.
+  void loadTreeIndex() {
+    final root = get(treeIndexDescriptor)?.root ?? 0;
+    if (root != 0) {
+      byId.root = root;
+    } else {
+      rebuildTreeIndex();
+    }
+  }
+
+  /// Publishes tree 3's root into its descriptor.
+  void publishTreeIndex() {
+    final root = byId.root;
+    if (root == 0) return;
+    final existing = get(treeIndexDescriptor);
+    if (existing != null && existing.root == root) return;
+    final d = existing == null
+        ? TreeDescriptor.create(
+            treeId: TreeId.treeIndex,
+            kind: TreeKind.internal,
+            keyKind: 'u32',
+            root: root,
+            levelled: false)
+        : TreeDescriptor(CDoc({
+            ...existing.doc.fields,
+            'root': CInt.of(NumType.u64, root),
+          }));
+    // Straight into the catalog tree: `create` would allocate a fresh
+    // `tree_id`, and tree 3's is reserved (§2).
+    tree.put(_nameKey(treeIndexDescriptor), d.encode());
   }
 
   // ---------------------------------------------------------------------

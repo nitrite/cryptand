@@ -164,8 +164,9 @@ impl Region {
         // `data_offset` is page-aligned, which is the property that makes a
         // zero-copy mmap possible at all.
         let data_offset = page_size;
-        let bytes = data_offset + slots * stride as u64;
-        let pages = bytes.div_ceil(page_size) as u32;
+        // `14-security.md` §5.4 — an encrypted region's data area is chunked,
+        // so it needs more pages than `ceil(len / page_size)`.
+        let pages = (1 + pager.extent_data_pages(slots * stride as u64)) as u32;
         let start = pager.alloc_extent(pages)?;
         let header = RegionHeader {
             dim,
@@ -187,10 +188,6 @@ impl Region {
         Ok(Region { start_page, pages: h.extent_pages.max(1), header })
     }
 
-    fn slot_offset(&self, page_size: usize, slot: u64) -> u64 {
-        self.start_page * page_size as u64 + self.header.data_offset + slot * self.header.stride as u64
-    }
-
     pub fn write_slot(&mut self, pager: &mut Pager, slot: u64, v: &[f32]) -> Result<()> {
         if slot == Region::NULL_SLOT {
             return invalid("slot 0 is reserved so that slot_id 0 is a null pointer");
@@ -210,16 +207,24 @@ impl Region {
             }
             _ => return invalid("this build writes f32 regions only"),
         }
-        let at = self.slot_offset(pager.page_size, slot);
-        pager.write_at(at, &buf)
+        pager.write_extent_data(
+            self.start_page,
+            self.header.data_offset,
+            slot * self.header.stride as u64,
+            &buf,
+        )
     }
 
     pub fn read_slot(&self, pager: &mut Pager, slot: u64) -> Result<Vec<f32>> {
         if slot >= self.header.slot_count {
             return corrupt(format!("slot {slot} is past the region's {} slots", self.header.slot_count));
         }
-        let at = self.slot_offset(pager.page_size, slot);
-        let raw = pager.read_at(at, self.header.stride as usize)?;
+        let raw = pager.read_extent_data(
+            self.start_page,
+            self.header.data_offset,
+            slot * self.header.stride as u64,
+            self.header.stride as usize,
+        )?;
         let d = self.header.dim as usize;
         Ok(match self.header.dtype {
             DType::F32 => (0..d)

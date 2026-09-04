@@ -10,10 +10,18 @@ Dart implementation and back.
 **The spec is normative. Where this code and the spec disagree, the spec wins
 and this code is wrong** (`11-conformance.md` §7).
 
-- **143 Rust tests** in this crate (**208 across the workspace**), `cargo test`
-  clean, zero warnings, no `unsafe` anywhere in the library.
+- **147 Rust tests** in this crate (**212 across the workspace**), `cargo test`
+  clean in **both** the debug and release profiles, zero warnings, no `unsafe`
+  anywhere in the library.
 - **Level 4** declared (`11-conformance.md` §1), full write profile.
-- The Dart suite is **552 tests** and still passes with the changes §7 lists.
+- The Dart suite is **561 tests** and still passes with the changes §7 lists.
+- The round-trip gate runs in **four** directions: plaintext both ways and
+  **encrypted** both ways (§3).
+
+**Read §5's defects 58–65 first if you are returning to this.** The largest by
+some distance is 58: `14-security.md` §5.2's page encryption was not
+implemented, so every inline value, every key and every index entry in an
+"encrypted" database sat on disk in the clear, and every test passed.
 
 ---
 
@@ -97,7 +105,7 @@ alone.
 |---|---|---|
 | read tail | p99 ≤ 2, p99.9 ≤ 3 | **p99 1, p99.9 2** (early exit on, random-order write load) |
 | aged scan | ≤ 1.5×, `value_reads_per_scanned_row` < 0.3 | **1.00×, 0.079**, `locality_debt` **0.0 %** |
-| foreground stall | ≤ 8 ms on `mobile` | **worst 1 ms**, 0 violations in 4 000 operations |
+| foreground stall | ≤ 8 ms on `mobile` | **worst 1 ms**, 0 violations in 4 000 operations (release; on an unoptimized build the clock is reported and the §5.2 step bound asserted instead) |
 | containment | serve outside the range, name it | **800 keys served, 200 refused by name** |
 | filter cross-check | bytes, not the rate | header and blocks byte-identical to the vector |
 | concurrency | snapshot per reader, verify clean | 8 writers × 3 scanners, compaction throughout, verify clean |
@@ -105,6 +113,8 @@ alone.
 | range delete under filter | no resurrection | passes, with the filter asserted to prune first |
 | profile round trip | data identical, page size fixed | `mobile ↔ tablet`, and `→ desktop` refused |
 | crash | acknowledged batches survive | 3 durability modes × 4 kill points |
+| writer exclusion (`01` §10) | second writer refused by name | `Error::Locked`, and the lock released on `close` |
+| encrypted round trip | A ↔ B over a file neither can read without the key | both directions, plus the wrong key refused by both |
 
 The aged-scan controls fail, which is what makes the test mean anything:
 
@@ -113,8 +123,18 @@ shape                                                scan    v/row   debt %   ru
 all four MUSTs in force                             1.00x    0.079      0.0      1
   control: promotion but no collection              1.61x    0.128     35.7      4
   control: no readahead window                      1.00x    1.000      0.0      1
-  floor: no promotion, no collection                1.00x    1.000    100.0      5
+  floor: no promotion, no collection                1.00x    1.000      1.7      5
 ```
+
+Two of those columns moved in this round and both moves are the point:
+
+- The floor case's debt was **100 %** and is now 1.7 %. That was defect 64 —
+  §6.9 counting the hot tier, which made a database with *no* cold runs at all
+  read as maximally unclustered.
+- The scan ratio is the wrong control for the readahead row and the *right* one
+  for the promotion row; they are two mechanisms and they now have two controls.
+  Turning everything off degrades the fresh scan by the same factor as the aged
+  one, which is why the floor case reads 1.00× while its `v/row` reads 1.000.
 
 ## 3. Cross-language portability — the round-trip gate
 
@@ -139,12 +159,30 @@ and it must be tested as such.**"*
    ok   dart wrote 400 documents, digest cf3da902
    ok   rust read the same digest cf3da902 from dart's file
    ok   rust agrees on documents, dictionary, index and page size
-   ok   rust verified dart's file: no corruption, 33 repairable leaks
+   ok   rust verified dart's file: no corruption, 8 repairable leaks
    ok   rust mutated it to 419 documents, digest 0ce6b59b
    ok   dart reads back exactly what rust wrote: digest 0ce6b59b
    ok   the field name rust added to the dictionary is visible to dart
    ok   after mutations by both, they agree: digest c47efb25
+
+== 3. rust writes, dart reads, dart mutates, rust reads -- ENCRYPTED
+   ... the same eight lines, over a file neither can read without the key
+
+== 4. dart writes, rust reads, rust mutates, dart reads -- ENCRYPTED
+   ... and the same eight the other way
+
+== 5. an encrypted file refuses the wrong key, in both implementations
+   ok   rust refused the wrong key: cannot unlock: no keyslot accepted the key
+   ok   dart refused the wrong key: cannot unlock: no keyslot accepted the key
 ```
+
+**Directions 3 and 4 are new, and `14-security.md` is the chapter with the most
+ways to be individually right and mutually incompatible.** The page AAD, the
+stored payload length, the per-record counter, the per-chunk counter, the
+keyslot AAD and the superblock MAC are six independent chances for two
+implementations to each encrypt correctly and neither to read the other. A
+plaintext round trip exercises none of them. Everything below the MAC reproduced
+first run; the MAC did not, and that is defect 62.
 
 The fixture is 400 documents with a name dictionary, a non-unique index, values
 on both sides of `vlog_min` (so inline *and* separated), and a mutation that
@@ -198,11 +236,17 @@ early exit — without it p99 is 3, exactly as §4.1 records.
 | XChaCha20-Poly1305 encrypt / decrypt | 366 / 429 MiB/s | 1–3 GB/s per core |
 | tag overhead per 8 KiB page | 0.20 % | 0.4 % at 4 KiB — consistent |
 | Argon2id `mobile` (t=3, 64 MiB, p=1) | 90 ms | ~250 ms on a mid-range ARM |
-| Argon2id `desktop` (t=4, 256 MiB, p=4) | 531 ms | ~500 ms |
-| cipher cost on the write path | 1.28× | "not the bottleneck" below 1–3 GB/s storage |
+| Argon2id `desktop` (t=4, 256 MiB, p=4) | 530 ms | ~500 ms |
+| cipher cost on the write path | **1.30×** | "not the bottleneck" below 1–3 GB/s storage |
 
 **Argon2id hits its target natively**, which confirms the Dart report's defect
 32 diagnosis: the KDF is not slow, a scalar VM is 3–6× off native.
+
+**The 1.30× is now a real number.** Before defect 58 it measured the cost of
+encrypting value-log records and nothing else, on a write path where pages were
+stored in the clear; it now covers every page as well. That it barely moved is
+the useful part: the AEAD is not what a write costs, which is exactly §12's
+claim, and the 0.20 % tag overhead is the whole space bill on an 8 KiB page.
 
 **Filter false-positive rate** (`filter_fpr`), 200 000 keys over five key
 shapes, 2 000 000 absent probes:
@@ -221,6 +265,175 @@ Stable to within 5 % across shapes, and **0.227–0.235 % at 16 bits** reproduce
 ## 5. Defects and divergences found
 
 Numbering continues the Dart report's, which ended at 49.
+
+### ⚠⚠ Defect 58 — `14-security.md` §5.2's page encryption was not implemented, in either language
+
+An "encrypted" database encrypted its **value-log records and nothing else**.
+Every inline value, every key, every index entry, every catalog descriptor and
+every B+tree page sat on disk in the clear under a `cipher = 1` superblock.
+
+```
+plaintext occurrences of the secret in an ENCRYPTED file: 50
+```
+
+50 of 50, from a test that writes `TOPSECRETPAYLOAD` fifty times through the
+ordinary `put` path on `desktop`, where `vlog_min` is 256 B so nothing separates.
+On `mobile`, where `vlog_min` is 1024 B, *most documents are inline* — so the
+profile aimed at the device most likely to be stolen was the one that encrypted
+least.
+
+Nothing caught it, and the reasons are worth writing down:
+
+- `KeyRing::encrypt_page` and `decrypt_page` existed, were correct, and were
+  called **only from a benchmark**. The primitive being present and tested is
+  what made the absence invisible.
+- `unencrypted_pages` was a `Counters` field no code path ever incremented, so
+  it read **0** — which is exactly "fully encrypted". `13-operations.md` §6
+  already forbids this ("a metric you cannot compute MUST be reported
+  unavailable, never given a plausible value"); the rule was in the spec and the
+  metric still lied. It now counts on the read path, from each page's own
+  `flags.ENCRYPTED`, and reports *unavailable* when no page has been read.
+- §13's mandatory security tests all passed. `structure_and_checksums_are_
+  readable_without_the_key` verifies page **headers** without a key, which §5.1
+  keeps in the clear — it passes identically whether or not payloads are
+  encrypted. `a_flipped_ciphertext_byte…` flips a byte in a value-log record,
+  the one thing that *was* encrypted.
+- There was **no API to create an encrypted database**. Every test converted one
+  after the fact, which is §8.3's mixture, so the pages written before the
+  switch are legitimately in the clear — and that legitimate mixture masked the
+  fact that the pages written *after* it were too. `Engine::create_encrypted`
+  now exists, and the flag test uses it.
+
+Fixed by putting the cipher in the `Pager`, which is the only place both the
+copy-on-write trees and the segment builder pass through, plus §5.4 for vector
+regions. Three new tests, all of which fail against the old code: no needle in
+the clear, every data page carries `flags.ENCRYPTED` with a distinct nonce, and
+a vector slot's `f32` bytes are not on disk. The Dart side has the same three.
+
+**The general lesson, for a format with a security chapter: test what is
+*absent* from the bytes, not what the API returns.** Every test here asked "does
+it round-trip", and encryption round-trips perfectly when it does not happen.
+
+### ⚠ Defect 59 — `01-container.md` §3 and `14-security.md` §5.2 contradict each other on `payload_len`
+
+§3: "`payload_len` — uncompressed, unencrypted payload length". §5.2: the AEAD
+tag "is appended to the ciphertext and **is inside `payload_len`**". Both cannot
+hold, and neither is implementable alone — a decryptor needs the exact stored
+length (Poly1305 covers exactly the ciphertext, one byte either way fails the
+tag) and a decompressor needs the plaintext length. A page that is compressed
+*and* encrypted needs both at once.
+
+Fixed by giving the reserved `u32` at offset 28 a name: `stored_len`, the
+payload bytes as stored, `0` meaning "same as `payload_len`". Nothing moves —
+every page that is neither compressed nor encrypted writes 0 there and is
+byte-identical to what the draft described, which is why the conformance vector
+needed only a rename.
+
+Also new in §5.2, because it is not derivable and both implementations had to
+discover it: **a page builder must reserve the tag before laying out cells.** A
+page filled to `page_size - 40` has nowhere to put 16 more bytes, and finding
+that out at write time means a page that cannot be written at all.
+
+### ⚠ Defect 60 — `14-security.md` §5.4's per-extent nonce is reused on the first ordinary write
+
+§5.4 fixed a chunk's nonce at `1 || counter || head_page_id || i` with
+"`counter` … the extent's single allocated nonce value, stored in its head
+page". That holds only if every chunk is written exactly once. A vector region
+breaks it immediately: `stride` is far below `page_size`, so two slots share a
+chunk and are written at different times, and a slot may be rewritten outright.
+Same key, same nonce, two plaintexts — the failure §4 opens by calling "not a
+hardening measure; it is the whole thing".
+
+Fixed: the counter is **per chunk and per write**, stored in the clear at the
+head of the chunk, exactly as §5.3 already does for a value-log record and for
+the same reason. A partial-chunk write is a read-modify-write under a fresh
+counter. The cost is 8 bytes a chunk, so an encrypted extent is ~0.6 % larger
+rather than ~0.4 %.
+
+### ⚠ Defect 61 — `14-security.md` §4.1's nonce floor was derived, not held, and underflowed
+
+`allocate_nonce` computed its base as `sb.next_nonce - NONCE_GAP`, which is
+correct only if rule 1's publish has already run. Encryption can be switched on
+*after* open (§8.3's conversion), which is a writer that never passed through
+the open-time publish, so on a converting database the subtraction ran at
+`next_nonce = 0`.
+
+- **Debug**: `attempt to subtract with overflow`, three of thirteen security
+  tests panicking.
+- **Release**: it wraps, `base + n` wraps back, and the session quietly hands
+  out nonces `0 … 2²⁰` **from a floor that was never published** — precisely the
+  crash-reuse hole §4.1 exists to close.
+
+The report this file replaces said "zero warnings, `cargo test` clean". It was
+run in release only. **`cargo test` and `cargo test --release` are different
+tests of arithmetic**, and a format whose security rests on a counter should run
+both. Fixed by holding the cursor and the published limit as engine state, with
+one cursor shared by pages and value-log records — two would be two chances to
+hand the same value out twice.
+
+### ⚠ Defect 62 — a writer sealed `sb_mac` into the file and kept the old one in memory
+
+`write_superblock` sealed the image it wrote but never updated
+`self.sb.sb_mac`. From the next write on, `verify_superblock` recomputed the MAC
+over the *current* fields and compared it against a MAC that described the
+fields as they were *before* — so it reported the writer's own file as
+**tampering**. §4.1's open-time nonce publish is a superblock write, which makes
+this every encrypted file immediately after every open.
+
+**The only verifier that noticed was the other implementation's**, in the
+encrypted round trip: Rust opened a Dart-written encrypted file fine and then
+failed it on `sb_mac`. This implementation's own tests could not see it — the
+one test that runs `verify()` on an encrypted engine asserts that
+`Class::Corruption` is empty, and tampering is deliberately a different class.
+
+§6.2 now states the second half of the rule explicitly.
+
+### ⚠ Defect 63 — tree 1 was written as a log of everything ever freed, not as the free list
+
+`write_free_list` only ever *inserted*, on the reasoning that "a commit writes
+only what is new". But an extent **leaves** the free list when it is reclaimed
+(§6), and a best-fit allocation that takes part of one moves the remainder to a
+different key. Neither was ever removed, so the persisted tree 1 was a strict
+superset of the truth.
+
+That is invisible to the implementation that wrote it, which keeps its own list
+in memory and never reads tree 1 back within a session. It is fatal to any
+*other* implementation: it allocates a page tree 1 calls free, the live
+superblock still names it, and the catalog it overwrites is gone. Found by the
+round-trip gate the moment the Dart side started reading tree 1 at all — Dart
+could not open a file it had written and Rust had mutated.
+
+### ⚠ Defect 64 — `04-segments.md` §6.9's locality debt flags a healthy database, twice over
+
+§6.9's surplus set was defined over "the value-log segments", with "live bytes
+in a run that is not key-clustered at all are surplus regardless of where it
+sorts". Both halves flag a database that is not sick:
+
+- A hot run is unclustered **by construction** — §6.3 clusters a generation when
+  it is *promoted* — so a freshly loaded database, every live value in one hot
+  run, reads **100 %** against a 20 % bound. This implementation's own
+  `cryptand verify` said so on its own fresh file.
+- A hot run is also the write path's *tail*, holding everything written since
+  the last last-level compaction, and **neither remedy §6.9 names can reach
+  it**: promotion happens at the next last-level compaction, which the level
+  policy schedules, and collection merges cold generations. A healthy database
+  with one clustered cold run plus a live tail read **40 %** that collecting
+  could not move.
+
+Fixed by defining `ideal_runs` and the surplus set over the **cold tier** only,
+with the denominator staying all live bytes. The measurement that motivated the
+definition is untouched — the nineteen runs of §6.9's table are cold
+generations — and P8's control still fails at 35.7 % debt with collection off.
+
+### ⚠ Defect 65 — `10-transactions.md` §2 step B says "seal/flush", and the two words are different things
+
+Step B is "flush the open value-log segments' tails". Sealing is
+`04-segments.md` §6.2's *terminal* state — no further appends, ever — and doing
+it per commit retires the open run every time, so a database gets **one
+value-log run per commit**. That is precisely the surplus §6.9 bounds: the Dart
+implementation sealed at commit, loaded 400 documents in three commits, produced
+three runs against an `ideal_runs` of one, and read 45 % locality debt on a
+freshly written database. §2 now says "flush", and says why.
 
 ### ⚠ Defect 50 — `04-segments.md` §6.2 puts records inside a page whose checksum covers the whole page
 
@@ -314,14 +527,21 @@ reclaims. A first attempt at a fixed-point loop *diverged*: re-putting the whole
 free list each round copied a path per entry and produced 68 leaks instead of 7.
 §6 should say which discipline it expects.
 
-### Divergence 56 — a Dart-written file has no free tree, so a Rust reader reports every orphaned page as a leak
+### Divergence 56 — CLOSED: a Dart-written file now carries a free tree
 
-Dart "records free pages without reclaiming them" (its own `cow.dart` says so)
-and the new file layer writes `freelist_root = 0`. A Rust reader's §9 step 7
-therefore reports **33 leaks** on the interop fixture. Correctly classified —
-leaks are repairable and are not corruption — and it is the first time the two
-implementations' different simplifications have been visible to each other,
-which is the point of a round trip.
+The original finding: Dart recorded free pages without reclaiming them and wrote
+`freelist_root = 0`, so a Rust reader's §9 step 7 reported **33 leaks** on the
+interop fixture.
+
+Dart's `PageStore` now keeps §6's free tree, best-fits from it among extents at
+or below `min_retained_commit`, extends the file only when nothing fits, and
+persists it as tree 1. The remaining count on that fixture is **8**, all of them
+tree 1's own pages — defect 55, which is a property of the format and which Rust
+leaks about the same number of.
+
+Closing it produced defect 63 on the Rust side, which is the value of a round
+trip stated precisely: the moment one implementation *reads* what the other
+writes, an internally consistent lie stops being consistent.
 
 ### Defect 57 — §2.4.1's negative control depends on the key set, and the obvious key set cannot fail
 
@@ -381,6 +601,22 @@ that exists because a chapter asked for it:
    in the same page to be *coalesced*; counting the coalesced I/Os is what the
    metric is for.
 
+### Implementation defects the encrypted round trip found
+
+Listed separately because they are what a second implementation buys. None was
+reachable from this crate's own tests:
+
+1. **`sb_mac` stale in memory** — defect 62. Rust opened Dart's encrypted file
+   and then failed its own `verify()` on the MAC.
+2. **Tree 1 as an append-only log** — defect 63. Dart read Rust's free tree,
+   allocated pages it named, and overwrote the live catalog.
+3. **The gate's own last comparison could not fail.** It compared two digests
+   after both sides had mutated, and when *both* readers failed to open the file
+   it compared two empty strings and printed `ok`. It reported success while
+   printing `Bad state: the file does not hold orders` two lines above. Fifth
+   instance in this project of "a control that cannot fail measures nothing",
+   and the first one inside the test harness rather than a benchmark.
+
 ## 6. What is not here
 
 - **Zstd and Zstd dictionaries** (`ZSTD`, `ZDICT`). LZ4 is implemented and is
@@ -418,18 +654,43 @@ Additive, and each is needed for a file to exist at all:
 - `tool/interop.dart`, the Dart half of the round-trip gate.
 - `test/file_test.dart`, six tests over the file layer.
 
-All 552 Dart tests still pass.
+Since then the Dart side has closed the gaps that made it a *reader* of the
+format rather than a peer implementation of it. Its own `REPORT.md` §12 has the
+detail; in summary:
+
+- **`14-security.md` end to end.** Page encryption (§5.2), value-log record
+  encryption (§5.3), `sb_mac` (§6.2), the §4.1 nonce discipline with a durable
+  publish, keyslots, and `DatabaseFile.create` for a database that is encrypted
+  from its first page. It could previously open only unencrypted files, and had
+  the primitives without an engine that used them — the same shape as defect 58
+  on this side.
+- **`01-container.md` §6**, the free tree: kept, best-fitted from, persisted as
+  tree 1, and read back. Divergence 56 above.
+- **`01-container.md` §10**, the exclusive writer lock, tested with a real
+  second process because Dart's `lockSync` is a POSIX `fcntl` lock and those are
+  held per *process* — a second handle inside one process is granted it, so a
+  same-process assertion would have passed while testing nothing.
+- **`05-catalog.md` §2**, tree 3's root in its own descriptor, which was the
+  leak-per-open this side had already fixed.
+- **Superblock fidelity**: the real profile rather than a hardcoded `desktop`,
+  the durability actually performed, `min_retained_commit`/`min_retained_seq`,
+  and the keyslots.
+- **`01-container.md` §9 step 8** in its verifier: `sb_mac`, every page's AEAD
+  tag, and no `(key, nonce)` pair twice.
+
+All **561** Dart tests pass, `dart analyze` is clean.
 
 ## 8. Running it
 
 ```
-cargo test -p cryptand --release          # 142 tests
+cargo test --workspace                    # 212 tests, debug
+cargo test --workspace --release          # and release: they test different arithmetic
 cargo run --release --bin cryptand -- verify <file>
-reference/conformance/interop/run.sh      # the cross-language round trip
+reference/conformance/interop/run.sh      # the round trip, plaintext and encrypted
 cargo run --release --bin p10_read_tail 200000
 cargo run --release --bin p8_aged_scan 20000
 cargo run --release --bin filter_fpr
-cargo run --release --bin p3_write_scale 20000
+cargo run --release --bin p3_engine_write_scale 20000
 cargo run --release --bin p11_encryption
 cargo run --release --bin p1_height
 cargo run --release --bin cryptand -- fuzz <file> 5000

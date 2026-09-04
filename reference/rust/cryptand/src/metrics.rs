@@ -95,7 +95,23 @@ impl Metrics for Engine {
         // difference and the obvious derivation reads 0.
         m.insert("pinned_by_snapshots".into(), Metric::Count(c.pinned_by_snapshots));
         m.insert("pinned_by_checkpoints".into(), Metric::Count(c.pinned_by_checkpoints));
-        m.insert("unencrypted_pages".into(), Metric::Count(c.unencrypted_pages));
+        // §8.3 — "that is the one place where a reassuring answer is a
+        // dangerous one". Counted on the read path, where a page's own
+        // `flags.ENCRYPTED` says which it is, and never inferred from `cipher`.
+        // A database with no reads yet has observed nothing and says so, rather
+        // than reporting the 0 that reads as "fully encrypted".
+        let seen = self.pager.encrypted_pages + self.pager.unencrypted_pages;
+        m.insert(
+            "unencrypted_pages".into(),
+            if self.sb.cipher == 0 {
+                Metric::Count(0)
+            } else if seen == 0 {
+                Metric::Unavailable("no page has been read in this session")
+            } else {
+                Metric::Count(self.pager.unencrypted_pages + c.unencrypted_pages)
+            },
+        );
+        m.insert("encrypted_pages".into(), Metric::Count(self.pager.encrypted_pages));
         m.insert("nonces_allocated".into(), Metric::Count(c.nonces_allocated));
         m.insert("nonce_floor".into(), Metric::Count(self.sb.next_nonce));
 

@@ -1,4 +1,4 @@
-# Cryptand reference implementation — phase 17 report
+# Cryptand reference implementation — phase 18 report
 
 **Implementations:** pure Dart 3.12, `reference/dart/cryptand/`; a second one in
 Rust that reads the vectors, `reference/rust/cryptand-conformance/` (phase 15);
@@ -6,17 +6,206 @@ and the write protocol plus multi-process readers,
 `reference/rust/cryptand-write/` (phases 16–17)
 **Spec under test:** `cryptand/spec/` (CFF v1.0), `cryptand/design/`
 **Measured on:** Apple M2 Pro, macOS 26.6.2, Dart SDK 3.12.2 (native VM)
-**Status:** 546 Dart tests green, **no skips**, `dart analyze` clean; 65 Rust
-tests green; conformance vectors byte-exact, self-verifying, and read by an
-implementation that did not generate them. **Every prediction that can be
-measured without a competing engine has been measured, P3 included, and every
-section of the specification now has an implementation.**
+**Status:** **561 Dart tests green**, no skips, `dart analyze` clean; 212 Rust
+tests green in both the debug and release profiles; conformance vectors
+byte-exact; and the cross-language round-trip gate passing in **four**
+directions — plaintext both ways and **encrypted** both ways.
+
+**Read §-12 first.** Phase 18 is the phase in which this implementation stopped
+being a reader of `14-security.md` and became a writer of it, and in which the
+two implementations found eight defects in each other that neither could see
+alone.
 
 Earlier phase reports are superseded by this one; their findings are carried
 forward. **Phase 4 was short and had one theme**: it was prompted by the question
 "why does a portable format spec have implementation details in it, and why does
 a feature need Rust?" — and the answer turned out to be one correction and one
 audit, both of which are now in the documents. Section 0.1 is the whole of it.
+
+---
+
+## 0.-12 Phase 18 — encryption that happens, space that comes back, and a lock
+
+Phase 18 has one shape: **every defect in it was invisible to the
+implementation that held it, and visible the moment the other one looked.** Two
+were found by the encrypted round-trip gate on its first run; three by giving
+the Dart side a capability it had been declaring rather than having.
+
+### ⚠⚠ Defect 58 — `14-security.md` §5.2's page encryption happened in neither implementation
+
+An "encrypted" database encrypted its value-log records and nothing else. Every
+inline value, every key, every index entry, every catalog descriptor and every
+B+tree page sat on disk in the clear under `cipher = 1`. On `desktop`, where
+`vlog_min` is 256 B, a probe that writes `TOPSECRETPAYLOAD` fifty times through
+the ordinary `put` path found **50 of 50 in the clear**. On `mobile`, where
+`vlog_min` is 1024 B, *most documents are inline* — so the profile aimed at the
+device most likely to be stolen encrypted the least.
+
+On this side it was worse than a gap in the engine: `DatabaseFile.open` threw
+`UnsupportedFeatureException('this reader opens unencrypted files only')`. The
+whole of chapter 14 was implemented as *primitives* — XChaCha20-Poly1305 against
+RFC 8439, Argon2id against RFC 9106, HKDF, keyslots, the superblock MAC, a
+`NonceAllocator` implementing §4.1 exactly — with **418 tests over them** and no
+engine that used any of it. Having the primitives, and testing them well, is
+what made their absence from the write path invisible.
+
+Now: the cipher lives on `PageStore`, which is the one place both the
+copy-on-write trees and the segment builder pass through; the value log encrypts
+per record (§5.3); the superblock carries a real `sb_mac`; `DatabaseFile.create`
+makes a database that is encrypted from its **first** page, which is the only
+shape in which §4.1 rule 1 can hold — the floor must be durably published before
+the first nonce is handed out, so the file has to exist before the first page is
+encrypted.
+
+Six new tests, all of which fail against the old code: an encrypted round trip
+that refuses the wrong key, no needle in the clear, a separated value encrypted
+per record, every data page carrying `flags.ENCRYPTED` with a distinct nonce, the
+floor moving by 2²⁰ across three crashed sessions, and `cipher = 0` on a file
+that still carries keyslots reported as **tampering** rather than corruption.
+
+**The lesson, for a format with a security chapter: test what is *absent* from
+the bytes, not what the API returns.** Encryption round-trips perfectly when it
+does not happen.
+
+### ⚠ Defect 62 — the `sb_mac` a writer keeps and the one it wrote
+
+Found by the encrypted gate, in the direction that only exists because there are
+two implementations: Rust opened a Dart-written encrypted file, read every
+document correctly, and then failed its own `verify()` with "superblock MAC
+mismatch". The Rust writer sealed the MAC into the image it wrote and left its
+*in-memory* superblock holding the MAC parsed at open, so from the next write on
+it compared a MAC of the current fields against a MAC of the previous ones.
+
+Neither side could see it alone: the Rust test that runs `verify()` on an
+encrypted engine asserts only that the **corruption** class is empty, and
+tampering is deliberately a different class — while this side's verifier did not
+check `sb_mac` at all. `01-container.md` §9 step 8 requires it, and
+`verifyEncryption()` now does it, along with every page's AEAD tag and §4's
+"no `(key, nonce)` pair twice".
+
+### ⚠ Defect 63 — Rust's tree 1 was a log of everything ever freed
+
+The moment this side started *reading* tree 1, it could no longer open a file
+Rust had mutated: "the file does not hold orders". Rust's free tree only ever
+inserted, so it was a strict superset of the real free list — invisible to the
+writer, which keeps its own list in memory, and fatal to a reader, which
+allocates a page tree 1 calls free while the live superblock still names it.
+
+**This is the value of a round trip stated precisely: an internally consistent
+lie stops being consistent the moment someone else reads it.**
+
+### `01-container.md` §6 — the free tree, kept rather than declared
+
+`cow.dart` had said, honestly, that freed pages were "recorded but not
+reclaimed". `PageStore` now keeps §6's free tree, best-fits from it among
+extents at or below `min_retained_commit`, extends the file only when nothing
+fits, and persists it as tree 1 — which is what closed Rust's divergence 56 (33
+leaks on the interop fixture, now 8, all of them tree 1's own pages, which is
+defect 55 and a property of the format).
+
+Two rules had to be stated where they are enforced rather than left to a caller:
+
+- `min_retained_commit` is **one below** the minimum, not the minimum. Returning
+  the current commit id makes a page freed by *this* commit immediately
+  reallocatable while the previous superblock still names it — the one thing
+  copy-on-write must never do.
+- The allocator additionally refuses any extent freed at or above the current
+  commit, so a bare `PageStore` with no engine over it cannot get this wrong.
+
+And `save` now opens a commit (`beginPublish`), because publishing a superblock
+*is* a commit and §6's reclamation rule is stated over commit ids; without it a
+file written by `save` alone never advanced past commit 1 and no session could
+ever reuse a byte.
+
+### `01-container.md` §10 — the writer lock, tested with a real process
+
+Neither implementation had it. Rust's is `File::try_lock`; this side's is
+`RandomAccessFile.lockSync`.
+
+The test is a **second process**, and that is not ceremony: Dart's `lockSync` is
+a POSIX `fcntl` lock, which is held per *process*, so a second handle inside one
+process is granted it. A same-process assertion would have passed while testing
+nothing — the same conclusion `13-operations.md` §8's multi-process readers
+reached, for the same reason. `tool/lock_probe.dart` is that process.
+
+### ⚠ Defect 64 — `04-segments.md` §6.9 flagged a healthy database, twice
+
+`cryptand verify` reported **45 %** locality debt on a file this implementation
+had just written, and **100 %** on one Rust had. Both halves of §6.9's surplus
+definition catch a database that is not sick:
+
+- A hot run is unclustered *by construction* — §6.3 clusters a generation when
+  it is **promoted** — so "not key-clustered is surplus regardless" flags every
+  fresh database.
+- A hot run is also the write path's *tail*, and **neither remedy §6.9 names can
+  reach it**: promotion waits for the next last-level compaction, collection
+  merges cold generations.
+
+§6.9 now defines `ideal_runs` and the surplus set over the **cold tier** only,
+denominator unchanged. P8's control still fails — 9.85× with promotion off — so
+the bound did not become unfalsifiable, which was the thing to check.
+
+### ⚠ Defect 65, and the promotion gate underneath it
+
+Two more findings came out of chasing that 45 %:
+
+- **`10-transactions.md` §2 step B says "seal/flush", and the two words are
+  different things.** This engine sealed the open value-log run on every commit.
+  Sealing is §6.2's *terminal* state, so that is one run per commit: 400
+  documents in three commits gave three runs against an `ideal_runs` of one. Step
+  B flushes a tail; sealing belongs at close and at open (§14 §4.3).
+- **Promotion was not gated on the last level.** §6.3 promotes "during
+  last-level compaction, which already runs in key order" — that gate *is* the
+  mechanism, and it was missing here. Promoting during a tiered merge produces a
+  cold run ordered by that merge rather than by key, and one that collection can
+  never reach, because `collectWhileOverDebt` reclusters *last-level* segments
+  and a database whose compactions never reach the last level has none. It
+  accumulated one unreachable cold generation per compaction while collection
+  ran and returned immediately, every time.
+
+A test moved because of this: the checkpoint space-limit test passed only
+because promotion ran everywhere, leaving dead bytes for the limit to refuse.
+Its fixture now compacts, and asserts `checkpointWouldPin() > 0` first — a limit
+test needs something to be over the limit.
+
+### The readahead control could not fail, and had not been able to for six phases
+
+P8's `no readahead` row measured **exactly** the same 0.100 v/row as `all three
+on`. Over a clustered cold run the entries already arrive in value order, so
+sorting a window is a no-op and disabling it changes nothing.
+
+`04-segments.md` §8.1 has two halves — issue reads in `(segment, offset)` order,
+**and** "MUST coalesce reads of records that fall in the same page" — and only
+the first was being switched off; the page cache did the coalescing regardless.
+Turning off both makes the control read **1.099**.
+
+That in turn split the mandatory aged-scan test's controls, which is a
+correction on its own: `aged/fresh` is about promotion and `v/row` is about
+readahead, and measuring both against "everything off" degrades the *fresh* scan
+by the same factor as the aged one, so the ratio reads 1.00× and says nothing.
+Each bound now gets the control of the mechanism it depends on — the same
+attribution error §4.1 taught this project in phase 3.
+
+### Superblock fidelity, and three fields that were constants
+
+`DatabaseFile.save` wrote `profile: Profile.desktop`, `durabilityAchieved: 2`
+and a fresh `createdUtcMs` regardless of what the database was. A `mobile`
+database saved as `desktop` reopens with another SDK reading `desktop`'s stall
+budget and maintenance policy for a phone. It now writes the profile the engine
+actually runs (or `custom` when its constants match no named one, which
+`12-profiles.md` §1 provides for exactly here), the durability actually
+performed, `min_retained_commit`/`min_retained_seq`, the keyslots, and the
+nonce floor.
+
+`05-catalog.md` §2's `$tree_index` descriptor is now written and read, which was
+a leak per open on this side — Rust had already fixed the same one.
+
+### What phase 18 did not change
+
+The engine still never merges underfull copy-on-write pages, `04 §5.1`'s
+parallel compaction still needs threads this runtime does not have, and tree 1
+still leaks its own pages by one commit (defect 55). All three are recorded
+rather than hidden, which is the only thing that makes them safe to leave.
 
 ---
 

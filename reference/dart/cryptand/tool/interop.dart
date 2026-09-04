@@ -65,7 +65,7 @@ class Interop {
   Engine get e => db.engine;
 
   static Interop open(String path) {
-    final db = DatabaseFile.open(path);
+    final db = DatabaseFile.open(path, key: keyArg);
     final data = db.catalog.get(collectionName)?.treeId;
     final dictTree = db.catalog.get(nameDictName)?.treeId;
     if (data == null || dictTree == null) {
@@ -152,7 +152,10 @@ class Interop {
 void cmdWrite(String path) {
   final f = File(path);
   if (f.existsSync()) f.deleteSync();
-  final db = Database(engine: Engine(memtableEntries: 120, vlogMin: 256));
+  final db = keyArg == null
+      ? Database(engine: Engine(memtableEntries: 120, vlogMin: 256))
+      : DatabaseFile.create(path,
+          credential: keyArg!, kdf: Keyslot.kdfRaw, memtableEntries: 120);
   final dictDesc = db.catalog.create(nameDictName,
       kind: TreeKind.nameDict, owner: collectionName, keyKind: 'u32');
   final dataDesc = db.catalog.create(collectionName,
@@ -246,17 +249,43 @@ void cmdMutate(String path, String tag) {
 int cmdVerify(String path) {
   final io = Interop.open(path);
   final findings = io.e.verify();
+  final structure = io.e.verifyStructure();
+  // `spec/01-container.md` §9 step 8: with a key, `sb_mac`, every page's AEAD
+  // tag, and no `(key, nonce)` pair twice. Reported as its own class because
+  // §9 is explicit that tampering is neither corruption nor a leak.
+  final crypto = io.e.verifyEncryption();
   stdout.writeln('verify: ${io.e.manifest.all.length} segments, '
-      '${findings.length} structural findings');
+      '${findings.length + structure.findings.length + crypto.length} '
+      'structural findings');
   for (final f in findings) {
-    stdout.writeln('  $f');
+    stdout.writeln('  Corruption: quarantined segment ${f.segmentId}');
   }
-  return findings.isEmpty ? 0 : 1;
+  for (final f in structure.findings) {
+    stdout.writeln('  Corruption: $f');
+  }
+  for (final f in crypto) {
+    stdout.writeln('  Tampering: $f');
+  }
+  return findings.isEmpty && structure.isClean && crypto.isEmpty ? 0 : 1;
 }
 
+/// `spec/14-security.md` section 3.3's `kdf = 0` credential, when the gate is
+/// run over an encrypted file. A fixed key rather than a password because the
+/// subject is the *format*, not Argon2id, which the vectors already pin.
+List<int>? keyArg;
+
 void main(List<String> args) {
+  final at = args.indexOf('--key');
+  if (at >= 0 && at + 1 < args.length) {
+    final hex = args[at + 1];
+    keyArg = [
+      for (var i = 0; i + 1 < hex.length; i += 2)
+        int.parse(hex.substring(i, i + 2), radix: 16)
+    ];
+    args = [...args]..removeRange(at, at + 2);
+  }
   if (args.length < 2) {
-    stderr.writeln('interop write|read|mutate <tag>|verify <file>');
+    stderr.writeln('interop write|read|mutate <tag>|verify <file> [--key <hex>]');
     exit(2);
   }
   try {

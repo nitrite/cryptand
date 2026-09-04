@@ -561,6 +561,7 @@ final class PageHeader {
     this.commitId = 0,
     this.extentPages = 1,
     this.payloadLen = 0,
+    this.storedLen = 0,
     this.nonce = 0,
   });
 
@@ -575,9 +576,29 @@ final class PageHeader {
   final int extentPages;
   final int payloadLen;
 
+  /// `spec/14-security.md` section 5.2, in the reserved u32 at offset 28: the
+  /// number of payload bytes actually *stored* on the page, after compression
+  /// and after encryption. Zero means "same as [payloadLen]", which is every
+  /// page that is neither, so no existing byte moves.
+  ///
+  /// Both fields are needed and the spec named only one. Section 3 of
+  /// `spec/01-container.md` defines `payload_len` as the "uncompressed,
+  /// unencrypted payload length" while section 5.2 of `spec/14-security.md`
+  /// says the AEAD tag "is inside `payload_len`" — the two cannot both hold,
+  /// and neither is implementable alone: a decryptor needs the exact stored
+  /// length, because Poly1305 covers exactly the ciphertext, and a
+  /// decompressor needs the plaintext length.
+  final int storedLen;
+
   /// The allocated `next_nonce` value when `flags.ENCRYPTED`, 0 otherwise.
   /// `spec/14-security.md` section 4.2.
   final int nonce;
+
+  /// The bytes actually on the page, which is what a cipher and a codec both
+  /// have to be handed.
+  int get stored => storedLen != 0 ? storedLen : payloadLen;
+
+  bool get isEncrypted => flags & PageFlags.encrypted != 0;
 
   /// Writes the header into [page] and computes the checksum over bytes
   /// `4..page.length-1`, as stored.
@@ -594,7 +615,7 @@ final class PageHeader {
       ..setUint32(12, extentPages, Endian.little)
       ..setUint64(16, commitId, Endian.little)
       ..setUint32(24, payloadLen, Endian.little)
-      ..setUint32(28, 0, Endian.little) // reserved
+      ..setUint32(28, storedLen, Endian.little)
       ..setUint64(32, nonce, Endian.little)
       ..setUint32(0, crc32c(page, 4, checksumEnd(page, pageType)), Endian.little);
   }
@@ -644,6 +665,7 @@ final class PageHeader {
       extentPages: bd.getUint32(12, Endian.little),
       commitId: bd.getUint64(16, Endian.little),
       payloadLen: bd.getUint32(24, Endian.little),
+      storedLen: bd.getUint32(28, Endian.little),
       nonce: bd.getUint64(32, Endian.little),
     );
   }

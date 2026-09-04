@@ -24,11 +24,17 @@ say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok()   { printf '   \033[32mok\033[0m   %s\n' "$*"; }
 bad()  { printf '   \033[31mFAIL\033[0m %s\n' "$*"; fail=1; }
 
+# `spec/14-security.md` §3.3's `kdf = 0` credential. Empty for the plaintext
+# directions; set for the encrypted ones.
+KEY=""
+
 run_impl() {
   local impl="$1"; shift
+  local extra=()
+  [[ -n "$KEY" ]] && extra=(--key "$KEY")
   case "$impl" in
-    rust) "$RUST" "$@" ;;
-    dart) (cd "$dart" && dart run tool/interop.dart "$@") ;;
+    rust) "$RUST" "$@" ${extra[@]+"${extra[@]}"} ;;
+    dart) (cd "$dart" && dart run tool/interop.dart "$@" ${extra[@]+"${extra[@]}"}) ;;
     *) echo "unknown implementation $impl" >&2; return 2 ;;
   esac
 }
@@ -40,9 +46,9 @@ field() { grep -E "^$2=" <<<"$1" | head -1 | cut -d= -f2-; }
 round_trip() {
   local a="$1"
   local b="$2"
-  local file="$work/$a-to-$b.cryptand"
+  local file="$work/$a-to-$b${KEY:+-enc}.cryptand"
   step=$((step + 1))
-  say "$step. $a writes, $b reads, $b mutates, $a reads"
+  say "$step. $a writes, $b reads, $b mutates, $a reads${KEY:+ -- ENCRYPTED}"
 
   run_impl "$a" write "$file" >/dev/null || { bad "$a could not write"; return; }
   local produced
@@ -100,12 +106,20 @@ round_trip() {
 
   # And once more, so the file has been mutated by both.
   run_impl "$a" mutate "$file" "$a" >/dev/null || { bad "$a could not mutate"; return; }
-  local final_a final_b
-  final_a="$(run_impl "$a" read "$file")"; final_b="$(run_impl "$b" read "$file")"
-  if [[ "$(field "$final_a" digest)" == "$(field "$final_b" digest)" ]]; then
-    ok "after mutations by both, they agree: digest $(field "$final_a" digest)"
+  local final_a final_b da db
+  final_a="$(run_impl "$a" read "$file")" || { bad "$a could not reopen after its own mutation"; return; }
+  final_b="$(run_impl "$b" read "$file")" || { bad "$b could not reopen after ${a}'s mutation"; return; }
+  da="$(field "$final_a" digest)"; db="$(field "$final_b" digest)"
+  # An empty digest is not agreement. The first version of this comparison
+  # tested two empty strings and reported `ok` while BOTH sides had failed to
+  # open the file at all -- a control that cannot fail measures nothing, which
+  # is this project's own recurring lesson and it reached its own test harness.
+  if [[ -z "$da" || -z "$db" ]]; then
+    bad "no digest after both mutated ($a='$da', $b='$db'): a reader failed to open the file"
+  elif [[ "$da" == "$db" ]]; then
+    ok "after mutations by both, they agree: digest $da"
   else
-    bad "after both mutated: $a says $(field "$final_a" digest), $b says $(field "$final_b" digest)"
+    bad "after both mutated: $a says $da, $b says $db"
   fi
 }
 
@@ -116,6 +130,28 @@ ok "rust: $($RUST 2>&1 | head -1 >/dev/null; echo built)"
 
 round_trip rust dart
 round_trip dart rust
+
+# The same gate over an encrypted file. `14-security.md` is the chapter with the
+# most ways to be *individually* right and *mutually* incompatible -- the page
+# AAD, the stored payload length, the per-record counter, the keyslot AAD and
+# the superblock MAC are five independent chances for two implementations to
+# each encrypt correctly and neither to read the other. A plaintext round trip
+# exercises none of them.
+KEY=0707070707070707070707070707070707070707070707070707070707070707
+round_trip rust dart
+round_trip dart rust
+
+# And the other half of the property: the wrong key is refused, by both, with
+# the one error `§3.3` allows -- "a failure across all slots is 'wrong key', and
+# an implementation MUST NOT distinguish 'no such slot' from 'bad password'".
+say "5. an encrypted file refuses the wrong key, in both implementations"
+for impl in rust dart; do
+  out="$(KEY=0808080808080808080808080808080808080808080808080808080808080808 \
+         run_impl "$impl" read "$work/rust-to-dart-enc.cryptand" 2>&1)" && \
+    bad "$impl opened an encrypted file with the wrong key" || \
+    ok "$impl refused the wrong key: $(head -1 <<<"$out")"
+done
+KEY=""
 
 say "result"
 if [[ $fail -eq 0 ]]; then

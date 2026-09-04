@@ -397,7 +397,16 @@ ciphertext = XChaCha20-Poly1305-Encrypt(
     pt    = the payload, after compression )
 ```
 
-- The 16-byte tag is appended to the ciphertext and **is inside `payload_len`**.
+- The 16-byte tag is appended to the ciphertext and is inside **`stored_len`**
+  (`01-container.md` §3, offset 28), *not* `payload_len`. `payload_len` keeps
+  the meaning §3 gives it — the uncompressed, unencrypted length — and
+  `stored_len` is what the page actually holds. An earlier draft of this bullet
+  said `payload_len`, which contradicted §3 outright and left a page that is
+  compressed *and* encrypted with no way to record both lengths.
+- **A page builder MUST reserve the 16 bytes before it lays out its payload.**
+  A page filled to `page_size - 40` has nowhere to put a tag, and a builder that
+  discovers this at write time has produced a page that cannot be written at
+  all. The usable payload of an encrypted page is `page_size - 40 - 16`.
 - Order is **compress, then encrypt** on write; **verify checksum, decrypt,
   then decompress** on read. Encrypting compressed output is the only order that
   compresses at all, and checking the CRC first means a corrupt page is never
@@ -439,17 +448,32 @@ header (`01-container.md` §3). Each is encrypted **per page-sized chunk**, not
 as one stream, so that a reader can decrypt the chunk it wants:
 
 ```
-chunk i = bytes [ i × (page_size − 16), (i+1) × (page_size − 16) )
-nonce   = 1 || counter || head_page_id || i
-aad     = u64le(head_page_id) || u64le(i)
+chunk i  = bytes [ i × (page_size − 24), (i+1) × (page_size − 24) )
+on disk  = u64le counter || ciphertext || tag        -- one page
+nonce    = 1 || counter || head_page_id || i
+aad      = u64le(head_page_id) || u64le(i)
 ```
 
-`counter` is the extent's single allocated nonce value, stored in its head page.
-Each chunk's ciphertext is 16 bytes longer than its plaintext, so an encrypted
-extent needs `ceil(len / (page_size − 16))` pages rather than
-`ceil(len / page_size)` — about 0.4 % more space at 4 KiB pages. A writer MUST
-size the extent accordingly, and `01-container.md` §5's blob `byte_len` is the
-plaintext length.
+**`counter` is per chunk and per write, and it is stored in the clear at the
+head of the chunk.** An earlier draft made it "the extent's single allocated
+nonce value, stored in its head page", which is correct only if every chunk of
+the extent is written exactly once. A vector region breaks that on its first
+ordinary use: `stride` is far below `page_size`, so two slots share a chunk and
+are written at different times, and a slot may be rewritten outright. Rewriting
+a chunk under a fixed per-extent counter is the same key and the same nonce over
+different plaintext — the failure §4 opens by calling "not a hardening measure;
+it is the whole thing". Storing the counter in the clear inside the chunk is
+what §5.3 already does for a value-log record, and for the same reason: it is
+what lets one chunk be decrypted, or rewritten, on its own.
+
+A partial-chunk write is therefore a read-modify-write under a **fresh**
+counter, never a patch in place.
+
+Each chunk costs 8 bytes of counter plus a 16-byte tag, so an encrypted extent
+needs `ceil(len / (page_size − 24))` pages rather than `ceil(len / page_size)` —
+about 0.6 % more space at 4 KiB pages. A writer MUST size the extent
+accordingly, and `01-container.md` §5's blob `byte_len` is the plaintext
+length.
 
 **This is where encryption costs an architectural property.** `09-vector.md` §2
 lets an implementation `mmap` a vector region and read vectors as zero-copy
@@ -489,7 +513,16 @@ sb_mac = HMAC-SHA256(
 
 Rules, all MUST:
 
-- A writer holding the key writes `sb_mac` on **every** superblock write.
+- A writer holding the key writes `sb_mac` on **every** superblock write, and
+  **keeps the value it wrote**. The second half is the one that gets missed. An
+  implementation that seals the image it writes but leaves its *in-memory*
+  superblock holding the MAC it parsed at open will, from that moment,
+  recompute the MAC over the current fields and compare it against a MAC that
+  described the fields as they were *before* — and report its own file as
+  tampering. §4.1's open-time nonce publish is a superblock write, so this makes
+  every encrypted file fail `01-container.md` §9 step 8 immediately after every
+  open. A reference implementation did exactly this, and the only verifier that
+  noticed was the **other** implementation's, in the cross-language round trip.
 - A reader that has unwrapped the master key verifies `sb_mac` immediately after
   choosing a slot (`01-container.md` §2.1 step 3) and **before acting on any
   other superblock field**, in constant time. A mismatch is a security failure

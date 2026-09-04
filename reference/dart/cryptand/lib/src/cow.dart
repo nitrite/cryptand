@@ -7,18 +7,21 @@
 /// copy-on-write: a write copies the path from leaf to root, appends the
 /// copied pages, and publishes a new root.
 ///
-/// **What this file simplifies, stated rather than hidden.** Freed pages are
-/// recorded but not reclaimed: the free tree of `spec/01-container.md` §6 is
-/// keyed by `commit_id` and only becomes interesting once `min_retained_commit`
-/// does, which needs the snapshot set of `spec/10-transactions.md` §8. And an
-/// underfull page is never merged with a sibling — only an empty one is
-/// unlinked, and a root with one child is collapsed. Both are space effects,
-/// not correctness ones, and [PageStore.freedPages] makes the first measurable.
+/// **What this file simplifies, stated rather than hidden.** An underfull page
+/// is never merged with a sibling — only an empty one is unlinked, and a root
+/// with one child is collapsed. That is a space effect, not a correctness one.
+/// Freed pages *are* reclaimed: [PageStore] keeps §6's free tree, best-fits
+/// from it among extents at or below `min_retained_commit`, and extends the
+/// file only when nothing fits.
 library;
 
+import 'dart:collection';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'bytes.dart';
+import 'container.dart';
+import 'security.dart';
 import 'cke.dart';
 import 'limits.dart';
 import 'errors.dart';
@@ -29,6 +32,29 @@ import 'segment.dart';
 /// In memory, like the segment extents of phase 2 — `REPORT.md` §5 states the
 /// limit that follows and it is unchanged here. Page *identity* and page
 /// *granularity* are real, which is what the counters measure.
+/// `spec/14-security.md` §5.2 — what a page write needs in order to encrypt:
+/// the ring, and the half-open window of nonce values §4.1 rule 1 has already
+/// published. It lives on the store, not on the engine, because the
+/// copy-on-write trees write pages with only a [PageStore] in hand; a second
+/// cursor elsewhere would be a second thing to keep true.
+final class PageCrypto {
+  PageCrypto(this.ring, this.nonces);
+
+  final KeyRing ring;
+  final NonceAllocator nonces;
+}
+
+/// `spec/01-container.md` §6 — one entry of the free tree (tree 1), keyed
+/// `(commit_id, start_page)` so a scan from the beginning yields the oldest,
+/// most reclaimable extents first.
+final class FreeExtent {
+  const FreeExtent(this.commitId, this.startPage, this.pages);
+
+  final int commitId;
+  final int startPage;
+  final int pages;
+}
+
 final class PageStore {
   PageStore({this.pageSize = 4096}) {
     checkPageSize(pageSize);
@@ -38,6 +64,7 @@ final class PageStore {
     _pages
       ..add(Uint8List(pageSize))
       ..add(Uint8List(pageSize));
+    _pageCount = 2;
   }
 
   /// Rebuilds a store from the bytes of a file, for `DatabaseFile.open`.
@@ -49,42 +76,165 @@ final class PageStore {
       s._pages.add(Uint8List.fromList(
           Uint8List.sublistView(bytes, at, at + pageSize)));
     }
+    s._pageCount = s._pages.length;
     return s;
   }
 
+  /// A store backed by an open file. [file] is positioned by page id; the
+  /// store never holds the whole page space in memory, which is the difference
+  /// between a database and a buffer that happens to be saved.
+  PageStore.onFile(this.file, {required this.pageSize, required int pageCount})
+      : _pageCount = pageCount {
+    checkPageSize(pageSize);
+  }
+
   final int pageSize;
+
+  /// `null` in memory mode. Not owned: whoever opened it closes it, and on a
+  /// writing store that close is what releases `spec/01-container.md` §10's
+  /// exclusive advisory lock.
+  RandomAccessFile? file;
+
   final List<Uint8List> _pages = [];
-  final List<int> _freed = [];
+  int _pageCount = 0;
+
+  /// §6's free tree, in memory. Keyed `(commit_id, start_page)`.
+  final SplayTreeMap<(int, int), int> _free = SplayTreeMap((a, b) =>
+      a.$1 != b.$1 ? a.$1.compareTo(b.$1) : a.$2.compareTo(b.$2));
+
+  /// §6's reclamation rule: "an extent freed at `commit_id = N` may be
+  /// reallocated once `N <= min_retained_commit`". Until a caller sets this,
+  /// nothing is reclaimable, which is the safe direction.
+  int minRetainedCommit = 0;
+
+  /// The commit a `free()` is attributed to. Starts at 1 for the same reason
+  /// [Engine.commitId] does: commit 0 is the empty database nothing wrote.
+  int commitId = 1;
+
+  /// §5.2's page cipher. `null` on an unencrypted database.
+  PageCrypto? crypto;
 
   int pageReads = 0;
   int pageWrites = 0;
 
-  int get pageCount => _pages.length;
+  /// §8.3 of `spec/14-security.md` — a converting file holds a mixture, and
+  /// "that is the one place where a reassuring answer is a dangerous one", so
+  /// both are counted where a page's own flag says which it is.
+  int encryptedPages = 0;
+  int unencryptedPages = 0;
 
-  /// Pages a copy-on-write path copy has orphaned and the free tree would own.
-  int get freedPages => _freed.length;
+  int get pageCount => _pageCount;
+
+  /// Extents the free tree holds, whether or not they are reclaimable yet.
+  Iterable<FreeExtent> get freeExtents =>
+      _free.entries.map((e) => FreeExtent(e.key.$1, e.key.$2, e.value));
+
+  int get freedPages =>
+      _free.values.fold(0, (a, b) => a + b);
 
   /// Bytes the store has allocated, live and orphaned alike.
-  int get allocatedBytes => _pages.length * pageSize;
+  int get allocatedBytes => _pageCount * pageSize;
 
   void resetCounters() {
     pageReads = 0;
     pageWrites = 0;
   }
 
-  int alloc() {
-    _pages.add(Uint8List(pageSize));
-    return _pages.length - 1;
-  }
+  /// §5.2 — the payload a page builder may fill. The AEAD tag has to be
+  /// reserved *before* the cells are laid out: a page filled to
+  /// `page_size - 40` has nowhere to put 16 more bytes, and discovering that
+  /// at write time means a page that cannot be written at all.
+  int get tagReserve => crypto == null ? 0 : 16;
+
+  int get payloadCap => pageSize - PageHeader.size - tagReserve;
+
+  int alloc() => allocExtent(1);
 
   /// `spec/01-container.md` §6: allocation unit is the **extent** — one or more
   /// contiguous pages. Returns the first page id.
+  ///
+  /// Allocation order is §6's: "best-fit from the free tree among extents with
+  /// `commit_id <= min_retained_commit`; failing that, extend the file at
+  /// `page_count`."
   int allocExtent(int pages) {
-    final start = _pages.length;
-    for (var i = 0; i < pages; i++) {
-      _pages.add(Uint8List(pageSize));
+    (int, int)? bestKey;
+    var bestPages = 1 << 62;
+    for (final e in _free.entries) {
+      // §6's reclamation rule, and the invariant under it stated where it is
+      // enforced rather than left to the caller: an extent freed by a commit
+      // that is still the newest one is still named by the live superblock,
+      // and "no page that a live superblock references is ever overwritten".
+      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId) continue;
+      if (e.value >= pages && e.value < bestPages) {
+        bestKey = e.key;
+        bestPages = e.value;
+        if (e.value == pages) break;
+      }
     }
+    if (bestKey != null) {
+      _free.remove(bestKey);
+      final start = bestKey.$2;
+      if (bestPages > pages) {
+        // The remainder goes straight back, at the same commit id.
+        _free[(bestKey.$1, start + pages)] = bestPages - pages;
+      }
+      for (var i = 0; i < pages; i++) {
+        _zero(start + i);
+      }
+      return start;
+    }
+    final start = _pageCount;
+    _grow(pages);
     return start;
+  }
+
+  void _grow(int pages) {
+    if (file == null) {
+      for (var i = 0; i < pages; i++) {
+        _pages.add(Uint8List(pageSize));
+      }
+      _pageCount = _pages.length;
+      return;
+    }
+    _pageCount += pages;
+    final want = _pageCount * pageSize;
+    if (file!.lengthSync() < want) file!.truncateSync(want);
+  }
+
+  void _zero(int pageId) {
+    if (file == null) {
+      _pages[pageId] = Uint8List(pageSize);
+    } else {
+      file!
+        ..setPositionSync(pageId * pageSize)
+        ..writeFromSync(Uint8List(pageSize));
+    }
+  }
+
+  /// §6 — records a freed extent under the committing `commit_id`. It becomes
+  /// reallocatable only once that id is at or below [minRetainedCommit].
+  void freeExtent(int startPage, int pages) {
+    if (startPage < 2 || pages <= 0) return;
+    _free[(commitId, startPage)] = pages;
+  }
+
+  void free(int pageId) {
+    if (pageId != 0) freeExtent(pageId, 1);
+  }
+
+  /// Replaces the free tree, for a reopen that reads tree 1 back.
+  void loadFree(Iterable<FreeExtent> extents) {
+    _free.clear();
+    for (final e in extents) {
+      _free[(e.commitId, e.startPage)] = e.pages;
+    }
+  }
+
+  /// Used after a reopen: the file may be longer than `page_count`, and
+  /// everything at or beyond it is debris from an interrupted commit
+  /// (`spec/01-container.md` §2.1 step 7).
+  void setPageCount(int pageCount) {
+    _pageCount = pageCount;
   }
 
   /// Writes a whole extent, head page first. The bytes MUST be a whole number
@@ -100,6 +250,30 @@ final class PageStore {
     }
   }
 
+  /// A whole extent with no page cipher: `spec/14-security.md` section 5.1
+  /// leaves a value-log segment's head page in the clear, and its interior
+  /// pages hold raw records with no page header at all
+  /// (`spec/01-container.md` section 3), so neither can go through the page
+  /// seam. Their confidentiality comes from section 5.3, per record.
+  void writeExtentClear(int startPage, Uint8List extent) {
+    if (extent.length % pageSize != 0) {
+      throw const InvalidArgumentException(
+          'an extent must be a whole number of pages');
+    }
+    for (var i = 0; i * pageSize < extent.length; i++) {
+      writeClear(startPage + i,
+          Uint8List.sublistView(extent, i * pageSize, (i + 1) * pageSize));
+    }
+  }
+
+  Uint8List readExtentClear(int startPage, int pages) {
+    final out = Uint8List(pages * pageSize);
+    for (var i = 0; i < pages; i++) {
+      out.setRange(i * pageSize, (i + 1) * pageSize, readClear(startPage + i));
+    }
+    return out;
+  }
+
   Uint8List readExtent(int startPage, int pages) {
     final out = Uint8List(pages * pageSize);
     for (var i = 0; i < pages; i++) {
@@ -108,25 +282,56 @@ final class PageStore {
     return out;
   }
 
-  /// The whole page space, for `DatabaseFile.save`.
+  /// The whole page space, for a file written in one go.
   Uint8List toBytes() {
-    final out = Uint8List(_pages.length * pageSize);
-    for (var i = 0; i < _pages.length; i++) {
-      out.setRange(i * pageSize, (i + 1) * pageSize, _pages[i]);
+    final out = Uint8List(_pageCount * pageSize);
+    if (file == null) {
+      for (var i = 0; i < _pages.length; i++) {
+        out.setRange(i * pageSize, (i + 1) * pageSize, _pages[i]);
+      }
+      return out;
+    }
+    for (var i = 0; i < _pageCount; i++) {
+      out.setRange(i * pageSize, (i + 1) * pageSize, _rawRead(i));
     }
     return out;
   }
 
-  void free(int pageId) {
-    if (pageId != 0) _freed.add(pageId);
+  Uint8List _rawRead(int pageId) {
+    if (file == null) return _pages[pageId];
+    final buf = Uint8List(pageSize);
+    file!
+      ..setPositionSync(pageId * pageSize)
+      ..readIntoSync(buf);
+    return buf;
+  }
+
+  void _rawWrite(int pageId, Uint8List page) {
+    if (file == null) {
+      _pages[pageId] = page;
+      return;
+    }
+    file!
+      ..setPositionSync(pageId * pageSize)
+      ..writeFromSync(page);
   }
 
   Uint8List read(int pageId) {
-    if (pageId < 1 || pageId >= _pages.length) {
+    final raw = readClear(pageId);
+    if (crypto == null) return raw;
+    return _openPage(pageId, raw);
+  }
+
+  /// The page exactly as it is stored. `spec/01-container.md` §9 step 8 —
+  /// "without a key, steps 1–7 still run: that is the point of leaving headers
+  /// in the clear" — is what this exists for, along with the value-log head
+  /// page, which §5.1 leaves in the clear.
+  Uint8List readClear(int pageId) {
+    if (pageId < 1 || pageId >= _pageCount) {
       throw CorruptionException('page $pageId is outside the store');
     }
     pageReads++;
-    return _pages[pageId];
+    return _rawRead(pageId);
   }
 
   void write(int pageId, Uint8List page) {
@@ -135,7 +340,106 @@ final class PageStore {
           'page $pageId is ${page.length} B, expected $pageSize');
     }
     pageWrites++;
-    _pages[pageId] = page;
+    _rawWrite(pageId, crypto == null ? page : _sealPage(pageId, page));
+  }
+
+  /// §5.1's two clear page kinds: a superblock, which never comes through
+  /// here, and a value-log segment's head page, whose records are appended
+  /// into its tail and encrypted one by one (§5.3).
+  void writeClear(int pageId, Uint8List page) {
+    if (page.length != pageSize) {
+      throw InvalidArgumentException(
+          'page $pageId is ${page.length} B, expected $pageSize');
+    }
+    pageWrites++;
+    _rawWrite(pageId, page);
+  }
+
+  /// §5.2: compress, then encrypt; the tag is appended to the ciphertext and
+  /// the header — checksum zeroed — is the AAD. The checksum is recomputed
+  /// last, over the stored bytes (`spec/00-conventions.md` §6).
+  Uint8List _sealPage(int pageId, Uint8List page) {
+    final h = PageHeader.read(page, pageId: pageId);
+    if (h.isEncrypted || h.pageType == PageType.vlogSegment) return page;
+    final stored = h.stored;
+    if (stored == 0 || PageHeader.size + stored + 16 > pageSize) {
+      throw InvalidArgumentException(
+          'page $pageId holds $stored payload bytes, which leaves no room for '
+          'the 16-byte AEAD tag in a $pageSize B page');
+    }
+    final counter = crypto!.nonces.allocate();
+    final out = Uint8List(pageSize);
+    final sealedHeader = PageHeader(
+      pageType: h.pageType,
+      flags: h.flags | PageFlags.encrypted,
+      codecOrReserved: h.codecOrReserved,
+      treeId: h.treeId,
+      commitId: h.commitId,
+      extentPages: h.extentPages,
+      payloadLen: h.payloadLen,
+      storedLen: stored + 16,
+      nonce: counter,
+    )..writeInto(out);
+    final ct = encryptPagePayload(
+      keys: crypto!.ring,
+      pageId: pageId,
+      nonceCounter: counter,
+      pageHeader40: Uint8List.sublistView(out, 0, PageHeader.size),
+      payload: Uint8List.sublistView(page, PageHeader.size,
+          PageHeader.size + stored),
+    );
+    out.setRange(PageHeader.size, PageHeader.size + ct.length, ct);
+    // Again, because the CRC covers the payload as stored.
+    sealedHeader.writeInto(out);
+    return out;
+  }
+
+  /// The read half of §5.2. §8.3's mixture: an unencrypted page in an
+  /// encrypted file is returned as it is and counted, never guessed at.
+  Uint8List _openPage(int pageId, Uint8List page) {
+    final PageHeader h;
+    try {
+      h = PageHeader.read(page, pageId: pageId);
+    } on CorruptionException {
+      return page;
+    }
+    if (!h.isEncrypted) {
+      unencryptedPages++;
+      return page;
+    }
+    encryptedPages++;
+    final stored = h.stored;
+    if (stored < 16 || PageHeader.size + stored > page.length) {
+      throw CorruptionException('page $pageId declares $stored stored bytes',
+          pageId: pageId);
+    }
+    final pt = decryptPagePayload(
+      keys: crypto!.ring,
+      pageId: pageId,
+      nonceCounter: h.nonce,
+      pageHeader40: Uint8List.sublistView(page, 0, PageHeader.size),
+      sealed: Uint8List.sublistView(
+          page, PageHeader.size, PageHeader.size + stored),
+    );
+    final out = Uint8List(page.length);
+    out.setRange(PageHeader.size, PageHeader.size + pt.length, pt);
+    // The header a caller sees describes the plaintext it was handed.
+    PageHeader(
+      pageType: h.pageType,
+      flags: h.flags & ~PageFlags.encrypted,
+      codecOrReserved: h.codecOrReserved,
+      treeId: h.treeId,
+      commitId: h.commitId,
+      extentPages: h.extentPages,
+      payloadLen: h.payloadLen,
+    ).writeInto(out);
+    return out;
+  }
+
+  /// `spec/10-transactions.md` §7 — the strongest primitive the platform
+  /// provides. Reported, never assumed.
+  void sync() {
+    file?.flushSync();
   }
 }
 
@@ -237,6 +541,7 @@ final class CowTree {
         id,
         encodeNodePage(
           pageSize: store.pageSize,
+          payloadSize: store.payloadCap,
           isLeaf: n.isLeaf,
           keys: n.keys,
           payloads: n.payloads,
@@ -458,7 +763,8 @@ final class CowTree {
   /// Splits [n] until every part fits one page.
   List<_Node> _split(_Node n) {
     if (n.count == 0 ||
-        nodePageBytes(n.keys, n.payloads) <= store.pageSize) {
+        nodePageBytes(n.keys, n.payloads) <=
+            store.payloadCap + PageHeader.size) {
       return [n];
     }
     if (n.count == 1) {

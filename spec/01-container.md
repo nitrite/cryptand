@@ -156,11 +156,22 @@ The header is **40 bytes**:
 | 12 | 4 | `extent_pages` | 1 for an ordinary page; > 1 for a multi-page extent head |
 | 16 | 8 | `commit_id` | commit that wrote this page — drives reclamation |
 | 24 | 4 | `payload_len` | uncompressed, unencrypted payload length |
-| 28 | 4 | reserved | |
+| 28 | 4 | `stored_len` | payload bytes **as stored**, after compression and after encryption; 0 means "same as `payload_len`" (`14-security.md` §5.2) |
 | 32 | 8 | `nonce` | the allocated `next_nonce` value when `flags.ENCRYPTED`; 0 otherwise (`14-security.md` §4.2) |
 
 `checksum` verifies before decompression and before decryption, so a corrupt
 page is never fed to a codec or a cipher.
+
+**Why both lengths.** An earlier draft left offset 28 reserved and defined
+`payload_len` alone, while `14-security.md` §5.2 said the AEAD tag "is inside
+`payload_len`". The two cannot both hold, and neither is implementable alone: a
+decryptor needs the *exact* stored length, because Poly1305 covers exactly the
+ciphertext and one byte either way fails the tag; a decompressor needs the
+*plaintext* length, because that is the output size it decodes into. Compressed
+*and* encrypted needs both at once. Both reference implementations hit it the
+moment either wrote an encrypted page. The field was reserved and is 4 bytes, so
+nothing moves: every page that is neither compressed nor encrypted writes 0 here
+and is byte-identical to what the draft described.
 
 **Why 40 and not 32.** An earlier draft declared a 32-byte header over a field
 table whose widths sum to 36, with `commit_id` (8 bytes at offset 12) running

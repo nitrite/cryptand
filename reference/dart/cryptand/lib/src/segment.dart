@@ -209,6 +209,12 @@ int nodePageBytes(List<Uint8List> keys, List<Uint8List> payloads) {
 Uint8List encodeNodePage({
   required int pageSize,
   required bool isLeaf,
+  /// `spec/14-security.md` section 5.2's AEAD tag, reserved before a single
+  /// cell is placed: a page filled to `page_size - 40` has nowhere left to put
+  /// one, and discovering that at write time means a page that cannot be
+  /// written at all. Defaults to the whole payload, which is the unencrypted
+  /// case and every conformance vector.
+  int? payloadSize,
   required List<Uint8List> keys,
   required List<Uint8List> payloads,
   required int subtreeEntries,
@@ -219,7 +225,10 @@ Uint8List encodeNodePage({
   final page = Uint8List(pageSize);
   final bd = ByteData.view(page.buffer);
   final base = PageHeader.size;
-  final payloadSize = pageSize - base;
+  payloadSize ??= pageSize - base;
+  if (payloadSize > pageSize - base) {
+    throw const InvalidArgumentException('payloadSize exceeds the page');
+  }
   final count = keys.length;
   final prefixLen = _pagePrefix(keys);
 
@@ -316,12 +325,18 @@ final class SegmentBuilder {
     this.group = 0,
     this.treeId,
     this.filterBitsPerKey = 0,
+    this.tagReserve = 0,
   }) {
     checkPageSize(pageSize);
-    _payloadSize = pageSize - PageHeader.size;
+    _payloadSize = pageSize - PageHeader.size - tagReserve;
   }
 
   final int pageSize;
+
+  /// `spec/14-security.md` section 5.2's AEAD tag: 16 on an encrypted
+  /// database, 0 otherwise. Subtracted from every page's usable payload.
+  final int tagReserve;
+
   final int segmentId;
   final int level;
   final int group;
@@ -531,6 +546,7 @@ final class SegmentBuilder {
   int _emitPage(_PendingPage p) {
     _pages.add(encodeNodePage(
       pageSize: pageSize,
+      payloadSize: _payloadSize,
       isLeaf: p.isLeaf,
       keys: p.keys,
       payloads: p.payloads,
@@ -600,7 +616,7 @@ final class SegmentBuilder {
             bitsPerKey: filterBitsPerKey, distinctKeys: _userKeys.length)
         .encodePayload();
     final first = _pages.length + 1;
-    final capacity = pageSize - PageHeader.size;
+    final capacity = _payloadSize;
     for (var off = 0; off < payload.length; off += capacity) {
       final n = (payload.length - off).clamp(0, capacity);
       final page = Uint8List(pageSize)
@@ -640,7 +656,7 @@ final class SegmentBuilder {
     // the whole header MUST fit the head page.
     var minKey = _minKey ?? Uint8List(0);
     var maxKey = _maxKey ?? Uint8List(0);
-    final budget = pageSize - base - w.length - 8 - _treeSpan.length * 12 - 8;
+    final budget = _payloadSize - w.length - 8 - _treeSpan.length * 12 - 8;
     if (minKey.length + maxKey.length > budget) {
       // Widen the bounds by truncating: a shorter min_key is <= every key, and
       // a max_key extended with 0xFF is >= every key.

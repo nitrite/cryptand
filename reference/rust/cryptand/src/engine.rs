@@ -201,11 +201,15 @@ pub struct Engine {
     checkpoint_floor: (Option<u64>, Option<u64>),
     /// Free extents already written into tree 1, so a commit writes only what
     /// is new.
-    persisted_free: HashSet<u64>,
+    persisted_free: HashSet<(u64, u64)>,
     /// `11-conformance.md` §5 — trees whose `params.change_feed` is true.
     pub changefeed_trees: HashSet<u32>,
     job: Option<CompactionJob>,
     closed: bool,
+    /// `14-security.md` §4.1 — the session's nonce allocation cursor and
+    /// the published floor it must not reach. Equal means "publish first".
+    nonce_next: u64,
+    nonce_limit: u64,
 }
 
 impl Engine {
@@ -216,16 +220,55 @@ impl Engine {
     pub fn create_in_memory(profile: Profile) -> Result<Engine> {
         let pc = ProfileConstants::of(profile);
         let pager = Pager::in_memory(pc.page_size);
-        Engine::bootstrap(pager, pc)
+        Engine::bootstrap(pager, pc, None)
     }
 
     pub fn create(path: &Path, profile: Profile) -> Result<Engine> {
         let pc = ProfileConstants::of(profile);
         let pager = Pager::create(path, pc.page_size)?;
-        Engine::bootstrap(pager, pc)
+        Engine::bootstrap(pager, pc, None)
     }
 
-    fn bootstrap(pager: Pager, pc: ProfileConstants) -> Result<Engine> {
+    /// Creates a database that is encrypted from its **first** page.
+    ///
+    /// Without this there is no way to get one: turning `cipher` on after
+    /// `create` is `14-security.md` §8.3's *conversion*, which leaves every
+    /// page written before the switch in the clear — correct, reported by
+    /// `unencrypted_pages`, and not what someone asking for an encrypted
+    /// database means. `kdf = 0` takes a key the host already holds (§3.3);
+    /// `kdf = 1` derives it with Argon2id at `t_cost`/`m_cost_kib`/`lanes`.
+    pub fn create_encrypted(
+        path: &Path,
+        profile: Profile,
+        credential: &[u8],
+        kdf: u8,
+        t_cost: u32,
+        m_cost_kib: u32,
+        lanes: u32,
+    ) -> Result<Engine> {
+        let pc = ProfileConstants::of(profile);
+        let pager = Pager::create(path, pc.page_size)?;
+        Engine::bootstrap(pager, pc, Some((credential, kdf, t_cost, m_cost_kib, lanes)))
+    }
+
+    pub fn create_encrypted_in_memory(
+        profile: Profile,
+        credential: &[u8],
+        kdf: u8,
+        t_cost: u32,
+        m_cost_kib: u32,
+        lanes: u32,
+    ) -> Result<Engine> {
+        let pc = ProfileConstants::of(profile);
+        let pager = Pager::in_memory(pc.page_size);
+        Engine::bootstrap(pager, pc, Some((credential, kdf, t_cost, m_cost_kib, lanes)))
+    }
+
+    fn bootstrap(
+        pager: Pager,
+        pc: ProfileConstants,
+        key: Option<(&[u8], u8, u32, u32, u32)>,
+    ) -> Result<Engine> {
         let mut sb = Superblock {
             page_size_log2: pc.page_size.trailing_zeros() as u16,
             profile: pc.profile.code(),
@@ -297,9 +340,31 @@ impl Engine {
             changefeed_trees: HashSet::new(),
             job: None,
             closed: false,
+            nonce_next: 0,
+            nonce_limit: 0,
             sb,
         };
         e.events.push(StoreEvent::Opened);
+        if let Some((cred, kdf, t_cost, m_cost_kib, lanes)) = key {
+            let master = crate::security::random_bytes::<32>();
+            let slot = crate::security::make_keyslot(
+                &master,
+                &e.sb.database_uuid,
+                0,
+                cred,
+                kdf,
+                t_cost,
+                m_cost_kib,
+                lanes,
+                "keyslot 0",
+            )?;
+            e.sb.keyslots[..crate::security::keyslot::SIZE].copy_from_slice(&slot.encode());
+            e.sb.cipher = 1;
+            e.sb.set_feature(feature::CIPHER, true);
+            e.keys = Some(KeyRing::from_master(master, e.sb.database_uuid, 0));
+            // Before `write_store_metadata`, which is the first page write.
+            e.arm()?;
+        }
         e.write_store_metadata()?;
         e.commit(Durability::Sync)?;
         Ok(e)
@@ -309,13 +374,13 @@ impl Engine {
     pub fn open(path: &Path, key: Option<&[u8]>) -> Result<Engine> {
         // Read both slots without knowing the page size yet: slot A is always
         // at offset 0 and is exactly 4096 bytes.
-        let mut probe = Pager::open(path, 4096, u64::MAX)?;
+        let mut probe = Pager::open_shared(path, 4096, u64::MAX)?;
         let a = Superblock::parse(&probe.read_at(0, 4096)?).ok();
         let page_size = match &a {
             Some(sb) => sb.page_size(),
             None => 4096,
         };
-        let mut probe = Pager::open(path, page_size, u64::MAX)?;
+        let mut probe = Pager::open_shared(path, page_size, u64::MAX)?;
         let b = Superblock::parse(&probe.read_at(page_size as u64, 4096)?).ok();
         // Step 3: the valid slot with the greater commit_id.
         let sb = match (a, b) {
@@ -392,9 +457,18 @@ impl Engine {
             changefeed_trees: HashSet::new(),
             job: None,
             closed: false,
+            nonce_next: 0,
+            nonce_limit: 0,
             sb,
         };
         e.pager.min_retained_commit = e.sb.min_retained_commit;
+        // `14-security.md` §5.2 — the page cipher goes in before the first
+        // read. Every `reload_*` below walks copy-on-write pages, and a pager
+        // without the ring hands back ciphertext that parses as a corrupt node.
+        if let Some(k) = &e.keys {
+            let ring = k.clone();
+            e.pager.crypto = Some(crate::pager::PageCrypto { ring, next: 0, limit: 0 });
+        }
         e.reload_freelist()?;
         e.reload_vlog_stats()?;
         e.reload_tree_index()?;
@@ -502,7 +576,7 @@ impl Engine {
                 pages,
             });
         }
-        self.persisted_free = extents.iter().map(|e| e.start_page).collect();
+        self.persisted_free = extents.iter().map(|e| (e.commit_id, e.start_page)).collect();
         self.pager.set_free_list(extents);
         Ok(())
     }
@@ -537,11 +611,58 @@ impl Engine {
         Ok(())
     }
 
-    /// `14-security.md` §4.1 rule 1 — on open, before allocating anything,
-    /// durably publish `persisted_next_nonce + 2^20`.
+    /// `14-security.md` §4.1 rules 1 and 3 — durably publish
+    /// `persisted_next_nonce + 2^20` and allocate from the persisted value
+    /// upward, never reaching what was published.
+    ///
+    /// The session's allocation cursor is held here rather than derived from
+    /// `sb.next_nonce - NONCE_GAP`: the derivation is only correct if rule 1
+    /// has already run, and encryption can be switched on *after* open
+    /// (§8.3's conversion), which is a writer that never passed through the
+    /// open-time publish. Deriving it there underflows on the first allocation
+    /// of a converting database and, where the subtraction wraps rather than
+    /// panics, hands out nonces from a floor that was never published — which
+    /// is precisely the crash-reuse hole §4.1 exists to close.
     fn publish_nonce_floor(&mut self) -> Result<()> {
+        self.nonce_next = self.sb.next_nonce;
         self.sb.next_nonce = self.sb.next_nonce.saturating_add(crate::security::NONCE_GAP);
+        self.nonce_limit = self.sb.next_nonce;
+        if let Some(c) = &mut self.pager.crypto {
+            c.next = self.nonce_next;
+            c.limit = self.nonce_limit;
+        }
         self.write_superblock(Durability::Sync)
+    }
+
+    /// Reserves `n` nonce values without handing any out, so a page-write loop
+    /// that cannot stop halfway does not have to publish mid-extent.
+    pub fn ensure_nonces(&mut self, n: u64) -> Result<()> {
+        if self.sb.cipher == 0 || self.keys.is_none() {
+            return Ok(());
+        }
+        if self.pager.crypto.is_none() {
+            let ring = self.keys.as_ref().unwrap().clone();
+            self.pager.crypto = Some(crate::pager::PageCrypto { ring, next: 0, limit: 0 });
+            self.nonce_next = 0;
+            self.nonce_limit = 0;
+        }
+        if self.nonce_next + n > self.nonce_limit {
+            self.publish_nonce_floor()?;
+        }
+        Ok(())
+    }
+
+    /// Headroom armed at the start of every unit of work. A flush writes one
+    /// memtable's worth of pages and a compaction step is byte-budgeted, so
+    /// neither comes near 2^16 pages between two of these calls; running out
+    /// anyway is an error from [`crate::pager::PageCrypto`], never a reuse.
+    const NONCE_HEADROOM: u64 = 1 << 16;
+
+    /// Installs the page cipher (idempotent) and arms the nonce window.
+    /// Encryption can be switched on after open — `14-security.md` §8.3's
+    /// conversion — so this cannot live in `open` alone.
+    fn arm(&mut self) -> Result<()> {
+        self.ensure_nonces(Engine::NONCE_HEADROOM)
     }
 
     pub fn close(&mut self, flush_memtable: bool) -> Result<()> {
@@ -557,7 +678,14 @@ impl Engine {
         if let Some(k) = &mut self.keys {
             k.zeroize();
         }
+        if let Some(c) = &mut self.pager.crypto {
+            c.ring.zeroize();
+        }
+        self.pager.crypto = None;
         self.closed = true;
+        // §10: the exclusive advisory lock is held for the writing lifetime,
+        // and this is the end of it.
+        self.pager.release();
         self.events.push(StoreEvent::Closed);
         Ok(())
     }
@@ -601,6 +729,7 @@ impl Engine {
     }
 
     pub fn put_with_expiry(&mut self, tree: u32, key: &Value, value: &[u8], expiry_ms: u64) -> Result<u64> {
+        self.arm()?;
         self.write(tree, key, op::PUT, value, Some(expiry_ms))
     }
 
@@ -623,6 +752,7 @@ impl Engine {
     /// `drop()` and rollback of a bulk insert O(1) writes rather than O(n)
     /// tombstones.
     pub fn remove_range(&mut self, tree: u32, start: &Value, end: &Value) -> Result<u64> {
+        self.arm()?;
         let s = user_prefix(tree, &cke::encode(start)?);
         let e = user_prefix(tree, &cke::encode(end)?);
         if e <= s {
@@ -739,7 +869,9 @@ impl Engine {
             nonce_base,
         };
         let page = head.encode(self.pager.page_size, pages);
-        self.pager.write_page(start, &page)?;
+        // §5.1: a value-log segment's head page stays in the clear — its
+        // records are appended into its tail and encrypted one by one (§5.3).
+        self.pager.write_page_clear(start, &page)?;
         self.vlog_stats.insert(
             id,
             VlogStats {
@@ -920,20 +1052,27 @@ impl Engine {
         vlog::decode_record(&raw, self.sb.cipher != 0)
     }
 
-    fn allocate_nonce(&mut self) -> Result<u64> {
+    pub fn allocate_nonce(&mut self) -> Result<u64> {
         // §4.1 rules 2 and 3: allocate from the persisted watermark upward and
         // never reach the published value; on reaching it, publish another gap
-        // and only then continue.
-        let n = self.counters.nonces_allocated;
+        // and only then continue. One cursor serves both pages and value-log
+        // records — two would be two chances to hand the same value out twice.
+        self.ensure_nonces(1)?;
+        let n = match &mut self.pager.crypto {
+            Some(c) => {
+                let n = c.next;
+                c.next += 1;
+                n
+            }
+            None => {
+                let n = self.nonce_next;
+                self.nonce_next += 1;
+                n
+            }
+        };
+        self.nonce_next = n + 1;
         self.counters.nonces_allocated += 1;
-        let base = self.sb.next_nonce - crate::security::NONCE_GAP;
-        if n >= crate::security::NONCE_GAP {
-            self.sb.next_nonce += crate::security::NONCE_GAP;
-            self.counters.nonces_allocated = 0;
-            self.write_superblock(Durability::Sync)?;
-            return Ok(self.sb.next_nonce - crate::security::NONCE_GAP);
-        }
-        Ok(base + n)
+        Ok(n)
     }
 
     // ---------------------------------------------------------------
@@ -974,6 +1113,7 @@ impl Engine {
     /// flush — an engine whose watermark never advances retains every
     /// superseded version forever.
     pub fn flush(&mut self) -> Result<()> {
+        self.arm()?;
         if self.memtable_len() == 0 {
             self.visible_seq = self.next_seq.saturating_sub(1);
             return Ok(());
@@ -985,8 +1125,9 @@ impl Engine {
         all.sort_by(|a, b| a.0.cmp(&b.0));
         self.memtable_bytes = 0;
 
-        let mut b = SegmentBuilder::new(
+        let mut b = SegmentBuilder::with_reserve(
             self.pager.page_size,
+            self.pager.tag_reserve(),
             self.sb.next_segment_id,
             0,
             0,
@@ -1581,12 +1722,14 @@ impl Engine {
     /// any point between two output leaf pages; the partially built output is
     /// just a prefix, so abandoning it costs the work done and nothing else.
     pub fn step_compaction(&mut self, job: &mut CompactionJob, budget_bytes: Option<u64>) -> Result<bool> {
+        self.arm()?;
         let budget = budget_bytes.unwrap_or(self.profile.compaction_step_bytes as u64);
         let mut spent = 0u64;
         while job.cursor < job.entries.len() {
             if job.builder.is_none() {
-                let b = SegmentBuilder::new(
+                let b = SegmentBuilder::with_reserve(
                     self.pager.page_size,
+                    self.pager.tag_reserve(),
                     self.sb.next_segment_id,
                     job.target_level,
                     job.target_group,
@@ -1646,6 +1789,7 @@ impl Engine {
     /// `10-transactions.md` §5 — publishing the manifest edit is the only
     /// place concurrent compactions serialize, and it is microseconds.
     pub fn finish_compaction(&mut self, mut job: CompactionJob) -> Result<()> {
+        self.arm()?;
         self.rotate_output(&mut job)?;
         let mut m = std::mem::replace(&mut self.manifest, Manifest::new(0));
         m.tree.commit_id = self.sb.commit_id;
@@ -1765,6 +1909,7 @@ impl Engine {
     /// `vlog_space_target_pct`. A space-only trigger left an aged scan at
     /// 1.58x where a debt trigger held it at 1.00x.
     pub fn collect(&mut self) -> Result<()> {
+        self.arm()?;
         // Merge the live records of every cold segment holding live data into
         // one clustered run. Survivors are emitted in `(tree_id, CKE(key))`
         // order and the output keeps `clustered` (§6.8's last MUST).
@@ -1991,6 +2136,7 @@ impl Engine {
     // ---------------------------------------------------------------
 
     pub fn commit(&mut self, durability: Durability) -> Result<u64> {
+        self.arm()?;
         self.publish_tree_index_root()?;
         // §2.3 invariant 2 — the value-log watermark is published here, through
         // the ordinary commit path, because tree 7 is the authority for it and
@@ -2055,27 +2201,45 @@ impl Engine {
         for p in &freed {
             self.pager.free_extent(*p, 1, self.sb.commit_id);
         }
+        // Tree 1 must be the free list, not a log of everything that was ever
+        // freed. An earlier version only ever *inserted*, on the reasoning that
+        // "a commit writes only what is new" — but an extent leaves the free
+        // list when it is reclaimed (§6), and a best-fit allocation that takes
+        // part of one moves the remainder to a different key. Neither was ever
+        // removed, so the persisted tree was a strict superset of the truth.
+        //
+        // That is invisible to the implementation that wrote it, which keeps
+        // its own list in memory and never reads tree 1 back within a session.
+        // It is fatal to any *other* implementation: it allocates a page tree 1
+        // calls free, the live superblock still names it, and the catalog it
+        // overwrites is gone. Found by the round-trip gate the moment the Dart
+        // side started reading tree 1 at all — which is what a second
+        // implementation is for.
         let extents = self.pager.free_list();
         let mut t = std::mem::replace(&mut self.freelist, CowTree::new(tree_id::FREE_SPACE, 0));
         t.commit_id = self.sb.commit_id;
-        let mut wrote = Vec::new();
-        for e in extents {
-            if !self.persisted_free.insert(e.start_page) {
+        let key_of = |commit_id: u64, start_page: u64| {
+            cke::encode(&Value::Array(vec![
+                Value::Int { w: NumType::U64, neg: false, mag: commit_id as u128 },
+                Value::Int { w: NumType::U64, neg: false, mag: start_page as u128 },
+            ]))
+        };
+        let now: HashSet<(u64, u64)> = extents.iter().map(|e| (e.commit_id, e.start_page)).collect();
+        for gone in self.persisted_free.difference(&now).cloned().collect::<Vec<_>>() {
+            t.remove(&mut self.pager, &key_of(gone.0, gone.1)?)?;
+        }
+        for e in &extents {
+            if self.persisted_free.contains(&(e.commit_id, e.start_page)) {
                 continue;
             }
-            let key = cke::encode(&Value::Array(vec![
-                Value::Int { w: NumType::U64, neg: false, mag: e.commit_id as u128 },
-                Value::Int { w: NumType::U64, neg: false, mag: e.start_page as u128 },
-            ]))?;
             let v = cve::encode(&Value::Doc(vec![(
                 "pages".into(),
                 Value::Int { w: NumType::U32, neg: false, mag: e.pages as u128 },
             )]));
-            t.put(&mut self.pager, &key, &v)?;
-            wrote.push(e.start_page);
+            t.put(&mut self.pager, &key_of(e.commit_id, e.start_page)?, &v)?;
         }
+        self.persisted_free = now;
         self.freelist = t;
-        let _ = wrote;
         Ok(())
     }
 
@@ -2091,6 +2255,19 @@ impl Engine {
         let mut image = self.sb.encode();
         if let Some(ring) = &self.keys {
             ring.seal_superblock(&mut image);
+            // The MAC just written is now the file's, so it has to be the
+            // in-memory superblock's too. Without this, `verify_superblock`
+            // recomputes over the *current* fields and compares against the
+            // MAC parsed at open — which described the fields as they were
+            // *before* this write. Every encrypted file therefore failed §9
+            // step 8 as **tampering** the moment anything wrote a superblock,
+            // and `14-security.md` §4.1's open-time nonce publish is a
+            // superblock write, so it was every encrypted file after every
+            // open. Invisible here because the only verifier that checked was
+            // the other implementation's.
+            self.sb.sb_mac.copy_from_slice(
+                &image[crate::container::sb::SB_MAC..crate::container::sb::SB_MAC + 32],
+            );
         }
         self.pager.write_at(offset, &image)?;
         let achieved2 = self.pager.sync(durability)?;
