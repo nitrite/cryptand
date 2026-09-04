@@ -39,7 +39,13 @@ That is the whole design. Consequences worth stating explicitly:
   entry is one byte smaller and a sentinel can never be persisted by accident.
 - **Uniqueness is enforced, not encoded.** A unique index uses the same layout;
   the SDK checks for an existing entry with the same `v1…vk` prefix before
-  inserting. The tree does not need a different shape for it.
+  inserting. The tree does not need a different shape for it. The check is on
+  the *`NitriteId` behind* the matching entries, not on their existence: an
+  entry whose id is the id being written is the writer's own and is not a
+  violation. A unique index over a multi-valued field reaches the same key twice
+  for `["a", "b", "a"]`, and a rebuild or a replayed write reaches keys the
+  document already owns; a bare existence test rejects all of these. Java, Dart
+  and Rust all shipped that bare test (nitrite/nitrite-java#1295).
 
 ## 2. Descriptor
 
