@@ -2,9 +2,17 @@
 name = "cryptand"
 version = "1.0.0"
 edition = "2021"
+rust-version = "1.89"
 # The files in `benches/` are plain binaries, not libtest benchmarks.
 autobenches = false
-description = "Reference implementation of the Cryptand File Format (CFF) v1.0"
+description = "Reference implementation of the Cryptand File Format (CFF) v1.0: a cross-language, encrypted LSM storage engine and on-disk format for Nitrite."
+license = "Apache-2.0"
+repository = "https://github.com/nitrite/cryptand"
+homepage = "https://nitrite.dizitart.com/cryptand"
+documentation = "https://docs.rs/cryptand"
+readme = "README.md"
+keywords = ["database", "storage", "lsm", "file-format", "encryption"]
+categories = ["database-implementations", "filesystem", "cryptography", "encoding"]
 
 [dependencies]
 sha2 = "0.10"

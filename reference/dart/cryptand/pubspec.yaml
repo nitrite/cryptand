@@ -1,10 +1,19 @@
 name: cryptand
 description: >-
-  Reference implementation of the Cryptand File Format (CFF v1.0), in pure Dart.
-  Normative source is ../../../spec/. Where this code and the spec disagree,
-  the spec wins and this code is wrong (spec/11-conformance.md section 7).
-version: 0.1.0-phase1
-publish_to: none
+  Reference implementation of the Cryptand File Format (CFF v1.0) in pure Dart:
+  a cross-language, encrypted, LSM storage engine and on-disk format for Nitrite.
+version: 1.0.0
+homepage: https://nitrite.dizitart.com/cryptand
+repository: https://github.com/nitrite/cryptand
+issue_tracker: https://github.com/nitrite/cryptand/issues
+documentation: https://nitrite.dizitart.com/cryptand
+
+topics:
+  - database
+  - storage
+  - lsm
+  - file-format
+  - encryption
 
 environment:
   sdk: ^3.5.0
