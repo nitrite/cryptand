@@ -50,64 +50,84 @@ public final class Cve {
         if (depth > Limits.MAX_DEPTH) {
             throw new LimitException("CVE nesting deeper than " + Limits.MAX_DEPTH);
         }
-        switch (v) {
-            case Value.Null ignored -> w.u8(Tag.NULL);
-            case Value.Bool b -> w.u8(b.value() ? Tag.TRUE : Tag.FALSE);
-            case Value.Int i -> writeInt(w, i);
-            case Value.Float f -> {
-                if (f.type() == NumType.F32) {
-                    // floatToIntBits, not RawIntBits: §3 of 00-conventions
-                    // canonicalizes any NaN payload to the quiet NaN.
-                    w.u8(Tag.F32).u32(Float.floatToIntBits((float) f.value()));
-                } else {
-                    w.u8(Tag.F64).u64(Double.doubleToLongBits(f.value()));
-                }
+        if (v instanceof Value.Null) {
+            w.u8(Tag.NULL);
+        } else if (v instanceof Value.Bool b) {
+            w.u8(b.value() ? Tag.TRUE : Tag.FALSE);
+        } else if (v instanceof Value.Int i) {
+            writeInt(w, i);
+        } else if (v instanceof Value.Float f) {
+            if (f.type() == NumType.F32) {
+                // floatToIntBits, not floatToRawIntBits: §3 of 00-conventions
+                // canonicalizes any NaN payload to the quiet NaN.
+                w.u8(Tag.F32).u32(Float.floatToIntBits((float) f.value()));
+            } else {
+                w.u8(Tag.F64).u64(Double.doubleToLongBits(f.value()));
             }
-            case Value.Dec128 d -> w.u8(Tag.DEC128).bytes(d.bytes());
-            case Value.Char c -> w.u8(Tag.CHAR).u32(c.scalar());
-            case Value.Str s -> w.u8(Tag.STR).str(s.value());
-            case Value.Bytes b -> {
-                byte[] raw = b.value();
-                w.u8(Tag.BYTES).uvar(raw.length).bytes(raw);
-            }
-            case Value.Timestamp t -> w.u8(Tag.TIMESTAMP).u64(t.millis());
-            case Value.TimestampNs t -> w.u8(Tag.TIMESTAMP_NS).u64(t.secs()).u32(t.nanos());
-            case Value.Zoned z -> w.u8(Tag.ZONED).u64(z.millis()).str(z.zoneId());
-            case Value.Date d -> w.u8(Tag.DATE).u32(d.days());
-            case Value.Time t -> w.u8(Tag.TIME).u64(t.nanos());
-            case Value.Duration d -> w.u8(Tag.DURATION).u64(d.secs()).u32(d.nanos());
-            case Value.Uuid u -> w.u8(Tag.UUID).bytes(u.bytes());
-            case Value.NitriteId n -> w.u8(Tag.NITRITE_ID).u64(n.id());
-            case Value.Regex r -> w.u8(Tag.REGEX).str(r.pattern()).str(r.flags());
-            case Value.Array a -> writeLengthPrefixed(w, Tag.ARRAY, inner -> {
+        } else if (v instanceof Value.Dec128 d) {
+            w.u8(Tag.DEC128).bytes(d.bytes());
+        } else if (v instanceof Value.Char c) {
+            w.u8(Tag.CHAR).u32(c.scalar());
+        } else if (v instanceof Value.Str s) {
+            w.u8(Tag.STR).str(s.value());
+        } else if (v instanceof Value.Bytes b) {
+            byte[] raw = b.value();
+            w.u8(Tag.BYTES).uvar(raw.length).bytes(raw);
+        } else if (v instanceof Value.Timestamp t) {
+            w.u8(Tag.TIMESTAMP).u64(t.millis());
+        } else if (v instanceof Value.TimestampNs t) {
+            w.u8(Tag.TIMESTAMP_NS).u64(t.secs()).u32(t.nanos());
+        } else if (v instanceof Value.Zoned z) {
+            w.u8(Tag.ZONED).u64(z.millis()).str(z.zoneId());
+        } else if (v instanceof Value.Date d) {
+            w.u8(Tag.DATE).u32(d.days());
+        } else if (v instanceof Value.Time t) {
+            w.u8(Tag.TIME).u64(t.nanos());
+        } else if (v instanceof Value.Duration d) {
+            w.u8(Tag.DURATION).u64(d.secs()).u32(d.nanos());
+        } else if (v instanceof Value.Uuid u) {
+            w.u8(Tag.UUID).bytes(u.bytes());
+        } else if (v instanceof Value.NitriteId n) {
+            w.u8(Tag.NITRITE_ID).u64(n.id());
+        } else if (v instanceof Value.Regex r) {
+            w.u8(Tag.REGEX).str(r.pattern()).str(r.flags());
+        } else if (v instanceof Value.Array a) {
+            writeLengthPrefixed(w, Tag.ARRAY, inner -> {
                 inner.uvar(a.items().size());
                 for (Value e : a.items()) {
                     write(inner, e, dict, depth + 1);
                 }
             });
-            case Value.Map m -> writeMap(w, m, dict, depth);
-            case Value.Doc d -> writeDoc(w, d, dict, depth);
-            case Value.Vector vec -> w.u8(Tag.VECTOR).u8(vec.dtype()).uvar(vec.dim()).bytes(vec.payload());
-            case Value.Geometry g -> {
-                byte[] wkb = g.wkb();
-                w.u8(Tag.GEOMETRY).uvar(wkb.length).bytes(wkb);
-            }
-            case Value.BlobRef b -> w.u8(Tag.BLOB_REF).u64(b.startPage()).u32((int) b.byteLen()).u32(b.crc32c());
-            case Value.OverflowRef o -> {
-                byte[] inline = o.inline();
-                w.u8(Tag.OVERFLOW_REF).uvar(inline.length).bytes(inline).u64(o.nextPage());
-            }
-            case Value.VlogRef vl -> w.u8(Tag.VLOG_REF).u64(vl.segmentId()).u32((int) vl.offset()).u32(vl.len());
-            case Value.Opaque o -> writeLengthPrefixed(w, Tag.OPAQUE, inner -> {
+        } else if (v instanceof Value.Map m) {
+            writeMap(w, m, dict, depth);
+        } else if (v instanceof Value.Doc d) {
+            writeDoc(w, d, dict, depth);
+        } else if (v instanceof Value.Vector vec) {
+            w.u8(Tag.VECTOR).u8(vec.dtype()).uvar(vec.dim()).bytes(vec.payload());
+        } else if (v instanceof Value.Geometry g) {
+            byte[] wkb = g.wkb();
+            w.u8(Tag.GEOMETRY).uvar(wkb.length).bytes(wkb);
+        } else if (v instanceof Value.BlobRef b) {
+            w.u8(Tag.BLOB_REF).u64(b.startPage()).u32((int) b.byteLen()).u32(b.crc32c());
+        } else if (v instanceof Value.OverflowRef o) {
+            byte[] inline = o.inline();
+            w.u8(Tag.OVERFLOW_REF).uvar(inline.length).bytes(inline).u64(o.nextPage());
+        } else if (v instanceof Value.VlogRef vl) {
+            w.u8(Tag.VLOG_REF).u64(vl.segmentId()).u32((int) vl.offset()).u32(vl.len());
+        } else if (v instanceof Value.Opaque o) {
+            writeLengthPrefixed(w, Tag.OPAQUE, inner -> {
                 byte[] data = o.data();
                 inner.str(o.origin()).str(o.typeName()).uvar(data.length).bytes(data);
             });
+        } else if (v instanceof Value.Unknown u) {
             // §1.1: reserved and implementation-private tags are
             // length-prefixed, so preserving one is writing back what we read.
-            case Value.Unknown u -> {
-                byte[] payload = u.payload();
-                w.u8(u.unknownTag()).uvar(payload.length).bytes(payload);
-            }
+            byte[] payload = u.payload();
+            w.u8(u.unknownTag()).uvar(payload.length).bytes(payload);
+        } else {
+            // Unreachable while Value stays sealed and this chain covers it.
+            // On 21 the compiler proved that; here the throw is the proof.
+            throw new InvalidArgumentException("no CVE encoding for " + v.getClass().getName());
         }
     }
 

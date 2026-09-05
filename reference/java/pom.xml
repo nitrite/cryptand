@@ -41,13 +41,16 @@
 
     <properties>
         <!--
-          21, not 17, for pattern matching in switch. The value model is a
-          sealed interface and every encoder, comparator and key builder
-          switches over it; on 21 the compiler checks those switches for
-          exhaustiveness, so a type added to the format breaks the build in
-          every place that must learn about it. That is worth an LTS bump.
+          17: records, sealed interfaces and pattern matching for instanceof,
+          which is what the value model needs. Pattern matching in *switch* is
+          21, so the encoders dispatch through instanceof chains instead and
+          the compiler does not check them for exhaustiveness. Each such chain
+          therefore ends in a throw naming the type it did not handle - a
+          runtime check where 21 would have given a compile-time one. Worth
+          knowing when adding a CVE type: the build will not tell you where to
+          go, the tests will.
         -->
-        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.11.4</junit.version>
         <jackson.version>2.18.2</jackson.version>

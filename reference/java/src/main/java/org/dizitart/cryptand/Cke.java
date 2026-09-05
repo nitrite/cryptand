@@ -298,25 +298,26 @@ public final class Cke {
      * no-op.
      */
     public static boolean isKeyEncodable(Value v) {
-        return switch (v) {
-            case Value.Null ignored -> true;
-            case Value.Bool ignored -> true;
-            case Value.Float ignored -> true;
-            case Value.Char ignored -> true;
-            case Value.Str ignored -> true;
-            case Value.Bytes ignored -> true;
-            case Value.Timestamp ignored -> true;
-            case Value.TimestampNs ignored -> true;
-            case Value.Zoned ignored -> true;
-            case Value.Date ignored -> true;
-            case Value.Time ignored -> true;
-            case Value.Duration ignored -> true;
-            case Value.Uuid ignored -> true;
-            case Value.NitriteId ignored -> true;
-            case Value.Int i -> i.type().isKeyEncodable();
-            case Value.Array a -> a.items().stream().allMatch(Cke::isKeyEncodable);
-            default -> false;
-        };
+        if (v instanceof Value.Int i) {
+            return i.type().isKeyEncodable();
+        }
+        if (v instanceof Value.Array a) {
+            return a.items().stream().allMatch(Cke::isKeyEncodable);
+        }
+        return v instanceof Value.Null
+                || v instanceof Value.Bool
+                || v instanceof Value.Float
+                || v instanceof Value.Char
+                || v instanceof Value.Str
+                || v instanceof Value.Bytes
+                || v instanceof Value.Timestamp
+                || v instanceof Value.TimestampNs
+                || v instanceof Value.Zoned
+                || v instanceof Value.Date
+                || v instanceof Value.Time
+                || v instanceof Value.Duration
+                || v instanceof Value.Uuid
+                || v instanceof Value.NitriteId;
     }
 
     public static byte[] encode(Value v) {
@@ -329,49 +330,58 @@ public final class Cke {
         if (depth > Limits.MAX_DEPTH) {
             throw new LimitException("CKE nesting deeper than " + Limits.MAX_DEPTH);
         }
-        switch (v) {
-            case Value.Null ignored -> w.u8(Group.NULL);
-            case Value.Bool b -> w.u8(Group.BOOL).u8(b.value() ? 0x01 : 0x00);
-            case Value.Int i -> writeInt(w, i);
-            case Value.Float f -> writeFloat(w, f);
-            case Value.Char c -> w.u8(Group.CHAR).u32be(c.scalar());
-            case Value.Str s -> {
-                w.u8(Group.STRING);
-                writeEsc(w, Utf8.encode(s.value()));
-            }
-            case Value.Bytes b -> {
-                w.u8(Group.BYTES);
-                writeEsc(w, b.value());
-            }
+        if (v instanceof Value.Null) {
+            w.u8(Group.NULL);
+        } else if (v instanceof Value.Bool b) {
+            w.u8(Group.BOOL).u8(b.value() ? 0x01 : 0x00);
+        } else if (v instanceof Value.Int i) {
+            writeInt(w, i);
+        } else if (v instanceof Value.Float f) {
+            writeFloat(w, f);
+        } else if (v instanceof Value.Char c) {
+            w.u8(Group.CHAR).u32be(c.scalar());
+        } else if (v instanceof Value.Str s) {
+            w.u8(Group.STRING);
+            writeEsc(w, Utf8.encode(s.value()));
+        } else if (v instanceof Value.Bytes b) {
+            w.u8(Group.BYTES);
+            writeEsc(w, b.value());
+        } else if (v instanceof Value.NitriteId n) {
             // The XOR flips the sign bit so a signed i64 sorts correctly as
             // unsigned bytes. Snowflake ids are positive in practice, but
             // NitriteId accepts any i64 and the format must not depend on
             // application discipline.
-            case Value.NitriteId n -> w.u8(Group.NITRITE_ID).u64be(n.id() ^ SIGN_BIT_64);
-            case Value.Uuid u -> w.u8(Group.UUID).bytes(u.bytes());
-            case Value.Timestamp t -> writeInstant(w, millisToSecs(t.millis()), millisToNanos(t.millis()));
-            case Value.TimestampNs t -> writeInstant(w, t.secs(), t.nanos());
+            w.u8(Group.NITRITE_ID).u64be(n.id() ^ SIGN_BIT_64);
+        } else if (v instanceof Value.Uuid u) {
+            w.u8(Group.UUID).bytes(u.bytes());
+        } else if (v instanceof Value.Timestamp t) {
+            writeInstant(w, millisToSecs(t.millis()), millisToNanos(t.millis()));
+        } else if (v instanceof Value.TimestampNs t) {
+            writeInstant(w, t.secs(), t.nanos());
+        } else if (v instanceof Value.Zoned z) {
             // §5: the zone id is not part of the key.
-            case Value.Zoned z -> writeInstant(w, millisToSecs(z.millis()), millisToNanos(z.millis()));
-            case Value.Date d -> w.u8(Group.TEMPORAL).u8(TemporalClass.DATE).u32be(d.days() ^ 0x80000000);
-            case Value.Time t -> w.u8(Group.TEMPORAL).u8(TemporalClass.TIME).u64be(t.nanos());
-            case Value.Duration d -> w.u8(Group.TEMPORAL).u8(TemporalClass.DURATION)
-                    .u64be(d.secs() ^ SIGN_BIT_64).u32be(d.nanos());
-            case Value.Array a -> {
-                w.u8(Group.ARRAY);
-                for (Value e : a.items()) {
-                    w.u8(ELEM_CONTINUE);
-                    write(w, e, depth + 1);
-                }
-                // ELEM_END is below ELEM_CONTINUE, so [a] < [a, b].
-                w.u8(ELEM_END);
+            writeInstant(w, millisToSecs(z.millis()), millisToNanos(z.millis()));
+        } else if (v instanceof Value.Date d) {
+            w.u8(Group.TEMPORAL).u8(TemporalClass.DATE).u32be(d.days() ^ 0x80000000);
+        } else if (v instanceof Value.Time t) {
+            w.u8(Group.TEMPORAL).u8(TemporalClass.TIME).u64be(t.nanos());
+        } else if (v instanceof Value.Duration d) {
+            w.u8(Group.TEMPORAL).u8(TemporalClass.DURATION).u64be(d.secs() ^ SIGN_BIT_64).u32be(d.nanos());
+        } else if (v instanceof Value.Array a) {
+            w.u8(Group.ARRAY);
+            for (Value e : a.items()) {
+                w.u8(ELEM_CONTINUE);
+                write(w, e, depth + 1);
             }
-            case Value.Dec128 ignored -> throw new InvalidArgumentException(
+            // ELEM_END is below ELEM_CONTINUE, so [a] < [a, b].
+            w.u8(ELEM_END);
+        } else if (v instanceof Value.Dec128) {
+            throw new InvalidArgumentException(
                     "DEC128 has no CKE encoding and cannot be a key (spec/03-key-encoding.md §4.4): "
                             + "a decimal fraction has no exact binary m x 2^e form");
-            default -> throw new InvalidArgumentException(
-                    v.getClass().getSimpleName()
-                            + " has no CKE encoding and cannot be a key (spec/03-key-encoding.md §2)");
+        } else {
+            throw new InvalidArgumentException(v.getClass().getSimpleName()
+                    + " has no CKE encoding and cannot be a key (spec/03-key-encoding.md §2)");
         }
     }
 

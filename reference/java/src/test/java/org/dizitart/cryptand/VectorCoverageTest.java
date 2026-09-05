@@ -5,6 +5,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * How many cases each vector file holds.
@@ -36,6 +37,34 @@ class VectorCoverageTest {
         assertCount("numbers/torture.json", "entries", 170);
         assertCount("numbers/torture.json", "sorted_by_cke", 170);
         assertCount("numbers/torture.json", "lossy_decodings", 3);
+        assertCount("container/layout.json", "crc32c", 2);
+        assertCount("filter/blocked_bloom.json", "cfh64_vectors", 6);
+        assertCount("index/entries.json", "cases", 9);
+        assertCount("index/layout.json", "entries", 5);
+        assertCount("catalog/trees.json", "trees", 3);
+        assertCount("catalog/trees.json", "levelled_kinds", 8);
+        assertCount("security/derivation.json", "nonces", 2);
+    }
+
+    /**
+     * Which of the ten vector groups this implementation consumes.
+     *
+     * <p>A group with no test is not a failure — it is a chapter not yet built —
+     * but it must be visible rather than inferred from an absence. The tenth,
+     * {@code analyzer}, needs the Unicode 15.1 tables and Porter2 and is its own
+     * phase.
+     */
+    @Test
+    @DisplayName("nine of the ten vector groups are consumed; the analyzer is not")
+    void groupsConsumed() {
+        String[] consumed = {"cke", "cve", "numbers", "strings", "documents",
+                "container", "filter", "index", "catalog", "security"};
+        for (String group : consumed) {
+            assertTrue(java.nio.file.Files.isDirectory(Vectors.root().resolve(group)),
+                    group + " vectors should exist");
+        }
+        assertTrue(java.nio.file.Files.isDirectory(Vectors.root().resolve("analyzer")),
+                "the analyzer group exists and is deliberately not yet consumed");
     }
 
     private static void assertCount(String file, String field, int expected) {
