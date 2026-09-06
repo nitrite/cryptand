@@ -6,6 +6,14 @@
 
 # Build outputs
 build/
+bin/
+out/
+
+# Java / Maven
+*.class
+.classpath
+.project
+.settings/
 
 # Rust build outputs
 target/

@@ -13,10 +13,12 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ref="$(cd "$here/../.." && pwd)"
 rust="$ref/rust"
 dart="$ref/dart/cryptand"
+java="$ref/java"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 RUST="$rust/target/release/interop"
+JAVA_CP="$java/target/classes"
 fail=0
 step=0
 
@@ -35,6 +37,7 @@ run_impl() {
   case "$impl" in
     rust) "$RUST" "$@" ${extra[@]+"${extra[@]}"} ;;
     dart) (cd "$dart" && dart run tool/interop.dart "$@" ${extra[@]+"${extra[@]}"}) ;;
+    java) java -cp "$JAVA_CP" org.dizitart.cryptand.Interop "$@" ${extra[@]+"${extra[@]}"} ;;
     *) echo "unknown implementation $impl" >&2; return 2 ;;
   esac
 }
@@ -126,10 +129,17 @@ round_trip() {
 say "building"
 (cd "$rust" && cargo build --release -p cryptand -q) || { echo "cargo build failed"; exit 1; }
 [[ -x "$RUST" ]] || { echo "missing $RUST"; exit 1; }
-ok "rust: $($RUST 2>&1 | head -1 >/dev/null; echo built)"
+ok "rust: built"
+(cd "$java" && mvn -q -o -DskipTests compile) || { echo "maven build failed"; exit 1; }
+[[ -d "$JAVA_CP" ]] || { echo "missing $JAVA_CP"; exit 1; }
+ok "java: built"
 
 round_trip rust dart
 round_trip dart rust
+round_trip java rust
+round_trip rust java
+round_trip java dart
+round_trip dart java
 
 # The same gate over an encrypted file. `14-security.md` is the chapter with the
 # most ways to be *individually* right and *mutually* incompatible -- the page
@@ -140,12 +150,16 @@ round_trip dart rust
 KEY=0707070707070707070707070707070707070707070707070707070707070707
 round_trip rust dart
 round_trip dart rust
+round_trip java rust
+round_trip rust java
+round_trip java dart
+round_trip dart java
 
 # And the other half of the property: the wrong key is refused, by both, with
 # the one error `§3.3` allows -- "a failure across all slots is 'wrong key', and
 # an implementation MUST NOT distinguish 'no such slot' from 'bad password'".
 say "5. an encrypted file refuses the wrong key, in both implementations"
-for impl in rust dart; do
+for impl in rust dart java; do
   out="$(KEY=0808080808080808080808080808080808080808080808080808080808080808 \
          run_impl "$impl" read "$work/rust-to-dart-enc.cryptand" 2>&1)" && \
     bad "$impl opened an encrypted file with the wrong key" || \

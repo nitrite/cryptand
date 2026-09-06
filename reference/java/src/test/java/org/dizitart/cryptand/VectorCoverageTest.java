@@ -44,27 +44,28 @@ class VectorCoverageTest {
         assertCount("catalog/trees.json", "trees", 3);
         assertCount("catalog/trees.json", "levelled_kinds", 8);
         assertCount("security/derivation.json", "nonces", 2);
+        assertCount("analyzer/std_v1.json", "cases", 14);
     }
 
     /**
-     * Which of the ten vector groups this implementation consumes.
+     * Which vector groups this implementation consumes.
      *
      * <p>A group with no test is not a failure — it is a chapter not yet built —
-     * but it must be visible rather than inferred from an absence. The tenth,
-     * {@code analyzer}, needs the Unicode 15.1 tables and Porter2 and is its own
-     * phase.
+     * but it must be visible rather than inferred from an absence. Every group
+     * on disk is consumed now; {@code analyzer} was the last, because it needed
+     * Unicode 15.1 segmentation and Porter2, and {@link FullTextTest} is where
+     * it is spent.
      */
     @Test
-    @DisplayName("nine of the ten vector groups are consumed; the analyzer is not")
+    @DisplayName("every vector group on disk is consumed")
     void groupsConsumed() {
         String[] consumed = {"cke", "cve", "numbers", "strings", "documents",
-                "container", "filter", "index", "catalog", "security"};
+                "container", "filter", "index", "catalog", "security", "analyzer"};
         for (String group : consumed) {
             assertTrue(java.nio.file.Files.isDirectory(Vectors.root().resolve(group)),
                     group + " vectors should exist");
         }
-        assertTrue(java.nio.file.Files.isDirectory(Vectors.root().resolve("analyzer")),
-                "the analyzer group exists and is deliberately not yet consumed");
+        assertEquals(11, consumed.length, "every vector group has a test");
     }
 
     private static void assertCount(String file, String field, int expected) {

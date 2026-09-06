@@ -115,6 +115,27 @@ public final class PageHeader {
      * decoding. Call this once the payload is already in place.
      */
     public void writeInto(byte[] page) {
+        writeInto(page, page.length);
+    }
+
+    /**
+     * As {@link #writeInto(byte[])}, but with the checksum covering only bytes
+     * {@code 4 … checksumEnd-1}.
+     *
+     * <p>Exactly one page needs this: a value-log segment's head page. Its
+     * record space begins at {@code data_offset} — byte 104, which is
+     * <em>inside</em> the head page — and records are appended there for the
+     * life of the segment. A checksum over the whole page would be invalidated
+     * by the first append, leaving a page that fails its own checksum for most
+     * of its life. That is the same argument {@code spec/04-segments.md} §6.2
+     * makes when it moves the mutable {@code bytes} watermark out of the head
+     * page and into tree 7, and it applies here verbatim.
+     *
+     * <p>Nothing is left unprotected by narrowing it: {@code 01-container.md}
+     * §3 already says the record bytes take their integrity from the per-record
+     * {@code crc32c}, not from any page checksum.
+     */
+    public void writeInto(byte[] page, int checksumEnd) {
         if (page.length < BYTES) {
             throw new InvalidArgumentException("page is " + page.length + " bytes, header needs " + BYTES);
         }
@@ -131,7 +152,7 @@ public final class PageHeader {
         }
         System.arraycopy(h, 0, page, 0, BYTES);
 
-        checksum = Crc32c.of(page, 4, page.length - 4);
+        checksum = Crc32c.of(page, 4, checksumEnd - 4);
         page[0] = (byte) checksum;
         page[1] = (byte) (checksum >>> 8);
         page[2] = (byte) (checksum >>> 16);
@@ -175,8 +196,13 @@ public final class PageHeader {
      * as a failed AEAD tag, which is tampering and must not be repaired.
      */
     public static PageHeader verify(byte[] page, long pageId) {
+        return verify(page, pageId, page.length);
+    }
+
+    /** Verifies with the checksum scope of {@link #writeInto(byte[], int)}. */
+    public static PageHeader verify(byte[] page, long pageId, int checksumEnd) {
         PageHeader h = parse(page, 0);
-        int actual = Crc32c.of(page, 4, page.length - 4);
+        int actual = Crc32c.of(page, 4, checksumEnd - 4);
         if (actual != h.checksum) {
             throw new CorruptionException(String.format(
                     "page checksum mismatch: stored %08x, computed %08x", h.checksum, actual), pageId, null);
@@ -191,7 +217,29 @@ public final class PageHeader {
                     "stored_len " + Integer.toUnsignedString(h.storedLen) + " does not fit the page", pageId, null);
         }
         if (h.extentPages < 1) {
-            throw new CorruptionException("extent_pages is " + h.extentPages + ", must be at least 1", pageId, null);
+            // §3 says extent_pages is "1 for an ordinary page; > 1 for a
+            // multi-page extent head", and this implementation always writes 1.
+            // On a page that is NOT an extent head the field is pure redundancy
+            // - the page is one page by definition - so a 0 there is read as 1
+            // rather than refused. The Rust reference writes 0 on every ordinary
+            // page, and refusing it would make a file that is otherwise
+            // perfectly readable unopenable, which is the opposite of what
+            // 00-conventions.md §9 resolves ambiguity toward.
+            //
+            // On an extent HEAD it stays corruption: there the field is the only
+            // record of how far the extent runs, and guessing it would be
+            // guessing at the size of something.
+            if (h.isSet(Flags.EXTENT_HEAD)) {
+                throw new CorruptionException("extent_pages is " + h.extentPages
+                        + " on an extent head, which is the only record of the extent's length",
+                        pageId, null);
+            }
+            // Accepted, and deliberately NOT rewritten to 1: §5.2's AAD is "the
+            // 40-byte page header with `checksum` zeroed", so every other field
+            // has to stay exactly as stored or the tag fails. Normalizing it
+            // here made Java unable to decrypt a page Rust wrote while Rust
+            // could still decrypt Java's - an asymmetry that only a
+            // cross-implementation test can produce.
         }
         return h;
     }

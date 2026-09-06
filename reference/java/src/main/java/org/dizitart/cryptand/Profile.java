@@ -158,6 +158,41 @@ public enum Profile {
         return maxForegroundStallMs;
     }
 
+    /**
+     * Argon2id cost — {@code spec/14-security.md} §3.2, a per-device decision
+     * and therefore a profile default. Stored per keyslot, so a file created on
+     * a phone still opens on a phone after a desktop has written to it.
+     *
+     * <p>The memory cost is transient and much larger than the engine's entire
+     * steady-state budget: 64 MiB against {@code MOBILE}'s 4 MiB page cache. It
+     * is allocated, used and released before opening proceeds.
+     */
+    public int argon2TCost() {
+        return switch (this) {
+            case MOBILE, TABLET -> 3;
+            case DESKTOP, SERVER -> 4;
+            case CUSTOM -> 3;
+        };
+    }
+
+    public int argon2MCostKib() {
+        return switch (this) {
+            case MOBILE -> 65536;
+            case TABLET -> 131072;
+            case DESKTOP, SERVER -> 262144;
+            case CUSTOM -> 65536;
+        };
+    }
+
+    public int argon2Parallelism() {
+        return switch (this) {
+            case MOBILE -> 1;
+            case TABLET -> 2;
+            case DESKTOP, SERVER -> 4;
+            case CUSTOM -> 1;
+        };
+    }
+
     public static Profile byId(int id) {
         for (Profile p : values()) {
             if (p.id == id) {

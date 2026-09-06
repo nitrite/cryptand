@@ -15,7 +15,8 @@ package org.dizitart.cryptand;
  */
 public abstract sealed class CryptandException extends RuntimeException
         permits CorruptionException, LimitException, InvalidArgumentException,
-                UnsupportedFeatureException {
+                UnsupportedFeatureException, TamperingException, LockedException,
+                CannotUnlockException, ConflictException {
 
     protected CryptandException(String message) {
         super(message);

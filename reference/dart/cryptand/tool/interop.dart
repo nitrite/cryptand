@@ -306,8 +306,9 @@ void main(List<String> args) {
         stderr.writeln('unknown command ${args[0]}');
         exit(2);
     }
-  } on Object catch (err) {
+  } on Object catch (err, st) {
     stderr.writeln(err);
+    if (Platform.environment['INTEROP_TRACE'] != null) stderr.writeln(st);
     exit(1);
   }
 }

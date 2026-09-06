@@ -232,6 +232,46 @@ public final class Superblock {
         return out;
     }
 
+    /**
+     * The image with {@code sb_mac} computed and the checksum recomputed over
+     * it — {@code spec/14-security.md} §6.2.
+     *
+     * <p>The MAC value is also written back into {@link #sbMac}, and that half
+     * is the one that gets missed. An implementation that seals the image it
+     * writes but leaves its in-memory superblock holding the MAC it parsed at
+     * open will, from that moment, recompute the MAC over the current fields
+     * and compare it against one that described the fields as they were
+     * <em>before</em> — and report its own file as tampering. §4.1's open-time
+     * nonce publish is a superblock write, so that makes every encrypted file
+     * fail {@code 01-container.md} §9 step 8 immediately after every open.
+     */
+    public byte[] encodeSealed(byte[] macKey) {
+        byte[] image = encode();
+        byte[] mac = FileCipher.superblockMac(macKey, image);
+        System.arraycopy(mac, 0, image, 296, 32);
+        this.sbMac = mac;
+        int crc = Crc32c.of(image, 0, CHECKSUM_OFFSET);
+        image[CHECKSUM_OFFSET] = (byte) crc;
+        image[CHECKSUM_OFFSET + 1] = (byte) (crc >>> 8);
+        image[CHECKSUM_OFFSET + 2] = (byte) (crc >>> 16);
+        image[CHECKSUM_OFFSET + 3] = (byte) (crc >>> 24);
+        return image;
+    }
+
+    /**
+     * §6.2: verified in constant time, immediately after a keyslot is chosen
+     * and <strong>before acting on any other field</strong>. A mismatch is
+     * tampering, reported distinctly from a CRC failure, which is corruption.
+     */
+    public static void verifyMac(byte[] macKey, byte[] image) {
+        byte[] stored = Arrays.copyOfRange(image, 296, 328);
+        byte[] expected = FileCipher.superblockMac(macKey, image);
+        if (!Security.constantTimeEquals(stored, expected)) {
+            throw new TamperingException("superblock MAC does not verify; "
+                    + "the superblock was modified after it was written");
+        }
+    }
+
     private static byte[] fixed(byte[] src, int n) {
         return src.length == n ? src : Arrays.copyOf(src, n);
     }
