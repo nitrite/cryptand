@@ -31,8 +31,14 @@ int _rank(CValue v) => switch (v) {
       CNitriteId() => Group.nitriteId,
       CUuid() => Group.uuid,
       CArray() => Group.array,
-      CDoc() => 0xB0,
-      CMap() => 0xB1,
+      // `spec/02-value-encoding.md` section 8 rule 10's extension: ordering
+      // ranks, never written to a file. ARRAY < MAP < DOC. An earlier version
+      // of this file used 0xB0/0xB1 -- which are inside the range section 2
+      // *reserves* -- and put DOC below MAP, the opposite of what the Rust
+      // implementation chose. Nothing could see it because nothing tested
+      // this file.
+      CMap() => 0xA1,
+      CDoc() => 0xA2,
       _ => -1, // unordered
     };
 

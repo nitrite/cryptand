@@ -1115,6 +1115,51 @@ spec's word is the right one; it is worth writing down that it is satisfied by a
 lock rather than by an instruction, because an implementer looking for
 `compare_exchange` will not find one.
 
+### 8.16 Phase 19 — the definition of value order, tested for the first time
+
+`02-value-encoding.md` §8 is the chapter that opens *"defined here once, for all
+SDKs, ending the current divergence"*. A coverage run across the three
+implementations found it was the least tested chapter in the project, and the
+reason is worth stating plainly: **it is the one chapter whose output never
+reaches a file.** Every other chapter is checked by the cross-language round
+trip, because a disagreement changes bytes. §8's order is consumed in memory,
+by sorts and equality checks, so three implementations could disagree
+completely and every conformance vector, every interop direction and every
+verifier would still pass.
+
+They did disagree. Coverage before this phase: Dart `compare.dart` **0 of 144
+lines**, Rust `compare.rs` **7 of 134**, and Java had **no implementation of §8
+at all** — it had CKE's byte comparison and nothing that ordered values.
+
+| | defect | fix |
+|---|---|---|
+| ⚠ 66 | **Rule 10 defers to `03-key-encoding.md` §2's tag table for cross-type order, and that table has no entry for `DOC` or `MAP`** — correctly, since it is a table of *key* group tags and neither has a key encoding. But rule 8 orders them, so the order §8 calls total was not. Dart ranked `DOC` below `MAP`, using `0xB0`/`0xB1` — inside the range §2 **reserves**; Rust ranked `MAP` below `DOC` at `0xA1`/`0xA2`. Two shipped implementations, opposite answers, and nothing could observe it because the ranks are never written to a file | rule 10 gains the two ranks explicitly, as **ordering ranks and not group tags**: `ARRAY < MAP < DOC`, which is the order rule 8 itself lists them in. `0xB0`–`0xEF` stay reserved. Dart moved |
+| ⚠ 67 | **Comparing two values §8 does not order returned "equal" in Rust.** The closing paragraph made using them as an index key an error and said nothing about comparing them, and an infallible `Ordering` signature has no other answer available. Measured: `values_equal` on two **different** `GEOMETRY` values returned `true`. That is not a conservative default — it makes them indistinguishable to a sort, a deduplication and an equality check, silently | §8 makes the comparison itself an error, and forbids returning equal. `compare_values` is now fallible in Rust, as it already was in Dart. An unordered value *inside* a container is still ranked deterministically, because sorting a list of documents has to stay defined |
+| 68 | **Every `DEC128` compared equal to every other, and to integer zero.** Rule 2 puts `DEC128` in the numeric domain; Rust routed it to `compare_numeric`, whose exact decomposition has no case for it, so it decomposed to zero. `DEC128(5)` tested equal to `INT(0)`. The code even said the caller avoids this, and nothing made the caller avoid it | §8 requires an implementation without exact decimal arithmetic to **refuse** rather than approximate. Both now refuse, as Dart already did |
+| 69 | **Dart's own header named `test/cke_order_test.dart` as "the single most important test in this package".** That file had never existed. `cke_test.dart` does test the numeric ordering invariant — against a `referenceCompareNumeric` local to the test, so the *shipped* order and the *shipped* key encoding were never compared to each other | §8 now requires the agreement test by name: `sign(compare(a,b))` and `sign(memcmp(CKE(a), CKE(b)))` over every key-encodable pair. Written in all three: Dart +26, Rust +24, Java +24 tests |
+
+**The pattern, and it is the project's oldest one.** Defects 66 through 68 are
+each *a rule that is correct under an assumption nobody wrote down* — rule 10
+assumed every ordered type has a group tag; the closing paragraph assumed
+"cannot be a key" and "cannot be compared" are the same sentence; rule 2 assumed
+an implementation in the numeric domain can do decimal arithmetic. Defects 9, 23
+and 33 were the same shape.
+
+**What is new here is the reason they survived so long.** The cross-language
+gate is this project's strongest instrument and it is blind to anything that
+does not change a byte. Chapter 08's EWKB rejection, chapter 14's page
+encryption and chapter 04's disjointness were all eventually caught by a file;
+§8 cannot be. A chapter whose output is not durable needs a test that names the
+invariant, because there is no file to disagree about.
+
+**A control that cannot fail, the sixth time.** The first version of the pair
+sweep contained no character in `U+E000`–`U+FFFF`. UTF-16 code-unit order and
+UTF-8 byte order differ only for a pair that straddles the surrogate range, so
+replacing the comparison with Java's `String.compareTo` — the exact mistake the
+rule exists to prevent — left the 20 000-pair sweep passing, and only the
+hand-written rule 4 case failed. Adding `U+FF61` to the corpus makes the sweep
+itself the control: the same substitution now fails two tests.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

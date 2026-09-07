@@ -327,14 +327,53 @@ Defined here once, for all SDKs, ending the current divergence.
    their sorted `(key, value)` sequences.
 9. `BOOL`: `FALSE < TRUE`.
 10. Cross-type order (when two values are not in the same group) is the group
-    order given in `03-key-encoding.md` §2. It is stable and total but has no
-    semantic meaning; queries SHOULD NOT rely on it.
+    order given in `03-key-encoding.md` §2, extended by the two ranks below.
+    It is stable and total but has no semantic meaning; queries SHOULD NOT
+    rely on it.
 
-`OPAQUE`, `GEOMETRY`, `VECTOR` and `REGEX` are **not ordered**. Using them as
-index keys is an error. `DOC` and `MAP` *are* ordered (rule 8) but have no key
-encoding, so they too cannot be index keys or map keys — the order defined here
-is for value comparison only. The set of types that can be a key is exactly the
-set `03-key-encoding.md` §2 gives a group tag.
+    §2's table stops at `0xA0` `ARRAY`, because it is a table of *key* group
+    tags and `MAP` and `DOC` have no key encoding. Rule 8 nonetheless orders
+    them, so rule 10 needs a rank for them or the order it calls total is not:
+
+    | rank | group |
+    |---|---|
+    | `0xA1` | `MAP` |
+    | `0xA2` | `DOC` |
+
+    These are **ordering ranks, not group tags.** They are never written to a
+    file, `0xA1` and `0xA2` remain unused in §2's table, and `0xB0`–`0xEF`
+    stay reserved. `ARRAY < MAP < DOC`, which is the order rule 8 lists them
+    in.
+
+    This was left open in an earlier draft, and two reference implementations
+    filled the hole in **opposite** directions — one ranked `DOC` below `MAP`
+    (using the reserved tags `0xB0`/`0xB1`), the other `MAP` below `DOC`. A
+    chapter that opens "defined here once, for all SDKs, ending the current
+    divergence" had a divergence in it, and no test could see it because
+    nothing tested this section at all.
+
+`OPAQUE`, `GEOMETRY`, `VECTOR` and `REGEX` are **not ordered**, and an
+implementation-private tag (§1.1) is not ordered either. Using any of them as
+an index key is an error, **and so is comparing two of them**: an
+implementation MUST report the comparison as an error and MUST NOT return
+"equal". Returning equal is the dangerous answer, not the conservative one —
+it makes two different geometries indistinguishable to a sort, a deduplication
+or an equality check, silently. `DEC128` is the same case for a different
+reason: rule 2 puts it in the numeric domain, but an implementation without
+exact decimal arithmetic MUST refuse the comparison rather than approximate it
+(one reference implementation compared every `DEC128` as zero, so `DEC128(5)`
+tested equal to `INT(0)`).
+
+`DOC` and `MAP` *are* ordered (rule 8) but have no key encoding, so they
+cannot be index keys or map keys — the order defined here is for value
+comparison only. The set of types that can be a key is exactly the set
+`03-key-encoding.md` §2 gives a group tag.
+
+An implementation MUST test this section against its own key encoding:
+`sign(compare(a, b))` and `sign(memcmp(CKE(a), CKE(b)))` agree for every pair
+of key-encodable values, up to `03-key-encoding.md` §1 clause 2. Testing the
+key encoding against a comparator written inside the test is not the same
+thing, and is how three divergences reached two shipped implementations.
 
 ## 9. Indirection tags are storage, not data
 

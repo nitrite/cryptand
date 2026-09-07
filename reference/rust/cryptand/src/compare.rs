@@ -1,6 +1,7 @@
 //! `02-value-encoding.md` §8 — equality and comparison, defined once for all
 //! SDKs. This is the *logical* order; `cke` is the byte order that refines it.
 
+use crate::error::{invalid, Result};
 use crate::value::{NumType, Value};
 use std::cmp::Ordering;
 
@@ -20,9 +21,15 @@ fn group(v: &Value) -> u8 {
         Value::NitriteId(_) => 0x80,
         Value::Uuid(_) => 0x90,
         Value::Array(_) => 0xA0,
+        // §8 rule 10's extension: ordering ranks, never written to a file.
+        // ARRAY < MAP < DOC. Dart chose the opposite order until the spec
+        // pinned it, and nothing could see the disagreement because these
+        // ranks are not in any byte of any file.
         Value::Map(_) => 0xA1,
         Value::Doc(_) => 0xA2,
-        // §8's closing paragraph: these are not ordered at all.
+        // §8's closing paragraph: these are not ordered at all. The rank is
+        // unreachable -- `compare_values` refuses before it is consulted --
+        // and exists only so `group` is total.
         _ => 0xF0,
     }
 }
@@ -116,7 +123,36 @@ pub fn compare_numeric(a: &Value, b: &Value) -> Ordering {
 }
 
 /// §8, all ten rules.
-pub fn compare_values(a: &Value, b: &Value) -> Ordering {
+///
+/// Fallible on purpose. §8's closing paragraph makes comparing two unordered
+/// values an *error*, and the alternative an infallible signature forces --
+/// returning `Equal` -- is the dangerous answer, not the conservative one: it
+/// made two different `GEOMETRY` values indistinguishable to a sort, a dedup
+/// and `values_equal`. `DEC128` is refused for the same reason in the other
+/// direction: rule 2 puts it in the numeric domain, this crate has no exact
+/// decimal arithmetic, and approximating it compared every `DEC128` as zero.
+pub fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
+    for v in [a, b] {
+        if !is_ordered(v) {
+            return invalid(format!(
+                "{} is not ordered (02-value-encoding.md §8)",
+                crate::cke::type_label(v)
+            ));
+        }
+        if matches!(v, Value::Dec128(_)) {
+            return invalid(
+                "DEC128 comparison needs exact decimal arithmetic, which this \
+                 implementation does not provide; it is never a key",
+            );
+        }
+    }
+    Ok(compare_ordered(a, b))
+}
+
+/// The infallible core, for callers that have already established both sides
+/// are ordered -- which the recursion into `ARRAY`, `MAP` and `DOC` elements
+/// has *not*, so it re-checks there.
+fn compare_ordered(a: &Value, b: &Value) -> Ordering {
     let (ga, gb) = (group(a), group(b));
     if ga != gb {
         return ga.cmp(&gb);
@@ -135,7 +171,7 @@ pub fn compare_values(a: &Value, b: &Value) -> Ordering {
         (Value::Duration(s1, n1), Value::Duration(s2, n2)) => s1.cmp(s2).then(n1.cmp(n2)),
         (Value::Array(x), Value::Array(y)) => {
             for (p, q) in x.iter().zip(y.iter()) {
-                match compare_values(p, q) {
+                match compare_element(p, q) {
                     Ordering::Equal => {}
                     o => return o,
                 }
@@ -148,8 +184,8 @@ pub fn compare_values(a: &Value, b: &Value) -> Ordering {
                 x.iter().map(|(k, v)| (Value::Str(k.clone()), v.clone())).collect();
             let mut ys: Vec<(Value, Value)> =
                 y.iter().map(|(k, v)| (Value::Str(k.clone()), v.clone())).collect();
-            xs.sort_by(|p, q| compare_values(&p.0, &q.0));
-            ys.sort_by(|p, q| compare_values(&p.0, &q.0));
+            xs.sort_by(|p, q| compare_ordered(&p.0, &q.0));
+            ys.sort_by(|p, q| compare_ordered(&p.0, &q.0));
             compare_pairs(&xs, &ys)
         }
         _ => match (instant(a), instant(b)) {
@@ -161,9 +197,40 @@ pub fn compare_values(a: &Value, b: &Value) -> Ordering {
     }
 }
 
+/// An element *inside* an ARRAY, MAP or DOC. §8 gives no order for an
+/// unordered element, but the container comparison has to stay total or
+/// sorting a list of documents is undefined -- so an unordered element is
+/// ranked by tag and then by its own bytes. That is deterministic and it is
+/// never a key, so it is never written down.
+fn compare_element(a: &Value, b: &Value) -> Ordering {
+    if is_ordered(a) && is_ordered(b) && !matches!(a, Value::Dec128(_))
+        && !matches!(b, Value::Dec128(_))
+    {
+        return compare_ordered(a, b);
+    }
+    unordered_rank(a).cmp(&unordered_rank(b))
+}
+
+fn unordered_rank(v: &Value) -> (u8, Vec<u8>) {
+    match v {
+        Value::Dec128(b) => (0x30, b.to_vec()),
+        Value::Regex(p, f) => (0xF0, [p.as_bytes(), b"\0", f.as_bytes()].concat()),
+        Value::VectorF32(xs) => {
+            (0xF1, xs.iter().flat_map(|x| x.to_le_bytes()).collect())
+        }
+        Value::Geometry(b) => (0xF2, b.clone()),
+        Value::Opaque { origin, type_name, data } => (
+            0xF3,
+            [origin.as_bytes(), b"\0", type_name.as_bytes(), b"\0", data].concat(),
+        ),
+        Value::Unknown { tag, payload } => (0xF4, [&[*tag][..], payload].concat()),
+        _ => (group(v), Vec::new()),
+    }
+}
+
 fn compare_pairs(x: &[(Value, Value)], y: &[(Value, Value)]) -> Ordering {
     for (p, q) in x.iter().zip(y.iter()) {
-        match compare_values(&p.0, &q.0).then_with(|| compare_values(&p.1, &q.1)) {
+        match compare_element(&p.0, &q.0).then_with(|| compare_element(&p.1, &q.1)) {
             Ordering::Equal => {}
             o => return o,
         }
@@ -172,8 +239,16 @@ fn compare_pairs(x: &[(Value, Value)], y: &[(Value, Value)]) -> Ordering {
 }
 
 /// §8 rule 2's consequence: `I32(5)` MUST equal `I64(5)`.
+///
+/// Two values §8 does not order are equal only if they are structurally
+/// identical. Before this was written it returned `true` for two *different*
+/// geometries, because the comparison it delegates to answered `Equal` for
+/// everything it could not order.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
-    compare_values(a, b) == Ordering::Equal
+    match compare_values(a, b) {
+        Ok(o) => o == Ordering::Equal,
+        Err(_) => compare_element(a, b) == Ordering::Equal,
+    }
 }
 
 /// The declared width is metadata, never semantics (`02` §1.2).
