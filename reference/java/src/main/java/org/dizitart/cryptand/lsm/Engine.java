@@ -195,6 +195,12 @@ public final class Engine implements AutoCloseable {
         this.pager = pager;
         this.sb = sb;
         this.options = options;
+        // `01-container.md` §7 -- the codec is a *default* for newly written
+        // pages and comes from the file, not from this build's profile, so a
+        // desktop that opens a phone's database keeps writing the codec the
+        // phone chose. Set before the first read, because an already-compressed
+        // page is decompressed on the way out.
+        pager.setPageCodec(sb.pageCodec);
         this.shards = new ConcurrentSkipListMap[Math.max(1, sb.memtableShards)];
         for (int i = 0; i < shards.length; i++) {
             shards[i] = new ConcurrentSkipListMap<>(BtreePage::memcmp);
@@ -2475,6 +2481,11 @@ public final class Engine implements AutoCloseable {
             sb.vlogSpaceTargetPct = p.vlogSpaceTargetPct();
             sb.localityDebtPct = p.localityDebtPct();
             sb.readaheadWindow = p.readaheadWindow();
+            // §7: a profile change moves the *default* for newly written
+            // pages. Existing pages keep their own flags, which is what makes
+            // the mixture §7 permits legal rather than a repair job.
+            sb.pageCodec = p.pageCodec();
+            pager.setPageCodec(sb.pageCodec);
             publishSuperblock(visibleSeq);
         } finally {
             structure.unlock();

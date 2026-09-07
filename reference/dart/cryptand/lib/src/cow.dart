@@ -24,6 +24,7 @@ import 'container.dart';
 import 'security.dart';
 import 'cke.dart';
 import 'limits.dart';
+import 'lz4.dart';
 import 'errors.dart';
 import 'segment.dart';
 
@@ -113,6 +114,12 @@ final class PageStore {
 
   /// §5.2's page cipher. `null` on an unencrypted database.
   PageCrypto? crypto;
+
+  /// `spec/01-container.md` §7's `page_codec`: the **default** for newly
+  /// written pages, never a property of the file. A page's own state is in its
+  /// `flags.COMPRESSED` and `codec_or_reserved`, so a file may hold a mixture
+  /// and the default may change without a rewrite.
+  int pageCodec = Codec.none;
 
   int pageReads = 0;
   int pageWrites = 0;
@@ -245,7 +252,7 @@ final class PageStore {
           'an extent must be a whole number of pages');
     }
     for (var i = 0; i * pageSize < extent.length; i++) {
-      write(startPage + i,
+      writeInExtent(startPage + i,
           Uint8List.sublistView(extent, i * pageSize, (i + 1) * pageSize));
     }
   }
@@ -318,8 +325,9 @@ final class PageStore {
 
   Uint8List read(int pageId) {
     final raw = readClear(pageId);
-    if (crypto == null) return raw;
-    return _openPage(pageId, raw);
+    // §5.2's read order: verify checksum, decrypt, then decompress.
+    final plain = crypto == null ? raw : _openPage(pageId, raw);
+    return _inflatePage(pageId, plain);
   }
 
   /// The page exactly as it is stored. `spec/01-container.md` §9 step 8 —
@@ -340,7 +348,137 @@ final class PageStore {
           'page $pageId is ${page.length} B, expected $pageSize');
     }
     pageWrites++;
+    // §7's order, and §5.2 restates it: compress, then encrypt. The other
+    // order compresses ciphertext, which does not compress.
+    final deflated = _deflatePage(page) ?? page;
+    _rawWrite(pageId, crypto == null ? deflated : _sealPage(pageId, deflated));
+  }
+
+  /// A page that belongs to a multi-page extent: encrypted like any other, and
+  /// **never compressed**.
+  ///
+  /// An extent is a contiguous byte range. `spec/01-container.md` §3 gives its
+  /// interior pages no header at all, and a reader may hold the whole extent
+  /// and parse pages at fixed offsets rather than fetching them one at a time
+  /// — which one of the three implementations does. Compressing a page inside
+  /// one moves every byte after its header without telling that reader, and
+  /// the failure is "segment header magic mismatch" in the *other* language,
+  /// several steps later.
+  void writeInExtent(int pageId, Uint8List page) {
+    if (page.length != pageSize) {
+      throw InvalidArgumentException(
+          'page $pageId is ${page.length} B, expected $pageSize');
+    }
+    pageWrites++;
     _rawWrite(pageId, crypto == null ? page : _sealPage(pageId, page));
+  }
+
+  /// §7 — compress a header-bearing page's payload, if the default codec is
+  /// set and it is worth it. `null` means "store it as it is", which is the
+  /// answer for an incompressible page as well as for `page_codec = 0`.
+  ///
+  /// `payload_len` keeps the meaning §3 gives it — the uncompressed length —
+  /// and `stored_len` becomes what the page actually holds.
+  Uint8List? _deflatePage(Uint8List page) {
+    if (pageCodec == Codec.none) return null;
+    final PageHeader h;
+    try {
+      h = PageHeader.read(page);
+    } on CorruptionException {
+      return null;
+    }
+    // A value-log segment's head page is appended into after it is written
+    // (§6.2), so its bytes are not a payload that can be rewritten; an
+    // already-compressed or already-encrypted page is not ours to touch.
+    //
+    // And **a page belonging to a multi-page extent is never independently
+    // compressed**: an extent is a contiguous byte range (§3 gives its interior
+    // pages no header at all), and its reader addresses it by offset rather
+    // than through the page seam, so compressing its head page moves every
+    // byte after the header without telling anyone. This is a header check
+    // rather than a call-path rule on purpose -- `writeExtent` routing through
+    // `write` is exactly how it was got wrong, and a check the caller cannot
+    // bypass is the only kind that survives that.
+    if (h.isCompressed ||
+        h.isEncrypted ||
+        h.extentPages > 1 ||
+        h.pageType == PageType.vlogSegment) {
+      return null;
+    }
+    final stored = h.stored;
+    if (stored == 0 || PageHeader.size + stored > page.length) return null;
+    final raw = Uint8List.sublistView(page, PageHeader.size,
+        PageHeader.size + stored);
+    final compressed = compressPayload(pageCodec, raw);
+    if (compressed == null) return null;
+    // Compressing then encrypting still has to leave room for the tag, which
+    // is defect 59's rule. Compression only ever helps there, but the check is
+    // cheap and the alternative is a page that cannot be written.
+    if (compressed.length > pageSize - PageHeader.size - tagReserve) {
+      return null;
+    }
+    final out = Uint8List(pageSize);
+    out.setRange(PageHeader.size, PageHeader.size + compressed.length,
+        compressed);
+    PageHeader(
+      pageType: h.pageType,
+      flags: h.flags | PageFlags.compressed,
+      codecOrReserved: pageCodec,
+      treeId: h.treeId,
+      commitId: h.commitId,
+      extentPages: h.extentPages,
+      payloadLen: h.payloadLen,
+      storedLen: compressed.length,
+      nonce: h.nonce,
+    ).writeInto(out);
+    return out;
+  }
+
+  /// The read half of §7. The header a caller sees describes the plaintext it
+  /// was handed, exactly as [_openPage] does for the cipher.
+  Uint8List _inflatePage(int pageId, Uint8List page) {
+    final PageHeader h;
+    try {
+      h = PageHeader.read(page, pageId: pageId);
+    } on CorruptionException {
+      return page;
+    }
+    if (!h.isCompressed) return page;
+    // §5.2's read order is decrypt *then* decompress, so a page still holding
+    // ciphertext is not a codec's business. Reachable without a bug: §5.1
+    // keeps headers in the clear precisely so a keyless reader can verify
+    // structure and checksums, and such a reader sees COMPRESSED set over
+    // bytes it cannot decrypt. Feeding those to LZ4 is at best an error and at
+    // worst a decompression bomb from a file someone else wrote.
+    if (h.isEncrypted) return page;
+    final stored = h.stored;
+    if (PageHeader.size + stored > page.length) {
+      throw CorruptionException('page $pageId declares $stored stored bytes',
+          pageId: pageId);
+    }
+    final raw = decompressPayload(
+        h.codecOrReserved,
+        Uint8List.sublistView(
+            page, PageHeader.size, PageHeader.size + stored),
+        h.payloadLen);
+    if (PageHeader.size + raw.length > pageSize) {
+      throw CorruptionException(
+          'page $pageId decompresses to ${raw.length} bytes, past the page',
+          pageId: pageId);
+    }
+    final out = Uint8List(pageSize);
+    out.setRange(PageHeader.size, PageHeader.size + raw.length, raw);
+    PageHeader(
+      pageType: h.pageType,
+      flags: h.flags & ~PageFlags.compressed,
+      codecOrReserved: 0,
+      treeId: h.treeId,
+      commitId: h.commitId,
+      extentPages: h.extentPages,
+      payloadLen: h.payloadLen,
+      nonce: h.nonce,
+    ).writeInto(out);
+    return out;
   }
 
   /// §5.1's two clear page kinds: a superblock, which never comes through
@@ -423,7 +561,11 @@ final class PageStore {
     );
     final out = Uint8List(page.length);
     out.setRange(PageHeader.size, PageHeader.size + pt.length, pt);
-    // The header a caller sees describes the plaintext it was handed.
+    // The header a caller sees describes the plaintext it was handed. A
+    // *compressed* page is still compressed after it is decrypted, and
+    // `_inflatePage` needs its block length: leaving `storedLen` at 0 -- which
+    // is what "same as payload_len" means -- would hand the decompressor the
+    // uncompressed length as the block length.
     PageHeader(
       pageType: h.pageType,
       flags: h.flags & ~PageFlags.encrypted,
@@ -432,6 +574,7 @@ final class PageStore {
       commitId: h.commitId,
       extentPages: h.extentPages,
       payloadLen: h.payloadLen,
+      storedLen: h.isCompressed ? pt.length : 0,
     ).writeInto(out);
     return out;
   }

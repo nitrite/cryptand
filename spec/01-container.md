@@ -290,7 +290,50 @@ Per page and per value-log record, never per file.
 - LZ4 is the default and the only codec a Level-0 implementation MUST support.
   Zstd is feature bit `ZSTD`; a writer setting `page_codec = 2` MUST set it in
   `features_required`.
-- A page is stored compressed only if compression saves ≥ 12.5 % of the page.
+- A page is stored compressed only if compression saves ≥ 12.5 % **of the
+  payload it compresses** — `compressed + raw / 8 ≤ raw`. Measured against the
+  payload rather than the page, because the 40-byte header is never compressed
+  and including it would make the threshold depend on `page_size`.
+- **Only the decoder is normative.** Any conforming LZ4 block decompresses to
+  the same output whatever produced it, so a reader MUST decode every block in
+  `conformance/vectors/codec/lz4.json` and a **writer is not required to
+  reproduce those bytes**: three implementations compress the same page to
+  three different lengths and still read each other's files. This is the same
+  freedom `08-spatial.md` §2.3 gives the R-tree split algorithm, and for the
+  same reason — the format constrains the bytes a reader must understand, not
+  the search a writer performs (`00-conventions.md` §1.1).
+- A writer SHOULD honour LZ4's **end-of-block restrictions** — the last five
+  bytes of a block are literals, and the last match starts at least twelve
+  bytes before the end. A block that violates them is legal and every
+  bounds-checking decoder reads it, but the widely deployed *fast* decoders
+  take a shortcut that does not, and the whole point of writing an LZ4 block is
+  that somebody else's decoder reads it. The cost is a handful of literal bytes
+  on the tail of a page.
+- A decoder MUST refuse a block that decodes to anything other than exactly
+  `payload_len` bytes, and MUST bounds-check every literal length, match length
+  and match offset **before** using it. A short decode is not a truncated page,
+  it is a page whose tail the caller reads as zeros; and a decompressor is the
+  classic place to write past the end of a buffer on a length an attacker
+  chose (`14-security.md` §9). One reference implementation's LZ4 library took
+  the declared size as a capacity *hint* and returned a short buffer with no
+  error, which is exactly this failure.
+- **A page belonging to a multi-page extent is never independently
+  compressed.** An extent is a contiguous byte range — §3 gives its interior
+  pages no header at all — and a reader may hold the whole extent and parse
+  pages at fixed offsets rather than fetching them one at a time. Compressing a
+  page inside one moves every byte after its header without telling that
+  reader. The same applies to a value-log segment's head page, whose records
+  are appended into its own tail (`04-segments.md` §6.2), so its bytes are not
+  a payload that can be rewritten. Both are checkable from the header, and an
+  implementation SHOULD check them there rather than relying on which function
+  the caller reached: one reference implementation routed its extent writer
+  through its page writer and compressed a segment head, which the other two
+  then could not read.
+- Order is **compress, then encrypt** on write, and **verify checksum, decrypt,
+  then decompress** on read (`14-security.md` §5.2). A reader that cannot
+  decrypt a page MUST NOT attempt to decompress it: §5.1 keeps headers in the
+  clear precisely so a keyless reader can verify structure and checksums, and
+  such a reader sees `flags.COMPRESSED` set over bytes it cannot decrypt.
 
 **Compression before encryption leaks length.** `payload_len` is in the clear,
 so how well a page compressed is observable. Where an attacker can influence

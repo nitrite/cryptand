@@ -24,7 +24,6 @@ import 'dart:typed_data';
 import 'package:cryptand/src/cke.dart';
 import 'package:cryptand/src/compare.dart';
 import 'package:cryptand/src/errors.dart';
-import 'package:cryptand/src/u128.dart';
 import 'package:cryptand/src/value.dart';
 import 'package:test/test.dart';
 

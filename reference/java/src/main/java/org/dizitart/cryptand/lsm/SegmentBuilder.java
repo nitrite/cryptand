@@ -235,7 +235,7 @@ public final class SegmentBuilder {
         head.pageType = PageHeader.Type.SEGMENT_HEADER;
         head.flags = PageHeader.Flags.EXTENT_HEAD;
         head.extentPages = pages;
-        byte[] headPage = pager.buildPage(start, head, meta.encodeHeadPayload());
+        byte[] headPage = pager.buildExtentPage(start, head, meta.encodeHeadPayload());
         System.arraycopy(headPage, 0, extent, 0, headPage.length);
 
         int index = 1;
@@ -243,14 +243,14 @@ public final class SegmentBuilder {
             PageHeader h = new PageHeader();
             BtreePage b = BtreePage.parse(payload, 0, payload.length);
             h.pageType = b.isLeaf() ? PageHeader.Type.BTREE_LEAF : PageHeader.Type.BTREE_INTERNAL;
-            byte[] page = pager.buildPage(start + index, h, payload);
+            byte[] page = pager.buildExtentPage(start + index, h, payload);
             System.arraycopy(page, 0, extent, index * pager.pageSize(), page.length);
             index++;
         }
         for (byte[] payload : filterPages) {
             PageHeader h = new PageHeader();
             h.pageType = PageHeader.Type.SEGMENT_FILTER;
-            byte[] page = pager.buildPage(start + index, h, payload);
+            byte[] page = pager.buildExtentPage(start + index, h, payload);
             System.arraycopy(page, 0, extent, index * pager.pageSize(), page.length);
             index++;
         }

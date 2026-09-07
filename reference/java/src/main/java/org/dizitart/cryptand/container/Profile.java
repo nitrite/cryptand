@@ -162,6 +162,19 @@ public enum Profile {
     }
 
     /**
+     * {@code page_codec} — {@code spec/12-profiles.md} §1's row, and
+     * {@code 01-container.md} §7: LZ4 is the default and the only codec a
+     * Level-0 implementation MUST support.
+     *
+     * <p>Zstd is feature bit {@code ZSTD}; this build does not set it, so every
+     * profile names LZ4 and the heavier last-level codec §7 recommends from
+     * {@code TABLET} upward is left to a build that has one.
+     */
+    public int pageCodec() {
+        return Superblock.Codec.LZ4;
+    }
+
+    /**
      * Argon2id cost — {@code spec/14-security.md} §3.2, a per-device decision
      * and therefore a profile default. Stored per keyslot, so a file created on
      * a phone still opens on a phone after a desktop has written to it.

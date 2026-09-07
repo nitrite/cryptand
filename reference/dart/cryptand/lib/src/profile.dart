@@ -164,6 +164,11 @@ extension EngineProfile on Engine {
           '(spec/13-operations.md section 2).');
     }
     _p.profile = p;
+    // `01-container.md` §7 — the codec is a profile constant, and a profile
+    // change is exactly when the *default* for newly written pages should move.
+    // Existing pages keep their own flags, which is what makes the mixture §7
+    // permits legal rather than a repair job.
+    store.pageCodec = p.pageCodec;
   }
 
   /// `reprofile()`, §6 — force the conversion eagerly rather than waiting for

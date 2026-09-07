@@ -4,6 +4,7 @@ import org.dizitart.cryptand.CannotUnlockException;
 import org.dizitart.cryptand.CorruptionException;
 import org.dizitart.cryptand.InvalidArgumentException;
 import org.dizitart.cryptand.LimitException;
+import org.dizitart.cryptand.UnsupportedFeatureException;
 import org.dizitart.cryptand.crypto.PageCrypto;
 import org.dizitart.cryptand.crypto.XChaCha20Poly1305;
 import org.dizitart.cryptand.lsm.Engine;
@@ -56,6 +57,14 @@ public final class Pager {
     private PageCrypto crypto;
 
     /**
+     * {@code 01-container.md} §7's {@code page_codec}: the <strong>default</strong>
+     * for newly written pages, never a property of the file. A page's own state
+     * is in its {@code flags.COMPRESSED} and {@code codec_or_reserved}, so a
+     * file may hold a mixture and the default may change without a rewrite.
+     */
+    private int pageCodec = Superblock.Codec.NONE;
+
+    /**
      * Pages this pager has read from the file — {@code spec/11-conformance.md}
      * §6's aged-scan test measures a scan's cost with it, and there is no other
      * way to state that cost as a number. Value-log record reads are added by
@@ -101,6 +110,46 @@ public final class Pager {
         return pageSize - PageHeader.BYTES - (crypto != null ? XChaCha20Poly1305.TAG_BYTES : 0);
     }
 
+    /**
+     * §7 — compress a payload if the default codec is set and it is worth it.
+     *
+     * <p>{@code null} means "store it as it is", which is the answer both for
+     * {@code page_codec = 0} and for a payload that does not compress by §7's
+     * 12.5 % margin: the two are the same decision to the caller, which is why
+     * they are one return value.
+     */
+    private byte[] compress(PageHeader h, byte[] raw) {
+        if (pageCodec == Superblock.Codec.NONE || raw.length == 0) {
+            return null;
+        }
+        // A page belonging to a multi-page extent is never independently
+        // compressed: an extent is a contiguous byte range (§3 gives its
+        // interior pages no header at all) and its reader addresses it by
+        // offset rather than through the page seam, so compressing its head
+        // page moves every byte after the header without telling anyone. A
+        // value-log segment's head page is appended into after it is written
+        // (§6.2), so its bytes are not a payload that can be rewritten either.
+        if (h.extentPages > 1 || h.pageType == PageHeader.Type.VLOG_SEGMENT) {
+            return null;
+        }
+        if (pageCodec == Superblock.Codec.ZSTD) {
+            throw new UnsupportedFeatureException(
+                    "codec 2 (Zstd) needs feature bit ZSTD, which this build does not set");
+        }
+        if (pageCodec != Superblock.Codec.LZ4) {
+            throw new CorruptionException("unknown codec id " + pageCodec);
+        }
+        byte[] out = Lz4.compress(raw);
+        if (!Lz4.worthCompressing(raw.length, out.length)) {
+            return null;
+        }
+        // Compressing then encrypting still has to leave room for the tag,
+        // which is the whole of §5.2's reservation rule. Compression only ever
+        // helps there, but the check is cheap and the alternative is a page
+        // that cannot be written.
+        return out.length <= payloadSize() ? out : null;
+    }
+
     /** The whole payload area of a page, tag reservation included. */
     public int rawPayloadSize() {
         return pageSize - PageHeader.BYTES;
@@ -128,6 +177,20 @@ public final class Pager {
 
     public PageFile file() {
         return file;
+    }
+
+    /**
+     * The default codec for newly written pages.
+     *
+     * <p>It comes from the file, not from this build's profile, so a desktop
+     * that opens a phone's database keeps writing the codec the phone chose.
+     */
+    public void setPageCodec(int codec) {
+        this.pageCodec = codec;
+    }
+
+    public int pageCodec() {
+        return pageCodec;
     }
 
     /** Installs the page-level cipher. Null means the file is written in the clear. */
@@ -278,6 +341,14 @@ public final class Pager {
             body = crypto.decryptPage(body, h, pageId);
         }
         if (h.isSet(PageHeader.Flags.COMPRESSED)) {
+            if (h.codecOrReserved == Superblock.Codec.ZSTD) {
+                throw new UnsupportedFeatureException(
+                        "this build cannot decompress Zstd (feature bit ZSTD)");
+            }
+            if (h.codecOrReserved != Superblock.Codec.LZ4) {
+                throw new CorruptionException(
+                        "unknown codec id " + h.codecOrReserved, pageId, null);
+            }
             body = Lz4.decompress(body, h.payloadLen);
         }
         if (body.length != h.payloadLen) {
@@ -299,6 +370,28 @@ public final class Pager {
         }
     }
 
+    /**
+     * A page that belongs to a multi-page extent: encrypted like any other, and
+     * <strong>never compressed</strong>.
+     *
+     * <p>An extent is a contiguous byte range. {@code 01-container.md} §3 gives
+     * its interior pages no header at all, and a reader may hold the whole
+     * extent and parse pages at fixed offsets rather than fetching them one at
+     * a time — which one of the three implementations does. Compressing a page
+     * inside one moves every byte after its header without telling that reader,
+     * and the failure surfaces as "segment header magic mismatch" in the
+     * <em>other</em> language, several steps later.
+     */
+    public byte[] buildExtentPage(long pageId, PageHeader h, byte[] payload) {
+        int saved = pageCodec;
+        pageCodec = Superblock.Codec.NONE;
+        try {
+            return buildPage(pageId, h, payload);
+        } finally {
+            pageCodec = saved;
+        }
+    }
+
     /** The page bytes, exactly as they will be stored. */
     public byte[] buildPage(long pageId, PageHeader h, byte[] payload) {
         if (payload.length > payloadSize()) {
@@ -312,6 +405,17 @@ public final class Pager {
         h.codecOrReserved = 0;
         h.storedLen = 0;
         h.nonce = 0;
+        // §7's order, and §5.2 restates it: compress, then encrypt. The other
+        // order compresses ciphertext, which does not compress. `payload_len`
+        // keeps the meaning §3 gives it -- the uncompressed length -- and
+        // `stored_len` becomes what the page actually holds.
+        byte[] compressed = compress(h, body);
+        if (compressed != null) {
+            body = compressed;
+            h.flags |= PageHeader.Flags.COMPRESSED;
+            h.codecOrReserved = pageCodec;
+            h.storedLen = body.length;
+        }
         if (crypto != null) {
             // Every field of the header is settled BEFORE the encryption,
             // because §5.2's AAD is the header as stored. `stored_len` is

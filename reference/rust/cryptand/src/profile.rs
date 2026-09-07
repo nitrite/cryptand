@@ -27,6 +27,12 @@ pub struct ProfileConstants {
     pub level_count: u8,
     pub segment_target_bytes: u32,
     pub vlog_segment_bytes: u32,
+    /// `12-profiles.md`'s `page_codec` row and `01-container.md` §7: LZ4 is
+    /// the default and the only codec a Level-0 implementation MUST support.
+    /// Zstd is feature bit `ZSTD` and this build does not set it, so every
+    /// profile names LZ4 and a heavier last-level codec is left to a build
+    /// that has one.
+    pub page_codec: u8,
     pub filter_bits_upper: u8,
     pub filter_bits_last: u8,
     pub vlog_space_target_pct: u32,
@@ -63,6 +69,7 @@ impl ProfileConstants {
                 level_count: 4,
                 segment_target_bytes: 2 << 20,
                 vlog_segment_bytes: 4 << 20,
+                page_codec: crate::codec::LZ4,
                 filter_bits_upper: 12,
                 filter_bits_last: 10,
                 vlog_space_target_pct: 120,
@@ -91,6 +98,7 @@ impl ProfileConstants {
                 level_count: 4,
                 segment_target_bytes: 8 << 20,
                 vlog_segment_bytes: 16 << 20,
+                page_codec: crate::codec::LZ4,
                 filter_bits_upper: 14,
                 filter_bits_last: 10,
                 vlog_space_target_pct: 130,
@@ -119,6 +127,7 @@ impl ProfileConstants {
                 level_count: 4,
                 segment_target_bytes: 128 << 20,
                 vlog_segment_bytes: 256 << 20,
+                page_codec: crate::codec::LZ4,
                 filter_bits_upper: 16,
                 filter_bits_last: 10,
                 vlog_space_target_pct: 150,
@@ -149,6 +158,7 @@ impl ProfileConstants {
                 level_count: 4,
                 segment_target_bytes: 32 << 20,
                 vlog_segment_bytes: 64 << 20,
+                page_codec: crate::codec::LZ4,
                 filter_bits_upper: 16,
                 filter_bits_last: 10,
                 vlog_space_target_pct: 150,
@@ -180,6 +190,7 @@ impl ProfileConstants {
         c.memtable_shards = sb.memtable_shards;
         c.segment_target_bytes = sb.segment_target_bytes;
         c.vlog_segment_bytes = sb.vlog_segment_bytes;
+        c.page_codec = sb.page_codec;
         c.filter_bits_upper = sb.filter_bits_upper;
         c.filter_bits_last = sb.filter_bits_last;
         c.vlog_space_target_pct = sb.vlog_space_target_pct;
@@ -217,6 +228,7 @@ impl ProfileConstants {
         sb.memtable_shards = self.memtable_shards;
         sb.segment_target_bytes = self.segment_target_bytes;
         sb.vlog_segment_bytes = self.vlog_segment_bytes;
+        sb.page_codec = self.page_codec;
         sb.filter_bits_upper = self.filter_bits_upper;
         sb.filter_bits_last = self.filter_bits_last;
         sb.vlog_space_target_pct = self.vlog_space_target_pct;

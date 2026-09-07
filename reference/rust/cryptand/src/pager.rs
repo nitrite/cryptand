@@ -12,6 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use crate::codec;
 use crate::container::{page_flags, page_type, Durability, PageHeader, PAGE_HEADER_BYTES, SUPERBLOCK_BYTES};
 use crate::security::{KeyRing, AEAD_TAG_BYTES};
 use crate::error::{corrupt, invalid, Result};
@@ -73,6 +74,11 @@ pub struct Pager {
     pub grow_chunk_pages: u64,
     /// `01-container.md` §10 — this pager holds the exclusive writer lock.
     pub locked: bool,
+    /// `01-container.md` §7's `page_codec`: the **default** for newly written
+    /// pages, never a property of the file. A page's own state is in its
+    /// `flags.COMPRESSED` and `codec`, so a file may hold a mixture and the
+    /// default may change without a rewrite.
+    pub page_codec: u8,
     /// `None` on an unencrypted database. `14-security.md` §5.1.
     pub crypto: Option<PageCrypto>,
     /// §8.3 — a converting file holds a mixture, and "that is the one place
@@ -138,6 +144,7 @@ impl Pager {
             bytes_written_device: 0,
             grow_chunk_pages: 64,
             locked: false,
+            page_codec: 0,
             crypto: None,
             encrypted_pages: 0,
             unencrypted_pages: 0,
@@ -298,10 +305,9 @@ impl Pager {
 
     pub fn read_page(&mut self, page_id: u64) -> Result<Vec<u8>> {
         let raw = self.read_page_clear(page_id)?;
-        if self.crypto.is_some() {
-            return self.open_page(page_id, raw);
-        }
-        Ok(raw)
+        // §5.2's read order: verify checksum, decrypt, then decompress.
+        let plain = if self.crypto.is_some() { self.open_page(page_id, raw)? } else { raw };
+        self.inflate_page(page_id, plain)
     }
 
     /// The page exactly as it is stored. `01-container.md` §9 step 8 — "without
@@ -322,11 +328,119 @@ impl Pager {
             return invalid(format!("page {page_id} is {} B, expected {}", page.len(), self.page_size));
         }
         self.page_writes += 1;
+        // §7's order, and §5.2 restates it: compress, then encrypt. The other
+        // order compresses ciphertext, which does not compress.
+        let deflated = self.deflate_page(page)?;
+        let page: &[u8] = deflated.as_deref().unwrap_or(page);
         if self.crypto.is_some() {
             let sealed = self.seal_page(page_id, page)?;
             return self.write_at(page_id * self.page_size as u64, &sealed);
         }
         self.write_at(page_id * self.page_size as u64, page)
+    }
+
+    /// §7 — compress a header-bearing page's payload, if the default codec is
+    /// set and it is worth it.
+    ///
+    /// `Ok(None)` means "store it as it is", which is the answer for an
+    /// incompressible page as well as for `page_codec = 0`. `payload_len`
+    /// keeps the meaning §3 gives it — the uncompressed length — and
+    /// `stored_len` becomes what the page actually holds.
+    fn deflate_page(&self, page: &[u8]) -> Result<Option<Vec<u8>>> {
+        if self.page_codec == codec::NONE {
+            return Ok(None);
+        }
+        let mut h = PageHeader::parse(page)?;
+        // A value-log segment's head page is appended into after it is written
+        // (§6.2), so its bytes are not a payload that can be rewritten; an
+        // already-compressed or already-encrypted page is not ours to touch.
+        //
+        // And **a page belonging to a multi-page extent is never independently
+        // compressed**: an extent is a contiguous byte range (§3 gives its
+        // interior pages no header at all) and its reader addresses it by
+        // offset rather than through the page seam. `write_extent` here goes
+        // straight to `seal_page` and so never reaches this function, but the
+        // guard is stated on the header rather than left to the call path --
+        // the Dart implementation routes `writeExtent` through `write` and
+        // compressed a segment head, which the other two could not then read.
+        if h.compressed()
+            || h.encrypted()
+            || h.extent_pages > 1
+            || h.page_type == page_type::VLOG_SEGMENT
+        {
+            return Ok(None);
+        }
+        let stored = h.stored();
+        if stored == 0 || PAGE_HEADER_BYTES + stored > page.len() {
+            return Ok(None);
+        }
+        let raw = &page[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + stored];
+        let compressed = match codec::compress(self.page_codec, raw)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        // Compressing then encrypting still has to leave room for the tag,
+        // which is the whole of defect 59's rule; compression only ever helps
+        // there, but the check is cheap and the alternative is a page that
+        // cannot be written.
+        let room = self.page_size - PAGE_HEADER_BYTES
+            - if self.crypto.is_some() { AEAD_TAG_BYTES } else { 0 };
+        if compressed.len() > room {
+            return Ok(None);
+        }
+        let mut out = vec![0u8; self.page_size];
+        out[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + compressed.len()]
+            .copy_from_slice(&compressed);
+        h.flags |= page_flags::COMPRESSED;
+        h.codec = self.page_codec as u16;
+        h.stored_len = compressed.len() as u32;
+        h.write_into(&mut out);
+        Ok(Some(out))
+    }
+
+    /// The read half of §7. The header a caller sees describes the plaintext it
+    /// was handed, exactly as [`Pager::open_page`] does for the cipher.
+    fn inflate_page(&self, page_id: u64, page: Vec<u8>) -> Result<Vec<u8>> {
+        let h = match PageHeader::parse(&page) {
+            Ok(h) => h,
+            Err(_) => return Ok(page),
+        };
+        if !h.compressed() {
+            return Ok(page);
+        }
+        // §5.2's read order is decrypt *then* decompress, so a page still
+        // holding ciphertext is not a codec's business. This is reachable
+        // without a bug: §5.1 keeps headers in the clear precisely so that a
+        // keyless reader can verify structure and checksums, and such a reader
+        // sees COMPRESSED set over bytes it cannot decrypt. Feeding those to
+        // LZ4 is at best an error and at worst a decompression bomb from a
+        // file someone else wrote.
+        if h.encrypted() {
+            return Ok(page);
+        }
+        let stored = h.stored();
+        if PAGE_HEADER_BYTES + stored > page.len() {
+            return corrupt(format!("page {page_id} declares {stored} stored bytes"));
+        }
+        let raw = codec::decompress(
+            h.codec as u8,
+            &page[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + stored],
+            h.payload_len as usize,
+        )?;
+        if PAGE_HEADER_BYTES + raw.len() > self.page_size {
+            return corrupt(format!(
+                "page {page_id} decompresses to {} bytes, past the page",
+                raw.len()
+            ));
+        }
+        let mut out = vec![0u8; self.page_size];
+        out[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + raw.len()].copy_from_slice(&raw);
+        let mut hh = h;
+        hh.flags &= !page_flags::COMPRESSED;
+        hh.codec = 0;
+        hh.stored_len = 0;
+        hh.write_into(&mut out);
+        Ok(out)
     }
 
     /// §5.1 — the two page kinds that stay in the clear: a superblock (which
@@ -412,7 +526,11 @@ impl Pager {
         // The header a caller sees describes the plaintext it was handed.
         let mut hh = h;
         hh.flags &= !page_flags::ENCRYPTED;
-        hh.stored_len = 0;
+        // A compressed page is still compressed after it is decrypted, and
+        // `inflate_page` needs its length. Zeroing this unconditionally --
+        // which is what "same as payload_len" means -- handed the decompressor
+        // the uncompressed length as the block length.
+        hh.stored_len = if h.compressed() { pt.len() as u32 } else { 0 };
         hh.nonce = 0;
         hh.write_into(&mut out);
         Ok(out)

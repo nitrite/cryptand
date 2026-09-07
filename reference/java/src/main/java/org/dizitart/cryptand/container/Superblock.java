@@ -173,6 +173,7 @@ public final class Superblock {
         sb.vlogSpaceTargetPct = p.vlogSpaceTargetPct();
         sb.localityDebtPct = p.localityDebtPct();
         sb.readaheadWindow = p.readaheadWindow();
+        sb.pageCodec = p.pageCodec();
         return sb;
     }
 

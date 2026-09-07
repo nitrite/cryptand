@@ -283,6 +283,7 @@ impl Engine {
             fanout: pc.fanout,
             level_count: pc.level_count,
             memtable_shards: pc.memtable_shards,
+            page_codec: pc.page_codec,
             filter_bits_upper: pc.filter_bits_upper,
             filter_bits_last: pc.filter_bits_last,
             readahead_window: pc.readahead_window,
@@ -345,6 +346,9 @@ impl Engine {
             sb,
         };
         e.events.push(StoreEvent::Opened);
+        // `01-container.md` §7 — the profile's codec becomes the file's
+        // default before the first page is written.
+        e.pager.page_codec = e.sb.page_codec;
         if let Some((cred, kdf, t_cost, m_cost_kib, lanes)) = key {
             let master = crate::security::random_bytes::<32>();
             let slot = crate::security::make_keyslot(
@@ -462,6 +466,11 @@ impl Engine {
             sb,
         };
         e.pager.min_retained_commit = e.sb.min_retained_commit;
+        // `01-container.md` §7 — the codec is a *default* for newly written
+        // pages and comes from the file, not from this build's profile, so a
+        // desktop that opens a phone's database keeps writing the codec the
+        // phone chose.
+        e.pager.page_codec = e.sb.page_codec;
         // `14-security.md` §5.2 — the page cipher goes in before the first
         // read. Every `reload_*` below walks copy-on-write pages, and a pager
         // without the ring hands back ciphertext that parses as a corrupt node.

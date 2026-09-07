@@ -189,6 +189,11 @@ abstract final class DatabaseFile {
       // constants match no named profile, which §1 provides for exactly here:
       // "a reader uses the *values* in the superblock, never the name".
       profile: e.profile.pageSize == e.pageSize ? e.profile : Profile.custom,
+      // `01-container.md` §7 — the codec is a *default* for newly written
+      // pages, and it is whatever this store has been writing with, not what
+      // this build's profile would choose: a desktop that opens a phone's
+      // database keeps writing the codec the phone chose.
+      pageCodec: store.pageCodec,
       cipher: e.keys == null ? 0 : 1,
       featuresRequired:
           (1 << Feature.core) | (e.keys == null ? 0 : (1 << Feature.cipher)),
@@ -297,6 +302,7 @@ abstract final class DatabaseFile {
       commitId: 1,
       pageCount: 2,
       profile: profile,
+      pageCodec: profile.pageCodec,
       vlogMin: profile.vlogMin,
       cipher: 1,
       featuresRequired: (1 << Feature.core) | (1 << Feature.cipher),
@@ -415,7 +421,13 @@ abstract final class DatabaseFile {
     final used = sb.pageCount * sb.pageSize;
     final store = PageStore.fromBytes(
         Uint8List.sublistView(bytes, 0, used > bytes.length ? bytes.length : used),
-        pageSize: sb.pageSize);
+        pageSize: sb.pageSize)
+      // `01-container.md` §7 — the codec is a *default* for newly written
+      // pages and comes from the file, not from this build's profile, so a
+      // desktop that opens a phone's database keeps writing the codec the
+      // phone chose. It has to be set before the first page is read, because
+      // an already-compressed page is decompressed on the way out.
+      ..pageCodec = sb.pageCodec;
 
     final e = Engine(
       pageSize: sb.pageSize,

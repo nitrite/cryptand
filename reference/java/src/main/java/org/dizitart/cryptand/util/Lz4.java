@@ -34,8 +34,32 @@ public final class Lz4 {
     }
 
     private static final int MIN_MATCH = 4;
+
+    /**
+     * The last five bytes of a block are always literals, and the last match
+     * must start at least twelve bytes before the end.
+     *
+     * <p>These are the LZ4 <em>end-of-block restrictions</em>. A decoder that
+     * reads a block safely does not need them, but the widely-deployed fast
+     * decoders take a shortcut that does, and the point of writing an LZ4 block
+     * is that somebody else's decoder reads it. Honouring them costs a handful
+     * of literal bytes on the tail of a page and removes the question.
+     */
     private static final int LAST_LITERALS = 5;
+
+    private static final int MATCH_END_GUARD = 12;
     private static final int HASH_BITS = 14;
+
+    /**
+     * §7: "a page is stored compressed only if compression saves &ge; 12.5 %".
+     *
+     * <p>Measured against the payload being compressed, not against the whole
+     * page: the 40-byte header is never compressed, so including it would make
+     * the threshold depend on the page size.
+     */
+    public static boolean worthCompressing(int raw, int compressed) {
+        return compressed + raw / 8 <= raw;
+    }
 
     public static byte[] decompress(byte[] src, int decompressedLen) {
         byte[] dst = new byte[decompressedLen];
@@ -115,7 +139,8 @@ public final class Lz4 {
         int s = 0;
         int anchor = 0;
         int d = 0;
-        int limit = src.length - LAST_LITERALS - MIN_MATCH;
+        // A match may start no later than twelve bytes before the end.
+        int limit = src.length - MATCH_END_GUARD;
         while (s <= limit) {
             int h = hash(src, s);
             int candidate = table[h];

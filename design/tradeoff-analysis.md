@@ -1160,6 +1160,58 @@ rule exists to prevent — left the 20 000-pair sweep passing, and only the
 hand-written rule 4 case failed. Adding `U+FF61` to the corpus makes the sweep
 itself the control: the same substitution now fails two tests.
 
+### 8.17 Phase 20 — the codec nobody wrote
+
+`01-container.md` §7 says LZ4 is "the default and the only codec a Level-0
+implementation MUST support", and `12-profiles.md` §1's table gives every
+profile a `page_codec`. A coverage run found the row was fiction: **compression
+was in no write path in any of the three implementations.**
+
+| implementation | what it had |
+|---|---|
+| Rust | a correct `codec.rs` over `lz4_flex`, and an `encode_data_page` with **no callers**; the pager never mentioned `COMPRESSED` |
+| Java | `Lz4.decompress` wired into the pager's read path and **0 % coverage**; the write path *cleared* `flags.COMPRESSED` and set `codec = 0` |
+| Dart | **no LZ4 at all**, and no code path that read `flags.COMPRESSED` anywhere |
+
+All three wrote `page_codec = 0`, so the twelve-direction interop gate passed —
+and would have kept passing forever. The conformance vector recorded
+`page_codec = 0` at offset 177, which is a superblock no conforming `mobile`
+writer would produce, so **the vector encoded the defect**.
+
+**This is defect 58's shape a second time**, and the resemblance is exact: the
+primitive existed, was correct, and was called only from somewhere that is not
+the write path; a metric-shaped signal (here, the vector) reported the
+reassuring value; and every test round-tripped, which a page does perfectly
+when nothing happened to it.
+
+| | defect | fix |
+|---|---|---|
+| ⚠⚠ 70 | **§7 unimplemented in every write path, and Dart could not read a conforming file at all** — it ignored `flags.COMPRESSED` and handed the compressed bytes to the B+tree parser. Turning Rust's profile default on produced, on the first run, `page 8235: cell pointers overrun the payload` from Dart. A page that happened to parse would have returned garbage instead | LZ4 in the pager in all three — the one place both the CoW trees and the segment builder pass through, which is where defect 58 put the cipher. `page_codec` is a real profile constant, and comes from the *file* on open, so a desktop opening a phone's database keeps the codec the phone chose |
+| 71 | **`lz4_flex` takes the declared size as a capacity *hint*.** A truncated block decoded **short and returned `Ok`**; Dart and Java refuse. A page then decodes to fewer bytes than `payload_len` declares and the caller reads its tail as zeros — silent corruption from a crafted file, which is precisely what `14 §9` is about | §7 requires a decoder to refuse anything but exactly `payload_len` bytes; `codec::decompress` checks it |
+| 72 | **Compressing a page inside an extent breaks a reader that parses the extent at fixed offsets** — which the Rust `Segment` does, holding the extent as raw bytes. Dart's `writeExtent` routed through the compressing `write`, so a segment head was compressed and Rust reported "segment header magic mismatch" several steps later, in the other language | §7 states the rule, and all three check it **on the header** (`extent_pages > 1`) rather than on the call path, because the call path is what got it wrong |
+| 73 | **A keyless reader tried to LZ4-decode ciphertext.** §5.1 keeps headers in the clear so that verify, repair and containment run without the key — so such a reader legitimately sees `COMPRESSED` set over bytes it cannot decrypt. Reachable with no bug at all | §7 spells out the read order and forbids decompressing a page still holding ciphertext |
+| 74 | **The vector generator had drifted from the vector.** Defect 59's `stored_len` at offset 28, and its note, were hand-edited into the committed JSON and never put in `tool/generate_vectors.dart` — so the first regeneration in three days silently reverted them | both are in the generator. A generated file that is hand-edited stops being generated |
+
+**What §7 is worth, measured.** A document-shaped page — repeated field names,
+short values, which is what this format actually holds — stores in **under half
+a page**, and the tests assert that rather than only asserting the round trip,
+because a correctness-only test lets the benefit quietly go to zero.
+
+**The new conformance vector is `codec/lz4.json`, and it says something the
+others do not: only the decoder is normative.** Any conforming LZ4 block
+decompresses to the same output whatever produced it, so a reader is checked
+against the recorded blocks and a writer is *not* required to reproduce them —
+the same freedom §2.3 gives the R-tree split. The blocks were cross-checked in
+all six directions between the three compressors and the three decoders, 50
+blocks each way, before any of this was wired in; that check is what made it
+safe to change three write paths at once.
+
+**What is still not implemented, stated rather than left to be discovered
+again:** §7's *value-log record* compression. Records are compressed
+individually and flagged in the segment header's `codec`, and no implementation
+does it. On a `desktop` profile, where `vlog_min` is 256 B, that is where the
+bulk of the bytes are — so the space win now measured is the smaller half.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

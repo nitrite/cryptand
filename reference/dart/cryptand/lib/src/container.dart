@@ -41,6 +41,18 @@ class PageFlags {
   static const int extentHead = 0x08;
 }
 
+/// Page codec ids, `spec/01-container.md` section 7.
+///
+/// LZ4 is the default and the only codec a Level-0 implementation MUST
+/// support. Zstd is feature bit `ZSTD`; this implementation does not set it, so
+/// it never writes `page_codec = 2` and refuses a page carrying it rather than
+/// guessing.
+class Codec {
+  static const int none = 0;
+  static const int lz4 = 1;
+  static const int zstd = 2;
+}
+
 /// Feature bits, `spec/11-conformance.md` section 2.
 class Feature {
   static const int core = 0;
@@ -215,6 +227,17 @@ enum Profile {
   final int readaheadWindow;
   final int filterBitsUpper;
   final int filterBitsLast;
+
+  /// `spec/12-profiles.md` §1's `page_codec` row and `01-container.md` §7:
+  /// LZ4 is the default and **the only codec a Level-0 implementation MUST
+  /// support**. Zstd is feature bit `ZSTD`; this implementation does not set
+  /// it, so every profile names LZ4 and the heavier last-level codec §7
+  /// recommends from `tablet` upward is left to a build that has one.
+  ///
+  /// It lives on the enum rather than in `profile.dart`'s behavioural
+  /// extension because it is a *superblock field*, and the vector generator
+  /// needs it without importing the engine.
+  int get pageCodec => Codec.lz4;
 
   int get blobThreshold => switch (this) {
         Profile.mobile || Profile.custom => 65536,
@@ -599,6 +622,8 @@ final class PageHeader {
   int get stored => storedLen != 0 ? storedLen : payloadLen;
 
   bool get isEncrypted => flags & PageFlags.encrypted != 0;
+
+  bool get isCompressed => flags & PageFlags.compressed != 0;
 
   /// Writes the header into [page] and computes the checksum over bytes
   /// `4..page.length-1`, as stored.

@@ -32,9 +32,33 @@ pub fn compress(codec: u8, raw: &[u8]) -> Result<Option<Vec<u8>>> {
 /// frame header (§7).
 pub fn decompress(codec: u8, data: &[u8], payload_len: usize) -> Result<Vec<u8>> {
     match codec {
-        NONE => Ok(data.to_vec()),
-        LZ4 => lz4_flex::block::decompress(data, payload_len)
-            .map_err(|e| crate::error::Error::Corrupt(format!("LZ4 block: {e}"))),
+        NONE => {
+            if data.len() != payload_len {
+                return corrupt(format!(
+                    "uncompressed payload is {} bytes, the header declares {payload_len}",
+                    data.len()
+                ));
+            }
+            Ok(data.to_vec())
+        }
+        LZ4 => {
+            let out = lz4_flex::block::decompress(data, payload_len)
+                .map_err(|e| crate::error::Error::Corrupt(format!("LZ4 block: {e}")))?;
+            // `lz4_flex` takes the size as a *capacity hint*, not an exact
+            // length, so a truncated block decodes short and returns `Ok`. The
+            // Dart and Java implementations refuse it, and so must this one:
+            // `payload_len` is the declared plaintext length and a page that
+            // decodes to fewer bytes is a page whose tail the caller would read
+            // as zeros. A crafted file is exactly where that happens
+            // (`14-security.md` §9).
+            if out.len() != payload_len {
+                return corrupt(format!(
+                    "LZ4 block decoded to {} bytes, the header declares {payload_len}",
+                    out.len()
+                ));
+            }
+            Ok(out)
+        }
         ZSTD => corrupt("this build cannot decompress Zstd (feature bit ZSTD)"),
         c => corrupt(format!("unknown codec id {c}")),
     }
