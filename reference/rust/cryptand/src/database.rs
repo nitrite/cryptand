@@ -273,6 +273,36 @@ pub trait Indexing {
     fn index_document(&mut self, idx: &IndexDescriptor, doc: &Value) -> Result<usize>;
     fn unindex_document(&mut self, idx: &IndexDescriptor, doc: &Value) -> Result<usize>;
     fn index_scan(&mut self, idx: &IndexDescriptor, scan: &index::IndexScan) -> Result<Vec<i64>>;
+
+    /// `13-operations.md` §9 — recompute `params.stats` for an index tree.
+    ///
+    /// §9 maintains these "at compaction, ... free, because that compaction
+    /// already touches every key". This is the same walk, exposed so the
+    /// statistics can be refreshed on demand: a scan of the index tree in key
+    /// order, which is exactly what a last-level compaction of it would do.
+    ///
+    /// The result is **advisory** and is stored under `params.stats`.
+    fn analyze(&mut self, idx: &IndexDescriptor) -> Result<crate::stats::IndexStats>;
+
+    /// The statistics stored for an index, or `None` when none have been
+    /// computed. §9: "Statistics are advisory. They may be stale or absent."
+    fn stats_of(&mut self, idx: &IndexDescriptor) -> Result<Option<crate::stats::IndexStats>>;
+
+    /// Picks the most selective index among `candidates` — `06-indexes.md`
+    /// §7.1.
+    ///
+    /// This is the decision Nitrite's `FindPlan` makes today from static
+    /// descriptor properties — whether an index is unique and how many fields
+    /// it covers — which "routinely picks a unique index on a field the query
+    /// barely constrains over a non-unique index that would eliminate 99 % of
+    /// the collection". With statistics it is made on evidence.
+    ///
+    /// `None` when no candidate has statistics, which a planner MUST treat as
+    /// "choose some other way" rather than as an error.
+    fn most_selective<'a>(
+        &mut self,
+        candidates: &'a [IndexDescriptor],
+    ) -> Result<Option<&'a IndexDescriptor>>;
 }
 
 impl Indexing for Database {
@@ -378,5 +408,77 @@ impl Indexing for Database {
             false,
         )?;
         rows.iter().map(|(k, _)| index::entry_id(k)).collect()
+    }
+
+    fn analyze(&mut self, idx: &IndexDescriptor) -> Result<crate::stats::IndexStats> {
+        let rows = self.engine.scan_tree(idx.tree, None, None, None, false)?;
+        let mut b = crate::stats::StatsBuilder::new();
+        for (k, _) in &rows {
+            // §9's `null_count`: an entry is null when any indexed value is.
+            // `sparse` indexes never hold one, which is the whole difference
+            // between a sparse index and a dense one.
+            let is_null = match index::entry_values(k) {
+                Ok((values, _)) => values.iter().any(|v| matches!(v, Value::Null)),
+                Err(_) => false,
+            };
+            b.add(k, is_null);
+        }
+        // The descriptor is one cell of a copy-on-write B+tree, so
+        // `params.stats` MUST fit one page (§9, defect 37). The budget is the
+        // page less what the rest of the descriptor already costs; half a page
+        // is a deliberately conservative floor, and §9's remedy for exceeding
+        // it is to drop alternate buckets rather than to truncate the range.
+        let budget = self.engine.pager.page_size / 2;
+        let stats = b.build(self.engine.visible_seq, budget);
+
+        let mut cat =
+            std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new(0, 0, 16));
+        let r = (|| -> Result<()> {
+            let Some(mut d) = cat.get(&mut self.engine.pager, &idx.name)? else {
+                return invalid(format!("no catalog entry for index {}", idx.name));
+            };
+            let mut params: Vec<(String, Value)> = match d.get("params") {
+                Some(Value::Doc(f)) => f.clone(),
+                _ => Vec::new(),
+            };
+            params.retain(|(k, _)| k != "stats");
+            params.push(("stats".to_string(), stats.to_value()));
+            d.doc.retain(|(k, _)| k != "params");
+            d.doc.push(("params".to_string(), Value::Doc(params)));
+            cat.put(&mut self.engine.pager, &idx.name, &d)
+        })();
+        self.engine.catalog = cat;
+        r?;
+        Ok(stats)
+    }
+
+    fn stats_of(&mut self, idx: &IndexDescriptor) -> Result<Option<crate::stats::IndexStats>> {
+        let Some(d) = self.engine.catalog.get(&mut self.engine.pager, &idx.name)? else {
+            return Ok(None);
+        };
+        let Some(Value::Doc(params)) = d.get("params") else {
+            return Ok(None);
+        };
+        Ok(params
+            .iter()
+            .find(|(k, _)| k == "stats")
+            .map(|(_, v)| crate::stats::IndexStats::from_value(v)))
+    }
+
+    fn most_selective<'a>(
+        &mut self,
+        candidates: &'a [IndexDescriptor],
+    ) -> Result<Option<&'a IndexDescriptor>> {
+        let mut best: Option<&IndexDescriptor> = None;
+        let mut best_sel = f64::INFINITY;
+        for c in candidates {
+            let Some(s) = self.stats_of(c)? else { continue };
+            let Some(sel) = crate::stats::selectivity(&s) else { continue };
+            if sel < best_sel {
+                best_sel = sel;
+                best = Some(c);
+            }
+        }
+        Ok(best)
     }
 }

@@ -7,6 +7,7 @@ import org.dizitart.cryptand.index.VectorIndex;
 import org.dizitart.cryptand.index.VectorRegion;
 import org.dizitart.cryptand.key.Cke;
 import org.dizitart.cryptand.key.IndexKeys;
+import org.dizitart.cryptand.ops.IndexStats;
 import org.dizitart.cryptand.lsm.Engine;
 import org.dizitart.cryptand.lsm.SegmentMeta;
 import org.dizitart.cryptand.text.Analyzer;
@@ -335,6 +336,77 @@ public final class Collection {
             return scan(IndexKeys.startsWith(prefix, s));
         }
 
+        /**
+         * Recomputes {@code params.stats} for this index —
+         * {@code spec/13-operations.md} §9.
+         *
+         * <p>§9 maintains these "at compaction, ... free, because that
+         * compaction already touches every key". This is the same walk, exposed
+         * so the statistics can be refreshed on demand: a scan of the index
+         * tree in key order, which is exactly what a last-level compaction of
+         * it would do.
+         *
+         * <p>The result is <strong>advisory</strong> and is stored under
+         * {@code params.stats}; a planner must work without it.
+         */
+        public IndexStats analyze() {
+            IndexStats.Builder b = new IndexStats.Builder();
+            try (Engine.Cursor c = engine.scan(treeId, null, null, false)) {
+                while (c.next()) {
+                    byte[] key = c.row().key();
+                    // §9's `null_count`: an entry is null when any indexed
+                    // value is. A sparse index never holds one, which is the
+                    // whole difference between sparse and dense.
+                    boolean isNull = false;
+                    try {
+                        for (Value v : IndexKeys.valuesOf(key)) {
+                            if (v instanceof Value.Null) {
+                                isNull = true;
+                                break;
+                            }
+                        }
+                    } catch (RuntimeException ignored) {
+                        // A key this build cannot decode still counts toward
+                        // `entries`; refusing here would make one unreadable
+                        // entry lose the whole index's statistics, and §9's
+                        // whole premise is that they are advisory.
+                    }
+                    b.add(key, isNull);
+                }
+            }
+            // The descriptor is one cell of a copy-on-write B+tree, so
+            // `params.stats` MUST fit one page (§9, defect 37). Half a page is
+            // a deliberately conservative floor: the rest of the descriptor
+            // shares the cell.
+            IndexStats s = b.build(engine.visibleSeq(), engine.superblock().pageSize() / 2);
+
+            TreeDescriptor d = db.descriptor(name);
+            if (d == null) {
+                throw new InvalidArgumentException("no catalog entry for index " + name);
+            }
+            Map<String, Value> params = new LinkedHashMap<>(d.params().fields());
+            params.put("stats", s.toDoc());
+            Map<String, Value> doc = new LinkedHashMap<>(d.document().fields());
+            doc.put("params", new Value.Doc(params));
+            db.putDescriptor(name, new TreeDescriptor(new Value.Doc(doc)));
+            return s;
+        }
+
+        /**
+         * The statistics stored for this index, or {@code null} when none have
+         * been computed.
+         *
+         * <p>§9: "Statistics are advisory. They may be stale or absent."
+         */
+        public IndexStats stats() {
+            TreeDescriptor d = db.descriptor(name);
+            if (d == null) {
+                return null;
+            }
+            Value v = d.params().fields().get("stats");
+            return v == null ? null : IndexStats.fromDoc(v);
+        }
+
         public List<Long> scan(IndexKeys.Scan range) {
             List<Long> out = new ArrayList<>();
             try (Engine.Cursor c = engine.scan(treeId, range.lower(), range.upper(), false)) {
@@ -348,6 +420,36 @@ public final class Collection {
             }
             return out;
         }
+    }
+
+    /**
+     * Picks the most selective index among {@code candidates} —
+     * {@code spec/06-indexes.md} §7.1.
+     *
+     * <p>This is the decision Nitrite's {@code FindPlan} makes today from
+     * static descriptor properties — whether an index is unique and how many
+     * fields it covers — which "routinely picks a unique index on a field the
+     * query barely constrains over a non-unique index that would eliminate
+     * 99 % of the collection". With statistics it is made on evidence.
+     *
+     * <p>{@code null} when no candidate has statistics, which a planner MUST
+     * treat as "choose some other way" rather than as an error.
+     */
+    public IndexBinding mostSelective(List<IndexBinding> candidates) {
+        IndexBinding best = null;
+        double bestSelectivity = Double.POSITIVE_INFINITY;
+        for (IndexBinding c : candidates) {
+            IndexStats s = c.stats();
+            if (s == null) {
+                continue;
+            }
+            Double sel = s.selectivity();
+            if (sel != null && sel < bestSelectivity) {
+                bestSelectivity = sel;
+                best = c;
+            }
+        }
+        return best;
     }
 
     public List<IndexBinding> indexes() {

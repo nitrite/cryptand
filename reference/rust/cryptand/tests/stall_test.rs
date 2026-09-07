@@ -6,7 +6,8 @@
 //! test, so the measurement is not competing with the rest of the suite for
 //! cores. That is a property of the harness, not a weakening of the bound.
 //!
-//! **It also measures the build.** An unoptimized build of this engine is
+//! **It also measures the build.** An unoptimized *or instrumented* build of
+//! this engine is
 //! 10–40× slower than the shipped one and measures ~20 ms against an 8 ms
 //! budget — a real number about a binary nobody deploys, and the same JIT-cold
 //! caveat the Dart implementation recorded in its phase 9. So the wall clock is
@@ -78,12 +79,21 @@ fn no_foreground_operation_exceeds_the_mobile_stall_budget() {
          a bounded §5.2 step can write: the compaction cascade is not interruptible"
     );
 
-    if cfg!(debug_assertions) {
-        // Reported, not asserted, and with the number -- an unoptimized build
-        // is not the artifact the budget is about.
+    // Coverage instrumentation is the same case as an unoptimized build, and
+    // for the same reason: it inserts a counter increment per region, costs
+    // roughly 2x here, and produces a real number about a binary nobody
+    // deploys. `cargo llvm-cov` sets LLVM_PROFILE_FILE, which is the only
+    // signal available -- `cfg(coverage)` is not stable.
+    let instrumented = std::env::var_os("LLVM_PROFILE_FILE").is_some();
+    if cfg!(debug_assertions) || instrumented {
+        // Reported, not asserted, and with the number -- neither an
+        // unoptimized nor an instrumented build is the artifact the budget is
+        // about. The mechanism above was asserted either way, which is what
+        // stops this from becoming a test that cannot fail.
+        let why = if instrumented { "an instrumented build" } else { "an unoptimized build" };
         println!(
-            "wall-clock bound not asserted on an unoptimized build \
-             (worst {worst} ms against {budget} ms); run with --release"
+            "wall-clock bound not asserted on {why} \
+             (worst {worst} ms against {budget} ms); run `cargo test --release`"
         );
         return;
     }

@@ -1212,6 +1212,64 @@ individually and flagged in the segment header's `codec`, and no implementation
 does it. On a `desktop` profile, where `vlog_min` is 256 B, that is where the
 bulk of the bytes are — so the space win now measured is the smaller half.
 
+### 8.18 Phase 21 — the chapter that was present and unimplemented
+
+`13-operations.md` §9's planner statistics were in the same state as §7's
+codec, one layer up. Coverage found it:
+
+| implementation | what it had |
+|---|---|
+| Dart | the whole chapter, wired into `analyze` / `statsOf` / `mostSelective` |
+| Rust | `stats.rs` — the HyperLogLog, the equi-depth histogram, the byte-bounded `fit_to` — at **0 % line coverage, with no caller anywhere in the crate**, held in the build by a `pub fn _unused()` at the bottom |
+| Java | **absent entirely**: no sketch, no histogram, no `params.stats`, and nothing that chose an index on evidence |
+
+There is no defect number for this because nothing is *wrong*: Rust's sketch is
+correct and Dart's wiring is correct. It is the gap the project keeps finding
+in a new place — **code that is present and unreached** — and the reason it
+survives is always the same one. §9 is advisory by design, so a database with
+no statistics behaves identically to a database with good ones, only slower.
+Nothing fails. The interop gate cannot see it, because statistics are per-file
+metadata that a reader is explicitly allowed to ignore.
+
+Rust's `stats.rs` is now reached through `Indexing::analyze`, `stats_of` and
+`most_selective`; Java has `ops.IndexStats` and the same three on
+`Collection.IndexBinding`. 14 Rust tests, 13 Java.
+
+**What the tests assert, beyond the arithmetic.** §7.1's complaint about
+Nitrite's `FindPlan` is that it chooses an index "by whether it is unique and
+how many fields it covers", and so "routinely picks a unique index on a field
+the query barely constrains over a non-unique index that would eliminate 99 %
+of the collection". The test builds exactly that shape — `city` with 2 distinct
+values over 300 rows against `age` with 50 — and asserts `most_selective`
+picks `age`. Before `analyze` it asserts the method returns **nothing**, because
+§9 requires "no statistics" to be *choose some other way* rather than a guess.
+
+**Defect 37's bound is tested in both directions, which it had not been.** §9
+bounds the histogram in *bytes* rather than buckets, because a CKE key runs to
+kilobytes and `params.stats` is one cell of a copy-on-write B+tree: 64 bounds
+over 300 string keys measured 4734 B against a 4096 B page. The test uses
+200-byte keys, asserts the encoded size fits the budget, asserts the bucket
+count really was reduced — and asserts that the **last bound still equals
+`max_key`**, which is the difference between §9's remedy (drop alternate
+buckets) and the obvious wrong one (truncate). A negative control that
+truncates instead fails exactly that assertion and nothing else.
+
+**A control that could not fail, caught while writing it.** The first version
+asserted `histogram.len() == MAX_BUCKETS` for a generous budget. 500 entries at
+a quota of `ceil(500/64) = 8` gives **63** buckets, not 64 — `MAX_BUCKETS`
+bounds the count, it does not fix it. Asserting 64 would have been asserting an
+arithmetic accident of the corpus size.
+
+**And one test-harness fix.** `stall_test` is a wall-clock test that already
+reported rather than asserted on an unoptimized build, "because an unoptimized
+build is not the artifact the budget is about". Coverage instrumentation is the
+same case for the same reason — a counter increment per region, roughly 2× here
+— and it was failing every `cargo llvm-cov` run at 9 ms against an 8 ms budget,
+which meant **the Rust coverage report could not be produced at all**. It now
+detects `LLVM_PROFILE_FILE` and reports there too. The build-independent half —
+§5.2's bounded step, asserted in bytes — is still asserted on every build, which
+is what stops this from becoming a test that cannot fail.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

@@ -7,7 +7,6 @@
 //! histogram is a worse estimate and never a wrong answer.
 
 use crate::cve;
-use crate::error::Result;
 use crate::value::{NumType, Value};
 
 /// A mergeable, fixed-size distinct-count sketch. Chosen for exactly that
@@ -265,8 +264,4 @@ pub fn most_selective<'a>(candidates: &'a [(String, IndexStats)]) -> Option<&'a 
         .filter_map(|(n, s)| selectivity(s).map(|v| (n.as_str(), v)))
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(n, _)| n)
-}
-
-pub fn _unused() -> Result<()> {
-    Ok(())
 }
