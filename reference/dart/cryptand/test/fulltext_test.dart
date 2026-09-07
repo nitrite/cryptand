@@ -17,6 +17,7 @@ import 'package:test/test.dart';
 const String kUnicodeDir = '../../conformance/unicode';
 
 void main() {
+  _maintenance();
   group('Unicode, against the published conformance suites', () {
     test('NFC and NFKC reproduce every case of NormalizationTest-15.1.0', () {
       // 19 074 cases. spec/07-fulltext.md section 2.2 pins Unicode 15.1, so
@@ -370,6 +371,67 @@ void main() {
       expect(c.fullTextSearch(idx, 'the'), isEmpty,
           reason: 'the stopword is not indexed');
       expect(c.fullTextSearch(idx, 'brown'), isNotEmpty);
+    });
+  });
+}
+
+void _maintenance() {
+  group('the index is maintained by writes, not only by its build', () {
+    late Database db;
+    late Collection c;
+    late TreeDescriptor idx;
+
+    setUp(() {
+      db = Database();
+      c = db.createCollection('docs');
+      c.put(const CNitriteId(1), CDoc({'body': const CStr('the quick brown fox')}));
+      idx = c.createFullTextIndex(['body']);
+    });
+
+    /// `07-fulltext.md` section 1: "`df` is document frequency, `ttf` is total
+    /// term frequency; both are maintained for scoring and MUST be accurate."
+    ///
+    /// The index used to be written only by `createFullTextIndex` and never
+    /// touched again, so it was frozen at the moment of its build and wrong in
+    /// **both** directions after the first write: a new document was invisible,
+    /// and a term that an update removed still matched — a search returning a
+    /// document that does not contain the word.
+    ///
+    /// `11-conformance.md` section 5 exists precisely so that an index is never
+    /// silently wrong: an implementation that cannot maintain one must refuse
+    /// the write or mark the index stale in the repair log. Doing neither, while
+    /// having the feature, is the case that section is written against.
+    ///
+    /// The Java implementation has always maintained its text indexes in `put`
+    /// and `remove`.
+    test('an insert after the build is visible to a search', () {
+      c.put(const CNitriteId(2), CDoc({'body': const CStr('a brown bear')}));
+      expect(c.fullTextSearch(idx, 'brown'),
+          [const CNitriteId(1), const CNitriteId(2)]);
+      expect(c.termEntry(idx, 'brown')!.df, 2);
+    });
+
+    test('a term an update removes stops matching', () {
+      c.put(const CNitriteId(1), CDoc({'body': const CStr('the quick grey fox')}));
+      expect(c.fullTextSearch(idx, 'brown'), isEmpty,
+          reason: 'document 1 no longer contains "brown"');
+      expect(c.fullTextSearch(idx, 'grey'), [const CNitriteId(1)]);
+      expect(c.termEntry(idx, 'brown')!.df, 0,
+          reason: 'df MUST be accurate (section 1)');
+    });
+
+    test('a removed document stops matching', () {
+      c.put(const CNitriteId(2), CDoc({'body': const CStr('a brown bear')}));
+      c.remove(const CNitriteId(2));
+      expect(c.fullTextSearch(idx, 'brown'), [const CNitriteId(1)]);
+      expect(c.termEntry(idx, 'brown')!.df, 1);
+    });
+
+    test('a term only the removed document had matches nothing', () {
+      c.put(const CNitriteId(2), CDoc({'body': const CStr('a pangolin')}));
+      expect(c.fullTextSearch(idx, 'pangolin'), [const CNitriteId(2)]);
+      c.remove(const CNitriteId(2));
+      expect(c.fullTextSearch(idx, 'pangolin'), isEmpty);
     });
   });
 }

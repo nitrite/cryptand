@@ -143,3 +143,48 @@ fn a_vector_graph_key_sorts_a_layer_contiguously() {
     sorted.sort();
     assert_eq!(keys, sorted, "the CKE order is already layer-then-slot");
 }
+
+// ---------------------------------------------------------------------------
+// `09-vector.md` §8.1 — the metrics, numerically
+// ---------------------------------------------------------------------------
+
+/// §5's descriptor names `"cosine" | "l2" | "dot"` and §8 said nothing about
+/// what they compute. "Ordered nearest first" needs a value where smaller means
+/// closer, and a dot product is a *similarity* — so an implementation returning
+/// it unchanged sorts every result set backwards while satisfying every other
+/// sentence in the chapter. §8.1 now pins all three, and this is the vector.
+///
+/// The `wide_1024` case is the one with teeth: it fails for an implementation
+/// that accumulates in `f32`, which this one did.
+#[test]
+fn the_published_metric_vectors_are_reproduced() {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../conformance/vectors");
+    let text = std::fs::read_to_string(format!("{root}/vector/metrics.json"))
+        .expect("conformance/vectors/vector/metrics.json");
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let tol = doc["tolerance"].as_f64().unwrap();
+    let cases = doc["cases"].as_array().unwrap();
+    assert!(cases.len() >= 8, "the metric corpus is suspiciously small");
+
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        let f = |k: &str| -> Vec<f32> {
+            c[k].as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect()
+        };
+        let (a, b) = (f("a"), f("b"));
+        for (metric, key) in [
+            (cryptand::vector::Metric::L2, "l2"),
+            (cryptand::vector::Metric::Dot, "dot"),
+            (cryptand::vector::Metric::Cosine, "cosine"),
+        ] {
+            let want = c[key].as_f64().unwrap();
+            let got = cryptand::vector::distance_f64(metric, &a, &b);
+            assert!(
+                (got - want).abs() <= tol,
+                "{name}/{key}: want {want}, got {got} (delta {:e}, tolerance {tol:e})\n  {}",
+                (got - want).abs(),
+                c["note"].as_str().unwrap_or("")
+            );
+        }
+    }
+}

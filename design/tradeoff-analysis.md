@@ -1409,8 +1409,9 @@ state — the `hot` and `known` maps, each `Open`'s watermark bookkeeping, and i
 
 **An NPE is the lucky outcome.** The same race silently drops a `completed`
 entry, which leaves the durable watermark short of what was actually written,
-which is a value-log record that no longer resolves. That is
-[[cryptand-gc-visibility-defect]]'s failure mode reached by a different road.
+which is a value-log record that no longer resolves. That is the value-log GC
+visibility failure — a live record collected because the watermark it is judged
+against never moved (defect 34 in §7's table) — reached by a different road.
 
 Fixed by synchronizing `Vlog`'s entry points on the instance. There is no
 lock-order inversion to worry about: `commitBatch` never takes `structure`, so

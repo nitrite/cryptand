@@ -8,12 +8,16 @@
 /// for the same query; ANN is approximate by definition."
 library;
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'dart:typed_data';
 
 import 'package:cryptand/cryptand.dart';
 import 'package:test/test.dart';
 
 void main() {
+  _metrics();
   group('the vector region, section 2', () {
     test('the head page round-trips with its magic and page alignment', () {
       final r = VectorRegion(dim: 8, dtype: RegionDType.f32, slotCount: 100);
@@ -274,6 +278,50 @@ void main() {
       expect(idx.entryPoints, isNotEmpty);
       expect(idx.graph, isEmpty,
           reason: 'no adjacency lookup is needed to start');
+    });
+  });
+}
+
+void _metrics() {
+  /// `spec/09-vector.md` section 8.1 — the metrics, numerically.
+  ///
+  /// Section 5's descriptor names `"cosine" | "l2" | "dot"` and section 8 said
+  /// nothing about what they compute. "Ordered nearest first" needs a value
+  /// where smaller means closer, and a dot product is a *similarity* — so an
+  /// implementation returning it unchanged sorts every result set backwards
+  /// while satisfying every other sentence in the chapter. Section 8.1 pins all
+  /// three; this is the shared vector for it.
+  ///
+  /// The `wide_1024` case is the one with teeth: it fails for an implementation
+  /// that accumulates in f32 rather than f64.
+  group('09 section 8.1 -- the metrics', () {
+    final path =
+        '${Directory.current.path}/../../conformance/vectors/vector/metrics.json';
+    final file = File(path);
+    if (!file.existsSync()) {
+      test('the metric corpus is present', () => fail('$path does not exist'));
+      return;
+    }
+    final doc = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+    final tol = (doc['tolerance']! as num).toDouble();
+    final cases = (doc['cases']! as List).cast<Map<String, Object?>>();
+
+    test('every published metric value is reproduced', () {
+      expect(cases.length, greaterThanOrEqualTo(8));
+      for (final c in cases) {
+        List<double> v(String k) =>
+            (c[k]! as List).map((x) => (x as num).toDouble()).toList();
+        final a = v('a');
+        final b = v('b');
+        for (final metric in ['l2', 'dot', 'cosine']) {
+          final want = (c[metric]! as num).toDouble();
+          final got = vectorDistance(a, b, metric);
+          expect((got - want).abs() <= tol, isTrue,
+              reason: '${c['name']}/$metric: want $want, got $got '
+                  '(delta ${(got - want).abs()}, tolerance $tol)\n'
+                  '  ${c['note']}');
+        }
+      }
     });
   });
 }

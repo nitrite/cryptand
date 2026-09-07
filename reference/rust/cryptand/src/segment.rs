@@ -376,8 +376,16 @@ impl<'a> Node<'a> {
 
     pub fn record_at(&self, i: usize) -> Result<SegRecord> {
         let key = self.key_at(i)?;
+        // §1: an internal key is `u32be(tree_id) || CKE(key) || u64be(~seq) ||
+        // u8 op`, so it is never shorter than 13 bytes and in particular never
+        // empty. A hostile page can declare one that is — `prefix_len` and
+        // `suffix_len` are both read from the file — and taking its last byte
+        // for the op was a panic rather than §9.1's typed error.
+        // `parse_internal_key` already holds that minimum; reusing it keeps the
+        // rule in one place rather than two that can drift.
+        let op_byte = parse_internal_key(&key)?.op;
         let p = self.payload_at(i)?;
-        let (value_kind, expiry, value) = decode_cell_payload(p, *key.last().unwrap())?;
+        let (value_kind, expiry, value) = decode_cell_payload(p, op_byte)?;
         Ok(SegRecord { internal_key: key, value_kind, value, expiry_ms: expiry })
     }
 
@@ -1046,6 +1054,14 @@ pub struct Segment {
     pub header: SegmentHeader,
     pub node_accesses: std::sync::atomic::AtomicU64,
     pub page_reads: std::sync::atomic::AtomicU64,
+    /// The parsed `04-segments.md` §2.4 filter, decoded at most once per open
+    /// segment. See [`Segment::may_contain`] for why it is not decoded per
+    /// probe. `OnceLock` rather than `OnceCell` because a `Segment` is held in
+    /// an `Arc` and probed from every reader thread.
+    filter_cache: std::sync::OnceLock<Option<BlockedBloom>>,
+    /// How many times the filter payload has actually been decoded. A counter,
+    /// so the caching above is provable rather than merely faster.
+    pub filter_parses: std::sync::atomic::AtomicU64,
 }
 
 impl Segment {
@@ -1064,6 +1080,8 @@ impl Segment {
             header,
             node_accesses: std::sync::atomic::AtomicU64::new(0),
             page_reads: std::sync::atomic::AtomicU64::new(0),
+            filter_cache: std::sync::OnceLock::new(),
+            filter_parses: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1096,6 +1114,7 @@ impl Segment {
         if self.header.filter_page == 0 {
             return Ok(None);
         }
+        self.filter_parses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut payload = Vec::new();
         let cap = self.page_size - PAGE_HEADER_BYTES;
         let mut idx = self.header.filter_page;
@@ -1122,6 +1141,17 @@ impl Segment {
         // A reader MUST use the stored `probes`, not recompute it.
         let probes = u16le(&payload, 10) as u32;
         let distinct_keys = u64le(&payload, 12);
+        // §2.4's two attacker-controlled loop/index bounds, refused here rather
+        // than trusted downstream (`14-security.md` §9.1). `block_count = 0`
+        // makes `locate` address byte 0 of a zero-length block array, which is
+        // an out-of-bounds index and not a corruption error; `probes` is a loop
+        // count a reader MUST take from the file rather than recompute.
+        if block_count < 1 {
+            return corrupt("filter block_count is 0");
+        }
+        if !(1..=16).contains(&probes) {
+            return corrupt(format!("filter probes is {probes}, outside 1..16"));
+        }
         let want = block_count as usize * crate::filter::BLOCK_BYTES;
         if payload.len() < 20 + want {
             return corrupt("filter blocks truncated");
@@ -1135,10 +1165,25 @@ impl Segment {
         }))
     }
 
+    /// §2.4's probe.
+    ///
+    /// The filter is decoded **once per open segment**, not once per probe.
+    /// Before this cache existed, every point read re-walked the filter's pages,
+    /// copied the whole payload into a fresh `Vec`, and then copied the block
+    /// array out of it a second time — for a probe that reads one bit. §12 costs
+    /// a probe as "exactly one 64-byte block"; two full copies of a filter that
+    /// is tens of kilobytes on a large segment is not that, and it happened on
+    /// the hottest path in the engine. The Dart and Java implementations both
+    /// already cached it (`_filterLoaded`, `filterLoaded`); this was a
+    /// divergence, not a design.
+    ///
+    /// A filter that fails to decode caches as `None`, which answers "maybe" —
+    /// always a sound answer for a Bloom filter, and the behaviour this method
+    /// already had.
     pub fn may_contain(&self, user_key_prefix: &[u8]) -> bool {
-        match self.filter() {
-            Ok(Some(f)) => f.may_contain(user_key_prefix),
-            _ => true,
+        match self.filter_cache.get_or_init(|| self.filter().ok().flatten()) {
+            Some(f) => f.may_contain(user_key_prefix),
+            None => true,
         }
     }
 

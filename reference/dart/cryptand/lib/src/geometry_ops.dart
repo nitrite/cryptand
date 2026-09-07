@@ -52,19 +52,59 @@ bool _intersects(Geometry a, Geometry b) {
 
 /// `contains(a, b)` — every point of `b` is in `a`, §4.
 bool _contains(Geometry a, Geometry b) {
-  final parts = _flatten(b).toList();
-  if (parts.isEmpty) return false;
-  for (final y in parts) {
-    var covered = false;
-    for (final x in _flatten(a)) {
-      if (_simpleContains(x, y)) {
-        covered = true;
-        break;
-      }
-    }
-    if (!covered) return false;
+  // Section 4.1: `contains(A, B)` is `within(B, A)`, and `within` is "every
+  // point of B is a point of A".
+  //
+  // This used to ask whether each simple part of B was covered by some ONE
+  // simple part of A, via `_simpleContains`, which handled only
+  // polygon-contains-anything, line-contains-point and point-contains-point.
+  // Everything else answered false — so `contains(lineString, itself)` was
+  // false, and section 4.1 rule 1 makes the predicates reflexive. Testing
+  // membership against the whole of A rather than one part at a time also
+  // fixes a part of B that lies across two parts of A.
+  final coords = b.allCoords.toList();
+  if (coords.isEmpty) return false; // rule 4: an empty geometry is within nothing
+  for (final c in coords) {
+    if (!_pointIn(c, a)) return false;
+  }
+  // A segment of B may leave A between its vertices — through a hole or across
+  // a concavity — so each midpoint must be a point of A too.
+  for (final (p, q) in _segmentsOf(b)) {
+    if (!_pointIn(Coord((p.x + q.x) / 2, (p.y + q.y) / 2), a)) return false;
   }
   return true;
+}
+
+/// Section 4.1's point-set membership: inside a polygon (boundary included,
+/// holes excluded), on one of a linestring's segments, or equal to a point.
+bool _pointIn(Coord c, Geometry g) {
+  for (final x in _flatten(g)) {
+    if (x.type == GeometryType.polygon) {
+      if (_pointInPolygon(c, x)) return true;
+    } else if (x.type == GeometryType.lineString) {
+      if (_pointOnLine(c, x.coords)) return true;
+    } else if (x.type == GeometryType.point) {
+      if (x.coords.isNotEmpty && _same(c, x.coords.single)) return true;
+    }
+  }
+  return false;
+}
+
+/// Every segment of [g], as vertex pairs.
+Iterable<(Coord, Coord)> _segmentsOf(Geometry g) sync* {
+  for (final x in _flatten(g)) {
+    if (x.type == GeometryType.polygon) {
+      for (final r in x.rings) {
+        for (var i = 0; i + 1 < r.length; i++) {
+          yield (r[i], r[i + 1]);
+        }
+      }
+    } else if (x.type == GeometryType.lineString) {
+      for (var i = 0; i + 1 < x.coords.length; i++) {
+        yield (x.coords[i], x.coords[i + 1]);
+      }
+    }
+  }
 }
 
 /// `within(a, b)` — §4, the converse of `contains`.
@@ -127,27 +167,6 @@ bool _simpleIntersects(Geometry a, Geometry b) {
   return _segmentsCross(a.coords, b.coords);
 }
 
-bool _simpleContains(Geometry a, Geometry b) {
-  if (a.type == GeometryType.polygon) {
-    for (final c in b.allCoords) {
-      if (!_pointInPolygon(c, a)) return false;
-    }
-    // A shape whose vertices are all inside can still leave through a hole or
-    // a concavity, so the boundary must not be crossed.
-    return !_crossesBoundary(
-        b.type == GeometryType.polygon ? b.rings.first : b.coords, a,
-        strict: true);
-  }
-  if (a.type == GeometryType.lineString) {
-    if (b.type != GeometryType.point) return false;
-    return _pointOnLine(b.coords.single, a.coords);
-  }
-  if (a.type == GeometryType.point) {
-    return b.type == GeometryType.point &&
-        _same(a.coords.single, b.coords.single);
-  }
-  return false;
-}
 
 double _simpleDistance(Geometry a, Geometry b) {
   if (_simpleIntersects(a, b)) return 0;

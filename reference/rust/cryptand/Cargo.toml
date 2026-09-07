@@ -61,3 +61,7 @@ path = "benches/filter_fpr.rs"
 [[bin]]
 name = "interop"
 path = "src/bin/interop.rs"
+
+[[bin]]
+name = "filter_probe"
+path = "benches/filter_probe.rs"

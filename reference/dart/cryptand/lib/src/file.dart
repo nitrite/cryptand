@@ -363,6 +363,24 @@ abstract final class DatabaseFile {
   /// `kdf = 0` slot, or a password for an Argon2id slot. An encrypted file
   /// opened without one fails with [CannotUnlockException], which §3.3 requires
   /// to be reported identically for a missing keyslot and a wrong password.
+  ///
+  /// Pass a mutable sequence — a `Uint8List`, not the code units of a `String`.
+  /// §11 forbids offering a password parameter of an immutable string type on a
+  /// runtime whose strings are immutable, and Dart's are: a `String` holding a
+  /// password survives until collection with no way to clear it.
+  ///
+  /// **Zeroing on this runtime is best-effort, and §11 requires that to be
+  /// said rather than implied.** The Dart VM's collector is generational and
+  /// copying: a surviving `Uint8List` is relocated, and each relocation leaves
+  /// the old bytes in a region the program can no longer name and therefore
+  /// cannot overwrite. `Engine.close` zeroes the master key and every subkey,
+  /// and the caller should clear [key] once the database is open — but a copy
+  /// the program never sees cannot be zeroed by anyone. §11: "documenting it is
+  /// the requirement; achieving what the runtime forbids is not."
+  ///
+  /// Practically: a heap snapshot of a process that has ever opened an
+  /// encrypted database may contain the master key even after a clean close.
+  /// Treat process memory as in scope for whatever protects the key file.
   static Database open(String path, {List<int>? key}) {
     final lock = _takeWriterLock(path);
     try {

@@ -394,14 +394,45 @@ impl Codebook {
     }
 }
 
+/// §8.1 — the three metrics, as **distances**: smaller is nearer.
+///
+/// `dot` is negated because a dot product is a similarity; `cosine` is
+/// `1 - similarity`, not the similarity; `l2` is the Euclidean distance and not
+/// its square. §8 requires the *true* distance to be returned, so the square is
+/// not an option even though it orders identically.
+///
+/// **Accumulation is in `f64`** whatever the region's `dtype`. Summing 1024
+/// `f32` products in `f32` — which this did — drifts by roughly 1e-4 against the
+/// same sum in `f64`, so this implementation returned different distances from
+/// Dart and Java for the same pair of vectors and ordered near-ties
+/// differently. The stored vectors keep their `dtype`; only the arithmetic
+/// widens.
 pub fn distance(metric: Metric, a: &[f32], b: &[f32]) -> f32 {
+    distance_f64(metric, a, b) as f32
+}
+
+/// The same, without the narrowing on the way out — the form a search should
+/// use for ordering, so that two candidates differing below `f32` resolution
+/// still compare in a defined direction.
+pub fn distance_f64(metric: Metric, a: &[f32], b: &[f32]) -> f64 {
     match metric {
-        Metric::L2 => a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt(),
-        Metric::Dot => -a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>(),
+        Metric::L2 => a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| {
+                let d = *x as f64 - *y as f64;
+                d * d
+            })
+            .sum::<f64>()
+            .sqrt(),
+        Metric::Dot => -a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum::<f64>(),
         Metric::Cosine => {
-            let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-            let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+            let na: f64 = a.iter().map(|x| *x as f64 * *x as f64).sum::<f64>().sqrt();
+            let nb: f64 = b.iter().map(|x| *x as f64 * *x as f64).sum::<f64>().sqrt();
+            // §8.1: a zero vector has no direction, so this is the orthogonal
+            // value rather than a division by zero. A NaN here propagates into
+            // a neighbour list and corrupts the ordering silently.
             if na == 0.0 || nb == 0.0 {
                 1.0
             } else {

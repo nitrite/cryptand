@@ -7,7 +7,7 @@ use support::*;
 
 use cryptand::catalog::{data_tree_type, index_type, kind};
 use cryptand::container::{Durability, Profile};
-use cryptand::database::Indexing;
+use cryptand::database::{Database, Indexing};
 use cryptand::index::{self, Cmp};
 use cryptand::value::{NumType, Value};
 use cryptand::verify::{Class, EngineVerify};
@@ -355,4 +355,59 @@ fn a_clear_is_one_range_delete_not_n_tombstones() {
     assert_eq!(db.engine.next_seq, seq_before + 1, "clear() must be O(1) writes");
     db.engine.flush().unwrap();
     assert!(c.scan(&mut db.engine).unwrap().is_empty());
+}
+
+/// `05-catalog.md` §5.3 — "a writer MUST write new dictionary entries in the
+/// **same commit** as the document that first uses them."
+///
+/// `persist_dict` re-probed every dictionary entry on every insert, one
+/// `Engine::get` per name per document. It is now driven by a high-water mark,
+/// which is exact because §5.3's `name_id` is "allocated append-only and never
+/// reused" — but a high-water mark is precisely the kind of optimisation that
+/// is correct until a name is interned on a path that does not advance it, and
+/// then silently writes a document referring to a `name_id` no reader can
+/// resolve.
+///
+/// So this reopens the database in a **fresh** `Database`, which reloads the
+/// dictionary from tree bytes and shares nothing with the writer's in-memory
+/// copy, and reads every document back.
+#[test]
+fn every_field_name_survives_a_reopen_after_incremental_interning() {
+    let t = TempDb::new("dict_persist");
+    // Each document introduces a field name the previous ones did not, so the
+    // dictionary grows on every insert rather than only on the first.
+    {
+        let mut db = Database::create(&t.path, Profile::Desktop).unwrap();
+        let mut c = db.collection("orders").unwrap();
+        for i in 0..40i64 {
+            let d = doc(
+                i,
+                vec![
+                    ("common", str_value("x")),
+                    // A name unique to this document.
+                    (Box::leak(format!("f{i}").into_boxed_str()), i32v(i as i32)),
+                ],
+            );
+            c.insert(&mut db.engine, &d).unwrap();
+        }
+        db.engine.flush().unwrap();
+        db.commit(Durability::Sync).unwrap();
+    }
+
+    let mut db = Database::open(&t.path, None).unwrap();
+    let c = db.collection("orders").unwrap();
+    for i in 0..40i64 {
+        let got = c
+            .get(&mut db.engine, i)
+            .unwrap()
+            .unwrap_or_else(|| panic!("document {i} is missing after a reopen"));
+        // The per-document field must resolve to its NAME, not to a dangling
+        // `name_id`. A dictionary entry that was never written shows up here.
+        assert!(
+            got.field(&format!("f{i}")).is_some(),
+            "document {i} lost the field name only it introduced: {got:?}"
+        );
+        assert!(got.field("common").is_some(), "document {i} lost the shared field name");
+    }
+    assert_eq!(c.scan(&mut db.engine).unwrap().len(), 40);
 }

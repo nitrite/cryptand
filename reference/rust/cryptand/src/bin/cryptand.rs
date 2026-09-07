@@ -327,7 +327,18 @@ fn fuzz(path: &str, iterations: u64) -> cryptand::Result<ExitCode> {
             let all = cat.all(&mut e.pager);
             e.catalog = cat;
             for (_, d) in all.unwrap_or_default() {
-                let _ = e.scan_tree(d.tree_id(), None, None, None, true);
+                let rows = e.scan_tree(d.tree_id(), None, None, None, true);
+                // And then a POINT read of each key the scan returned. A scan
+                // and a `get` are different decoders: only `get` consults
+                // `04-segments.md` §2.4's segment filter, so a fuzzer that
+                // only scans cannot reach the filter header at all -- which is
+                // how a `block_count` of 0 (an out-of-bounds index, not a
+                // corruption error) survived every earlier run of this loop.
+                for (k, _) in rows.unwrap_or_default().iter().take(32) {
+                    if let Ok(v) = cryptand::cke::decode_all(k) {
+                        let _ = e.get(d.tree_id(), &v);
+                    }
+                }
             }
             Ok::<usize, cryptand::Error>(n)
         });

@@ -1,0 +1,471 @@
+{
+ "format": "cryptand-vectors",
+ "format_version": "3",
+ "generator": "gen_spatial.py",
+ "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+ "chapter": "spec/08-spatial.md sections 1, 3 and 4",
+ "invariant": "Section 2.3: 'two implementations inserting the same documents will produce different (equally valid) trees. A conformance test therefore compares QUERY RESULTS, never tree shape.' So this vector carries envelopes and the pairwise predicate matrices, which are properties of the geometry, and no tree at all.",
+ "geometries": [
+  {
+   "name": "p_1_1",
+   "wkb": "0101000000000000000000f03f000000000000f03f",
+   "envelope": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "note": "a point inside SQ and inside DONUT's hole"
+  },
+  {
+   "name": "p_5_5",
+   "wkb": "010100000000000000000014400000000000001440",
+   "envelope": [
+    5,
+    5,
+    5,
+    5
+   ],
+   "note": "a point in DONUT's hole -- inside the outer ring, outside the polygon"
+  },
+  {
+   "name": "p_9_9",
+   "wkb": "010100000000000000000022400000000000002240",
+   "envelope": [
+    9,
+    9,
+    9,
+    9
+   ],
+   "note": "a point in DONUT's material, outside SQ"
+  },
+  {
+   "name": "p_0_0",
+   "wkb": "010100000000000000000000000000000000000000",
+   "envelope": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "on SQ's corner -- a boundary case"
+  },
+  {
+   "name": "p_20_20",
+   "wkb": "010100000000000000000034400000000000003440",
+   "envelope": [
+    20,
+    20,
+    20,
+    20
+   ],
+   "note": "outside everything"
+  },
+  {
+   "name": "ls_x",
+   "wkb": "0102000000020000000000000000000000000000000000000000000000000024400000000000000000",
+   "envelope": [
+    0,
+    0,
+    10,
+    0
+   ],
+   "note": "along the x axis, on SQ's edge"
+  },
+  {
+   "name": "ls_cross",
+   "wkb": "010200000002000000000000000000144000000000000014c000000000000014400000000000001440",
+   "envelope": [
+    5,
+    -5,
+    5,
+    5
+   ],
+   "note": "crosses SQ2 and DONUT's boundary"
+  },
+  {
+   "name": "sq",
+   "wkb": "010300000001000000050000000000000000000000000000000000000000000000000010400000000000000000000000000000104000000000000010400000000000000000000000000000104000000000000000000000000000000000",
+   "envelope": [
+    0,
+    0,
+    4,
+    4
+   ],
+   "note": "the 0..4 square"
+  },
+  {
+   "name": "sq2",
+   "wkb": "010300000001000000050000000000000000000040000000000000004000000000000018400000000000000040000000000000184000000000000018400000000000000040000000000000184000000000000000400000000000000040",
+   "envelope": [
+    2,
+    2,
+    6,
+    6
+   ],
+   "note": "overlaps sq on 2..4"
+  },
+  {
+   "name": "big",
+   "wkb": "010300000001000000050000000000000000000000000000000000000000000000000024400000000000000000000000000000244000000000000024400000000000000000000000000000244000000000000000000000000000000000",
+   "envelope": [
+    0,
+    0,
+    10,
+    10
+   ],
+   "note": "contains sq and sq2 entirely"
+  },
+  {
+   "name": "donut",
+   "wkb": "01030000000200000005000000000000000000000000000000000000000000000000002440000000000000000000000000000024400000000000002440000000000000000000000000000024400000000000000000000000000000000005000000000000000000084000000000000008400000000000001c4000000000000008400000000000001c400000000000001c4000000000000008400000000000001c4000000000000008400000000000000840",
+   "envelope": [
+    0,
+    0,
+    10,
+    10
+   ],
+   "note": "a polygon WITH A HOLE -- the envelope cannot see the hole, so this is the case the two-phase rule of section 4 exists for"
+  },
+  {
+   "name": "mp",
+   "wkb": "0104000000020000000101000000000000000000f03f000000000000f03f010100000000000000000022400000000000002240",
+   "envelope": [
+    1,
+    1,
+    9,
+    9
+   ],
+   "note": "a multipoint spanning sq and donut's material"
+  },
+  {
+   "name": "mls",
+   "wkb": "01050000000200000001020000000200000000000000000000000000000000000000000000000000f03f000000000000f03f0102000000020000000000000000002040000000000000204000000000000022400000000000002240",
+   "envelope": [
+    0,
+    0,
+    9,
+    9
+   ],
+   "note": "two disjoint parts"
+  },
+  {
+   "name": "mpoly",
+   "wkb": "010600000002000000010300000001000000050000000000000000000000000000000000000000000000000010400000000000000000000000000000104000000000000010400000000000000000000000000000104000000000000000000000000000000000010300000001000000050000000000000000002040000000000000204000000000000022400000000000002040000000000000224000000000000022400000000000002040000000000000224000000000000020400000000000002040",
+   "envelope": [
+    0,
+    0,
+    9,
+    9
+   ],
+   "note": "two disjoint squares"
+  },
+  {
+   "name": "gc",
+   "wkb": "0107000000020000000101000000000000000000f03f000000000000f03f0102000000020000000000000000002040000000000000204000000000000022400000000000002240",
+   "envelope": [
+    1,
+    1,
+    9,
+    9
+   ],
+   "note": "a geometry collection"
+  },
+  {
+   "name": "p_z",
+   "wkb": "01e9030000000000000000f03f000000000000f03f0000000000001c40",
+   "envelope": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "note": "PointZ: ISO type 1001, XY envelope unaffected"
+  },
+  {
+   "name": "p_m",
+   "wkb": "01d1070000000000000000f03f000000000000f03f0000000000001c40",
+   "envelope": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "note": "PointM: ISO type 2001"
+  },
+  {
+   "name": "p_zm",
+   "wkb": "01b90b0000000000000000f03f000000000000f03f0000000000001c400000000000002240",
+   "envelope": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "note": "PointZM: ISO type 3001"
+  }
+ ],
+ "rejects": [
+  {
+   "name": "ewkb_z",
+   "wkb": "0101000080000000000000f03f000000000000f03f",
+   "why": "EWKB sets Z as a high bit of the type word; ISO adds 1000. A reader that accepts both decodes coordinates as garbage without error (section 1)."
+  },
+  {
+   "name": "ewkb_m",
+   "wkb": "0101000040000000000000f03f000000000000f03f",
+   "why": "EWKB M bit"
+  },
+  {
+   "name": "ewkb_srid",
+   "wkb": "0101000020000000000000f03f000000000000f03f",
+   "why": "EWKB SRID bit"
+  },
+  {
+   "name": "bad_bom",
+   "wkb": "0201000000000000000000f03f000000000000f03f",
+   "why": "byte order marker is neither 0 nor 1"
+  },
+  {
+   "name": "type_0",
+   "wkb": "0100000000000000000000f03f000000000000f03f",
+   "why": "geometry type 0 is not 1..7"
+  },
+  {
+   "name": "type_8",
+   "wkb": "0108000000000000000000f03f000000000000f03f",
+   "why": "geometry type 8 is not 1..7"
+  },
+  {
+   "name": "variant_4",
+   "wkb": "01a10f0000000000000000f03f000000000000f03f",
+   "why": "dimension variant 4 is not 0..3"
+  },
+  {
+   "name": "truncated",
+   "wkb": "0101000000000000000000f03f00000000",
+   "why": "the coordinate runs past the end of the buffer"
+  },
+  {
+   "name": "trailing",
+   "wkb": "0101000000000000000000f03f000000000000f03f00",
+   "why": "trailing bytes after a complete geometry"
+  },
+  {
+   "name": "empty",
+   "wkb": "",
+   "why": "an empty buffer is not a geometry"
+  }
+ ],
+ "accept_big_endian": {
+  "wkb": "00000000013ff00000000000003ff0000000000000",
+  "envelope": [
+   1,
+   1,
+   1,
+   1
+  ],
+  "note": "Section 1: a writer MUST emit little-endian, a reader MUST accept both."
+ },
+ "matrix": {
+  "intersects": [
+   "100000010111111111",
+   "010000101100000000",
+   "001000000111111000",
+   "000101010110110000",
+   "000010000000000000",
+   "000101110110110000",
+   "010001101110000000",
+   "100101011111111111",
+   "010000111110010000",
+   "111101111111111111",
+   "101101111111111111",
+   "101000010111111111",
+   "101101010111111111",
+   "101101011111111111",
+   "101000010111111111",
+   "100000010111111111",
+   "100000010111111111",
+   "100000010111111111"
+  ],
+  "contains": [
+   "100000000000000111",
+   "010000000000000000",
+   "001000000000000000",
+   "000100000000000000",
+   "000010000000000000",
+   "000101000000000000",
+   "010000100000000000",
+   "100100010000000111",
+   "010000001000000000",
+   "111101011111111111",
+   "101101000111101111",
+   "101000000001000111",
+   "101100000001101111",
+   "101100010001111111",
+   "101000000001001111",
+   "100000000000000111",
+   "100000000000000111",
+   "100000000000000111"
+  ],
+  "within": [
+   "100000010111111111",
+   "010000101100000000",
+   "001000000111111000",
+   "000101010110110000",
+   "000010000000000000",
+   "000001000110000000",
+   "000000100000000000",
+   "000000010100010000",
+   "000000001100000000",
+   "000000000110000000",
+   "000000000110000000",
+   "000000000111111000",
+   "000000000110110000",
+   "000000000100010000",
+   "000000000110111000",
+   "100000010111111111",
+   "100000010111111111",
+   "100000010111111111"
+  ]
+ },
+ "rules": [
+  {
+   "rule": "4.1 rule 1",
+   "predicate": "contains",
+   "a": 5,
+   "b": 5,
+   "expect": true,
+   "note": "the predicates are reflexive: a LineString contains itself"
+  },
+  {
+   "rule": "4.1 rule 1",
+   "predicate": "contains",
+   "a": 6,
+   "b": 6,
+   "expect": true,
+   "note": "reflexive for a LineString"
+  },
+  {
+   "rule": "4.1 rule 1",
+   "predicate": "contains",
+   "a": 12,
+   "b": 12,
+   "expect": true,
+   "note": "reflexive for a MultiLineString"
+  },
+  {
+   "rule": "4.1 rule 1",
+   "predicate": "contains",
+   "a": 14,
+   "b": 14,
+   "expect": true,
+   "note": "reflexive for a GeometryCollection"
+  },
+  {
+   "rule": "4.1 rule 1",
+   "predicate": "within",
+   "a": 7,
+   "b": 7,
+   "expect": true,
+   "note": "reflexive for a Polygon"
+  },
+  {
+   "rule": "4.1 rule 2",
+   "predicate": "within",
+   "a": 7,
+   "b": 9,
+   "expect": true,
+   "note": "sq shares two edges with big; sharing a boundary does not disqualify"
+  },
+  {
+   "rule": "4.1 rule 2",
+   "predicate": "contains",
+   "a": 9,
+   "b": 7,
+   "expect": true,
+   "note": "the converse"
+  },
+  {
+   "rule": "4.1 rule 2",
+   "predicate": "contains",
+   "a": 9,
+   "b": 13,
+   "expect": true,
+   "note": "mpoly's first part touches big's edge"
+  },
+  {
+   "rule": "4.1 rule 3",
+   "predicate": "within",
+   "a": 1,
+   "b": 11,
+   "expect": false,
+   "note": "(5,5) is inside mp's BOUNDING BOX and is not one of its points -- the envelope-fallback case"
+  },
+  {
+   "rule": "4.1 rule 3",
+   "predicate": "within",
+   "a": 1,
+   "b": 12,
+   "expect": false,
+   "note": "inside mls's box, on neither segment"
+  },
+  {
+   "rule": "4.1 rule 3",
+   "predicate": "within",
+   "a": 1,
+   "b": 14,
+   "expect": false,
+   "note": "inside gc's box, in neither part"
+  },
+  {
+   "rule": "4.1 rule 3",
+   "predicate": "within",
+   "a": 0,
+   "b": 11,
+   "expect": true,
+   "note": "(1,1) IS one of mp's points, so it is within it"
+  },
+  {
+   "rule": "4.1 rule 3",
+   "predicate": "within",
+   "a": 14,
+   "b": 12,
+   "expect": true,
+   "note": "every part of gc lies on mls"
+  },
+  {
+   "rule": "2-phase",
+   "predicate": "intersects",
+   "a": 1,
+   "b": 10,
+   "expect": false,
+   "note": "(5,5) is in donut's envelope and in its HOLE: the case the two-phase rule of section 4 exists for"
+  },
+  {
+   "rule": "2-phase",
+   "predicate": "intersects",
+   "a": 2,
+   "b": 10,
+   "expect": true,
+   "note": "(9,9) is in donut's material"
+  },
+  {
+   "rule": "2-phase",
+   "predicate": "intersects",
+   "a": 1,
+   "b": 9,
+   "expect": true,
+   "note": "big has no hole, so the same point is in it"
+  },
+  {
+   "rule": "section 1",
+   "predicate": "intersects",
+   "a": 0,
+   "b": 15,
+   "expect": true,
+   "note": "PointZ has the same XY, so the XY predicates ignore Z"
+  }
+ ],
+ "rules_note": "Each rule names a predicate, two corpus indices and the answer section 4.1 requires. The matrix proves the three implementations AGREE; these prove they agree with the spec. Before section 4.1 existed the three disagreed on 32 of these pairs while each was internally consistent, so agreement alone was never the test."
+}

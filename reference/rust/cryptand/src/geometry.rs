@@ -146,31 +146,62 @@ pub fn intersects(a: &Geometry, b: &Geometry) -> bool {
     a_pts.iter().any(|p| b_pts.iter().any(|q| p.x == q.x && p.y == q.y))
 }
 
-/// Every point of `inner` lies in `outer`.
-pub fn within(inner: &Geometry, outer: &Geometry) -> bool {
+/// Is `p` a point of `outer`? §4.1's point-set membership: inside a polygon
+/// (boundary included, holes excluded), on one of a linestring's segments, or
+/// equal to one of its points.
+fn point_in_geometry(p: &Coord, outer: &Geometry) -> bool {
     let mut polys = Vec::new();
     polygons_of(outer, &mut polys);
-    if polys.is_empty() {
-        // Degenerate outer: fall back to envelope containment, which is exact
-        // for a point-in-point or a collinear case.
-        return outer.envelope().contains(&inner.envelope(), 2);
+    if polys.iter().any(|r| point_in_polygon(p, r)) {
+        return true;
     }
+    let mut lines = Vec::new();
+    lines_of(outer, &mut lines);
+    if lines.iter().any(|(a, b)| on_segment(p, a, b)) {
+        return true;
+    }
+    let mut pts = Vec::new();
+    points_of(outer, &mut pts);
+    pts.iter().any(|q| q.x == p.x && q.y == p.y)
+}
+
+/// §4.1 — `within(A, B)` is true iff **every point of A is a point of B**.
+///
+/// This used to fall back to `outer.envelope().contains(inner.envelope())`
+/// whenever `outer` held no polygon, on the grounds that the envelope "is exact
+/// for a point-in-point or a collinear case". It is not exact for anything
+/// else, and it fired for every `MultiPoint`, `LineString`, `MultiLineString`
+/// and polygon-free collection: `within(POINT(5 5), MULTIPOINT(1 1, 9 9))`
+/// answered **true**, because (5,5) is inside that multipoint's bounding box.
+/// That is §4's "MUST NOT return box-level results as if they were exact",
+/// violated in the second phase rather than the first — and neither Dart nor
+/// Java did it, which is how it was found.
+pub fn within(inner: &Geometry, outer: &Geometry) -> bool {
     let mut pts = Vec::new();
     points_of(inner, &mut pts);
     if pts.is_empty() {
+        // §4.1 rule 4: an empty geometry is within nothing, including itself.
         return false;
     }
-    if !pts.iter().all(|p| polys.iter().any(|r| point_in_polygon(p, r))) {
+    // Every vertex of `inner` must be a point of `outer` ...
+    if !pts.iter().all(|p| point_in_geometry(p, outer)) {
         return false;
     }
-    // A segment of `inner` must not cross out of `outer` between its vertices.
+    // ... and no segment of `inner` may leave `outer` between its vertices. The
+    // midpoint test catches a chord across a concavity or a hole; it is not a
+    // proof for an arbitrary pair of geometries, and §2.3's freedom is about
+    // tree shape rather than predicates, so this is deliberately conservative
+    // in the same way for every implementation.
     let mut inner_lines = Vec::new();
     lines_of(inner, &mut inner_lines);
+    let mut outer_polys = Vec::new();
+    polygons_of(outer, &mut outer_polys);
     for (a, b) in inner_lines {
         let mid = Coord::xy((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
-        if !polys.iter().any(|r| point_in_polygon(&mid, r)) {
+        if !point_in_geometry(&mid, outer) {
             return false;
         }
+        let _ = &outer_polys;
     }
     true
 }

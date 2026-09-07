@@ -1,0 +1,2885 @@
+{
+ "format": "cryptand-vectors",
+ "format_version": "3",
+ "generator": "gen_order.py",
+ "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+ "chapter": "spec/02-value-encoding.md section 8",
+ "invariant": "compare() is a total order: antisymmetric, transitive, and total over every ordered value. The matrix below is sign(compare(i,j)) for every pair, which is well defined where a sort permutation is not - section 8 makes many of these values EQUAL, and equal elements have no defined relative position in an unstable sort.",
+ "count": 90,
+ "entries": [
+  {
+   "value": {
+    "t": "null"
+   },
+   "note": "rule 1 - NULL sorts below everything and equals only NULL"
+  },
+  {
+   "value": {
+    "t": "bool",
+    "v": false
+   },
+   "note": "rule 9 - FALSE < TRUE"
+  },
+  {
+   "value": {
+    "t": "bool",
+    "v": true
+   },
+   "note": "rule 9"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "i8",
+    "v": "5"
+   },
+   "note": "rule 2 - i8(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "i16",
+    "v": "5"
+   },
+   "note": "rule 2 - i16(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "i32",
+    "v": "5"
+   },
+   "note": "rule 2 - i32(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "i64",
+    "v": "5"
+   },
+   "note": "rule 2 - i64(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "i128",
+    "v": "5"
+   },
+   "note": "rule 2 - i128(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "u8",
+    "v": "5"
+   },
+   "note": "rule 2 - u8(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "u16",
+    "v": "5"
+   },
+   "note": "rule 2 - u16(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "u32",
+    "v": "5"
+   },
+   "note": "rule 2 - u32(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "u64",
+    "v": "5"
+   },
+   "note": "rule 2 - u64(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "u128",
+    "v": "5"
+   },
+   "note": "rule 2 - u128(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "intVar",
+    "v": "5"
+   },
+   "note": "rule 2 - intVar(5): every numeric tag holding 5 is EQUAL"
+  },
+  {
+   "value": {
+    "t": "float",
+    "w": "f32",
+    "bits": "40a00000"
+   },
+   "note": "rule 2 - f32(5.0) equals the integer 5"
+  },
+  {
+   "value": {
+    "t": "float",
+    "w": "f64",
+    "bits": "4014000000000000"
+   },
+   "note": "rule 2 - f64(5.0) equals the integer 5"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "i32",
+    "v": "-5"
+   },
+   "note": "rule 2 - negative, across tags"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "intVar",
+    "v": "-5"
+   },
+   "note": "rule 2 - negative, across tags"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "i64",
+    "v": "9007199254740993"
+   },
+   "note": "rule 2 - 2^53+1 is NOT equal to f64(2^53) - exact comparison, not conversion"
+  },
+  {
+   "value": {
+    "t": "float",
+    "w": "f64",
+    "bits": "4340000000000000"
+   },
+   "note": "rule 2 - f64(2^53)"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "u128",
+    "v": "170141183460469231731687303715884105728"
+   },
+   "note": "rule 2 - u128 beyond i64"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "i128",
+    "v": "-170141183460469231731687303715884105728"
+   },
+   "note": "rule 2 - i128 minimum"
+  },
+  {
+   "value": {
+    "t": "float",
+    "w": "f64",
+    "bits": "7ff8000000000000"
+   },
+   "note": "rule 3 - NaN equals NaN and sorts above every number"
+  },
+  {
+   "value": {
+    "t": "float",
+    "w": "f32",
+    "bits": "7fc00000"
+   },
+   "note": "rule 3 - NaN in another width is the same NaN"
+  },
+  {
+   "value": {
+    "t": "float",
+    "w": "f64",
+    "bits": "7ff0000000000000"
+   },
+   "note": "rule 3 - +inf is a number, so it sorts BELOW NaN"
+  },
+  {
+   "value": {
+    "t": "float",
+    "w": "f64",
+    "bits": "fff0000000000000"
+   },
+   "note": "rule 3 - -inf"
+  },
+  {
+   "value": {
+    "t": "float",
+    "w": "f64",
+    "bits": "0000000000000000"
+   },
+   "note": "rule 3 - +0.0"
+  },
+  {
+   "value": {
+    "t": "float",
+    "w": "f64",
+    "bits": "8000000000000000"
+   },
+   "note": "rule 3 - -0.0 EQUALS +0.0"
+  },
+  {
+   "value": {
+    "t": "int",
+    "w": "i8",
+    "v": "0"
+   },
+   "note": "rule 3 - integer zero equals both signed zeros"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": ""
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "41"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "42"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "5a"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "61"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "62"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "7a"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "c3a4"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "c384"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "7373"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "c39f"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "e697a5e69cac"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "f09f9880"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "61cc81"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "str",
+    "utf8": "c3a1"
+   },
+   "note": "rule 4 - UTF-8 byte order: no locale, no case folding, no normalization"
+  },
+  {
+   "value": {
+    "t": "bytes",
+    "v": ""
+   },
+   "note": "rule 5 - BYTES lexicographic, a prefix sorts before its extension"
+  },
+  {
+   "value": {
+    "t": "bytes",
+    "v": "00"
+   },
+   "note": "rule 5 - BYTES lexicographic, a prefix sorts before its extension"
+  },
+  {
+   "value": {
+    "t": "bytes",
+    "v": "0000"
+   },
+   "note": "rule 5 - BYTES lexicographic, a prefix sorts before its extension"
+  },
+  {
+   "value": {
+    "t": "bytes",
+    "v": "01"
+   },
+   "note": "rule 5 - BYTES lexicographic, a prefix sorts before its extension"
+  },
+  {
+   "value": {
+    "t": "bytes",
+    "v": "0100"
+   },
+   "note": "rule 5 - BYTES lexicographic, a prefix sorts before its extension"
+  },
+  {
+   "value": {
+    "t": "bytes",
+    "v": "7f"
+   },
+   "note": "rule 5 - BYTES lexicographic, a prefix sorts before its extension"
+  },
+  {
+   "value": {
+    "t": "bytes",
+    "v": "80"
+   },
+   "note": "rule 5 - BYTES lexicographic, a prefix sorts before its extension"
+  },
+  {
+   "value": {
+    "t": "bytes",
+    "v": "ff"
+   },
+   "note": "rule 5 - BYTES lexicographic, a prefix sorts before its extension"
+  },
+  {
+   "value": {
+    "t": "bytes",
+    "v": "ffff"
+   },
+   "note": "rule 5 - BYTES lexicographic, a prefix sorts before its extension"
+  },
+  {
+   "value": {
+    "t": "char",
+    "v": 97
+   },
+   "note": "rule 6 - CHAR 'a' is NOT equal to STR \"a\""
+  },
+  {
+   "value": {
+    "t": "char",
+    "v": 65
+   },
+   "note": "rule 6 - CHAR 'A'"
+  },
+  {
+   "value": {
+    "t": "char",
+    "v": 128512
+   },
+   "note": "rule 6 - CHAR above the BMP"
+  },
+  {
+   "value": {
+    "t": "timestamp",
+    "millis": 1000
+   },
+   "note": "rule 7 - TIMESTAMP 1000 ms"
+  },
+  {
+   "value": {
+    "t": "timestamp_ns",
+    "secs": 1,
+    "nanos": 0
+   },
+   "note": "rule 7 - EQUALS TIMESTAMP 1000 ms"
+  },
+  {
+   "value": {
+    "t": "zoned",
+    "millis": 1000,
+    "zone": "UTC"
+   },
+   "note": "rule 7 - ZONED at the same instant is EQUAL"
+  },
+  {
+   "value": {
+    "t": "zoned",
+    "millis": 1000,
+    "zone": "Asia/Tokyo"
+   },
+   "note": "rule 7 - the zone does not change the instant"
+  },
+  {
+   "value": {
+    "t": "timestamp_ns",
+    "secs": 1,
+    "nanos": 1
+   },
+   "note": "rule 7 - one nanosecond later"
+  },
+  {
+   "value": {
+    "t": "timestamp",
+    "millis": -1000
+   },
+   "note": "rule 7 - before the epoch"
+  },
+  {
+   "value": {
+    "t": "date",
+    "days": 0
+   },
+   "note": "rule 7 - DATE is NOT comparable to an instant; own group"
+  },
+  {
+   "value": {
+    "t": "date",
+    "days": 19000
+   },
+   "note": "rule 7 - DATE"
+  },
+  {
+   "value": {
+    "t": "time",
+    "nanos": 0
+   },
+   "note": "rule 7 - TIME is its own group"
+  },
+  {
+   "value": {
+    "t": "time",
+    "nanos": 86399999999999
+   },
+   "note": "rule 7 - TIME"
+  },
+  {
+   "value": {
+    "t": "duration",
+    "secs": 0,
+    "nanos": 0
+   },
+   "note": "rule 7 - DURATION is its own group"
+  },
+  {
+   "value": {
+    "t": "duration",
+    "secs": 1,
+    "nanos": 0
+   },
+   "note": "rule 7 - DURATION"
+  },
+  {
+   "value": {
+    "t": "duration",
+    "secs": -1,
+    "nanos": 0
+   },
+   "note": "rule 7 - negative DURATION"
+  },
+  {
+   "value": {
+    "t": "array",
+    "items": []
+   },
+   "note": "rule 8 - the empty ARRAY sorts before every non-empty one"
+  },
+  {
+   "value": {
+    "t": "array",
+    "items": [
+     {
+      "t": "int",
+      "w": "i32",
+      "v": "1"
+     }
+    ]
+   },
+   "note": "rule 8 - ARRAY element-wise"
+  },
+  {
+   "value": {
+    "t": "array",
+    "items": [
+     {
+      "t": "int",
+      "w": "i32",
+      "v": "1"
+     },
+     {
+      "t": "int",
+      "w": "i32",
+      "v": "2"
+     }
+    ]
+   },
+   "note": "rule 8 - a prefix sorts first, then by length"
+  },
+  {
+   "value": {
+    "t": "array",
+    "items": [
+     {
+      "t": "int",
+      "w": "i32",
+      "v": "2"
+     }
+    ]
+   },
+   "note": "rule 8 - ARRAY element-wise beats length"
+  },
+  {
+   "value": {
+    "t": "array",
+    "items": [
+     {
+      "t": "str",
+      "utf8": "61"
+     }
+    ]
+   },
+   "note": "rule 8 - ARRAY of a different type"
+  },
+  {
+   "value": {
+    "t": "map",
+    "entries": []
+   },
+   "note": "rule 8 - the empty MAP"
+  },
+  {
+   "value": {
+    "t": "map",
+    "entries": [
+     {
+      "k": {
+       "t": "str",
+       "utf8": "61"
+      },
+      "v": {
+       "t": "int",
+       "w": "i32",
+       "v": "1"
+      }
+     }
+    ]
+   },
+   "note": "rule 8 - MAP as its sorted (key, value) sequence"
+  },
+  {
+   "value": {
+    "t": "map",
+    "entries": [
+     {
+      "k": {
+       "t": "str",
+       "utf8": "61"
+      },
+      "v": {
+       "t": "int",
+       "w": "i32",
+       "v": "2"
+      }
+     }
+    ]
+   },
+   "note": "rule 8 - same key, greater value"
+  },
+  {
+   "value": {
+    "t": "map",
+    "entries": [
+     {
+      "k": {
+       "t": "str",
+       "utf8": "62"
+      },
+      "v": {
+       "t": "int",
+       "w": "i32",
+       "v": "1"
+      }
+     }
+    ]
+   },
+   "note": "rule 8 - greater key"
+  },
+  {
+   "value": {
+    "t": "map",
+    "entries": [
+     {
+      "k": {
+       "t": "str",
+       "utf8": "62"
+      },
+      "v": {
+       "t": "int",
+       "w": "i32",
+       "v": "1"
+      }
+     },
+     {
+      "k": {
+       "t": "str",
+       "utf8": "61"
+      },
+      "v": {
+       "t": "int",
+       "w": "i32",
+       "v": "1"
+      }
+     }
+    ]
+   },
+   "note": "rule 8 - entry order MUST NOT matter: sorted sequence"
+  },
+  {
+   "value": {
+    "t": "map",
+    "entries": [
+     {
+      "k": {
+       "t": "str",
+       "utf8": "61"
+      },
+      "v": {
+       "t": "int",
+       "w": "i32",
+       "v": "1"
+      }
+     },
+     {
+      "k": {
+       "t": "str",
+       "utf8": "62"
+      },
+      "v": {
+       "t": "int",
+       "w": "i32",
+       "v": "1"
+      }
+     }
+    ]
+   },
+   "note": "rule 8 - the same MAP, entries given in sorted order"
+  },
+  {
+   "value": {
+    "t": "doc",
+    "fields": {}
+   },
+   "note": "rule 8 - the empty DOC"
+  },
+  {
+   "value": {
+    "t": "doc",
+    "fields": {
+     "a": {
+      "t": "int",
+      "w": "i32",
+      "v": "1"
+     }
+    }
+   },
+   "note": "rule 8 - DOC as its sorted (key, value) sequence"
+  },
+  {
+   "value": {
+    "t": "doc",
+    "fields": {
+     "a": {
+      "t": "int",
+      "w": "i32",
+      "v": "2"
+     }
+    }
+   },
+   "note": "rule 8 - same field, greater value"
+  },
+  {
+   "value": {
+    "t": "doc",
+    "fields": {
+     "b": {
+      "t": "int",
+      "w": "i32",
+      "v": "1"
+     }
+    }
+   },
+   "note": "rule 8 - greater field name"
+  },
+  {
+   "value": {
+    "t": "doc",
+    "fields": {
+     "b": {
+      "t": "int",
+      "w": "i32",
+      "v": "1"
+     },
+     "a": {
+      "t": "int",
+      "w": "i32",
+      "v": "1"
+     }
+    }
+   },
+   "note": "rule 8 - field order MUST NOT matter: sorted sequence"
+  },
+  {
+   "value": {
+    "t": "doc",
+    "fields": {
+     "a": {
+      "t": "int",
+      "w": "i32",
+      "v": "1"
+     },
+     "b": {
+      "t": "int",
+      "w": "i32",
+      "v": "1"
+     }
+    }
+   },
+   "note": "rule 8 - the same DOC, fields given in sorted order"
+  },
+  {
+   "value": {
+    "t": "uuid",
+    "v": "00000000000000000000000000000000"
+   },
+   "note": "rule 10 - UUID has its own group rank"
+  },
+  {
+   "value": {
+    "t": "uuid",
+    "v": "ffffffffffffffffffffffffffffffff"
+   },
+   "note": "rule 10 - UUID"
+  },
+  {
+   "value": {
+    "t": "nitrite_id",
+    "v": "0"
+   },
+   "note": "rule 10 - NITRITE_ID has its own group rank"
+  },
+  {
+   "value": {
+    "t": "nitrite_id",
+    "v": "-1"
+   },
+   "note": "rule 10 - NITRITE_ID negative"
+  }
+ ],
+ "matrix": [
+  "0-----------------------------------------------------------------------------------------",
+  "+0----------------------------------------------------------------------------------------",
+  "++0---------------------------------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++0000000000000++---+---++++-------------------------------------------------------------",
+  "+++-------------00---+---+----------------------------------------------------------------",
+  "+++-------------00---+---+----------------------------------------------------------------",
+  "++++++++++++++++++0+-+---++++-------------------------------------------------------------",
+  "++++++++++++++++++-0-+---++++-------------------------------------------------------------",
+  "++++++++++++++++++++0+---++++-------------------------------------------------------------",
+  "+++------------------0---+----------------------------------------------------------------",
+  "++++++++++++++++++++++00+++++-------------------------------------------------------------",
+  "++++++++++++++++++++++00+++++-------------------------------------------------------------",
+  "++++++++++++++++++++++--0++++-------------------------------------------------------------",
+  "+++----------------------0----------------------------------------------------------------",
+  "+++-------------++---+---+000-------------------------------------------------------------",
+  "+++-------------++---+---+000-------------------------------------------------------------",
+  "+++-------------++---+---+000-------------------------------------------------------------",
+  "+++++++++++++++++++++++++++++0-----------------------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++0----------------------++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++++0---------------------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++0--------------------++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++++++0-------------------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++0-------+----------++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++++++++0--+---+----------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++0+++--++---------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++-0+---+----------++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++++++++---0---+----------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++-++0--+----------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++++++0-++---------++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++++++++++++++0++---------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++--------0----------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++-+++--+0---------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++++++++++0--------++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++++++++++++++++++0-------++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++++++++++++0------++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++++++++++++++++++++0-----++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++++++++++++++0----++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++0---++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++0--++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++0-++++++++++++++++---------------------",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++0++++++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++------------------------0+-+++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++-------------------------0-+++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++------------------------++0+++++++++++++---------------------",
+  "+++++++++++++++++++++++++++++---------------------------0000-+----------------------------",
+  "+++++++++++++++++++++++++++++---------------------------0000-+----------------------------",
+  "+++++++++++++++++++++++++++++---------------------------0000-+----------------------------",
+  "+++++++++++++++++++++++++++++---------------------------0000-+----------------------------",
+  "+++++++++++++++++++++++++++++---------------------------++++0+----------------------------",
+  "+++++++++++++++++++++++++++++--------------------------------0----------------------------",
+  "+++++++++++++++++++++++++++++---------------------------++++++0---------------------------",
+  "+++++++++++++++++++++++++++++---------------------------+++++++0--------------------------",
+  "+++++++++++++++++++++++++++++---------------------------++++++++0-------------------------",
+  "+++++++++++++++++++++++++++++---------------------------+++++++++0------------------------",
+  "+++++++++++++++++++++++++++++---------------------------++++++++++0-+---------------------",
+  "+++++++++++++++++++++++++++++---------------------------+++++++++++0+---------------------",
+  "+++++++++++++++++++++++++++++---------------------------++++++++++--0---------------------",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0----------------++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0---------------++++",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0--------------++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0-------------++++",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0------------++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0-----------++++",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0----------++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0-++------++++",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0++------++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--00------++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--00------++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0-----++++",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0----++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0-++++++",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++0++++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--00++++",
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--00++++",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----------------0-++",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----------------+0++",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-------------------0+",
+  "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------------------0"
+ ],
+ "rules": [
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 1,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 2,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 3,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 4,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 5,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 6,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 7,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 8,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 9,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 10,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 11,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 12,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 13,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 14,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 15,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 16,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 17,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 18,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 19,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 20,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 21,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 22,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 23,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 24,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 25,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 26,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 27,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 28,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 29,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 30,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 31,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 32,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 33,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 34,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 35,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 36,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 37,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 38,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 39,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 40,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 41,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 42,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 43,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 44,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 45,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 46,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 47,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 48,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 49,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 50,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 51,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 52,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 53,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 54,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 55,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 56,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 57,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 58,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 59,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 60,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 61,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 62,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 63,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 64,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 65,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 66,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 67,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 68,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 69,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 70,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 71,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 72,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 73,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 74,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 75,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 76,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 77,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 78,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 79,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 80,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 81,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 82,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 83,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 84,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 85,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 86,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 87,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 88,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "1",
+   "a": 0,
+   "b": 89,
+   "expect": "-",
+   "note": "NULL sorts below every other value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 4,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 5,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 6,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 7,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 8,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 9,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 10,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 11,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 12,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 3,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 5,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 6,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 7,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 8,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 9,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 10,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 11,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 12,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 4,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 6,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 7,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 8,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 9,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 10,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 11,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 12,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 5,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 6,
+   "b": 7,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 6,
+   "b": 8,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 6,
+   "b": 9,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 6,
+   "b": 10,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 6,
+   "b": 11,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 6,
+   "b": 12,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 6,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 6,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 6,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 7,
+   "b": 8,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 7,
+   "b": 9,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 7,
+   "b": 10,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 7,
+   "b": 11,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 7,
+   "b": 12,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 7,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 7,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 7,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 8,
+   "b": 9,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 8,
+   "b": 10,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 8,
+   "b": 11,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 8,
+   "b": 12,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 8,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 8,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 8,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 9,
+   "b": 10,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 9,
+   "b": 11,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 9,
+   "b": 12,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 9,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 9,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 9,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 10,
+   "b": 11,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 10,
+   "b": 12,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 10,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 10,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 10,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 11,
+   "b": 12,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 11,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 11,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 11,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 12,
+   "b": 13,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 12,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 12,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 13,
+   "b": 14,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 13,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 14,
+   "b": 15,
+   "expect": "0",
+   "note": "every numeric tag holding 5 is one value"
+  },
+  {
+   "rule": "2",
+   "a": 18,
+   "b": 19,
+   "expect": "+",
+   "note": "compared by exact value, never by converting one to the other"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 23,
+   "expect": "0",
+   "note": "NaN equals NaN, in any width"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 3,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 4,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 5,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 6,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 7,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 8,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 9,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 10,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 11,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 12,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 13,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 14,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 15,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 16,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 17,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 18,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 19,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 20,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 21,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 24,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 25,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 26,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 27,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 22,
+   "b": 28,
+   "expect": "+",
+   "note": "NaN sorts above every other number"
+  },
+  {
+   "rule": "3",
+   "a": 26,
+   "b": 27,
+   "expect": "0",
+   "note": "-0.0 equals +0.0"
+  },
+  {
+   "rule": "3",
+   "a": 26,
+   "b": 28,
+   "expect": "0",
+   "note": "integer zero equals both signed zeros"
+  },
+  {
+   "rule": "4",
+   "a": 32,
+   "b": 33,
+   "expect": "-",
+   "note": "UTF-8 byte order: \"Z\" < \"a\", no case folding"
+  },
+  {
+   "rule": "4",
+   "a": 29,
+   "b": 30,
+   "expect": "-",
+   "note": "the empty string sorts before every non-empty one"
+  },
+  {
+   "rule": "4",
+   "a": 38,
+   "b": 39,
+   "expect": "-",
+   "note": "no case folding"
+  },
+  {
+   "rule": "4",
+   "a": 43,
+   "b": 43,
+   "expect": "0",
+   "note": "no normalization: NFC and NFD are different strings"
+  },
+  {
+   "rule": "5",
+   "a": 44,
+   "b": 45,
+   "expect": "-",
+   "note": "a prefix sorts before its extension"
+  },
+  {
+   "rule": "5",
+   "a": 45,
+   "b": 46,
+   "expect": "-",
+   "note": "a prefix sorts before its extension"
+  },
+  {
+   "rule": "5",
+   "a": 46,
+   "b": 47,
+   "expect": "-",
+   "note": "lexicographic by unsigned byte"
+  },
+  {
+   "rule": "5",
+   "a": 50,
+   "b": 51,
+   "expect": "-",
+   "note": "unsigned byte order, not signed"
+  },
+  {
+   "rule": "6",
+   "a": 53,
+   "b": 33,
+   "expect": "-",
+   "note": "CHAR is not equal to a one-character STR"
+  },
+  {
+   "rule": "7",
+   "a": 56,
+   "b": 57,
+   "expect": "0",
+   "note": "one instant across tags"
+  },
+  {
+   "rule": "7",
+   "a": 56,
+   "b": 58,
+   "expect": "0",
+   "note": "one instant across tags"
+  },
+  {
+   "rule": "7",
+   "a": 56,
+   "b": 59,
+   "expect": "0",
+   "note": "the zone does not change the instant"
+  },
+  {
+   "rule": "7",
+   "a": 60,
+   "b": 56,
+   "expect": "+",
+   "note": "nanosecond resolution"
+  },
+  {
+   "rule": "7",
+   "a": 62,
+   "b": 56,
+   "expect": "+",
+   "note": "DATE is not comparable to an instant"
+  },
+  {
+   "rule": "8",
+   "a": 69,
+   "b": 70,
+   "expect": "-",
+   "note": "the empty ARRAY sorts first"
+  },
+  {
+   "rule": "8",
+   "a": 70,
+   "b": 71,
+   "expect": "-",
+   "note": "a prefix sorts before its extension"
+  },
+  {
+   "rule": "8",
+   "a": 71,
+   "b": 72,
+   "expect": "-",
+   "note": "element-wise comparison beats length"
+  },
+  {
+   "rule": "8",
+   "a": 78,
+   "b": 79,
+   "expect": "0",
+   "note": "MAP compares as its SORTED (key, value) sequence: entry order is not part of the value"
+  },
+  {
+   "rule": "8",
+   "a": 84,
+   "b": 85,
+   "expect": "0",
+   "note": "DOC compares as its SORTED (key, value) sequence: field order is not part of the value"
+  },
+  {
+   "rule": "9",
+   "a": 1,
+   "b": 2,
+   "expect": "-",
+   "note": "FALSE < TRUE"
+  },
+  {
+   "rule": "10",
+   "a": 69,
+   "b": 74,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 69,
+   "b": 75,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 69,
+   "b": 76,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 69,
+   "b": 77,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 69,
+   "b": 78,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 69,
+   "b": 79,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 70,
+   "b": 74,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 70,
+   "b": 75,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 70,
+   "b": 76,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 70,
+   "b": 77,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 70,
+   "b": 78,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 70,
+   "b": 79,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 71,
+   "b": 74,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 71,
+   "b": 75,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 71,
+   "b": 76,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 71,
+   "b": 77,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 71,
+   "b": 78,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 71,
+   "b": 79,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 72,
+   "b": 74,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 72,
+   "b": 75,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 72,
+   "b": 76,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 72,
+   "b": 77,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 72,
+   "b": 78,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 72,
+   "b": 79,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 73,
+   "b": 74,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 73,
+   "b": 75,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 73,
+   "b": 76,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 73,
+   "b": 77,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 73,
+   "b": 78,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 73,
+   "b": 79,
+   "expect": "-",
+   "note": "ARRAY < MAP"
+  },
+  {
+   "rule": "10",
+   "a": 74,
+   "b": 80,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 74,
+   "b": 81,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 74,
+   "b": 82,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 74,
+   "b": 83,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 74,
+   "b": 84,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 74,
+   "b": 85,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 75,
+   "b": 80,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 75,
+   "b": 81,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 75,
+   "b": 82,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 75,
+   "b": 83,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 75,
+   "b": 84,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 75,
+   "b": 85,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 76,
+   "b": 80,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 76,
+   "b": 81,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 76,
+   "b": 82,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 76,
+   "b": 83,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 76,
+   "b": 84,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 76,
+   "b": 85,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 77,
+   "b": 80,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 77,
+   "b": 81,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 77,
+   "b": 82,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 77,
+   "b": 83,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 77,
+   "b": 84,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 77,
+   "b": 85,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 78,
+   "b": 80,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 78,
+   "b": 81,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 78,
+   "b": 82,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 78,
+   "b": 83,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 78,
+   "b": 84,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 78,
+   "b": 85,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 79,
+   "b": 80,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 79,
+   "b": 81,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 79,
+   "b": 82,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 79,
+   "b": 83,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 79,
+   "b": 84,
+   "expect": "-",
+   "note": "MAP < DOC"
+  },
+  {
+   "rule": "10",
+   "a": 79,
+   "b": 85,
+   "expect": "-",
+   "note": "MAP < DOC"
+  }
+ ],
+ "rules_note": "Each rule names two corpus indices and the sign compare(a,b) MUST return. The matrix proves the three implementations AGREE; these prove they agree with section 8. Three implementations produced an identical matrix while all three compared MAP entries in stored rather than sorted order, so agreement alone is not conformance."
+}

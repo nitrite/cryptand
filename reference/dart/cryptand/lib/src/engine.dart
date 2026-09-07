@@ -11,6 +11,7 @@
 /// measured here at all, and `REPORT.md` says so rather than pretending.
 library;
 
+import 'dart:collection';
 import 'dart:typed_data';
 
 import 'bytes.dart';
@@ -416,7 +417,22 @@ final class Engine {
     return bad;
   }
 
-  final Map<Uint8List, _Pending> _memtable = {};
+  /// The memtable, ordered by internal key.
+  ///
+  /// This was a `Map<Uint8List, _Pending>`, and a plain `Map` keyed by
+  /// `Uint8List` cannot be looked up at all: Dart gives `Uint8List` identity
+  /// equality, so a key rebuilt from the same bytes is a *different* key. Every
+  /// point read therefore walked the whole memtable comparing prefixes by hand
+  /// — O(pending writes) per `get`, against `memtableEntries` of 4096 — and the
+  /// scan path sorted a filtered copy of the keys on every call.
+  ///
+  /// The Rust implementation range-seeks an ordered map and breaks when the
+  /// prefix stops matching; Java uses a `ConcurrentSkipListMap`. An ordered map
+  /// here makes the lookup O(log n), makes `_memtable[k]` work by content, and
+  /// makes the two sorts below redundant, because `keys` is already in
+  /// `compareKeys` order.
+  final SplayTreeMap<Uint8List, _Pending> _memtable =
+      SplayTreeMap<Uint8List, _Pending>(compareKeys);
 
   int _nextSeq = 1;
   int _nextSegmentId = 1;
@@ -983,7 +999,8 @@ final class Engine {
   /// Turns the memtable into an L0 segment, §2.3, and publishes it.
   void flush() {
     if (_memtable.isEmpty) return;
-    final keys = _memtable.keys.toList()..sort(compareKeys);
+    // Already in `compareKeys` order: the memtable is a SplayTreeMap.
+    final keys = _memtable.keys.toList();
     final b = _builder(level: 0);
     for (final k in keys) {
       final p = _memtable[k]!;
@@ -1751,11 +1768,13 @@ final class Engine {
   }
 
   SegRecord? _memtableLookup(Uint8List prefix, int? ceiling) {
+    // Every internal key for this user key is `prefix || u64 ~seq || u8 op`, so
+    // they form one contiguous run in the ordered memtable. Seek to the start
+    // of that run and stop at its end, rather than walking every pending write.
+    final lo = Uint8List(prefix.length + 9)..setRange(0, prefix.length, prefix);
     SegRecord? best;
-    for (final e in _memtable.entries) {
-      final k = e.key;
-      if (k.length != prefix.length + 9) continue;
-      if (ceiling != null && parseInternalKey(k).seq > ceiling) continue;
+    Uint8List? k = _memtable.containsKey(lo) ? lo : _memtable.firstKeyAfter(lo);
+    while (k != null && k.length == prefix.length + 9) {
       var match = true;
       for (var i = 0; i < prefix.length; i++) {
         if (k[i] != prefix[i]) {
@@ -1763,9 +1782,13 @@ final class Engine {
           break;
         }
       }
-      if (!match) continue;
-      final rec = SegRecord(k, e.value.valueKind, e.value.value, null);
-      if (best == null || rec.seq > best.seq) best = rec;
+      if (!match) break;
+      if (ceiling == null || parseInternalKey(k).seq <= ceiling) {
+        final p = _memtable[k]!;
+        final rec = SegRecord(k, p.valueKind, p.value, null);
+        if (best == null || rec.seq > best.seq) best = rec;
+      }
+      k = _memtable.firstKeyAfter(k);
     }
     return best;
   }
@@ -1809,11 +1832,12 @@ final class Engine {
     final upperKey = range?.upper;
     final upper = upperKey == null ? null : userKeyPrefix(treeId, upperKey);
 
-    // The memtable is unsorted; the range of it that matters is sorted once.
+    // The memtable is ordered, so filtering preserves the order and no sort
+    // is needed here any more.
     final pending = <Uint8List>[
       for (final k in _memtable.keys)
         if (_inRange(k, treeId, lower, upper)) k
-    ]..sort(compareKeys);
+    ];
     var pi = 0;
 
     // **Sourced from the manifest, not from the extent map.** The manifest is

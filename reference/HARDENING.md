@@ -1,0 +1,993 @@
+# Hardening pass — findings
+
+A security and edge-case pass over the three reference implementations, against
+`spec/14-security.md` §9 ("Hardening against a hostile file") and §11 ("Key
+material in memory").
+
+Baseline before this pass, all green: **Rust 286, Dart 637, Java 304**.
+
+Every defect below is recorded with the instrument that was blind to it, in the
+style this project already uses — because in each case the code was *present*
+and *tested*, and the question that found it was not "is this correct?" but
+"what does nothing here look at?"
+
+---
+
+## Defect 71 — Rust panics on a hostile segment filter
+
+`04-segments.md` §2.4's filter header carries `block_count` and `probes`, both
+read from the file and both attacker-controlled. **Dart and Java validate them;
+Rust validated neither.**
+
+`block_count = 0` makes `BlockedBloom::locate` compute `block = (h1 * 0) >> 32 =
+0` and then index `blocks[0 * 64 + bit/8]` into a **zero-length** array:
+
+```
+thread '...' panicked at cryptand/src/filter.rs:75:24:
+index out of bounds: the len is 0 but the index is 63
+```
+
+That is exactly what §9.1 forbids — "a typed corruption error rather than an
+allocation failure, a panic, an abort, or an unbounded recursion" — reachable by
+anyone who hands the process a `.cryptand` file. `probes` is an
+attacker-controlled loop count that §2.4 bounds at 1..16, and a reader MUST take
+it from the file rather than recompute it, so it cannot be sanitised by ignoring
+it.
+
+**Fixed** in `Segment::filter`, where the other two implementations already
+validate: `block_count < 1` and `probes` outside 1..16 are named corruption
+errors.
+
+### Why nothing saw it
+
+Two instruments, both blind, for different reasons:
+
+- **`cryptand fuzz` never reaches the filter at all.** Its read oracle opens,
+  verifies, and *scans* every tree. A scan does not consult a segment filter —
+  only a **point read** does. So §2.4's filter, the structure every `get` passes
+  through, was outside the fuzzer's reach for its entire life. Fixed: the oracle
+  now point-reads each key the scan returns.
+- **Even reaching it, random mutation cannot reliably find it.** `block_count`
+  is one specific u32 at one specific offset. With the oracle fixed, a control
+  run of **3 000 mutations with the bug reintroduced still reported 0 panics**.
+
+That second point is the useful one, and it generalises past this defect.
+
+---
+
+## The field-boundary sweep — a deterministic instrument where the fuzzer is random
+
+Bugs of this class live at the **boundaries of a named field**, and boundaries
+are enumerable. So the new sweep is exhaustive rather than random: for one page
+of every `page_type` in the shared corpus, every u32-aligned slot in the 40-byte
+page header and in the first 32 bytes of payload is set to each of `{0, 1, 2,
+0x7FFFFFFF, 0xFFFFFFFE, 0xFFFFFFFF}`, the page checksum is **repaired** (§9.4:
+an attacker recomputes it trivially, so leaving it broken tests the CRC and not
+the decoder), and the file is opened, verified, scanned and point-read.
+
+Added in all three: `tests/hostile_test.rs`, `test/hostile_test.dart`,
+`HostileTest.java`. Roughly 1 200 cases each, a few seconds to run.
+
+**It has a control, and the control fails.** With defect 71 reintroduced the
+sweep names the exact field on the first run:
+
+```
+page_type 6: setting the u32 at offset 44 to 0x00000000 panicked.
+§9.1 requires a typed corruption error.
+```
+
+Offset 44 is header (40) + payload offset 4 — `block_count`. What 3 000 random
+mutations missed, the sweep finds deterministically.
+
+Each sweep also asserts `refused > 0`: a sweep that reaches no decoder would
+otherwise pass against a reader that validates nothing, which is this project's
+recurring "a control that cannot fail measures nothing".
+
+---
+
+## Defect 72 — an untrusted extent length drives the verifier into an unbounded allocation, in all three
+
+Found by the Dart sweep on its first run:
+
+```
+Exhausted heap space, trying to allocate 34359738384 bytes.
+package:cryptand/src/verify.dart 210  EngineVerify._checkPageAccounting
+```
+
+32 GiB, from one edited u32. The verifier's page accounting walks each extent's
+page ids to detect double-allocation, and `start_page` / `pages` come out of the
+file:
+
+| | shape |
+|---|---|
+| Dart | `claim([for (var i = 0; i < seg.pageCount; i++) …])` — materialises one list element per declared page |
+| Rust | `for p in s.start_page .. s.start_page + s.pages` inserting into a `HashMap` — one entry per declared page |
+| Java | `for (long p = start; p < start + pages; p++) owners.put(…)` — the same |
+
+§9.1's "bounds-check **before allocating**" applies to the verifier's own
+working set, not only to its decoders.
+
+**The most interesting part is that the mitigation was already written, ten
+lines below, by the same hand.** Dart's leak report caps its output for exactly
+this reason and says so:
+
+> *"`page_count` comes out of the file, and one finding per leaked page means a
+> hostile superblock claiming four billion pages drives the verifier into four
+> billion allocations — section 9.1's ... applies to the verifier's own output"*
+
+The hazard was correctly identified and the fix applied to one of the three
+loops that had it.
+
+**Fixed** in all three: an extent that runs past the end of the file is a named
+corruption finding, and the page ids are produced lazily rather than
+materialised. Rust and Java were hardened defensively — the sweep did not reach
+their instances, and "the sweep did not reach it" is not "it is bounded".
+
+---
+
+## Defect 73 — Rust key material was zeroed only on the path that calls `close()`
+
+`14-security.md` §11: *"a runtime with deterministic destruction SHOULD bind key
+material to a type that zeroes on release and that cannot be debug-printed or
+copied implicitly."*
+
+Rust's `KeyRing` had a `zeroize()` method called from exactly one place,
+`Engine::close`, and **no `Drop` impl**. Every other way a ring dies left the
+master key and all three subkeys in freed memory:
+
+- an early `?` anywhere between `open` and `close`;
+- a panic unwinding through the caller;
+- a value simply falling out of scope;
+- **every `clone`** — and `KeyRing` is `#[derive(Clone)]`, which is "copied
+  implicitly" in the words of the rule.
+
+Three further copies were never zeroed at all: the KEK returned by `derive_kek`
+in both `unlock` and `make_keyslot`, and the **heap `Vec` the AEAD hands back
+holding the plaintext master key** in `unwrap_master_key`, which was copied into
+an array and then freed intact.
+
+**Fixed**: a `Drop` impl, and explicit clearing of all three intermediates.
+
+Zeroing is done through a new `secure_zero`, because a plain `fill(0)` before a
+drop is a **dead store** the optimizer is entitled to delete — which would make
+§11's MUST a comment. It uses `black_box` plus a compiler fence rather than
+`write_volatile`, because this crate contains no `unsafe` and that is a property
+worth keeping; the honest description is that it is a strong hint, not a
+guarantee.
+
+**The test is a control that fails.** Every field of `KeyRing` is a `Copy`
+array, so the type has no drop glue of its own and `std::mem::needs_drop` is
+`false` unless the `Drop` impl puts it there. Removing the impl fails the test.
+
+---
+
+## Defect 74 — §11's best-effort caveat was documented in neither Dart nor Java
+
+§11 has one requirement whose deliverable *is* the documentation:
+
+> | **A runtime that may relocate or copy heap objects** (a moving or copying
+> garbage collector) | MUST document that zeroing is best-effort, because a copy
+> the program never sees cannot be zeroed. **Documenting it is the
+> requirement**; achieving what the runtime forbids is not. |
+
+Both the Dart VM and the JVM have moving, copying collectors. Neither
+implementation said so anywhere — not in source, README or report. Java had
+documented the *other* half of §11 correctly (why the password parameter is
+`byte[]` and not `String`), which is what makes the omission easy to miss.
+
+**Fixed**: the caveat now sits on the API that accepts the credential in each —
+`Engine.Options.password` and `DatabaseFile.open`'s `key` — with the practical
+consequence stated: a heap dump of a process that has ever opened an encrypted
+database may contain the master key even after a clean `close()`.
+
+---
+
+## Defect 75 — Java verified credential records against parameters it took from the file unchecked
+
+`05-catalog.md` §8's tree 5 record carries its own `kdf` and `params`.
+`Database.authenticate` read `t_cost`, `m_cost_kib` and `parallelism` straight
+out of the record and passed them to Argon2id.
+
+The keyslot analogue is *deliberately* not validated, and §3.2 is explicit about
+why: *"on open it MUST use whatever the slot says — the superblock MAC (§6) is
+what prevents an attacker weakening those numbers."* **That reasoning does not
+reach tree 5.** `sb_mac` covers the superblock, not a tree's contents, and §10
+explicitly contemplates users on an *unencrypted* database — where nothing
+authenticates the record at all. §9 then governs, and it "applies to every
+implementation, whether or not it supports encryption, because T5 does not
+require the attacker to have a key."
+
+Four things were wrong, in rising order of how quietly they failed:
+
+1. **No ceiling.** `Argon2id.hash` has an RFC floor (`p < 1 || t < 1 || m < 8p`)
+   which catches `0xFFFFFFFF` only because it narrows to `-1`. **`0x7FFFFFFF`
+   passes that check and asks for roughly 2 TiB.** A floor is not a ceiling.
+2. **No §3.2 floor.** A record declaring `t_cost = 1, m_cost_kib = 8` was
+   accepted and used — the KDF downgrade the corpus has a vector for on
+   keyslots, unguarded on user records. Every profile in §3.2's table is above
+   the floor of 2 / 16384 / 1, so enforcing it refuses no conforming file.
+3. **`kdf` was read and ignored.** A record declaring `"scrypt"` was verified
+   with Argon2id anyway. §8 says `kdf` MUST be `"argon2id"`; §9.2 forbids
+   resolving the name to anything, so refusing is the only conforming answer.
+4. **Unchecked casts and null dereferences** on a record whose shape is
+   attacker-chosen: a non-`Doc` value in tree 5, or a record missing `salt`,
+   produced `ClassCastException` / `NullPointerException` rather than a typed
+   error.
+
+**Fixed**, with a floor, a ceiling (1 GiB — four times `desktop`'s 256 MiB and
+still bounded), a `kdf` check, and typed errors for every structural case.
+
+Rust and Dart do not implement tree 5 at all, so they are unaffected; §8's MUSTs
+are conditional on having the feature.
+
+---
+
+## One operational note, not a defect
+
+**The three test suites cannot run concurrently.** They share
+`reference/conformance/files/`, and a reader takes `01-container.md` §10's
+exclusive writer lock over it, so a parallel CI matrix reports three spurious
+corpus failures:
+
+```
+v1.0-security-tamper-page.cryptand  FAIL  locked by another process
+```
+
+Worth knowing before anyone parallelises the build.
+
+---
+
+## Defect 76 — Rust decoded the whole segment filter on every probe
+
+`04-segments.md` §2.4's filter is consulted by every point read. Rust's
+`Segment::may_contain` called `self.filter()`, which for each probe walked the
+filter's pages, copied the entire payload into a fresh `Vec`, and then copied
+the block array out of it **a second time** — to read one bit.
+
+**Dart and Java both already cached it** (`_filterLoaded`, `filterLoaded`). This
+was a divergence, not a design.
+
+`14-security.md` §12 costs a probe as "exactly one 64-byte block". Measured with
+the new `benches/filter_probe.rs` (`cargo run --release --bin filter_probe`),
+200 000 probes per row:
+
+| keys | filter bytes | per probe | cached | ratio |
+|---|---|---|---|---|
+| 1 000 | 1 280 | 188.6 ns | 14.3 ns | 13.2× |
+| 10 000 | 12 544 | 726.5 ns | 10.9 ns | 66.7× |
+| 100 000 | 125 056 | 6 660.9 ns | 10.8 ns | **616×** |
+| 500 000 | 625 024 | 26 277.4 ns | 10.6 ns | **2488×** |
+
+The cached column is **flat at ~11 ns** across a 500× range of filter sizes,
+which is what "one 64-byte block" looks like when it is true. The uncached
+column is linear in filter size, which is what it looks like when it is not: a
+single probe on a 500 000-key segment cost **26 µs**.
+
+**Fixed** with a `std::sync::OnceLock` on `Segment` — `OnceLock` and not
+`OnceCell` because a `Segment` lives in an `Arc` and is probed from every reader
+thread.
+
+### On the honest size of this number
+
+`reference/bench`'s end-to-end `ops_bench` at 20 000 documents moves only from
+**p50 121.8 µs → 116.2 µs**, about **5 %** (medians of three runs each; p99
+166 → 158). That is not the fix underperforming — it is the benchmark's scale.
+At 20 000 documents a segment's filter is two or three 64-byte blocks, so the
+copy being removed is a couple of hundred bytes. The cost removed is O(filter
+size), and the table above is the shape of the claim; the 5 % is one point on
+it, at the small end.
+
+This is exactly the case `reference/bench/README.md` warns about when it says a
+row in µs "is a property of this machine and this run". The primary result here
+is the **counter**: `a_thousand_probes_decode_the_filter_once` asserts that 1 000
+probes decode the payload exactly once, and it fails if the cache is removed.
+
+### What it costs
+
+The parsed filter now stays resident for the life of an open segment — roughly
+`10 bits × entry_count`, about 3 % on top of a segment extent that is already
+held in memory in full. Dart and Java have always paid it. A zero-copy borrow
+into the extent is not available in general: a filter spanning more than one
+page is interrupted by 40-byte page headers, so the block array is not
+contiguous in the file.
+
+---
+
+## Defect 77 — a leaf cell with an empty key panicked the Rust reader
+
+Found by `cryptand fuzz` **on the first run after its oracle learned to do a
+point read** — the same instrument fix that defect 71 needed:
+
+```
+panicked at cryptand/src/segment.rs:380:78:
+called `Option::unwrap()` on a `None` value
+```
+
+`Node::record_at` took the `op` byte as `*key.last().unwrap()`. `prefix_len` and
+`suffix_len` are both read from the file, so a hostile leaf page can declare a
+zero-length key. §1's internal key is
+`u32be(tree_id) || CKE(key) || u64be(~seq) || u8 op` and is never shorter than
+13 bytes, so this is corruption — but it arrived as a panic.
+
+**Fixed** by routing the op through `parse_internal_key`, which already holds
+the 13-byte minimum, rather than keeping a second copy of the rule that could
+drift from it.
+
+**Java and Dart were both already correct** — Java's `Ikey` calls
+`checkLength(ik)` on every accessor, Dart's `parseInternalKey` refuses anything
+under 13 bytes.
+
+---
+
+## The pattern across defects 71, 76 and 77
+
+Three unrelated findings in the Rust read path, and in every one of them **Dart
+and Java both did the right thing and Rust did not**:
+
+| | Dart | Java | Rust |
+|---|---|---|---|
+| filter `block_count` / `probes` bounded (71) | yes | yes | **no** |
+| internal key ≥ 13 bytes before indexing it (77) | yes | yes | **no** |
+| parsed filter cached per segment (76) | yes | yes | **no** |
+
+That is not three coincidences. Dart was built in eighteen phases against the
+conformance vectors, and Java was built against the vectors a third time; both
+arrived at each rule by being made to fail it. The Rust implementation was
+written in one pass, and one pass produces code that is right about what the
+author was thinking about.
+
+**The cheapest audit available on this project is therefore a differential one:
+for each decoder, ask which of the three validates the most, and treat the other
+two as suspects.** It costs one `grep` per rule and it found every defect above.
+
+---
+
+# Part 2 — compliance and performance, by differential audit
+
+Part 1 ended with a rule: **for each decoder, ask which of the three
+implementations validates the most, and treat the other two as suspects.** Part 2
+applies it deliberately rather than by accident, to `02-value-encoding.md`.
+
+## Defect 79 — all three compared MAP entries in stored order, where §8 says sorted
+
+§8 rule 8: *"`ARRAY` compares element-wise, then by length. `MAP` and `DOC`
+compare as their **sorted** `(key, value)` sequences."* One sentence, two
+containers. Every implementation sorted `DOC` and none sorted `MAP`:
+
+```rust
+(Value::Map(x), Value::Map(y)) => compare_pairs(x, y),            // stored order
+(Value::Doc(x), Value::Doc(y)) => { xs.sort_by(..); compare_pairs(..) }
+```
+
+Dart (`_docEntries` sorts, `a.entries` does not) and Java (`docEntries(x)` vs
+`x.entries()`) had it identically. So two maps holding the same entries, written
+in a different order, compared **unequal** — and sorting a list of them was
+therefore not sorting by value.
+
+### Why every existing instrument was blind
+
+§8 is consumed **in memory**. Three implementations can disagree completely
+about how values sort and every direction of the cross-language file gate still
+passes, because the bytes never differ. §8 knows this about itself — it opens
+"defined here once, for all SDKs, ending the current divergence" and then records
+that a divergence survived *inside* it, "and no test could see it because nothing
+tested this section at all".
+
+**And the differential audit alone would not have found this one.** All three
+implementations agreed, exactly, on a 90 × 90 comparison matrix. Agreement was
+the wrong question; the spec was the right one.
+
+### The instrument added: `conformance/vectors/order/values.json`
+
+A new vector group — the twelve that existed covered CKE, CVE, containers,
+filters, catalogs, indexes, numbers, strings, documents, codecs, the analyzer and
+security, and **none covered §8**.
+
+90 values chosen to exercise all ten rules, and **two** checks over them:
+
+- a **90 × 90 matrix** of `sign(compare(i, j))`, which every implementation must
+  reproduce. A matrix and not a sorted permutation, deliberately: §8 makes many
+  of these values equal — every numeric tag holding 5 is one value, a
+  `TIMESTAMP` of 1000 ms equals a `TIMESTAMP_NS` of (1 s, 0), `-0.0` equals
+  `+0.0` — and equal elements have no defined relative position in an unstable
+  sort. A permutation would encode the sort algorithm; the matrix encodes the
+  order.
+- **281 named rules**, each citing a §8 rule number, two corpus indices and the
+  sign required between them. This is the half that reads the spec instead of
+  the neighbours, and it is the half that found the defect.
+
+Plus, in each implementation, a total-order check over all 90 × 90 pairs
+(reflexivity, antisymmetry) and all 90³ triples (transitivity) — the property a
+comparator built out of per-type special cases is likeliest to break.
+
+Tests: `tests/order_test.rs`, `test/order_test.dart`,
+`OrderConformanceTest.java`. Reverting the fix in any one of them fails the
+matrix check with the differing row printed.
+
+## Defect 80 — Rust enforced none of §4's four MAP invariants; Dart and Java enforced all four
+
+The differential audit, run deliberately this time, on `02 §4`:
+
+| §4 rule | Dart | Java | Rust |
+|---|---|---|---|
+| writer rejects a map key with no CKE encoding | yes | yes | **no** |
+| writer rejects duplicate keys | yes | yes | **no** |
+| reader refuses entries not sorted by `CKE(key)` | yes | yes | **no** |
+| reader refuses duplicate keys as corruption | yes | yes | **no** |
+
+Rust had a *comment* citing the rule on the encode side and no check on either
+side. Worse than absent: the encoder sorted with
+
+```rust
+cke::encode(&a.0).unwrap_or_default()
+```
+
+so a key with **no** CKE encoding — a `DOC`, a `MAP`, a `REGEX`, all of which §4
+names — silently became the **empty byte string**, sorted first, and was written.
+The resulting file is one Dart and Java both refuse to open, because their
+readers check exactly this. A format whose purpose is interchange had one
+implementation able to write files the other two reject.
+
+§4's justification is not stylistic: *"sorting makes maps comparable, hashable
+and diffable across languages, and makes a lookup a binary search"* — and a
+binary search over unsorted entries silently returns the wrong answer rather
+than failing.
+
+### The API was the reason, and the fix respects it
+
+`cve::encode` returns `Vec<u8>`, not `Result` — the Rust encoder is structurally
+**unable** to reject anything, which is why Dart and Java (whose encoders are
+fallible) enforce the rules there and Rust could not.
+
+Changing the signature would touch 42 call sites. It would also be the wrong
+change: **every one of those call sites in `src/` encodes a value the engine
+itself built** — a catalog document, a tree name, a byte string — none of which
+can carry a map at all. A caller's value reaches the encoder at exactly one
+seam, `Collection::insert`, which already returns `Result`.
+
+So the reader checks went into the decoder where they belong, and the writer
+checks into a new `cve::check_writable` called from that one seam. **The tests
+go through `Collection::insert`, not through the helper** — a validator nothing
+calls is this project's most-repeated defect, and testing the helper directly
+would reproduce it exactly.
+
+One test detail worth keeping: the duplicate-key case uses `I32(5)` and `I64(5)`
+— different CVE tags, *equal* CKE bytes. A check that compared keys structurally
+rather than by their key encodings would pass it while violating §4, which
+defines a duplicate as "two entries whose `CKE(key)` bytes are equal".
+
+---
+
+## Defect 81 — Rust re-probed the whole name dictionary on every insert: 789 → 93 794 docs/s
+
+`Collection::persist_dict`, called from every `insert`:
+
+```rust
+for (id, name) in self.dict.by_id.clone() {      // deep-copies every name
+    let existing = e.get(self.dict_tree, &key)?; // one engine read PER NAME
+    if existing.is_none() { e.put(..)?; }
+}
+```
+
+So writing one 20-field document cost **one `Engine::get` per name in the
+dictionary** — around 25 point reads whose answer, after the first document, was
+always "already there" — plus a full deep copy of the dictionary. Two further
+copies sat in `insert` and `get` (`by_name.clone()`, `by_id.clone()`), left over
+from a borrow-checker workaround.
+
+`05-catalog.md` §5.3 requires only that *new* entries are written in the same
+commit as the document that first uses them. The type's own doc comment already
+carried the property that makes a high-water mark exact: *"`name_id` is
+allocated append-only and is **never reused**"*.
+
+**Measured** (`ops_bench 20000`, medians of three, same machine, back to back):
+
+| | before | after |
+|---|---|---|
+| `insert_docs_per_s` | 789 | **93 794** |
+| `insert_bytes_device` | 9 917 043 | 9 917 043 |
+| `write_amplification` | 0.775 | 0.775 |
+
+**119×**, and `insert_bytes_device` is identical **to the byte** across all six
+runs — which is the point. The removed work produced no output at all: it was
+redundant reads and copies, not writing the engine had to do. A throughput
+number that moves two orders of magnitude deserves a counter beside it saying
+the result is unchanged, and this is that counter.
+
+**Java was already correct**: `internNames` writes only names the dictionary
+does not already hold. Fourth instance of the differential rule.
+
+### The control, and why a high-water mark needs one
+
+A high-water mark is right until a name is interned on a path that does not
+advance it — and then a document is written referring to a `name_id` no reader
+can resolve, which is silent and permanent. So the test
+(`every_field_name_survives_a_reopen_after_incremental_interning`) writes 40
+documents that each introduce a name the previous ones did not, closes, reopens
+into a **fresh** `Database` that reloads the dictionary from tree bytes and
+shares nothing with the writer, and reads every field name back. Advancing the
+mark without writing fails it.
+
+---
+
+## Defect 82 — Dart's full-text index was frozen at the moment it was built
+
+`Collection.put` maintained every `TreeKind.index` tree and no `postings` tree;
+`_indexDocumentText` was called only from `createFullTextIndex`. So a full-text
+index was correct exactly once and silently wrong from the next write on — in
+**both** directions:
+
+```
+after build      : brown -> [id(1)]
+after insert     : brown -> [id(1)]        <- id(2) contains "brown" and is invisible
+after update     : brown -> [id(1)]        <- id(1) no longer contains "brown"
+                 : grey  -> []             <- id(1) does contain "grey"
+after remove     : brown -> [id(1)]
+```
+
+The middle line is the serious one: a search returning a document that does not
+contain the word. `07-fulltext.md` §1 makes `df` and `ttf` accuracy a MUST, and
+`11-conformance.md` §5 exists precisely so an index is never *silently* wrong —
+its two permitted responses are to refuse the write or to repair-log it and mark
+the index `stale_from`. Dart did neither, while **having** the feature.
+
+**Fixed**: `_unindexDocumentText`, the mirror of the indexing pass, plus both
+halves wired into `put` and `remove`. All four lines above are now correct, and
+four tests in `fulltext_test.dart` hold them there.
+
+**Java has always maintained its text indexes** in `put` and `remove`
+(`for (FullTextIndex index : textIndexes()) index.put(id, doc);`). Rust has no
+Collection-level full-text API at all, which is a gap rather than a defect —
+nothing there can go silently stale because nothing there indexes for you.
+
+### The test that existed, and what it was working around
+
+`fulltext_test.dart` already had "an update rewrites the block, and df follows".
+It passed. It passed by **building a second index after the update** and querying
+that:
+
+```dart
+c.put(const CNitriteId(2), CDoc({'body': const CStr('the lazy grey dog')}));
+c.createFullTextIndex(['body'], indexName: 'fts:rebuilt');   // <- rebuild
+expect(c.termEntry(rebuilt, 'brown')!.df, 1);
+```
+
+A test that rebuilds the index before asserting on it cannot observe that writes
+do not maintain it. The workaround was in the test, so the test was green and the
+behaviour was wrong.
+
+---
+
+## A benchmark that measured nothing, caught before it was believed
+
+The first attempt at measuring defect 81's Dart sibling — `_internTerm`
+allocating a `term_id` as `_e.scanTree(revId).length + 1`, a full scan of the
+reverse term index **per new term**, where Java holds a `nextTermId` counter —
+produced this:
+
+| terms | before | after |
+|---|---|---|
+| 500 | 64.4 ms | 64.0 ms |
+| 1000 | 58.1 | 57.9 |
+| 2000 | 107.7 | 106.7 |
+| 4000 | 279.0 | 275.0 |
+
+Identical within noise, which read as "the fix does nothing". Adding a counter to
+the function said why: **`intern=0`**. The benchmark inserted documents into a
+collection whose full-text index had already been created, and — defect 82 —
+`put` did not maintain it, so `_internTerm` was never called. The benchmark
+measured the absence of the bug it was written to measure.
+
+The counter is the whole lesson, and it is this project's own: a benchmark that
+shows no change is indistinguishable from a benchmark that runs no code, and only
+an execution count tells them apart. The `term_id` fix stands on the structural
+argument — O(V) per new term against O(1), and Java's counter as the third
+opinion — and is honestly labelled as unmeasured rather than propped up by a
+table that would have looked like evidence.
+
+---
+
+## Defect 83 — Dart's memtable could not be looked up, so every read walked all of it
+
+```dart
+final Map<Uint8List, _Pending> _memtable = {};
+```
+
+Dart gives `Uint8List` **identity** equality. A key rebuilt from the same bytes
+is a *different* key, so this map can never be looked up by content — and
+`_memtableLookup` did the only thing left: iterated **every pending entry**,
+comparing the prefix byte by byte, on every point read.
+
+Rust range-seeks an ordered map and breaks when the prefix stops matching
+(`shard.range(prefix.to_vec()..)`); Java uses a `ConcurrentSkipListMap`. Dart
+alone was O(pending writes) per `get`, against a default memtable of **20 000**
+entries.
+
+**Fixed** with a `SplayTreeMap<Uint8List, _Pending>(compareKeys)` — `dart:collection`,
+no new dependency. Every internal key for one user key is `prefix || u64 ~seq ||
+u8 op`, so they form one contiguous run: seek to its start, stop at its end. It
+also makes `_memtable[k]` work by content (the identity map was a live footgun
+for any future caller) and makes two `..sort(compareKeys)` calls redundant,
+because `keys` now arrives in that order.
+
+**Measured** (`bench/memtable_read.dart`, 20 000 reads per row):
+
+| pending writes | linear scan | ordered | speedup |
+|---|---|---|---|
+| 250 | 4.98 µs | 2.18 µs | 2.3× |
+| 500 | 7.42 | 0.86 | 8.6× |
+| 1000 | 14.38 | 0.83 | 17.3× |
+| 2000 | 27.62 | 0.81 | **34×** |
+
+The **shape** is the result, not the last number: the control's `vs previous`
+column reads **1.49×, 1.94×, 1.92×** — doubling per doubling, exactly linear —
+against **0.96×, 0.98×** for the ordered map. At the default 20 000-entry
+memtable the linear line extrapolates to ~276 µs per read.
+
+### The benchmark that said there was no win
+
+The first measurement used `reference/bench`'s `ops.dart` and reported **no
+improvement at all** (6412 against 6698 docs/s inserted; p50 identical at 11 µs).
+Taken at face value that is a clear "revert this".
+
+It is instead the benchmark answering a different question. `bench/README.md`
+says so in its own rules: *"Measure after a compaction, never before. A benchmark
+that reads what it just wrote measures the memtable."* That is the right rule for
+what `ops.dart` exists to measure, and it makes `ops.dart` **structurally
+incapable** of seeing this change — by the time it reads, there is nothing
+pending.
+
+Second time in this session that a fixed-shape benchmark was the wrong
+instrument, after defect 76's filter cache showing 5 % at 20 000 documents and
+2 488× at 500 000 keys. The rule that keeps falling out: **when a change is
+O(some dimension), the benchmark has to move along that dimension** — and if the
+existing suite holds that dimension fixed by design, it will report zero with
+complete confidence.
+
+---
+
+## Defect 84 — Dart derived the next `term_id` by scanning the whole term index
+
+```dart
+final next = _e.scanTree(revId).length + 1;   // per NEW TERM
+```
+
+`07-fulltext.md` §1: *"`term_id` is allocated append-only and never reused (same
+discipline as `name_id`)."* Append-only and never reused is exactly what makes a
+**held** counter correct, and Java has always held one (`nextTermId++`,
+recovered once at load). Dart re-derived it with a full scan of the reverse term
+index for every new term, so building a vocabulary of V terms cost O(V²).
+
+**Fixed** with a per-tree counter, recovered once by a single scan on the first
+new term after open.
+
+**Measured** (`bench/term_intern.dart`, one new term per document):
+
+| terms | derived | held | speedup |
+|---|---|---|---|
+| 500 | 207.1 ms | 155.3 ms | 1.33× |
+| 1000 | 362.7 | 194.3 | 1.87× |
+| 2000 | 1258.3 | 539.5 | 2.33× |
+| 4000 | 4858.7 | 1956.5 | **2.48×** |
+
+A speedup that *grows* with V is the signature of removing an O(V) term. The
+residual growth in the fixed column was defect 83 — the memtable — which this
+benchmark also exercises.
+
+This is the same shape as defect 61, where `14-security.md` §4.1's nonce floor
+was derived (`next_nonce - GAP`) rather than held. **"Derived instead of held"
+is now a named recurring defect in this project**, and the tell is always the
+same: a monotone counter recomputed from the data it counts.
+
+---
+
+## The differential audit's record, across both parts
+
+| defect | rule or path | Dart | Java | Rust |
+|---|---|---|---|---|
+| 71 | filter `block_count` / `probes` bounded | yes | yes | **no** |
+| 77 | internal key ≥ 13 bytes before indexing | yes | yes | **no** |
+| 76 | parsed filter cached per segment | yes | yes | **no** |
+| 80 | §4's four MAP invariants | yes | yes | **no** |
+| 81 | dictionary persisted incrementally | n/a | yes | **no** |
+| 82 | full-text index maintained on write | **no** | yes | n/a |
+| 83 | memtable ordered and seekable | **no** | yes | yes |
+| 84 | `term_id` counter held, not derived | **no** | yes | n/a |
+| 79 | §8 sorts MAP entries | **no** | **no** | **no** |
+
+Two things this table says that the individual entries do not.
+
+**The audit works, and it is cheap.** Eight of nine rows were found by asking one
+question per rule — *which of the three does the most here?* — and reading the
+two that did less. It costs a `grep` and it does not need a failing test to start
+from.
+
+**And it has one blind spot, which row 79 is.** All three implementations agreed,
+exactly, on a 90 × 90 comparison matrix while all three violated §8 rule 8.
+Agreement is not conformance. The differential audit finds where implementations
+*disagree*; only reading the spec finds where they are wrong *together* — which
+is why the new order vectors carry 281 rules citing §8 by number, and not just
+the matrix the three of them happen to produce.
+
+---
+
+# Part 3 — the chapters with no vectors
+
+Twelve vector groups existed. Cross-referencing them against the chapters showed
+`08-spatial.md` and `09-vector.md` had **none** — the same structural gap
+`02 §8` was in, and for the same reason: their contracts are consumed in memory,
+so three implementations can disagree completely and every direction of the file
+gate still passes.
+
+Both turned out to contain a **spec** gap, not just implementation drift.
+
+## Defect 85 — §4 said "exact containment" and three implementations read it three ways
+
+`08 §4` specifies the two-phase rule and then defines the predicates as "exact
+WKB predicate", "exact containment", "exact predicate" — and stops. Over an
+18-geometry corpus the three reference implementations **disagreed on 32 of the
+pairwise predicates**, each internally consistent, each wrong in a different way:
+
+| what | Rust | Dart | Java |
+|---|---|---|---|
+| outer holds no polygon → **envelope** containment | 1 | 0 | 0 |
+| `contains(A, A)` for a non-polygon A | 1 | **0** | 1 |
+| inner shares a boundary edge with outer | 1 | 1 | **0** |
+
+The first is a §4 violation on its own terms. Rust's `within` did
+
+```rust
+if polys.is_empty() {
+    return outer.envelope().contains(&inner.envelope(), 2);
+}
+```
+
+so `within(POINT(5 5), MULTIPOINT(1 1, 9 9))` answered **true** — (5,5) is
+inside that multipoint's bounding box. §4 says "An implementation MUST NOT
+return box-level results as if they were exact", and this is that rule broken by
+the *second* phase rather than the first, which is why nothing about the R-tree
+could catch it.
+
+The other two are not violations of anything, because there was nothing to
+violate. §4's closing sentence — *"This is the difference between Nitrite's
+spatial queries meaning the same thing in Java and in Rust"* — was false in 32
+places.
+
+### The spec change: §4.1, "What exact means"
+
+Every geometry is the **closed** set of points it occupies. Then:
+
+| predicate | definition |
+|---|---|
+| `intersects(A, B)` | `A ∩ B ≠ ∅` |
+| `within(A, B)` | every point of A is a point of B |
+| `contains(A, B)` | `within(B, A)` |
+
+with four consequences stated because an implementation got each wrong:
+the predicates are **reflexive**; **sharing a boundary does not disqualify**; a
+geometry with no area **contains only its own points** (never its bounding box);
+and an **empty geometry** intersects, contains and is within nothing.
+
+This is OGC's `covers`/`coveredBy` rather than `contains`/`within`. The
+difference is OGC's extra "the interiors must intersect" clause, which makes
+`within` non-reflexive for a geometry with empty interior and excludes a
+linestring lying along a polygon's edge — both surprising in a database query.
+The spec says so and says why.
+
+**Implemented in all three**, and the three now agree on all 972 pairs. Rust lost
+the envelope fallback for a point-set membership test; Dart's `contains` moved
+from "is each part of B covered by some one part of A" (which had no case for
+line-in-line at all) to point-set membership against the whole of A; Java
+replaced a `pathsProperlyCross` boundary test with the same midpoint rule the
+other two use, so all three are now conservative in the *same* way rather than
+in three ways.
+
+## Defect 86 — Java accepted trailing bytes after a complete WKB geometry
+
+Found by the same corpus's reject list. Rust and Dart both refuse it; Java
+decoded the geometry and ignored whatever followed, so two different byte strings
+decoded to the same geometry and anything appended to a stored WKB value rode
+along unnoticed. A length that is not consumed exactly is corruption.
+
+## Defect 87 — `09` named three metrics and defined none of them
+
+`09 §5`'s descriptor carries `"metric": "cosine" | "l2" | "dot"`. §8 requires
+results "ordered nearest first" with "the true distances". Nothing anywhere said
+what the three compute — and **a dot product is a similarity**, so an
+implementation returning it unchanged sorts every result set backwards while
+satisfying every other sentence in the chapter.
+
+The three implementations happened to agree (`-Σaᵢbᵢ`, `1 − cos`, Euclidean not
+squared, `1.0` for a zero vector). A fourth SDK had no written rule to agree
+with, and the sign convention is a coin flip.
+
+**The spec change: §8.1**, pinning all three as distances, the zero-vector case
+as `1.0` rather than a NaN, and — the part that was a real divergence —
+**accumulation in at least 64-bit floating point**. Rust summed `f32` products
+in `f32`; Dart and Java both used `f64`. Over 1024 dimensions that is a **3e-4**
+difference in the answer, so the same query against the same region returned
+different distances in Rust and ordered near-ties differently.
+
+**Fixed in Rust** (`distance_f64`, with `distance` narrowing only on the way
+out), and pinned by `conformance/vectors/vector/metrics.json` — 10 cases with a
+`1e-9` tolerance, including a `wide_1024` case that exists solely to fail an
+`f32` accumulation. It does: reverting the fix reports `want -2214.3861759752012,
+got -2214.386474609375`.
+
+## What the two new vector groups are, and what they deliberately are not
+
+`08 §2.3` and `09 §8` both refuse to specify the thing an obvious conformance
+test would compare:
+
+> §2.3: "two implementations inserting the same documents will produce different
+> (equally valid) trees. A conformance test therefore compares **query
+> results**, never tree shape."
+>
+> §8: "**Recall is not specified.** Two conforming implementations may return
+> different neighbours for the same query."
+
+So neither vector group contains a tree, a graph, or a neighbour list. They
+contain the parts that *are* determined: for `08`, envelopes, the reject list and
+the full pairwise predicate matrices; for `09`, the metric arithmetic. Where a
+chapter declines to specify something, the vectors have to decline too — the
+alternative is a conformance suite that fails a conforming implementation.
+
+---
+
+# Part 4 — `03`, `05`, `06`, `10`, `13`
+
+The remaining chapters, audited the same way. Most of what the differential
+found here was **already right**, and that is worth recording as precisely as the
+defects, because "we checked and it holds" is the other half of a compliance
+claim.
+
+## What held
+
+- **`03` key encoding, `05` catalog, `06` indexes** already have shared vector
+  groups (`cke/values.json`, `numbers/torture.json`, `strings/cases.json`,
+  `catalog/trees.json`, `index/entries.json`, `index/layout.json`) and all three
+  implementations consume them. These were the chapters least likely to drift and
+  they had not.
+- **`08 §1`'s EWKB rejection** — all three reject a type word with any of
+  `0x80000000`, `0x40000000`, `0x20000000` set, each with the reasoning written
+  out. **`08 §1`'s both-byte-orders rule** and **`08 §3`'s page-versus-descriptor
+  `dimensions` check** are likewise in all three.
+- **`10 §7`'s durability rule**, which the chapter itself flags as "the
+  load-bearing one, because the failure is silent". All three record what they
+  **performed**: Java derives it from what `sync()` did, Dart records `sync`
+  because it writes with `flush: true` and says so, and Rust returns `Full` only
+  on Darwin — matching §7's own platform table, where `F_FULLFSYNC` exists and
+  Linux and Windows coincide with `sync`. This is the rule most likely to be
+  quietly wrong in a storage engine and none of the three got it wrong.
+- **`13 §6`'s 26 required metrics** are present, by name, in all three.
+
+## Defect 88 — two of those 26 metrics were fabricated in Rust
+
+Presence is not the rule. §6's second paragraph is:
+
+> "A metric an implementation cannot compute MUST be reported as unavailable, by
+> name, and MUST NOT be given a plausible-looking value. A fabricated answer
+> defeats this section more thoroughly than a missing one, because a caller
+> cannot tell the two apart."
+
+Auditing each counter for a **mutation site** rather than a declaration found
+`stall_events` and `stall_total_ms` reported as `Count(self.counters.stall_events)`
+against a counter **nothing anywhere increments**. They read **0**, and zero
+stalls is the most plausible-looking value in the whole table.
+
+Underneath it, two more of this project's signature shape: `StoreEvent::Backpressure`
+is declared and **never constructed**, and the delay `Backpressure::compute`
+derives is reported to callers and **never applied**. Java increments a real
+`stallEvents` in its committer; Dart reports `stallViolations.length`.
+
+`pinned_by_checkpoints` was the same — a counter with no writer, reported as 0 —
+and §6 names that exact metric as one whose obvious derivation "reads **0** on a
+database holding a large pinned set".
+
+**Fixed**: the two stall metrics now report `Metric::Unavailable` with a reason,
+which is what §6 prescribes and what the variant already existed for; and
+`pinned_by_checkpoints` makes the same coarse attribution Dart and Java both make.
+
+### The test that existed, and the one that was missing
+
+`operations_test.rs` already asserted all 26 names are present. It passed
+throughout. A name-presence check cannot see a fabricated value — which is the
+failure §6 is written about — so the new test asserts the *kind*: these two are
+`Unavailable`, with a reason. It fails in both directions: if the stall path is
+implemented and the metric is not updated, and — the case that matters — if
+someone "fixes" the metric by handing it a zero. It carries a control of its own,
+that a computable metric is still reported as a count, so it cannot be satisfied
+by marking everything unavailable.
+
+---
+
+# The audit, complete
+
+| defect | rule or path | Dart | Java | Rust |
+|---|---|---|---|---|
+| 71 | filter `block_count` / `probes` bounded | yes | yes | **no** |
+| 76 | parsed filter cached per segment | yes | yes | **no** |
+| 77 | internal key ≥ 13 bytes before indexing | yes | yes | **no** |
+| 80 | `02 §4`'s four MAP invariants | yes | yes | **no** |
+| 81 | dictionary persisted incrementally | n/a | yes | **no** |
+| 82 | full-text index maintained on write | **no** | yes | n/a |
+| 83 | memtable ordered and seekable | **no** | yes | yes |
+| 84 | `term_id` counter held, not derived | **no** | yes | n/a |
+| 86 | WKB trailing bytes refused | yes | **no** | yes |
+| 88 | `13 §6` metrics not fabricated | yes | yes | **no** |
+| 79 | `02 §8` sorts MAP entries | **no** | **no** | **no** |
+| 85 | `08 §4` predicate semantics | **no** | **no** | **no** |
+| 87 | `09 §8` metric definitions | — | — | — |
+
+**Java was wrong once, in thirteen rows.** It is the implementation to diff
+against, and that is not a coincidence: it was written third, against vectors the
+other two had already been made to fail.
+
+**The last three rows are the audit's blind spot, and they are the reason the
+spec changed.** In 79 and 85 all three implementations were wrong *together* —
+and in 85 they were wrong in three different directions while each was internally
+consistent, agreeing on nothing and disagreeing on 32 predicates. In 87 all three
+happened to agree on a convention no sentence anywhere required. A differential
+audit finds disagreement; only reading the spec finds shared error, and only
+writing the spec down prevents the fourth SDK from picking the other convention.
+
+That is why each of the three new vector groups carries **named rules citing the
+spec by section number** alongside its matrix — 281 for `02 §8`, 17 for `08 §4.1`,
+10 metric cases for `09 §8.1`. The matrix proves the implementations agree. The
+rules prove they agree with the spec. Only the second one is conformance.
+
+## Spec changes made
+
+Three, all portable and all implemented in all three languages:
+
+1. **`02 §8`** — clarified that `MAP`'s sorted comparison is by (key, then
+   value), the tie-break §4 leaves open (duplicate keys being corruption there).
+2. **`08 §4.1`, "What exact means"** — the predicates as point sets, with the
+   four consequences that had diverged, and the reason for choosing OGC's
+   `covers`/`coveredBy` over `contains`/`within`.
+3. **`09 §8.1`, "The metrics, numerically"** — the three metrics as distances,
+   the zero-vector case as `1.0`, and 64-bit accumulation.
+
+`cryptand/spec/` is the normative source; `nitrite-doc/cryptand/spec/` holds a
+copy, **re-synced** — see below.
+
+## The doc re-sync, and the drift it exposed
+
+`nitrite-doc/cryptand/` carries a copy of the spec and the design docs, each
+prefixed with four lines of retype frontmatter and otherwise byte-identical to
+the normative source. Re-syncing the three changes above meant diffing all
+eighteen copied documents, and **six chapters plus one design doc were already
+behind** — not from this session:
+
+| document | what the copy was missing |
+|---|---|
+| `01-container.md` | the superseded `page_codec` text, still describing LZ4 as a default that saves space |
+| `02-value-encoding.md` | §8 rule 10's `MAP`/`DOC` rank table |
+| `11`, `12` | a profile row for `page_codec` that no longer exists, and a trailing line |
+| `design/tradeoff-analysis.md` | **318 lines**, including a whole `§8.16` from an earlier phase |
+
+Every difference was the copy being *behind*; nothing had been edited on the doc
+side, so nothing was lost. But a documentation copy that drifts silently is the
+same failure this whole audit is about — a second source of truth nobody
+compares. The check is four lines of Python and should run in CI:
+
+```python
+body_after_frontmatter(doc_copy) == normative_source
+```
+
+### One defect the re-sync found
+
+`retype build` reported an unresolved URL at `tradeoff-analysis.md:1419`:
+
+```
+[[cryptand-gc-visibility-defect]]
+```
+
+A **wiki-link to a private memory file** had leaked into a published normative
+document in an earlier session — retype parses `[[…]]` as a link and could not
+resolve it. It is now prose that stands on its own ("the value-log GC visibility
+failure — a live record collected because the watermark it is judged against
+never moved (defect 34 in §7's table)"), and a scan confirms it was the only one
+in `spec/` or `design/`.
+
+`retype build`: **117 pages, 0 errors, 0 warnings** — the recorded baseline.

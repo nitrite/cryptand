@@ -564,6 +564,18 @@ public final class Verify {
     }
 
     private void claim(long start, int pages, String what) {
+        // `start` and `pages` come out of the file and are untrusted. This loop
+        // puts one map entry per page in the range, so an extent claiming two
+        // billion pages is two billion entries and an OutOfMemoryError —
+        // `14-security.md` §9.1's "MUST bounds-check ... **before allocating**"
+        // applies to the verifier's own working set, not only to its decoders.
+        long limit = pager.pageCount();
+        if (pages < 0 || start < 0 || pages > limit || start > limit || start + pages > limit) {
+            findings.add(new Finding(Kind.CORRUPTION,
+                    what + " claims " + Integer.toUnsignedString(pages) + " pages from " + start
+                            + ", but the file holds " + limit));
+            return;
+        }
         for (long p = start; p < start + pages; p++) {
             String previous = owners.put(p, what);
             if (previous != null && !previous.equals(what)) {

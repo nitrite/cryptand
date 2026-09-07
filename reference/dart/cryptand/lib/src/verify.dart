@@ -200,14 +200,42 @@ extension EngineVerify on Engine {
             kind: FindingClass.corruption));
       }
     }
+    // `startPage` and `pages` come out of the file and are untrusted. Yielding
+    // them lazily and refusing an extent that runs past the end of the file is
+    // section 9.1's "bounds-check ... **before allocating**": the materialized
+    // form below built one list element per declared page, so a manifest entry
+    // claiming 0xFFFFFFFF pages asked for a 32 GiB list before anything looked
+    // at it. That is the same hazard the leak report at the end of this method
+    // already caps itself against, reached by two callers it did not cover.
+    Iterable<int> extentPages(int startPage, int pages, String what) sync* {
+      final limit = store.pageCount;
+      if (pages < 0 ||
+          startPage < 0 ||
+          pages > limit ||
+          startPage > limit ||
+          startPage + pages > limit) {
+        f.add(Finding(
+            '01§9.7',
+            '$what claims $pages pages from $startPage, '
+            'but the file holds $limit',
+            kind: FindingClass.corruption));
+        return;
+      }
+      for (var i = 0; i < pages; i++) {
+        yield startPage + i;
+      }
+    }
+
     for (final ref in manifest.all) {
       if (ref.startPage == 0 || ref.pages == 0) continue;
-      claim([for (var i = 0; i < ref.pages; i++) ref.startPage + i],
+      claim(extentPages(ref.startPage, ref.pages, 'segment ${ref.segmentId}'),
           'segment ${ref.segmentId}');
     }
     for (final seg in vlog.segments.values) {
       if (seg.startPage == 0) continue;
-      claim([for (var i = 0; i < seg.pageCount; i++) seg.startPage + i],
+      claim(
+          extentPages(seg.startPage, seg.pageCount,
+              'value-log segment ${seg.id}'),
           'value-log segment ${seg.id}');
     }
 

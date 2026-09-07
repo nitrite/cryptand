@@ -120,6 +120,26 @@ project's own history of flaky timing guards.
   values are separated. `mobile` inlines them and measures a different engine;
   it is a separate run, not a footnote.
 
+## A companion, for a cost this suite is the wrong shape to see
+
+`reference/rust/cryptand/benches/filter_probe.rs`
+(`cargo run --release --bin filter_probe`) measures one thing: what a
+`04-segments.md` §2.4 filter probe costs, across filter sizes.
+
+It exists because this suite could not see defect 76. Rust decoded the entire
+filter payload on **every** probe where Dart and Java cached it, and at this
+suite's 20 000 documents that showed up as about **5 %** on
+`point_read_us_p50` — a segment's filter at that size is two or three 64-byte
+blocks, so the copy being removed is a couple of hundred bytes. The cost is
+O(filter size): at 500 000 keys the same probe cost **26 µs against 10.6 ns**,
+a factor of 2 488.
+
+The lesson is not about that defect. It is that **a fixed-size workload measures
+a size-dependent cost at exactly one point on its curve**, and 20 000 documents
+is at the flat end of several curves in this format. When a change is O(some
+dimension), measure along that dimension; this suite answers "what does an
+implementation do per second", which is a different and equally real question.
+
 ## What it does not measure
 
 Concurrency. `10 §2`'s multi-writer scaling is P3, it needs threads, and it has

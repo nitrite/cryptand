@@ -429,16 +429,87 @@ public final class Database implements AutoCloseable {
         if (raw == null) {
             return false;
         }
-        Value.Doc d = (Value.Doc) Cve.decode(raw);
-        Value.Doc params = (Value.Doc) d.field("params");
-        byte[] salt = ((Value.Bytes) d.field("salt")).value();
-        byte[] expected = ((Value.Bytes) d.field("hash")).value();
-        byte[] actual = Argon2id.hash(password, salt,
-                (int) SegmentMeta.longOf(params.field("t_cost")),
-                (int) SegmentMeta.longOf(params.field("m_cost_kib")),
-                (int) SegmentMeta.longOf(params.field("parallelism")),
-                expected.length);
+        // Everything below this line came out of the file.
+        //
+        // A **keyslot's** KDF parameters are deliberately obeyed as stored —
+        // §3.2: "on open it MUST use whatever the slot says — the superblock MAC
+        // (§6) is what prevents an attacker weakening those numbers". That
+        // reasoning does not reach here. `sb_mac` covers the superblock, not a
+        // tree's contents, and §10 explicitly contemplates users on an
+        // *unencrypted* database, where nothing authenticates this record at
+        // all. So §9.1 governs instead, and it "applies to every implementation,
+        // whether or not it supports encryption, because T5 does not require the
+        // attacker to have a key".
+        Value decoded = Cve.decode(raw);
+        if (!(decoded instanceof Value.Doc d)) {
+            throw new CorruptionException(
+                    "tree 5 holds a " + decoded.getClass().getSimpleName()
+                            + " for user '" + username + "', not a credential record");
+        }
+        // §8: "`kdf` MUST be \"argon2id\"". A record naming another KDF is not a
+        // record to verify with this one; it is a record this implementation
+        // cannot check. §9.2 forbids resolving the name to anything, so the only
+        // conforming answer is to refuse.
+        if (!(d.field("kdf") instanceof Value.Str kdf) || !"argon2id".equals(kdf.value())) {
+            throw new UnsupportedFeatureException(
+                    "user '" + username + "' has kdf "
+                            + (d.field("kdf") == null ? "absent" : d.field("kdf"))
+                            + "; §8 requires argon2id");
+        }
+        if (!(d.field("params") instanceof Value.Doc params)) {
+            throw new CorruptionException("user '" + username + "' has no params document");
+        }
+        if (!(d.field("salt") instanceof Value.Bytes saltV)
+                || !(d.field("hash") instanceof Value.Bytes hashV)) {
+            throw new CorruptionException(
+                    "user '" + username + "' is missing salt or hash");
+        }
+        long t = kdfParam(params, "t_cost", username);
+        long m = kdfParam(params, "m_cost_kib", username);
+        long p = kdfParam(params, "parallelism", username);
+        // §8 requires "the parameters of §3.2", and §3.2's floor is t_cost 2,
+        // m_cost_kib 16384, parallelism 1 — below every profile in its table, so
+        // no conforming record trips this. Accepting a record beneath the floor
+        // is accepting a hash an attacker has already made cheap to grind.
+        if (t < 2 || m < 16384 || p < 1) {
+            throw new CorruptionException("user '" + username + "' declares t_cost=" + t
+                    + " m_cost_kib=" + m + " parallelism=" + p
+                    + ", below §3.2's floor of 2 / 16384 / 1");
+        }
+        // And a ceiling, which §3.2 does not state because it is describing a
+        // writer's choice rather than a reader's exposure. §12 budgets "64–256
+        // MiB transient" at open; 1 GiB is four times the largest profile and
+        // still a bounded allocation, where `m_cost_kib` straight from the file
+        // is not.
+        if (t > MAX_USER_T_COST || m > MAX_USER_M_COST_KIB || p > MAX_USER_PARALLELISM) {
+            throw new LimitException("user '" + username + "' declares t_cost=" + t
+                    + " m_cost_kib=" + m + " parallelism=" + p
+                    + ", above the ceiling this reader will allocate for");
+        }
+        byte[] salt = saltV.value();
+        byte[] expected = hashV.value();
+        byte[] actual = Argon2id.hash(password, salt, (int) t, (int) m, (int) p, expected.length);
         return Security.constantTimeEquals(expected, actual);
+    }
+
+    /** §3.2's floor for a credential record, below every profile in its table. */
+    private static final long MAX_USER_T_COST = 64;
+    /** 1 GiB — four times `desktop`'s 256 MiB, and still bounded. */
+    private static final long MAX_USER_M_COST_KIB = 1024L * 1024L;
+    private static final long MAX_USER_PARALLELISM = 64;
+
+    private static long kdfParam(Value.Doc params, String name, String username) {
+        Value v = params.field(name);
+        if (v == null) {
+            throw new CorruptionException(
+                    "user '" + username + "' has no " + name + " in its params");
+        }
+        try {
+            return SegmentMeta.longOf(v);
+        } catch (RuntimeException e) {
+            throw new CorruptionException(
+                    "user '" + username + "' has a non-numeric " + name);
+        }
     }
 
     // ==================================================================

@@ -172,6 +172,58 @@ box; the exact predicate is evaluated on the geometry. An implementation MUST NO
 return box-level results as if they were exact. This is the difference between
 Nitrite's spatial queries meaning the same thing in Java and in Rust.
 
+### 4.1 What "exact" means
+
+The table above says "exact containment" and stops, and three reference
+implementations read that three different ways — disagreeing on 32 of the
+pairwise predicates over an 18-geometry corpus while each was internally
+consistent. §2.3 makes query results *the* conformance criterion for this
+chapter, so the predicates are defined here as point sets, which is the only
+form in which they are decidable.
+
+Treat every geometry as the **closed** set of points it occupies: a polygon
+includes its boundary and excludes its holes, a linestring is the points on its
+segments, a point is one point, and a multi-geometry or collection is the union
+of its parts.
+
+| predicate | definition |
+|---|---|
+| `intersects(A, B)` | `A ∩ B ≠ ∅` |
+| `within(A, B)` | every point of A is a point of B, i.e. `A ∩ exterior(B) = ∅` |
+| `contains(A, B)` | `within(B, A)` |
+
+Four consequences, each stated because an implementation got it wrong:
+
+1. **The predicates are reflexive.** `within(A, A)` and `contains(A, A)` are
+   **true** for every non-empty A, whatever its type. An implementation that
+   answers `false` for `contains(lineString, itself)` is wrong.
+2. **Sharing a boundary does not disqualify.** A square inside a larger square
+   that shares one edge with it **is** within it — no point of the inner square
+   is outside the outer one. An implementation requiring the inner geometry to
+   fall strictly in the interior is wrong.
+3. **A geometry with no area still contains only its own points.** A point is
+   within a `MultiPoint` only if it **is** one of that multipoint's points, and
+   within a `LineString` only if it lies **on** a segment. It is never enough
+   for it to fall inside the bounding box. This is the case an implementation
+   that falls back to envelope containment "when the outer geometry has no
+   polygons" gets wrong, and it is the two-phase rule above being violated by
+   the second phase rather than the first.
+4. **An empty geometry intersects nothing, is within nothing, and contains
+   nothing** — including itself. `A ∩ ∅ = ∅` for every A, and reflexivity in
+   rule 1 is stated for non-empty geometries only.
+
+This is OGC's `covers` / `coveredBy` pair rather than its `contains` / `within`.
+The difference is OGC's extra requirement that the two interiors intersect,
+which makes `within` **non-reflexive for a geometry with empty interior** and
+makes a linestring lying exactly along a polygon's edge *not* within that
+polygon. Both are surprising in a database query and neither buys anything here,
+so the simpler point-set rule is the normative one — and an SDK wanting strict
+OGC semantics builds them above the format from these.
+
+Conformance vectors: `conformance/vectors/spatial/geometries.json` carries the
+corpus, its envelopes, §1's reject list and the full pairwise matrices for the
+three predicates. §2.3 forbids comparing tree shape; these compare answers.
+
 Distance for `near`/`nearest_k` is planar Euclidean in the coordinate system of
 the data by default. Geodesic distance (Nitrite's `GeoNearFilter` /
 `GeodesicUtils` on the Java side) is an SDK-level query option; it changes which

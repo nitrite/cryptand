@@ -68,8 +68,29 @@ impl Metrics for Engine {
                 None => Metric::Text("none".into()),
             },
         );
-        m.insert("stall_events".into(), Metric::Count(self.counters.stall_events));
-        m.insert("stall_total_ms".into(), Metric::Count(self.counters.stall_total_ms));
+        // §6: "A metric an implementation cannot compute MUST be reported as
+        // unavailable, by name, and MUST NOT be given a plausible-looking
+        // value."
+        //
+        // These two were `Count(self.counters.stall_events)` against a counter
+        // **nothing anywhere increments**, so they reported 0 — and 0 stalls is
+        // the most plausible-looking value there is. `Backpressure::compute`
+        // above derives a delay for reporting, but this engine never applies
+        // one and never emits `StoreEvent::Backpressure`, which is declared and
+        // never constructed. Until the foreground actually waits, there is
+        // nothing to count, and §6's answer to that is this variant rather than
+        // a reassuring zero.
+        //
+        // Java increments a real `stallEvents` in its committer; Dart reports
+        // `stallViolations.length`. This is the implementation that had neither.
+        m.insert(
+            "stall_events".into(),
+            Metric::Unavailable("this engine applies no foreground write delay, so no stall is ever entered"),
+        );
+        m.insert(
+            "stall_total_ms".into(),
+            Metric::Unavailable("this engine applies no foreground write delay, so no stall is ever entered"),
+        );
 
         // Space
         let allocated = self.pager.page_count * self.pager.page_size as u64;
@@ -94,7 +115,19 @@ impl Metrics for Engine {
         // bytes from *becoming* dead, so those bytes never enter that
         // difference and the obvious derivation reads 0.
         m.insert("pinned_by_snapshots".into(), Metric::Count(c.pinned_by_snapshots));
-        m.insert("pinned_by_checkpoints".into(), Metric::Count(c.pinned_by_checkpoints));
+        // Same shape as the two above: the counter existed and nothing wrote
+        // it. This is the coarse attribution Dart and Java both make — if a
+        // checkpoint holds the visible watermark down, the bytes snapshots are
+        // pinning are pinned by it too. Attributing them per checkpoint needs a
+        // per-checkpoint walk none of the three does, and §6's point is that
+        // the number must not read 0 while a checkpoint is holding space.
+        let has_checkpoint = {
+            use crate::checkpoint::Checkpoints;
+            !self.list_checkpoints()?.is_empty()
+        };
+        let c = &self.counters;
+        let checkpoint_pins = if has_checkpoint { c.pinned_by_snapshots } else { 0 };
+        m.insert("pinned_by_checkpoints".into(), Metric::Count(checkpoint_pins));
         // §8.3 — "that is the one place where a reassuring answer is a
         // dangerous one". Counted on the read path, where a page's own
         // `flags.ENCRYPTED` says which it is, and never inferred from `cipher`.

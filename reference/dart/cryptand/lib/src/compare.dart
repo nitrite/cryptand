@@ -112,7 +112,7 @@ int compareValues(CValue a, CValue b) {
     case CDoc():
       return _compareEntries(_docEntries(a), _docEntries(b as CDoc));
     case CMap():
-      return _compareEntries(a.entries, (b as CMap).entries);
+      return _compareEntries(_mapEntries(a), _mapEntries(b as CMap));
     default:
       throw InvalidArgumentException('unordered ${a.runtimeType}');
   }
@@ -139,6 +139,24 @@ List<int> _utf8(String s) {
     }
   }
   return out;
+}
+
+/// Section 8 rule 8: "MAP and DOC compare as their **sorted** (key, value)
+/// sequences." [_docEntries] has always sorted; the MAP arm compared in
+/// *stored* order, so two maps holding the same entries written in a different
+/// order compared unequal. All three implementations had it, identically —
+/// which is why no cross-language check could see it: the order is consumed in
+/// memory and the bytes never differ.
+///
+/// A MAP may hold a duplicate key where a DOC cannot, so the sort is by (key,
+/// then value): sorting on the key alone leaves the sequence undetermined
+/// exactly where the duplicates are.
+List<(CValue, CValue)> _mapEntries(CMap m) {
+  final e = [...m.entries]..sort((p, q) {
+      final c = compareValues(p.$1, q.$1);
+      return c != 0 ? c : compareValues(p.$2, q.$2);
+    });
+  return e;
 }
 
 List<(CValue, CValue)> _docEntries(CDoc d) {

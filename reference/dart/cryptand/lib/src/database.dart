@@ -106,6 +106,20 @@ final class Collection {
   final String name;
   final TreeDescriptor descriptor;
 
+  /// The next `term_id` to allocate, per `term_index` tree, held rather than
+  /// re-derived.
+  ///
+  /// [_internTerm] used to compute it as `_e.scanTree(revId).length + 1` — a
+  /// full scan of the whole reverse term index for **every new term**, so
+  /// building a vocabulary of V terms cost O(V^2) row reads. The Java
+  /// implementation has always held a `nextTermId` counter and Rust never had
+  /// this path, so this was Dart alone.
+  ///
+  /// Deriving a monotone counter instead of holding it is a shape this project
+  /// has met before: `14-security.md` section 4.1's nonce floor was derived
+  /// rather than held, which was defect 61.
+  final Map<int, int> _nextTermId = {};
+
   int get treeId => descriptor.treeId;
 
   Engine get _e => db.engine;
@@ -152,6 +166,18 @@ final class Collection {
       if (idx.unique) _checkUnique(tree.treeId, idx, doc, id);
       _writeIndexEntries(idx, tree.treeId, doc, id, remove: false);
     }
+    // Full-text indexes are maintained here too, in the same call. They used to
+    // be built by `createFullTextIndex` and never touched again, so every write
+    // after the build left the index silently wrong in both directions: a new
+    // document was invisible, and a term an update removed still matched.
+    for (final (post, fields) in _textIndexes) {
+      final a = _analyzerOf(post);
+      if (existing != null) {
+        _unindexDocumentText(post, a, fields, existing, id);
+      }
+      final positions = (post.params['positions'] as CBool?)?.value ?? true;
+      _indexDocumentText(post, a, fields, doc, id, positions);
+    }
     _e.put(treeId, id, encodeValue(doc));
   }
 
@@ -160,6 +186,9 @@ final class Collection {
     if (existing == null) return;
     for (final (tree, idx) in indexes) {
       _writeIndexEntries(idx, tree.treeId, existing, id, remove: true);
+    }
+    for (final (post, fields) in _textIndexes) {
+      _unindexDocumentText(post, _analyzerOf(post), fields, existing, id);
     }
     _e.remove(treeId, id);
   }
@@ -375,13 +404,84 @@ final class Collection {
     }
   }
 
+  /// Removes every posting [id] has in [postings], for the terms of [doc].
+  ///
+  /// The mirror of [_indexDocumentText]. Without it a full-text index was
+  /// frozen at the moment it was built: a term dropped by an update kept its
+  /// posting, so a search returned a document that no longer contained the word
+  /// — a silent false positive — and `07-fulltext.md` section 1's "`df` ... and
+  /// `ttf` ... MUST be accurate" was false after the first write.
+  void _unindexDocumentText(TreeDescriptor postings, Analyzer a,
+      List<String> fields, CDoc doc, CValue id) {
+    final terms = <String>{};
+    for (final path in fields) {
+      for (final v in resolvePath(doc, path)) {
+        for (final t in a.analyzeValue(v is CStr ? v.value : null)) {
+          terms.add(t.text);
+        }
+      }
+    }
+    if (terms.isEmpty) return;
+
+    final p = postings.params;
+    final dictId = ((p['term_dict']! as CInt).magnitude).lo;
+    final positions = (p['positions'] as CBool?)?.value ?? true;
+    final docId = (id as CNitriteId).id;
+
+    for (final term in terms) {
+      final entry = _e.get(dictId, CStr(term));
+      if (entry == null) continue;
+      final termId = TermEntry.decode(entry).id;
+      final existing = _blocksOf(postings, termId);
+      final kept = <Posting>[
+        for (final b in existing)
+          for (final q in b.postings)
+            if (q.docId != docId) q,
+      ]..sort((x, y) => x.docId.compareTo(y.docId));
+      for (final b in existing) {
+        _e.remove(postings.treeId,
+            decodeKey(PostingsBlock.keyFor(termId, b.firstDoc)));
+      }
+      for (final b in PostingsBlock.split(kept, hasPositions: positions)) {
+        _e.put(postings.treeId,
+            decodeKey(PostingsBlock.keyFor(termId, b.firstDoc)), b.encode());
+      }
+      // `term_id` is never reused even when the last posting goes, so the
+      // dictionary entry stays and only the statistics move.
+      _updateTermStats(dictId, term, termId, kept);
+    }
+  }
+
+  /// Every full-text index over this collection, as (descriptor, fields).
+  List<(TreeDescriptor, List<String>)> get _textIndexes => [
+        for (final (_, d) in db.catalog.indexesOf(name))
+          if (d.kind == TreeKind.postings)
+            (
+              d,
+              [
+                for (final f in (d.params['fields']! as CArray).items)
+                  (f as CStr).value
+              ]
+            )
+      ];
+
   int _internTerm(int dictId, int revId, String term) {
     final existing = _e.get(dictId, CStr(term));
     if (existing != null) return TermEntry.decode(existing).id;
-    // §1: "term_id is allocated append-only and never reused (same discipline
-    // as name_id)."
-    final next = _e.scanTree(revId).length + 1;
-    _e.put(dictId, CStr(term), const TermEntry(0, 0, 0).encode());
+    // Section 1: "term_id is allocated append-only and never reused (same
+    // discipline as name_id)." Append-only and never reused is exactly what
+    // makes a held counter correct — see [_nextTermId]. The tree is scanned
+    // once, on the first new term after this collection is opened, to recover
+    // the high-water mark; every later term is O(1).
+    final next = _nextTermId.putIfAbsent(revId, () {
+      var max = 0;
+      for (final e in _e.scanTree(revId)) {
+        final id = expectValue<CInt>(decodeKey(e.cke), 'term_id').magnitude.lo;
+        if (id > max) max = id;
+      }
+      return max + 1;
+    });
+    _nextTermId[revId] = next + 1;
     _e.put(revId, CInt.of(NumType.u32, next), encodeValue(CStr(term)));
     _e.put(dictId, CStr(term), TermEntry(next, 0, 0).encode());
     return next;

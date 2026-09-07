@@ -434,3 +434,48 @@ fn a_second_writer_is_refused_by_name_and_never_falls_back() {
     let mut b = Engine::open(&t.path, None).unwrap();
     assert_eq!(b.get(16, &Value::NitriteId(1)).unwrap().unwrap(), b"v");
 }
+
+/// `13-operations.md` §6's anti-fabrication rule, which is the half of that
+/// section a name-presence check cannot see:
+///
+/// > "A metric an implementation cannot compute MUST be reported as
+/// > unavailable, by name, and MUST NOT be given a plausible-looking value. A
+/// > fabricated answer defeats this section more thoroughly than a missing one,
+/// > because a caller cannot tell the two apart: `page_cache_hit_rate: 1.0`
+/// > from an engine with no page-cache accounting reads exactly like a perfect
+/// > cache."
+///
+/// The test above checks every required metric is **present**. It passed while
+/// `stall_events` and `stall_total_ms` were `Count(0)` against a counter
+/// **nothing anywhere increments** — and zero stalls is the most
+/// plausible-looking value there is. `StoreEvent::Backpressure` is declared and
+/// never constructed; the delay `Backpressure::compute` derives is reported and
+/// never applied. Java increments a real counter in its committer and Dart
+/// reports `stallViolations.length`; this implementation had neither.
+///
+/// So this pins the honest state: these are `Unavailable`, by name. It fails
+/// both ways — if someone implements the stall path without updating it, and,
+/// more importantly, if someone "fixes" the metric by handing it a zero.
+#[test]
+fn a_metric_this_engine_cannot_compute_is_unavailable_and_not_a_plausible_zero() {
+    let (_t, mut e) = engine("metrics_honesty", Profile::Desktop);
+    let m = e.metrics().unwrap();
+    for name in ["stall_events", "stall_total_ms"] {
+        match m.get(name) {
+            Some(cryptand::metrics::Metric::Unavailable(why)) => {
+                assert!(!why.is_empty(), "{name} is unavailable without saying why");
+            }
+            Some(other) => panic!(
+                "§6: {name} is reported as {other} by an engine that never enters a stall. \
+                 A metric it cannot compute MUST be reported as unavailable, by name."
+            ),
+            None => panic!("{name} is required by §6 and is absent"),
+        }
+    }
+    // And the control: a metric this engine *can* compute must not have been
+    // swept into `Unavailable` to make the assertion above easy.
+    assert!(
+        matches!(m.get("bytes_written_logical"), Some(cryptand::metrics::Metric::Count(_))),
+        "bytes_written_logical is computable and must be reported as a count"
+    );
+}

@@ -110,10 +110,23 @@ public final class Geometry {
                     return false;
                 }
             }
-            // A path may leave and re-enter between two vertices that are both
-            // inside, so the boundary has to be tested too.
-            for (double[][] boundary : allPaths(o)) {
-                if (pathsProperlyCross(path, boundary)) {
+            // A segment may leave `outer` between two vertices that are both
+            // inside — across a concavity or through a hole — so each midpoint
+            // is tested too.
+            //
+            // This replaces a `pathsProperlyCross(path, boundary)` test, which
+            // also rejected an inner geometry whose edge lay ALONG an edge of
+            // the outer one: a 0..4 square inside a 0..10 square shares two
+            // edges with it and was reported as not within it. §4.1 rule 2:
+            // "Sharing a boundary does not disqualify" — no point of the inner
+            // square is outside the outer one. Rust and Dart use this same
+            // midpoint rule, so all three now agree by construction.
+            for (int k = 0; k + 1 < path.length; k++) {
+                double[] mid = {
+                    (path[k][0] + path[k + 1][0]) / 2,
+                    (path[k][1] + path[k + 1][1]) / 2,
+                };
+                if (!covers(o, mid)) {
                     return false;
                 }
             }

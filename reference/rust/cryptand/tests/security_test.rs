@@ -557,3 +557,46 @@ fn a_vector_region_slot_is_not_stored_in_the_clear() {
     let hits = raw.windows(needle.len()).filter(|w| *w == needle.as_slice()).count();
     assert_eq!(hits, 0, "a vector's f32 bytes are on disk in the clear");
 }
+
+// ---------------------------------------------------------------------------
+// §11 — key material in memory
+// ---------------------------------------------------------------------------
+
+/// §11: "a runtime with deterministic destruction SHOULD bind key material to a
+/// type that zeroes on release".
+///
+/// This is a type-level assertion rather than a memory one, because safe Rust
+/// cannot read a freed allocation to check it. It is still a control that can
+/// fail: every field of `KeyRing` is a `Copy` array, so the type has no drop
+/// glue of its own and `needs_drop` is **false** unless a `Drop` impl puts it
+/// there. Deleting that impl fails this test.
+///
+/// It matters because `Engine::close` only zeroes the two rings it knows about.
+/// An engine dropped without `close` — an early `?`, a panic unwinding through
+/// the caller, a test letting the value fall out of scope — took its keys to
+/// the allocator intact before the impl existed.
+#[test]
+fn a_key_ring_zeroes_itself_on_drop_and_not_only_on_close() {
+    assert!(
+        std::mem::needs_drop::<KeyRing>(),
+        "KeyRing has no drop glue, so a ring that `close` never sees is never zeroed"
+    );
+
+    // And the zeroing it performs actually clears, rather than being a method
+    // that exists and does nothing — this project has shipped that shape before.
+    let mut ring = KeyRing::from_master([0xA5u8; 32], [1u8; 16], 0);
+    assert_eq!(ring.master_key(), &[0xA5u8; 32]);
+    ring.zeroize();
+    assert_eq!(ring.master_key(), &[0u8; 32], "the master key survived zeroize");
+}
+
+/// §11's zeroing is only meaningful if the writes survive optimization. A plain
+/// `fill(0)` before a drop is a dead store the compiler may delete outright, so
+/// the helper is asserted here to actually clear a buffer under `--release`,
+/// which is the profile where that deletion happens.
+#[test]
+fn secure_zero_clears_under_release_optimization() {
+    let mut secret = vec![0x5Au8; 4096];
+    cryptand::security::secure_zero(&mut secret);
+    assert!(secret.iter().all(|&b| b == 0), "secure_zero left bytes behind");
+}

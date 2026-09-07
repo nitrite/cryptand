@@ -81,6 +81,21 @@ public final class Engine implements AutoCloseable {
          * immutable and interned, so a password held in one survives until
          * collection and may persist in a heap dump indefinitely, which no
          * amount of care at the call site can undo.
+         *
+         * <p><b>Zeroing on this runtime is best-effort, and §11 requires that
+         * to be said rather than implied.</b> The JVM's collectors are moving
+         * and copying: a surviving {@code byte[]} is relocated between spaces,
+         * and every relocation leaves the old bytes in a region the program can
+         * no longer name and therefore cannot overwrite. {@link Engine#close}
+         * zeroes the master key and every subkey, and this array should be
+         * zeroed by the caller once the database is open — but a copy the
+         * program never sees cannot be zeroed by anyone. §11: "documenting it
+         * is the requirement; achieving what the runtime forbids is not."
+         *
+         * <p>What follows from that, practically: a heap dump of a process that
+         * has ever opened an encrypted database may contain the master key even
+         * after a clean {@code close()}. Treat process memory as in scope for
+         * whatever protects the key file itself.
          */
         public byte[] password;
         /** 32 bytes the host already holds — an OS keychain item, a hardware-backed key. */

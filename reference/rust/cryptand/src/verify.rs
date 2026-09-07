@@ -14,6 +14,24 @@ use crate::error::Result;
 use crate::segment::{parse_internal_key, user_part};
 use crate::vlog::{self, VlogPointer};
 
+/// The page ids of an extent, refused rather than walked when it runs past the
+/// end of the file.
+///
+/// `start_page` and `pages` come out of the file and are untrusted. Each caller
+/// below inserts one map entry per page in the range, so an extent claiming
+/// 0xFFFF_FFFF pages is four billion inserts and an allocation failure —
+/// `14-security.md` §9.1's "MUST bounds-check ... **before allocating**"
+/// applies to the verifier's own working set, not only to its decoders. The
+/// leak report at the end of `page_accounting` already caps itself for exactly
+/// this reason; these three callers did not.
+fn extent_pages(start_page: u64, pages: u64, page_count: u64) -> Option<std::ops::Range<u64>> {
+    if pages > page_count || start_page > page_count || start_page + pages > page_count {
+        return None;
+    }
+    Some(start_page..start_page + pages)
+}
+
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Class {
     Corruption,
@@ -205,12 +223,23 @@ impl EngineVerify for Engine {
                     format!("segment {}: min_seq/max_seq do not match its contents", rf.segment_id),
                 );
             }
-            for p in rf.start_page..rf.start_page + rf.pages as u64 {
-                if let Some(other) = reachable.insert(p, rf.segment_id) {
-                    r.add(
-                        Class::Corruption,
-                        format!("page {p} is allocated to both {other} and {}", rf.segment_id),
-                    );
+            match extent_pages(rf.start_page, rf.pages as u64, self.pager.page_count) {
+                None => r.add(
+                    Class::Corruption,
+                    format!(
+                        "segment {} claims {} pages from {}, but the file holds {}",
+                        rf.segment_id, rf.pages, rf.start_page, self.pager.page_count
+                    ),
+                ),
+                Some(range) => {
+                    for p in range {
+                        if let Some(other) = reachable.insert(p, rf.segment_id) {
+                            r.add(
+                                Class::Corruption,
+                                format!("page {p} is allocated to both {other} and {}", rf.segment_id),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -306,10 +335,21 @@ impl EngineVerify for Engine {
                     off += rec.total_len as u64;
                 }
             }
-            for p in s.start_page..s.start_page + s.pages as u64 {
-                if let Some(other) = reachable.insert(p, u64::MAX - 1) {
-                    if other != u64::MAX - 1 {
-                        r.add(Class::Corruption, format!("page {p} is double-allocated"));
+            match extent_pages(s.start_page, s.pages as u64, self.pager.page_count) {
+                None => r.add(
+                    Class::Corruption,
+                    format!(
+                        "value-log segment {} claims {} pages from {}, but the file holds {}",
+                        s.segment_id, s.pages, s.start_page, self.pager.page_count
+                    ),
+                ),
+                Some(range) => {
+                    for p in range {
+                        if let Some(other) = reachable.insert(p, u64::MAX - 1) {
+                            if other != u64::MAX - 1 {
+                                r.add(Class::Corruption, format!("page {p} is double-allocated"));
+                            }
+                        }
                     }
                 }
             }
@@ -338,11 +378,13 @@ impl EngineVerify for Engine {
                 }
             }
         }
+        let page_count = self.pager.page_count;
         let free: HashSet<u64> = self
             .pager
             .free_list()
             .into_iter()
-            .flat_map(|e| e.start_page..e.start_page + e.pages as u64)
+            .filter_map(|e| extent_pages(e.start_page, e.pages as u64, page_count))
+            .flatten()
             .collect();
         r.pages_reachable = reachable.len() as u64;
         for p in 2..self.pager.page_count {

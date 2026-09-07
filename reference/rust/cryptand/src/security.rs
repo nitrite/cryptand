@@ -311,12 +311,20 @@ pub fn unwrap_master_key(
     let mut ct = slot.wrapped_key.to_vec();
     ct.extend_from_slice(&slot.wrap_tag);
     let c = XChaCha20Poly1305::new(kek.into());
-    c.decrypt(
-        &slot.wrap_nonce.into(),
-        Payload { msg: &ct, aad: &wrap_aad(database_uuid, slot_index) },
-    )
-    .ok()
-    .and_then(|v| v.try_into().ok())
+    let plain = c
+        .decrypt(
+            &slot.wrap_nonce.into(),
+            Payload { msg: &ct, aad: &wrap_aad(database_uuid, slot_index) },
+        )
+        .ok();
+    // §11 — the AEAD hands back the master key in a fresh heap buffer. Copying
+    // it into the array and letting the `Vec` drop returns that allocation to
+    // the allocator with the key still in it.
+    plain.and_then(|mut v| {
+        let out: Option<[u8; 32]> = v.as_slice().try_into().ok();
+        secure_zero(&mut v);
+        out
+    })
 }
 
 /// §6.2's message: the superblock with `sb_mac` itself zeroed.
@@ -324,6 +332,25 @@ pub fn superblock_mac_message(image: &[u8]) -> Vec<u8> {
     let mut m = image[..4092].to_vec();
     m[sboff::SB_MAC..sboff::SB_MAC + 32].fill(0);
     m
+}
+
+/// Overwrites `b` with zeros in a way the optimizer is not free to remove.
+///
+/// `14-security.md` §11 makes zeroing a MUST, and a plain `fill(0)` on a buffer
+/// that is about to be dropped is a *dead store*: nothing reads it afterwards,
+/// so the compiler is entitled to delete the writes entirely and the key stays
+/// in the freed page. `black_box` makes the buffer opaque to the optimizer —
+/// it must assume the zeros are observed — and the fence stops the writes being
+/// sunk past the end of the scope.
+///
+/// The `zeroize` crate does this with `write_volatile`. That needs `unsafe`,
+/// and this crate has none; `black_box` is the safe approximation and is a
+/// hint rather than a guarantee, which is the honest description of what any
+/// zeroing achieves on a runtime that may have already copied the bytes.
+pub fn secure_zero(b: &mut [u8]) {
+    b.fill(0);
+    std::hint::black_box(&*b);
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The unlocked key material for one file.
@@ -365,9 +392,15 @@ impl KeyRing {
             if !slot.occupied {
                 continue;
             }
-            let Ok(kek) = derive_kek(password, &slot) else { continue };
-            if let Some(mk) = unwrap_master_key(&slot, &kek, &sb.database_uuid, i as u8) {
-                return Ok(KeyRing::from_master(mk, sb.database_uuid, i as u8));
+            let Ok(mut kek) = derive_kek(password, &slot) else { continue };
+            let unwrapped = unwrap_master_key(&slot, &kek, &sb.database_uuid, i as u8);
+            // §11 — the KEK is key material in its own right and outlives its
+            // use by the length of this loop body unless it is cleared here.
+            secure_zero(&mut kek);
+            if let Some(mut mk) = unwrapped {
+                let ring = KeyRing::from_master(mk, sb.database_uuid, i as u8);
+                secure_zero(&mut mk);
+                return Ok(ring);
             }
         }
         Err(Error::CannotUnlock)
@@ -511,10 +544,25 @@ impl KeyRing {
 
     /// §11 — zero the master key and every subkey on `close()`.
     pub fn zeroize(&mut self) {
-        self.master_key.fill(0);
-        self.page_key.fill(0);
-        self.vlog_key.fill(0);
-        self.sbmac_key.fill(0);
+        secure_zero(&mut self.master_key);
+        secure_zero(&mut self.page_key);
+        secure_zero(&mut self.vlog_key);
+        secure_zero(&mut self.sbmac_key);
+    }
+}
+
+/// §11 — "a runtime with deterministic destruction SHOULD bind key material to
+/// a type that zeroes on release".
+///
+/// `Engine::close` zeroes the two rings it knows about: the engine's and the
+/// pager's. It is not the only way a ring dies. An `Engine` dropped without
+/// `close` — a `?` on any error between `open` and `close`, a panic unwinding
+/// through the caller, a test that just lets the value fall out of scope — took
+/// its keys to the allocator intact, and so did every `clone` made anywhere
+/// else. Zeroing on drop covers those without the caller having to know.
+impl Drop for KeyRing {
+    fn drop(&mut self) {
+        self.zeroize();
     }
 }
 
@@ -546,8 +594,10 @@ pub fn make_keyslot(
         wrap_tag: [0u8; 16],
         label: label.to_string(),
     };
-    let kek = derive_kek(password, &slot)?;
-    let (nonce, wrapped, tag) = wrap_master_key(master_key, &kek, database_uuid, slot_index)?;
+    let mut kek = derive_kek(password, &slot)?;
+    let wrapped_result = wrap_master_key(master_key, &kek, database_uuid, slot_index);
+    secure_zero(&mut kek);
+    let (nonce, wrapped, tag) = wrapped_result?;
     slot.wrap_nonce = nonce;
     slot.wrapped_key = wrapped;
     slot.wrap_tag = tag;

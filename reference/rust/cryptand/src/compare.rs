@@ -178,7 +178,27 @@ fn compare_ordered(a: &Value, b: &Value) -> Ordering {
             }
             x.len().cmp(&y.len())
         }
-        (Value::Map(x), Value::Map(y)) => compare_pairs(x, y),
+        // §8 rule 8: "MAP and DOC compare as their **sorted** (key, value)
+        // sequences." The DOC arm below has always sorted; this one compared in
+        // *stored* order, so two maps holding the same entries written in a
+        // different order compared unequal. All three implementations had it,
+        // identically, which is why no cross-language check could see it: the
+        // order is consumed in memory and the bytes never differ.
+        //
+        // A MAP may hold a duplicate key where a DOC cannot, so the sort is by
+        // (key, then value) — sorting on the key alone leaves the sequence
+        // undetermined exactly where the duplicates are.
+        (Value::Map(x), Value::Map(y)) => {
+            let mut xs = x.clone();
+            let mut ys = y.clone();
+            xs.sort_by(|p, q| {
+                compare_element(&p.0, &q.0).then_with(|| compare_element(&p.1, &q.1))
+            });
+            ys.sort_by(|p, q| {
+                compare_element(&p.0, &q.0).then_with(|| compare_element(&p.1, &q.1))
+            });
+            compare_pairs(&xs, &ys)
+        }
         (Value::Doc(x), Value::Doc(y)) => {
             let mut xs: Vec<(Value, Value)> =
                 x.iter().map(|(k, v)| (Value::Str(k.clone()), v.clone())).collect();

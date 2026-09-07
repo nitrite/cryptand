@@ -212,6 +212,38 @@ returned (an implementation using PQ codes for traversal MUST re-rank against
 the full vectors before returning), and a document that does not exist is never
 returned.
 
+### 8.1 The metrics, numerically
+
+§5's descriptor names `"cosine" | "l2" | "dot"` and this chapter said nothing
+about what they compute. That is not a small gap. "Ordered nearest first"
+requires a value where **smaller means closer**, and a dot product is a
+*similarity* — larger means closer — so an implementation that returns it
+unchanged sorts every result set backwards while satisfying every other sentence
+here. The three reference implementations happened to agree; a fourth had no
+written rule to agree with.
+
+For vectors `a` and `b` of equal dimension:
+
+| metric | distance | notes |
+|---|---|---|
+| `l2` | `sqrt(Σ (aᵢ − bᵢ)²)` | the Euclidean distance, **not** its square. The square orders identically and is cheaper, but §8 requires the *true* distance to be returned, and "true" for `l2` is this. |
+| `dot` | `−Σ aᵢbᵢ` | negated, because the dot product is a similarity. The sign convention is the whole reason this section exists. |
+| `cosine` | `1 − (Σ aᵢbᵢ) / (‖a‖ ‖b‖)` | the cosine *distance*, in `[0, 2]`. Not the similarity. |
+
+Two edge cases, both MUST:
+
+- **A zero vector has no direction**, so `cosine` against one is defined as
+  **`1.0`** — the value an orthogonal pair takes — rather than a division by
+  zero, a NaN or an error. An index may legitimately hold a zero vector, and a
+  NaN propagating into a neighbour list corrupts the ordering silently.
+- **Accumulation is in at least 64-bit floating point**, whatever the region's
+  `dtype`. Summing 1536 `f32` products in `f32` loses several bits, so two
+  implementations reading the same region and the same query return different
+  distances for the same pair and order near-ties differently. The stored
+  vectors keep their `dtype`; only the arithmetic widens.
+
+Conformance vectors: `conformance/vectors/vector/metrics.json`.
+
 An implementation MAY refuse to serve a graph built by a different algorithm
 (`hnsw` vs `vamana`) — but it MUST then fall back to a brute-force scan of the
 vector region, which is always possible and always correct, rather than

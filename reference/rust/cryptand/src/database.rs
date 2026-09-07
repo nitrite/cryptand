@@ -33,11 +33,26 @@ pub struct NameDict {
     pub by_name: BTreeMap<String, u32>,
     pub by_id: BTreeMap<u32, String>,
     pub next_id: u32,
+    /// The greatest `name_id` already written to the dictionary tree.
+    ///
+    /// `persist_dict` used to re-probe **every** entry on **every** insert —
+    /// one `Engine::get` per name in the dictionary, per document — so writing
+    /// a 20-field document cost 20 engine lookups that could only ever answer
+    /// "already there". A high-water mark is exact here for the reason the type
+    /// comment above already gives: ids are "allocated append-only and never
+    /// reused", so everything at or below this has been written and everything
+    /// above it has not.
+    pub persisted_upto: u32,
 }
 
 impl NameDict {
     pub fn new() -> NameDict {
-        let mut d = NameDict { by_name: BTreeMap::new(), by_id: BTreeMap::new(), next_id: 1 };
+        let mut d = NameDict {
+            by_name: BTreeMap::new(),
+            by_id: BTreeMap::new(),
+            next_id: 1,
+            persisted_upto: 0,
+        };
         for f in RESERVED_FIELDS {
             d.intern(f);
         }
@@ -134,7 +149,12 @@ impl Database {
     }
 
     fn load_dict(&mut self, dict_tree: u32) -> Result<NameDict> {
-        let mut d = NameDict { by_name: BTreeMap::new(), by_id: BTreeMap::new(), next_id: 1 };
+        let mut d = NameDict {
+            by_name: BTreeMap::new(),
+            by_id: BTreeMap::new(),
+            next_id: 1,
+            persisted_upto: 0,
+        };
         if dict_tree == 0 {
             return Ok(NameDict::new());
         }
@@ -147,6 +167,7 @@ impl Database {
                 d.by_name.insert(name.clone(), id);
                 d.by_id.insert(id, name);
                 d.next_id = d.next_id.max(id + 1);
+                d.persisted_upto = d.persisted_upto.max(id);
             }
         }
         if d.by_id.is_empty() {
@@ -176,12 +197,21 @@ impl Collection {
     /// as the document that first uses them. Atomicity of the batch guarantees
     /// this is not a window.
     fn persist_dict(&mut self, e: &mut Engine) -> Result<()> {
-        for (id, name) in self.dict.by_id.clone() {
+        let from = self.dict.persisted_upto;
+        // Only the ids interned since the last call. The previous form cloned
+        // the whole dictionary and issued one `Engine::get` per entry on every
+        // insert, so the write path carried an O(dictionary) cost per document
+        // whose answer, after the first document, was always "already there".
+        let pending: Vec<(u32, String)> = self
+            .dict
+            .by_id
+            .range((std::ops::Bound::Excluded(from), std::ops::Bound::Unbounded))
+            .map(|(id, name)| (*id, name.clone()))
+            .collect();
+        for (id, name) in pending {
             let key = Value::Int { w: NumType::U32, neg: false, mag: id as u128 };
-            let existing = e.get(self.dict_tree, &key)?;
-            if existing.is_none() {
-                e.put(self.dict_tree, &key, &cve::encode(&Value::Str(name)))?;
-            }
+            e.put(self.dict_tree, &key, &cve::encode(&Value::Str(name)))?;
+            self.dict.persisted_upto = self.dict.persisted_upto.max(id);
         }
         Ok(())
     }
@@ -195,11 +225,16 @@ impl Collection {
             return invalid("a document in a collection data tree MUST carry an `_id` of type NITRITE_ID");
         };
         let id = *id;
+        // §4's writer rules, at the one seam where a caller's value reaches the
+        // encoder. A map key with no CKE encoding, or a duplicated one,
+        // produces a file Dart and Java both refuse to open — their readers
+        // check exactly this — so writing it would be a silent interop break.
+        cve::check_writable(doc)?;
         for (name, _) in fields {
             self.dict.intern(name);
         }
         self.persist_dict(e)?;
-        let dict = self.dict.by_name.clone();
+        let dict = &self.dict.by_name;
         let bytes = cve::encode_with_dict(doc, &|n| dict.get(n).copied());
         e.put(self.tree, &Value::NitriteId(id), &bytes)?;
         Ok(id)
@@ -207,7 +242,7 @@ impl Collection {
 
     pub fn get(&self, e: &mut Engine, id: i64) -> Result<Option<Value>> {
         let Some(bytes) = e.get(self.tree, &Value::NitriteId(id))? else { return Ok(None) };
-        let by_id = self.dict.by_id.clone();
+        let by_id = &self.dict.by_id;
         let doc = cve::decode_all(&bytes, &|i| by_id.get(&i).cloned())?;
         // §5.4 — the reader-side half of the `_id` rule.
         match doc.field("_id") {
@@ -233,7 +268,7 @@ impl Collection {
     }
 
     pub fn scan(&self, e: &mut Engine) -> Result<Vec<Value>> {
-        let by_id = self.dict.by_id.clone();
+        let by_id = &self.dict.by_id;
         let mut out = Vec::new();
         for (_k, v) in e.scan_tree(self.tree, None, None, None, true)? {
             out.push(cve::decode_all(&v, &|i| by_id.get(&i).cloned())?);

@@ -332,11 +332,32 @@ public final class VectorIndex {
     }
 
     double distance(float[] a, float[] b) {
+        return distance(metric, a, b);
+    }
+
+    /**
+     * §8.1 — the three metrics, as <b>distances</b>: smaller is nearer.
+     *
+     * <p>{@code dot} is negated because a dot product is a similarity;
+     * {@code cosine} is {@code 1 - similarity}, not the similarity; {@code l2}
+     * is the Euclidean distance and not its square. §8 requires the <em>true</em>
+     * distance to be returned, so the square is not an option even though it
+     * orders identically.
+     *
+     * <p>Accumulation is in {@code double} whatever the region's {@code dtype}:
+     * summing 1024 {@code float} products in {@code float} drifts by ~1e-4, so
+     * two implementations reading the same region would return different
+     * distances and order near-ties differently.
+     *
+     * <p>Static, and public, because it is arithmetic: the shared conformance
+     * vectors check it without constructing an index.
+     */
+    public static double distance(String metric, float[] a, float[] b) {
         return switch (metric) {
             case METRIC_L2 -> {
                 double sum = 0;
                 for (int i = 0; i < a.length; i++) {
-                    double d = a[i] - b[i];
+                    double d = (double) a[i] - b[i];
                     sum += d * d;
                 }
                 yield Math.sqrt(sum);
@@ -359,6 +380,9 @@ public final class VectorIndex {
                     nb += (double) b[i] * b[i];
                 }
                 double denominator = Math.sqrt(na) * Math.sqrt(nb);
+                // §8.1: a zero vector has no direction, so this is the
+                // orthogonal value rather than a division by zero. A NaN here
+                // propagates into a neighbour list and corrupts the ordering.
                 yield denominator == 0 ? 1 : 1 - dot / denominator;
             }
             default -> throw new InvalidArgumentException("metric '" + metric

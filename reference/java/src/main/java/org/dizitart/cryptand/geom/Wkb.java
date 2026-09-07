@@ -1,5 +1,6 @@
 package org.dizitart.cryptand.geom;
 
+import org.dizitart.cryptand.CorruptionException;
 import org.dizitart.cryptand.InvalidArgumentException;
 import org.dizitart.cryptand.LimitException;
 import org.dizitart.cryptand.util.ByteWriter;
@@ -190,6 +191,14 @@ public final class Wkb {
         Reader r = new Reader(wkb, 0);
         List<double[]> points = new ArrayList<>();
         int axes = readGeometry(r, points);
+        // Trailing bytes were accepted, so two different byte strings decoded
+        // to the same geometry and anything appended to a WKB value rode along
+        // unnoticed. Rust and Dart both refuse it; a length that is not
+        // consumed exactly is corruption.
+        if (r.remaining() != 0) {
+            throw new CorruptionException("trailing bytes after a complete WKB geometry: "
+                    + r.remaining() + " left over");
+        }
         return new Coordinates(points, axes);
     }
 

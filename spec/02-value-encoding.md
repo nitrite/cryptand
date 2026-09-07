@@ -324,7 +324,26 @@ Defined here once, for all SDKs, ending the current divergence.
    byte order agrees. `DATE`, `TIME` and `DURATION` are not comparable to
    instants and sort in their own groups.
 8. `ARRAY` compares element-wise, then by length. `MAP` and `DOC` compare as
-   their sorted `(key, value)` sequences.
+   their sorted `(key, value)` sequences — sorted by **key, then value**, and by
+   *this* section's order rather than by `CKE`.
+
+   The tie-break is not pedantry. §4 stores a `MAP`'s entries sorted by
+   `CKE(key)` and calls two entries with **equal `CKE` bytes** a duplicate, and
+   therefore corruption. But rule 2 above makes `I32(5)` and `I64(5)` the **same
+   value** while their `CKE` differs in the trailing type code, so a map holding
+   both is legal under §4 and holds two entries whose keys compare *equal* here.
+   Sorting on the key alone leaves their relative position undetermined, and two
+   implementations that order them differently then disagree about whether the
+   two maps are equal. Comparing the value second settles it.
+
+   Sorting by this section's order and not by `CKE` matters for the same pair:
+   `CKE` order refines this one (`03-key-encoding.md` §1), so the two orders
+   agree everywhere except exactly where a comparison here returns equal — which
+   is the case being tied.
+
+   Entry order is therefore **not part of a map's or a document's value**: the
+   same entries written in a different order compare equal, even though the two
+   encodings are different bytes.
 9. `BOOL`: `FALSE < TRUE`.
 10. Cross-type order (when two values are not in the same group) is the group
     order given in `03-key-encoding.md` §2, extended by the two ranks below.

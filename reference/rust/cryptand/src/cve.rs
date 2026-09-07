@@ -57,6 +57,49 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
 }
 
 /// Encodes with no name dictionary: every document field name is inline.
+/// `02-value-encoding.md` §4's two **writer** rules, checked over a whole value
+/// before it is encoded.
+///
+/// > "A map key MUST be CKE-encodable ... A writer MUST reject one"
+/// > "Duplicate keys — two entries whose `CKE(key)` bytes are equal — are
+/// > corruption."
+///
+/// This is a separate function rather than a check inside [`encode`] because
+/// `encode` is infallible, and that is not an accident to work around: every
+/// call to it inside this crate encodes a value the engine itself built — a
+/// catalog document, a name, a byte string — none of which can carry a map at
+/// all. The one place a *caller's* value reaches the encoder is
+/// [`crate::database::Collection::insert`], and that is where this is called.
+///
+/// Dart and Java enforce these inside their encoders, which their fallible
+/// signatures allow. The behaviour is the same; only the seam differs.
+pub fn check_writable(v: &Value) -> Result<()> {
+    match v {
+        Value::Map(entries) => {
+            let mut keys: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+            for (k, val) in entries {
+                let Ok(kb) = crate::cke::encode(k) else {
+                    return Err(crate::Error::Invalid(format!(
+                        "a value with CVE tag {:#04x} has no CKE encoding and cannot be a map key (02-value-encoding.md §4)",
+                        tag_of(k)
+                    )));
+                };
+                keys.push(kb);
+                check_writable(k)?;
+                check_writable(val)?;
+            }
+            keys.sort();
+            if keys.windows(2).any(|w| w[0] == w[1]) {
+                return Err(crate::Error::Invalid("duplicate map key".into()));
+            }
+            Ok(())
+        }
+        Value::Array(items) => items.iter().try_for_each(check_writable),
+        Value::Doc(fields) => fields.iter().try_for_each(|(_, x)| check_writable(x)),
+        _ => Ok(()),
+    }
+}
+
 pub fn encode(v: &Value) -> Vec<u8> {
     encode_with_dict(v, &|_| None)
 }
@@ -404,11 +447,33 @@ fn read(b: &[u8], dict: &dyn Fn(u32) -> Option<String>, depth: usize) -> Result<
                 (Value::Array(items), start + byte_len)
             } else {
                 let mut entries = Vec::new();
+                // §4's three reader rules. Dart and Java both enforce all
+                // three; this side enforced none, so it accepted MAPs that
+                // neither of the others will open — and §4's own justification
+                // is that sorting "makes a lookup a binary search", which over
+                // unsorted entries silently returns the wrong answer rather
+                // than failing.
+                let mut prev: Option<Vec<u8>> = None;
                 for _ in 0..count {
                     let (k, used) = read(&body[at..], dict, depth + 1)?;
                     at += used;
                     let (v, used) = read(&body[at..], dict, depth + 1)?;
                     at += used;
+                    // "A map key MUST be CKE-encodable ... a reader
+                    // encountering one MUST report corruption."
+                    let Ok(kb) = crate::cke::encode(&k) else {
+                        return corrupt("MAP key has no CKE encoding");
+                    };
+                    if let Some(before) = &prev {
+                        match kb.cmp(before) {
+                            std::cmp::Ordering::Less => {
+                                return corrupt("MAP entries are not sorted by CKE(key)")
+                            }
+                            std::cmp::Ordering::Equal => return corrupt("duplicate MAP key"),
+                            std::cmp::Ordering::Greater => {}
+                        }
+                    }
+                    prev = Some(kb);
                     entries.push((k, v));
                 }
                 if at != body.len() {

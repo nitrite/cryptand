@@ -183,7 +183,7 @@ public final class Compare {
             return Integer.compare(p.size(), q.size());
         }
         if (a instanceof Value.Map x) {
-            return comparePairs(x.entries(), ((Value.Map) b).entries());
+            return comparePairs(mapEntries(x), mapEntries((Value.Map) b));
         }
         if (a instanceof Value.Doc x) {
             return comparePairs(docEntries(x), docEntries((Value.Doc) b));
@@ -267,6 +267,27 @@ public final class Compare {
      * sequence, so the field order a caller happened to insert in is not part
      * of the value.
      */
+    /**
+     * §8 rule 8: "MAP and DOC compare as their <b>sorted</b> (key, value)
+     * sequences." {@link #docEntries} has always sorted; the MAP arm compared
+     * in <em>stored</em> order, so two maps holding the same entries written in
+     * a different order compared unequal. All three implementations had it,
+     * identically — which is why no cross-language check could see it: the
+     * order is consumed in memory and the bytes never differ.
+     *
+     * <p>A MAP may hold a duplicate key where a DOC cannot, so the sort is by
+     * (key, then value): sorting on the key alone leaves the sequence
+     * undetermined exactly where the duplicates are.
+     */
+    private static List<Value.Map.Entry> mapEntries(Value.Map m) {
+        List<Value.Map.Entry> out = new ArrayList<>(m.entries());
+        out.sort((p, q) -> {
+            int c = compareElement(p.key(), q.key());
+            return c != 0 ? c : compareElement(p.value(), q.value());
+        });
+        return out;
+    }
+
     private static List<Value.Map.Entry> docEntries(Value.Doc d) {
         List<Value.Map.Entry> out = new ArrayList<>(d.fields().size());
         for (java.util.Map.Entry<String, Value> e : d.fields().entrySet()) {
