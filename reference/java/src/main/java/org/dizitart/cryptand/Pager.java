@@ -45,6 +45,16 @@ public final class Pager {
 
     private PageCrypto crypto;
 
+    /**
+     * Pages this pager has read from the file — {@code spec/11-conformance.md}
+     * §6's aged-scan test measures a scan's cost with it, and there is no other
+     * way to state that cost as a number. Value-log record reads are added by
+     * {@link Engine} at the same point it counts a value read, so the counter
+     * is the whole read cost of a scan and not only its key half.
+     */
+    private final java.util.concurrent.atomic.AtomicLong pageReads =
+            new java.util.concurrent.atomic.AtomicLong();
+
     public Pager(PageFile file, int pageSize, long pageCount, long commitId, long minRetainedCommit) {
         Limits.checkPageSize(pageSize);
         this.file = file;
@@ -56,6 +66,15 @@ public final class Pager {
 
     public int pageSize() {
         return pageSize;
+    }
+
+    public long pageReads() {
+        return pageReads.get();
+    }
+
+    /** Counts reads this class did not perform - value-log record reads. */
+    void countReads(long n) {
+        pageReads.addAndGet(n);
     }
 
     /**
@@ -226,6 +245,7 @@ public final class Pager {
         if (pageId < 0) {
             throw new CorruptionException("negative page id " + pageId);
         }
+        pageReads.incrementAndGet();
         byte[] page = new byte[pageSize];
         file.readFully(offsetOf(pageId), page, 0, pageSize);
         return page;

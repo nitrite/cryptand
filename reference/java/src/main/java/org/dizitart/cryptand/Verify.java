@@ -224,6 +224,35 @@ public final class Verify {
         verifySubtreeEntries(seg, m);
     }
 
+    /**
+     * Whether an entry is already logically gone: superseded by a newer version
+     * and below {@code min_retained_seq}, so no reader and no snapshot can
+     * reach it.
+     *
+     * <p>§9 step 4 says "every {@code VLOG} pointer", and taking that at face
+     * value makes the check unsatisfiable: {@code 04-segments.md} §6.8 frees a
+     * record as soon as the tree's <em>current</em> entry stops pointing at it,
+     * and the entry that used to point at it stays in its segment until a
+     * compaction happens to drop it. GC's own pointer rewrite creates one such
+     * entry per surviving record, so a verifier that follows those reports
+     * every healthy database that has ever collected as corrupt - and a
+     * verifier that is wrong about the common case is worse than none.
+     *
+     * <p>Only genuinely unreachable entries are exempted. A superseded version
+     * at or above {@code min_retained_seq} is still readable through a snapshot,
+     * so its pointer MUST resolve and is still checked.
+     */
+    private boolean isDead(BtreePage.Leaf cell) {
+        byte[] ik = cell.key();
+        long seq = Ikey.seqOf(ik);
+        if (seq >= engine.superblock().minRetainedSeq) {
+            return false;
+        }
+        BtreePage.Leaf newest = engine.newestVersion(
+                Ikey.treeIdOf(ik), Ikey.ckeOf(ik), engine.visibleSeq());
+        return newest != null && Ikey.seqOf(newest.key()) > seq;
+    }
+
     /** Invariant 3: {@code subtree_entries} sums correctly and every leaf is at one depth. */
     private void verifySubtreeEntries(Segment seg, SegmentMeta m) {
         Set<Integer> depths = new HashSet<>();
@@ -326,7 +355,9 @@ public final class Verify {
                                 + m.segmentId + " resolves to a record with a different key"));
                     }
                 } catch (RuntimeException e) {
-                    report(e, "VLOG pointer in segment " + m.segmentId);
+                    if (!isDead(cell)) {
+                        report(e, "VLOG pointer in segment " + m.segmentId);
+                    }
                 }
             }
             case BtreePage.Kind.BLOB -> {

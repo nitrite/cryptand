@@ -31,6 +31,12 @@ class VerifyTest {
         return o;
     }
 
+    private static Engine.Options readOnlyOptions() {
+        Engine.Options o = options();
+        o.readOnly = true;
+        return o;
+    }
+
     private static byte[] key(long n) {
         return Cke.encode(Value.i64(n));
     }
@@ -109,8 +115,16 @@ class VerifyTest {
         }
         // A page a live segment actually reaches. A file holds freed pages that
         // still look like leaves, and damaging one of those proves nothing.
+        //
+        // Read-only for both of these opens, and not as a nicety: a read-write
+        // open starts the compactor, and on a machine busy enough that phase
+        // one closed with its level-0 segments unmerged, the compactor catches
+        // up during the *verifying* open - between Engine.open returning and
+        // Verify.run taking the structure lock. The damaged page is then a
+        // freed page, the verifier is right to say nothing about it, and the
+        // test fails. Measured at 3 runs in 150 under load; 0 in 150 read-only.
         long target;
-        try (Engine e = Engine.open(f, options())) {
+        try (Engine e = Engine.open(f, readOnlyOptions())) {
             SegmentMeta m = e.manifest().all().get(0);
             target = m.startPage + m.rootPage;
         }
@@ -119,7 +133,7 @@ class VerifyTest {
         int base = (int) (target * pageSize);
         raw[base + PageHeader.BYTES + 3] ^= 0x40;
         Files.write(f, raw);
-        try (Engine e = Engine.open(f, options())) {
+        try (Engine e = Engine.open(f, readOnlyOptions())) {
             Verify.Report r = Verify.run(e);
             assertFalse(r.clean());
             assertFalse(r.of(Verify.Kind.CORRUPTION).isEmpty(), r.toString());

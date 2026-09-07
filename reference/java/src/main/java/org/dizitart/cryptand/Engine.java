@@ -743,6 +743,33 @@ public final class Engine implements AutoCloseable {
     }
 
     /**
+     * Advances {@code visible_seq} to a target whose ranges are all complete.
+     *
+     * <p>Value-log GC needs this and it is not a nicety. GC decides liveness
+     * with {@code lookup(..., visibleSeq, ...)}: a record is live only if the
+     * tree's <em>current</em> entry points at it. Its own pointer rewrites are
+     * written at seqs above {@code visible_seq}, and {@code publishSuperblock}
+     * republishes the watermark it is handed, so nothing moved it. The next GC
+     * pass then looked past the rewrite, saw the entry it had just superseded
+     * pointing into a segment it had already freed, judged the surviving record
+     * dead, and freed the segment holding it. Two passes with no intervening
+     * write - a compaction on an idle database is exactly that - lose data,
+     * and every one of the four passes {@code collect0} runs in a row is
+     * another chance to.
+     */
+    private void makeVisible(long target) {
+        seqLock.lock();
+        try {
+            if (target > visibleSeq) {
+                visibleSeq = target;
+            }
+            visibleChanged.signalAll();
+        } finally {
+            seqLock.unlock();
+        }
+    }
+
+    /**
      * Steps A–G of §2's committer.
      *
      * <p>The two ordering invariants of §2.3 are what the barrier placement is
@@ -1994,7 +2021,9 @@ public final class Engine implements AutoCloseable {
             completeRange(seq, seq);
         }
         vlog.sealCold();
-        flushShards(Math.max(visibleSeq, completedThrough()));
+        long visible = Math.max(visibleSeq, completedThrough());
+        flushShards(visible);
+        makeVisible(visible);
         for (VlogStats stats : merged) {
             pager.freeExtent(stats.startPage, stats.pages);
             vlogStatsTree.remove(VlogStats.key(stats.segmentId));
@@ -2082,7 +2111,11 @@ public final class Engine implements AutoCloseable {
             shardFor(rec.treeId(), rec.key()).put(ik, cell);
             completeRange(seq, seq);
         }
-        flushShards(Math.max(visibleSeq, completedThrough()));
+        long visible = Math.max(visibleSeq, completedThrough());
+        flushShards(visible);
+        // The rewrites have to be visible before the next pass computes
+        // liveness against them - see makeVisible.
+        makeVisible(visible);
         // Step 5: the extent is freed at this commit id, and does not become
         // allocatable until min_retained_commit passes it - which is exactly
         // "no live snapshot predates it".

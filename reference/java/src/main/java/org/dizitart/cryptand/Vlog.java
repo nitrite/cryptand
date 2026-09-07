@@ -298,6 +298,7 @@ public final class Vlog {
         }
         byte[] buf = new byte[(int) p.len()];
         pager.file().readFully(pager.offsetOf(s.startPage) + p.offset(), buf, 0, buf.length);
+        pager.countReads(pagesSpanned(p.offset(), buf.length));
         return decodeAt(s, buf, p.offset());
     }
 
@@ -350,7 +351,11 @@ public final class Vlog {
             to = Math.min(to, (long) seg.pages * pageSize);
             byte[] window = new byte[(int) (to - from)];
             pager.file().readFully(pager.offsetOf(seg.startPage) + from, window, 0, window.length);
+            // `reads` is §6's metric - one per physical read, however wide.
+            // The pager's counter is pages, because that is what a scan's cost
+            // is measured in and a window is not one page.
             reads++;
+            pager.countReads(pagesSpanned(from, window.length));
             for (int i = at; i < end; i++) {
                 VlogPointer p = pointers.get(order.get(i));
                 int local = (int) (p.offset() - from);
@@ -364,6 +369,14 @@ public final class Vlog {
 
     /** Records in the order asked for, and the number of physical reads it took. */
     public record Resolved(List<VlogSegment.Record> records, int reads) {
+    }
+
+    /** Pages a byte range starting at {@code offset} covers. */
+    private int pagesSpanned(long offset, int length) {
+        int pageSize = pager.pageSize();
+        long first = offset / pageSize;
+        long last = (offset + Math.max(1, length) - 1) / pageSize;
+        return (int) (last - first + 1);
     }
 
     /**

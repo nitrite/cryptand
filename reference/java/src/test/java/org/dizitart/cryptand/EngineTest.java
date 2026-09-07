@@ -50,6 +50,55 @@ class EngineTest {
         return o;
     }
 
+    /**
+     * Two value-log collections with no write between them.
+     *
+     * <p>GC decides liveness with {@code lookup(..., visible_seq, ...)} and
+     * writes its pointer rewrites above {@code visible_seq}. Nothing else moves
+     * that watermark on an idle database — {@code publishSuperblock} republishes
+     * the one it is handed — so a second pass read the entry the first pass had
+     * already superseded, found it pointing into a segment the first pass had
+     * already freed, concluded the surviving record was dead, and freed the
+     * segment holding it. 295 of 600 keys became unreadable, the file verified
+     * as corrupt, and every step of it was a normal maintenance call.
+     *
+     * <p>Four passes, because {@code collect0} runs up to four in one call and
+     * each is another chance to.
+     */
+    @Test
+    @DisplayName("repeated collection with no write between passes keeps every value")
+    void collectionTwiceKeepsValues(@TempDir Path dir) {
+        int rows = 600;
+        try (Engine e = Engine.create(dir.resolve("gc.cryptand"), options())) {
+            Random rnd = new Random(4);
+            // Above desktop's vlog_min of 256, so every value is separated and
+            // collection has something to reclaim.
+            byte[] big = new byte[400];
+            for (int i = 0; i < rows; i++) {
+                rnd.nextBytes(big);
+                e.batch().put(TREE, key(i), big.clone()).commit();
+            }
+            e.commitNow();
+            e.compact();
+            e.maintain();
+            // Ten times the dataset in updates, so the segments holding the
+            // first generation are mostly dead and collection has candidates.
+            for (int i = 0; i < rows * 10; i++) {
+                rnd.nextBytes(big);
+                e.batch().put(TREE, key(rnd.nextInt(rows)), big.clone()).commit();
+            }
+            e.commitNow();
+            // And then maintenance with no write at all between the passes.
+            e.compact();
+            e.maintain();
+            for (int i = 0; i < rows; i++) {
+                assertNotNull(e.get(TREE, key(i)), "key " + i + " after collection");
+            }
+            Verify.Report r = Verify.run(e);
+            assertTrue(r.of(Verify.Kind.CORRUPTION).isEmpty(), r.toString());
+        }
+    }
+
     @Test
     @DisplayName("a put is readable, and survives close and reopen")
     void putGetReopen(@TempDir Path dir) {
