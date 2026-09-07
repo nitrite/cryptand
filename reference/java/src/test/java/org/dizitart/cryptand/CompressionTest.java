@@ -409,6 +409,47 @@ class CompressionTest {
     }
 
     // ------------------------------------------------------------------
+    // the read path must not rot now that no profile writes a compressed page
+    //
+    // §7 keeps page_codec at 0 in every profile, because a compressed page
+    // occupies the same fixed-size slot and saves nothing -- measured
+    // identical in bytes to device, page count and file size. That makes the
+    // READER the part with no natural exercise: nothing this implementation
+    // writes will produce a compressed page again, so the only thing standing
+    // between a conforming file from another SDK and a mis-decode is a test
+    // that writes one on purpose. Which is exactly the defect that started
+    // all of this.
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("every profile defaults page_codec to 0")
+    void everyProfileDefaultsToNoCodec() {
+        for (org.dizitart.cryptand.container.Profile p
+                : org.dizitart.cryptand.container.Profile.values()) {
+            assertEquals(Superblock.Codec.NONE, p.pageCodec(),
+                    p + " defaults to a page codec that saves nothing");
+        }
+    }
+
+    @Test
+    @DisplayName("a compressed page is decoded by a reader whose default is 0")
+    void aReaderWithNoCodecStillDecodesOne(@TempDir Path dir) {
+        Pager p = pagerWith(dir, Superblock.Codec.LZ4);
+        long id = p.allocate(1);
+        byte[] payload = documentish(4000);
+        p.writePage(id, head(1, PageHeader.Type.BTREE_LEAF), payload);
+        assertTrue(PageHeader.verify(p.readRaw(id), id).isSet(PageHeader.Flags.COMPRESSED),
+                "the fixture must actually be compressed, or this proves nothing");
+
+        // The read path must consult the PAGE's own flag and never the
+        // reader's default -- which is the whole of §7's "a file may hold a
+        // mixture".
+        p.setPageCodec(Superblock.Codec.NONE);
+        assertArrayEquals(payload, p.readPage(id),
+                "a reader whose default is 0 must still decode a compressed page");
+    }
+
+    // ------------------------------------------------------------------
     // the space claim
     // ------------------------------------------------------------------
 

@@ -31,6 +31,10 @@ name = "cryptand"
 path = "src/bin/cryptand.rs"
 
 [[bin]]
+name = "ops_bench"
+path = "benches/ops.rs"
+
+[[bin]]
 name = "p1_height"
 path = "benches/p1_height.rs"
 

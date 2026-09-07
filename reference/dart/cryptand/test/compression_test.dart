@@ -414,6 +414,56 @@ void main() {
   });
 
   // ------------------------------------------------------------------
+  // The read path must not rot now that no profile writes a compressed page.
+  //
+  // `01-container.md` section 7 keeps `page_codec` at 0 in every profile,
+  // because a compressed page occupies the same fixed-size slot and saves
+  // nothing -- measured identical in bytes to device, page count and file
+  // size. That makes the *reader* the part with no natural exercise: nothing
+  // this implementation writes will produce a compressed page again, so the
+  // only thing standing between a conforming file from another SDK and
+  // "cell pointers overrun the payload" is a test that writes one on purpose.
+  //
+  // Which is exactly the defect that started all of this.
+  // ------------------------------------------------------------------
+  group('no profile writes one, and the reader still decodes one', () {
+    test('every profile defaults page_codec to 0', () {
+      for (final p in Profile.values) {
+        expect(p.pageCodec, Codec.none,
+            reason: '${p.name} defaults to a page codec that saves nothing');
+      }
+    });
+
+    test('a compressed page is decoded by a reader whose default is 0', () {
+      final store = PageStore(pageSize: 4096)..pageCodec = Codec.lz4;
+      final id = store.alloc();
+      final payload = _documentish(4000);
+      final page = Uint8List(4096)
+        ..setRange(PageHeader.size, PageHeader.size + payload.length, payload);
+      PageHeader(
+        pageType: PageType.btreeLeaf,
+        treeId: 17,
+        commitId: 1,
+        extentPages: 1,
+        payloadLen: payload.length,
+      ).writeInto(page);
+      store.write(id, page);
+      expect(PageHeader.read(store.readClear(id), pageId: id).isCompressed, isTrue,
+          reason: 'the fixture must actually be compressed, or this proves nothing');
+
+      // The read path must consult the *page's* own flag and never the
+      // reader's default -- which is the whole of section 7's "a file may
+      // hold a mixture".
+      store.pageCodec = Codec.none;
+      expect(
+          Uint8List.sublistView(
+              store.read(id), PageHeader.size, PageHeader.size + payload.length),
+          payload,
+          reason: 'a reader whose default is 0 must still decode a compressed page');
+    });
+  });
+
+  // ------------------------------------------------------------------
   // The space claim. Section 7 exists to make files smaller; a test that only
   // proves correctness lets the benefit quietly go to zero.
   // ------------------------------------------------------------------

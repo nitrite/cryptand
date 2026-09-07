@@ -228,16 +228,25 @@ enum Profile {
   final int filterBitsUpper;
   final int filterBitsLast;
 
-  /// `spec/12-profiles.md` §1's `page_codec` row and `01-container.md` §7:
-  /// LZ4 is the default and **the only codec a Level-0 implementation MUST
-  /// support**. Zstd is feature bit `ZSTD`; this implementation does not set
-  /// it, so every profile names LZ4 and the heavier last-level codec §7
-  /// recommends from `tablet` upward is left to a build that has one.
+  /// `spec/12-profiles.md` §1's `page_codec` row and `01-container.md` §7.
+  ///
+  /// **0 in every profile, and measured rather than assumed.** A page is a
+  /// fixed-size slot addressed by page id, so a compressed page occupies the
+  /// same slot and is written with the same `page_size`-byte write: 20 000
+  /// documents at codec 0 and codec 1 produced identical bytes to device,
+  /// identical page count and identical file size. It cost CPU and leaked
+  /// compressibility through the cleartext `payload_len`.
+  ///
+  /// The write path stays implemented and a writer may set this field
+  /// deliberately; the **read** path is not optional, because another SDK or a
+  /// future minor version may write a compressed page, and refusing it turns a
+  /// readable file into an unreadable one — which is the defect this whole
+  /// area was found through.
   ///
   /// It lives on the enum rather than in `profile.dart`'s behavioural
   /// extension because it is a *superblock field*, and the vector generator
   /// needs it without importing the engine.
-  int get pageCodec => Codec.lz4;
+  int get pageCodec => Codec.none;
 
   int get blobThreshold => switch (this) {
         Profile.mobile || Profile.custom => 65536,

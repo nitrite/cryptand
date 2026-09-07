@@ -388,11 +388,10 @@ void _container(String root) {
     pageSize: 4096,
     commitId: 1,
     profile: Profile.mobile,
-    // `01-container.md` section 7 and `12-profiles.md` section 1's row: LZ4 is
-    // the default and the only codec a Level-0 implementation MUST support.
-    // This vector recorded 0 until 2026-09-07, which is a superblock no
-    // conforming mobile writer would produce -- and the vector file's own rule
-    // is that where a vector and the spec disagree, the vector is wrong.
+    // `12-profiles.md` section 1's row. Now 0 in every profile, and measured
+    // rather than assumed: a page is a fixed-size slot, so a compressed page
+    // occupies the same slot and is written with the same page_size-byte
+    // write. See `01-container.md` section 7 for the numbers.
     pageCodec: Profile.mobile.pageCodec,
     databaseUuid: Uint8List.fromList(List.generate(16, (i) => i)),
     createdUtcMs: 1767225600000,
@@ -428,12 +427,14 @@ void _container(String root) {
       'expected': {
         'vlog_min': 1024,
         'page_size': 4096,
-        'page_codec': 1,
+        'page_codec': 0,
         'rule': 'vlog_min MUST be <= page_size / 4 '
             '(spec/00-conventions.md section 8)',
-        'codec_rule': 'page_codec is LZ4 on every profile: it is the default '
-            'and the only codec a Level-0 implementation MUST support '
-            '(spec/01-container.md section 7)',
+        'codec_rule': 'page_codec is 0 on every profile: a page is a '
+            'fixed-size slot, so compressing one occupies the same slot and '
+            'writes the same page_size bytes -- measured identical in bytes '
+            'to device, page count and file size. A reader MUST still decode '
+            'a compressed page (spec/01-container.md section 7)',
       },
     },
     'page_header': {

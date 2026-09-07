@@ -163,15 +163,23 @@ public enum Profile {
 
     /**
      * {@code page_codec} — {@code spec/12-profiles.md} §1's row, and
-     * {@code 01-container.md} §7: LZ4 is the default and the only codec a
-     * Level-0 implementation MUST support.
+     * {@code 01-container.md} §7.
      *
-     * <p>Zstd is feature bit {@code ZSTD}; this build does not set it, so every
-     * profile names LZ4 and the heavier last-level codec §7 recommends from
-     * {@code TABLET} upward is left to a build that has one.
+     * <p><strong>0 in every profile, and measured rather than assumed.</strong>
+     * A page is a fixed-size slot addressed by page id, so a compressed page
+     * occupies the same slot and is written with the same
+     * {@code page_size}-byte write: 20 000 documents at codec 0 and codec 1
+     * produced identical bytes to device, identical page count and identical
+     * file size. It cost CPU and leaked compressibility through the cleartext
+     * {@code payload_len}.
+     *
+     * <p>The write path stays implemented and a writer may set this field
+     * deliberately; the <strong>read</strong> path is not optional, because
+     * another SDK or a future minor version may write a compressed page, and
+     * refusing it turns a readable file into an unreadable one.
      */
     public int pageCodec() {
-        return Superblock.Codec.LZ4;
+        return Superblock.Codec.NONE;
     }
 
     /**

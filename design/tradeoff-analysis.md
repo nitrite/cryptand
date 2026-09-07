@@ -1270,6 +1270,70 @@ detects `LLVM_PROFILE_FILE` and reports there too. The build-independent half �
 §5.2's bounded step, asserted in bytes — is still asserted on every build, which
 is what stops this from becoming a test that cannot fail.
 
+### 8.19 Phase 22 — the codec that saved nothing, measured
+
+Phase 20 implemented `01-container.md` §7's page codec in all three
+implementations, turned it on in every profile because the spec said to, and
+recorded a real defect on the way (Dart could not read a conforming compressed
+file at all). The **first thing the new cross-language benchmark measured was
+that the codec buys nothing**, and the reason is a property of the container
+rather than of LZ4.
+
+20 000 documents of §1's shape, `desktop`, `page_codec` at 0 and at 1:
+
+| | bytes to device | pages allocated | file bytes | seconds |
+|---|---|---|---|---|
+| `page_codec = 0` | 5 345 280 | 650 | 5 767 168 | 7.682 |
+| `page_codec = 1` | 5 345 280 | 650 | 5 767 168 | 7.680 |
+
+Identical in all three space columns. **A page is a fixed-size slot addressed
+by page id**, so a compressed page occupies the same slot and is written with
+the same `page_size`-byte `write_at`. Compressing it cannot save space and
+cannot save I/O; it can only cost CPU, and it leaks compressibility through the
+cleartext `payload_len` — the CRIME/BREACH shape §7's own security note
+describes.
+
+**The obvious repair does not work either.** Letting the page builder pack
+cells until the *compressed* payload reaches the cap is how block compression
+pays in a variable-block-size LSM. It cannot work here: a B+tree node must
+materialize into a `page_size` buffer to be navigated, so a payload that
+decompresses past `page_size − 40` cannot be read back at all. The fixed page
+is load-bearing for navigation, and it is what makes the codec inert.
+
+**What changed.** `page_codec` is now 0 in every profile, in the spec's table
+and in all three implementations, with the measurement written next to it. The
+write path stays — a writer may set the field deliberately, and another
+container shape may make it pay. The **read** path stays and is now guarded by
+a test in each implementation, because it is the half that has no natural
+exercise once nothing writes a compressed page: the only thing between a
+conforming file from a fourth SDK and "cell pointers overrun the payload" is a
+test that writes one on purpose.
+
+**Where §7 does pay, and why it is still not implemented.** The other half of
+§7 — value-log record compression, flagged in the segment header's `codec` at
+`04-segments.md` §6.2 offset 38 — saves real bytes, and for exactly the reason
+the page half does not: records are packed **back to back across page
+boundaries with no interior page headers**, so a record that compresses to half
+its size leaves the next record half a record earlier. It shrinks the log and,
+through `vlog_space_target_pct`, directly reduces how often GC runs.
+
+The design worked out for it, so the next attempt does not start cold: when a
+segment's `codec ≠ 0`, an unencrypted record carries `uvar plain_len` after
+`tree_id`, where 0 means "the block that follows is plaintext" and any other
+value is the decompressed length of the block — so §7's 12.5 % rule stays a
+per-record decision inside a per-segment codec, and a segment written at
+`codec = 0` is byte-identical to today's. The encrypted framing needs the
+length inside the encrypted unit (§7's compress-then-encrypt order puts it
+there), which is the part that needs care and is why this is written down
+rather than half-built.
+
+**It is deliberately not implemented, and that is recorded here rather than
+discovered later.** This project has now found the same shape four times —
+§14.5.2's page encryption, §13.9's statistics, §01.7's page codec, and the CLI
+— where code was *present and unreached* and nothing failed. Adding a fifth by
+specifying a format change and shipping three implementations that ignore it
+would be the same mistake with better paperwork.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.

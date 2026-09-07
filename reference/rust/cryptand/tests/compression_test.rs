@@ -389,3 +389,55 @@ fn the_threshold_matches_the_recorded_cases() {
             "{raw} -> {comp}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The read path must not rot now that no profile writes a compressed page.
+//
+// `01-container.md` §7 keeps `page_codec` at 0 in every profile, because a
+// compressed page occupies the same fixed-size slot and saves nothing. That
+// makes the *reader* the part with no natural exercise: nothing this
+// implementation writes will ever produce a compressed page again, so the only
+// thing standing between a conforming file from another SDK and
+// "cell pointers overrun the payload" is a test that writes one on purpose.
+//
+// This is the same shape as the defect that started all of it, and the reason
+// the tests above set `page_codec` explicitly rather than relying on a default.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn no_profile_defaults_to_a_page_codec_and_the_reader_still_decodes_one() {
+    use cryptand::container::Profile;
+    use cryptand::profile::ProfileConstants;
+
+    for p in [Profile::Mobile, Profile::Tablet, Profile::Desktop, Profile::Server] {
+        assert_eq!(
+            ProfileConstants::of(p).page_codec,
+            codec::NONE,
+            "{p:?} defaults to a page codec that saves nothing"
+        );
+    }
+
+    // And a page one of those profiles would never write is still read back
+    // exactly. The writer here sets the codec by hand, which is what another
+    // SDK -- or a container with variable-size pages -- would do.
+    let mut w = store_with(codec::LZ4);
+    let id = w.alloc_extent(1).unwrap();
+    let payload = documentish(4000);
+    w.write_page(id, &page_of(&payload, 4096, 1, page_type::BTREE_LEAF)).unwrap();
+    let stored = w.read_page_clear(id).unwrap();
+    assert!(
+        PageHeader::parse(&stored).unwrap().compressed(),
+        "the fixture must actually be compressed, or this proves nothing"
+    );
+
+    // Now read it with the codec default turned off. The read path must
+    // consult the *page's* own `flags.COMPRESSED` and never the reader's
+    // default -- which is the whole of §7's "a file may hold a mixture".
+    w.page_codec = codec::NONE;
+    let back = w.read_page(id).unwrap();
+    assert_eq!(
+        &back[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + payload.len()],
+        &payload[..],
+        "a reader whose default is 0 must still decode a compressed page"
+    );
+}

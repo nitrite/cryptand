@@ -34,7 +34,7 @@ converted to the other by ordinary compaction.
 | **`overlap_bound`** | 1 | 2 | 2 | 3 |
 | segment target size | 2 MiB | 8 MiB | 32 MiB | 128 MiB |
 | **`vlog_segment_bytes`** | 4 MiB | 16 MiB | 64 MiB | 256 MiB |
-| `page_codec` | LZ4 | LZ4, Zstd at last level | Zstd at last level | Zstd at last level |
+| `page_codec` | **0** | 0 | 0 | 0 |
 | filter bits, upper / last | 12 / 10 | 14 / 10 | 16 / 10 | 16 / 10 |
 | **`vlog_space_target_pct`** | 120 | 130 | 150 | 150 |
 | **`locality_debt_pct`** | 20 | 20 | 20 | 25 |
@@ -48,6 +48,15 @@ converted to the other by ordinary compaction.
 
 Bold rows are the ones where the profiles differ enough to change the engine's
 character rather than merely its constants.
+
+**`page_codec` is 0 in every profile**, and it used to be LZ4 in every profile.
+`01-container.md` §7 carries the measurement: a page is a fixed-size slot, so a
+compressed page occupies the same slot and is written with the same
+`page_size`-byte write — identical bytes to device, identical page count,
+identical file size, at 20 000 documents. It cost CPU and leaked
+compressibility through the cleartext `payload_len` and saved nothing. The row
+is kept rather than deleted because a writer may still set it deliberately, and
+because **a reader MUST decode a compressed page whatever this row says**.
 
 ## 2. What each profile is optimising, and why
 

@@ -27,11 +27,19 @@ pub struct ProfileConstants {
     pub level_count: u8,
     pub segment_target_bytes: u32,
     pub vlog_segment_bytes: u32,
-    /// `12-profiles.md`'s `page_codec` row and `01-container.md` §7: LZ4 is
-    /// the default and the only codec a Level-0 implementation MUST support.
-    /// Zstd is feature bit `ZSTD` and this build does not set it, so every
-    /// profile names LZ4 and a heavier last-level codec is left to a build
-    /// that has one.
+    /// `12-profiles.md`'s `page_codec` row and `01-container.md` §7.
+    ///
+    /// **0 in every profile, and measured rather than assumed.** A page is a
+    /// fixed-size slot addressed by page id, so a compressed page occupies the
+    /// same slot and is written with the same `page_size`-byte write:
+    /// 20 000 documents at codec 0 and codec 1 produced identical bytes to
+    /// device, identical page count and identical file size. It cost CPU and
+    /// leaked compressibility through the cleartext `payload_len`.
+    ///
+    /// The write path stays implemented and a writer may set this field
+    /// deliberately; the **read** path is not optional, because another SDK or
+    /// a future minor version may write a compressed page and refusing it
+    /// turns a readable file into an unreadable one.
     pub page_codec: u8,
     pub filter_bits_upper: u8,
     pub filter_bits_last: u8,
@@ -69,7 +77,7 @@ impl ProfileConstants {
                 level_count: 4,
                 segment_target_bytes: 2 << 20,
                 vlog_segment_bytes: 4 << 20,
-                page_codec: crate::codec::LZ4,
+                page_codec: crate::codec::NONE,
                 filter_bits_upper: 12,
                 filter_bits_last: 10,
                 vlog_space_target_pct: 120,
@@ -98,7 +106,7 @@ impl ProfileConstants {
                 level_count: 4,
                 segment_target_bytes: 8 << 20,
                 vlog_segment_bytes: 16 << 20,
-                page_codec: crate::codec::LZ4,
+                page_codec: crate::codec::NONE,
                 filter_bits_upper: 14,
                 filter_bits_last: 10,
                 vlog_space_target_pct: 130,
@@ -127,7 +135,7 @@ impl ProfileConstants {
                 level_count: 4,
                 segment_target_bytes: 128 << 20,
                 vlog_segment_bytes: 256 << 20,
-                page_codec: crate::codec::LZ4,
+                page_codec: crate::codec::NONE,
                 filter_bits_upper: 16,
                 filter_bits_last: 10,
                 vlog_space_target_pct: 150,
@@ -158,7 +166,7 @@ impl ProfileConstants {
                 level_count: 4,
                 segment_target_bytes: 32 << 20,
                 vlog_segment_bytes: 64 << 20,
-                page_codec: crate::codec::LZ4,
+                page_codec: crate::codec::NONE,
                 filter_bits_upper: 16,
                 filter_bits_last: 10,
                 vlog_space_target_pct: 150,

@@ -287,9 +287,43 @@ Per page and per value-log record, never per file.
   mixture and a codec may change without a rewrite.
 - Codec ids: `0` none, `1` **LZ4 block format** (raw block, no frame header;
   `payload_len` gives the decompressed size), `2` **Zstd** (raw block).
-- LZ4 is the default and the only codec a Level-0 implementation MUST support.
+- LZ4 is the only codec a Level-0 implementation MUST support **as a reader**.
   Zstd is feature bit `ZSTD`; a writer setting `page_codec = 2` MUST set it in
   `features_required`.
+- **`page_codec` SHOULD be 0, and every profile now defaults it to 0.** An
+  earlier version of this section made LZ4 the default and
+  `12-profiles.md` §1 named it in every profile row. That was wrong, and it was
+  wrong for a reason that is a property of this container rather than of the
+  codec: **a page is a fixed-size slot addressed by page id**, so a compressed
+  page occupies the same slot and is written with the same `page_size`-byte
+  write. Compressing it cannot save space or I/O.
+
+  Measured, 20 000 documents of `design/performance-model.md` §1's shape, on
+  `desktop`, with `page_codec` at `0` and at `1`:
+
+  | | bytes to device | pages allocated | file bytes |
+  |---|---|---|---|
+  | `page_codec = 0` | 5 345 280 | 650 | 5 767 168 |
+  | `page_codec = 1` | 5 345 280 | 650 | 5 767 168 |
+
+  Identical in all three columns. Page compression in this container costs CPU
+  on every page write and every page read, leaks compressibility through the
+  cleartext `payload_len` (the CRIME/BREACH shape §7's security note already
+  describes), and buys nothing.
+
+  The obvious repair — let the page builder pack cells until the *compressed*
+  payload reaches the cap — does not work either: a B+tree node must
+  materialize into a `page_size` buffer to be navigated, so a payload that
+  decompresses past `page_size − 40` cannot be read back at all.
+
+  **A reader MUST still decode a compressed page**, because another SDK, a
+  future minor version, or a container with variable-size pages may write one,
+  and because refusing it turns a readable file into an unreadable one. That
+  read path is not optional and is where the real defect was: one reference
+  implementation ignored `flags.COMPRESSED` entirely and mis-decoded a
+  conforming file.
+
+  **Where the codec does pay is the value log**, and that is the next bullet.
 - A page is stored compressed only if compression saves ≥ 12.5 % **of the
   payload it compresses** — `compressed + raw / 8 ≤ raw`. Measured against the
   payload rather than the page, because the 40-byte header is never compressed
@@ -341,9 +375,21 @@ some of a page's content and watch the file, that is the CRIME/BREACH shape.
 An implementation MUST offer `page_codec = 0` on an encrypted file and SHOULD
 default to it for a tree the application marks sensitive
 (`14-security.md` §7).
-- Value-log records are compressed individually, flagged in the segment header's
-  `codec`. Compressing individually (rather than per block) keeps a single-record
-  read to one decompression.
+- **Value-log records are compressed individually, flagged in the segment
+  header's `codec`** (`04-segments.md` §6.2, offset 38). Compressing
+  individually rather than per block keeps a single-record read to one
+  decompression.
+
+  This is the half of §7 that saves real bytes, and for the reason the page
+  half does not: records are packed **back to back across page boundaries with
+  no interior page headers**, so a record that compresses to half its size
+  leaves the next record half a record earlier. It shrinks the value log, and
+  through `vlog_space_target_pct` it directly reduces how often GC has to run.
+
+  It is **not implemented in any reference implementation**, and this sentence
+  is here so that the next person does not have to measure it again to find
+  that out. `design/tradeoff-analysis.md` §8.19 carries the measurement and the
+  design that was worked out for it.
 
 An implementation SHOULD apply a heavier codec to segments at the last level
 (cold, read-mostly, rarely rewritten) than to L0. The codec is per page, and
