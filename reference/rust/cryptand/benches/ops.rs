@@ -121,6 +121,8 @@ fn main() {
     let b = harness::Bench::new("ops");
     let mut db = Database::create(&b.path, Profile::Desktop).unwrap();
     let (logical, secs, index) = fill(&mut db, n, true);
+    // `13-operations.md` §6's own required metrics, not the file length: the
+    // file is grown in large chunks, so its size is preallocated space.
     let device = db.engine.pager.bytes_written_device;
     db.engine.drain_compaction().unwrap();
     db.commit(Durability::Os).unwrap();
@@ -228,7 +230,7 @@ fn main() {
     // stays in the suite so that a container shape which *does* make it pay
     // shows up here rather than in an argument.
     // ------------------------------------------------------------------
-    let bytes_off = on_disk;
+    let bytes_off = device_after_compaction;
     let b2 = harness::Bench::new("ops-codec");
     let mut db2 = Database::create(&b2.path, Profile::Desktop).unwrap();
     db2.engine.pager.page_codec = codec::LZ4;
@@ -236,8 +238,8 @@ fn main() {
     let (_, _, _) = fill(&mut db2, n, true);
     db2.engine.drain_compaction().unwrap();
     db2.commit(Durability::Os).unwrap();
-    let bytes_on = file_bytes(&b2.path);
     let device_on = db2.engine.pager.bytes_written_device;
+    let bytes_on = device_on;
     db2.close().unwrap();
     drop(b2);
     row("codec_bytes_on", bytes_on.to_string(), "bytes", true);

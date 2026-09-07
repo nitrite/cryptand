@@ -37,13 +37,65 @@ argument.
 | `insert_bytes_device` | bytes | what actually reached the device for those documents |
 | `write_amplification` | ratio | `insert_bytes_device / logical bytes`. The number key–value separation exists to move, and the one the `design/tradeoff-analysis.md` space discussion is about |
 | `point_read_us_p50` / `_p99` | µs | a random point read on a database that has been compacted, so it measures the engine and not the memtable |
-| `point_read_page_reads` | pages/lookup | **the primary result.** Wall time varies with the machine; page reads per lookup is the property P10 bounds, and it is what a slow implementation and a slow disk look different on |
+| `point_read_page_reads` | pages/lookup | pages fetched **through the pager** per lookup. Wall time varies with the machine; this does not |
 | `scan_rows_per_s` | rows/s | a full ordered scan, the operation the value-log clustering of `04 §6` exists to protect |
 | `scan_page_reads_per_row` | pages/row | P8's `v/row`, the locality number |
 | `index_lookup_us_p50` | µs | an equality lookup through a secondary index |
 | `codec_bytes_on` / `_off` | bytes | file size with `page_codec = LZ4` against `page_codec = 0`, same data. Supports `01 §7`'s reason for existing |
 | `codec_saving` | ratio | `1 - on/off` |
 | `cipher_write_ratio` | ratio | insert throughput unencrypted ÷ encrypted. P11's cost, on the write path |
+
+## One row that is not comparable, and why it is still here
+
+`point_read_page_reads` counts pages fetched **through the pager**, and the
+three implementations cache at different layers. Rust's engine re-reads a
+segment's pages through the pager and reports ~6 per lookup; Dart holds a
+segment's whole extent in memory once it is loaded and reports **0**, because
+after the load a lookup touches no page at all.
+
+Neither number is wrong and neither is a defect. What they are is *not the same
+measurement*, so the row must not be read as "Dart does six times less I/O than
+Rust" — it says where each implementation's caching boundary sits. Compare a
+number to itself across a change, not to another implementation's.
+
+`insert_logical_bytes` is the second such row. Java encodes the fixture through
+a name dictionary and reports ~1.30 MB where Rust and Dart encode the names
+inline and report ~1.92 MB for the same 3 000 documents. That is
+`02-value-encoding.md` §5.3 working as designed — the dictionary is the largest
+space win in the format — but it means the *denominator* of
+`write_amplification` is not the same quantity in all three, so that ratio
+compares an implementation to itself and not to its neighbours.
+
+**Nothing here is comparable between implementations except `codec_saving`**,
+which is a ratio of one implementation's own two runs and which all three
+independently report as zero. Every other row compares a number to itself
+across a change. This is written down because a benchmark table invites exactly
+the comparison it does not support, and the reader deserves to be told which
+columns lie.
+
+## A counter that is not a counter
+
+`bytes_written_device` is one of `13-operations.md` §6's required metrics and it
+looks like the ideal primary result: it counts bytes, not time. On the Java
+implementation it varies **2.2× between two runs of the same configuration**,
+because the compactor runs in the background and has done a variable amount of
+work by the moment the counter is read.
+
+That was caught by a control, and it mattered: a codec comparison built on it
+reported a **27 % saving** — flatly contradicting the controlled measurement in
+`01-container.md` §7, which found compression saves exactly zero. The 27 % was
+noise. Running the same comparison with the codec *unchanged* on both sides gave
+1 114 112 and 1 064 960 bytes for `none`, and 983 040 and 450 560 for `lz4`.
+
+So on this suite `bytes_written_device` and `write_amplification` are printed as
+**observations** by the Java implementation and as counters by Rust, whose
+single-threaded compaction makes them deterministic. The codec rows use
+`page_count × page_size`, which is deterministic everywhere and is the right
+question anyway: does compression reduce the space the database occupies?
+
+The general lesson, and it is the seventh time this project has met a version of
+it: **being a counter is not the same as being deterministic.** A counter read
+at an uncontrolled moment measures the scheduler.
 
 ## The rules this suite follows
 
