@@ -543,7 +543,7 @@ impl Superblock {
 }
 
 /// §3, the 40-byte header every page but the two superblocks begins with.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct PageHeader {
     pub checksum: u32,
     pub page_type: u8,
@@ -562,6 +562,41 @@ pub struct PageHeader {
     /// field, in the reserved u32 at offset 28, meaning what §5.2 needs.
     pub stored_len: u32,
     pub nonce: u64,
+}
+
+/// `01-container.md` §3 fixes `extent_pages` at "**1** for an ordinary page;
+/// > 1 for a multi-page extent head", so the default cannot be `u32::default()`.
+///
+/// It was, via `#[derive(Default)]` plus `..Default::default()` at every
+/// ordinary-page construction site — so this implementation wrote a **0** into
+/// that field on every B+tree page, every filter page and every segment leaf it
+/// has ever produced. Nothing here noticed, because nothing here reads the
+/// field on a page it already knows is one page long. The Java implementation
+/// found it, could not refuse it without making files it had to read unopenable,
+/// and carries a written-out accommodation for it to this day; the Dart
+/// implementation's §9.1 bounds check refused it outright, which is what a
+/// reader that trusts §3 does.
+///
+/// It matters beyond tidiness for one reason: `14-security.md` §5.2 makes the
+/// 40-byte page header the AEAD's **AAD**, so the byte is authenticated. Two
+/// SDKs that disagree about what belongs in it cannot decrypt each other's
+/// pages at all — and the field being pure redundancy on an ordinary page is
+/// exactly why the disagreement stays invisible until encryption is turned on.
+impl Default for PageHeader {
+    fn default() -> PageHeader {
+        PageHeader {
+            checksum: 0,
+            page_type: 0,
+            flags: 0,
+            codec: 0,
+            tree_id: 0,
+            extent_pages: 1,
+            commit_id: 0,
+            payload_len: 0,
+            stored_len: 0,
+            nonce: 0,
+        }
+    }
 }
 
 impl PageHeader {
@@ -619,7 +654,61 @@ impl PageHeader {
         if crc32c(&page[4..end]) != h.checksum {
             return corrupt(format!("page {page_id} checksum mismatch"));
         }
+        h.check_bounds(page.len(), page_id)?;
         Ok(h)
+    }
+
+    /// `14-security.md` §9.1 — "a decoder MUST bounds-check against the
+    /// containing page or extent **before allocating**".
+    ///
+    /// The three length fields come straight out of the file and every one of
+    /// them is an offset into a buffer somewhere. There was no check here at
+    /// all: the shared conformance corpus's `v1.0-corrupt-huge-len.cryptand`
+    /// sets `payload_len` to `0xFFFF_FFFC` with the checksum repaired, and this
+    /// reader **opened, read and verified it clean**. Nothing crashed, because
+    /// a Rust slice refuses an out-of-range index rather than reading past it —
+    /// but §9.1 requires a *typed corruption error*, and silently proceeding on
+    /// a length an attacker chose is not one. Memory safety made the failure
+    /// quiet; it did not make it correct.
+    ///
+    /// The bound is the **extent**, not the page: §3 lets a multi-page extent
+    /// head declare a payload that runs across its interior pages, and
+    /// `extent_pages` says how far.
+    ///
+    /// `extent_pages = 0` is refused only on an extent head. Elsewhere the
+    /// field is pure redundancy — the page is one page by definition — and this
+    /// implementation itself wrote 0 there on every ordinary page for as long
+    /// as `PageHeader` derived `Default`, so refusing it outright would make
+    /// files it wrote unopenable.
+    ///
+    /// **The arithmetic must not overflow.** `extent_pages` and `page_size` are
+    /// both `u32`-wide and their product does not fit a `u32`; computing the
+    /// capacity by multiplication in a 32-bit type wraps, and a wrapped
+    /// capacity turns the check into an accept. It is written below as a sum in
+    /// `u64` for that reason.
+    pub fn check_bounds(&self, page_bytes: usize, page_id: u64) -> Result<()> {
+        let extent_head = self.flags & page_flags::EXTENT_HEAD != 0;
+        if self.extent_pages == 0 && extent_head {
+            return corrupt(format!(
+                "page {page_id}: extent_pages is 0 on an extent head, which is the                  only record of the extent's length"
+            ));
+        }
+        let pages = self.extent_pages.max(1) as u64;
+        let capacity = (page_bytes as u64).saturating_sub(PAGE_HEADER_BYTES as u64)
+            + (pages - 1) * page_bytes as u64;
+        if self.payload_len as u64 > capacity {
+            return corrupt(format!(
+                "page {page_id}: payload_len {} is past its {pages}-page extent ({capacity} usable)",
+                self.payload_len
+            ));
+        }
+        if self.stored_len as u64 > capacity {
+            return corrupt(format!(
+                "page {page_id}: stored_len {} is past its {pages}-page extent ({capacity} usable)",
+                self.stored_len
+            ));
+        }
+        Ok(())
     }
 
     /// The end of the checksummed range for this page.

@@ -254,19 +254,26 @@ int cmdVerify(String path) {
   // tag, and no `(key, nonce)` pair twice. Reported as its own class because
   // §9 is explicit that tampering is neither corruption nor a leak.
   final crypto = io.e.verifyEncryption();
+  final leaks = structure.of(FindingClass.leak);
   stdout.writeln('verify: ${io.e.manifest.all.length} segments, '
       '${findings.length + structure.findings.length + crypto.length} '
-      'structural findings');
+      'findings (${leaks.length} of them leaks)');
   for (final f in findings) {
     stdout.writeln('  Corruption: quarantined segment ${f.segmentId}');
   }
   for (final f in structure.findings) {
-    stdout.writeln('  Corruption: $f');
+    stdout.writeln('  ${f.kind.name}: $f');
   }
   for (final f in crypto) {
     stdout.writeln('  Tampering: $f');
   }
-  return findings.isEmpty && structure.isClean && crypto.isEmpty ? 0 : 1;
+  // `isSound`, not `isClean`. `spec/01-container.md` §9 says "A leak is
+  // repairable. A double-allocation is corruption", so a leak is wasted space
+  // in a sound file and not a reason to fail the round-trip gate — and a
+  // copy-on-write container leaks tree 1's own pages by one commit as a
+  // property of the format (`design/tradeoff-analysis.md` defect 55). Counting
+  // them failed the gate in all four directions on files that were correct.
+  return findings.isEmpty && structure.isSound && crypto.isEmpty ? 0 : 1;
 }
 
 /// `spec/14-security.md` section 3.3's `kdf = 0` credential, when the gate is

@@ -1053,6 +1053,31 @@ final class Segment {
     for (var i = 0; i < treeCount; i++) {
       span[r.u32()] = r.u64();
     }
+    // `spec/14-security.md` section 9.1 — every one of these came out of the
+    // file and two of them are page indices into this extent. Checking them
+    // here, once, is what stops a hostile header from steering a slice.
+    //
+    // `u64` matters: [ByteReader.u64] returns the raw 64-bit pattern, so a
+    // `filter_page` of `0xFFFF_FFFF_FFF0_0000` arrives as a *negative* int and
+    // `first < pageCount` is true. `Uint8List.sublistView` then gets a negative
+    // start and raises a `RangeError` — an untyped failure, which is the
+    // violation regardless of what the field meant. Found by
+    // `lib/src/fuzz.dart`; a bound written as `< pageCount` alone would not
+    // have caught it, which is why both ends are checked.
+    void checkPage(int v, String field) {
+      if (v < 0 || v >= pageCount) {
+        throw CorruptionException(
+            'segment header $field $v outside its $pageCount-page extent');
+      }
+    }
+
+    checkPage(rootPage, 'root_page');
+    // 0 is "no filter" (section 2.4), and is the only value outside the extent
+    // that means anything.
+    if (filterPage != 0) checkPage(filterPage, 'filter_page');
+    if (entryCount < 0) {
+      throw CorruptionException('segment header entry_count $entryCount');
+    }
     return SegmentHeader(
       segmentId: segmentId,
       level: level,
@@ -1148,8 +1173,7 @@ final class Segment {
           extent, i * pageSize, (i + 1) * pageSize);
       final h = PageHeader.read(page, pageId: i);
       if (h.pageType != PageType.segmentFilter) break;
-      out.add(Uint8List.sublistView(
-          page, PageHeader.size, PageHeader.size + h.payloadLen));
+      out.add(h.payloadIn(page, pageId: i));
     }
     return _filter = BlockedBloom.decodePayload(out.takeBytes());
   }

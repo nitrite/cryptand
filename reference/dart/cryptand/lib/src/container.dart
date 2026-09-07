@@ -634,6 +634,8 @@ final class PageHeader {
 
   bool get isCompressed => flags & PageFlags.compressed != 0;
 
+  bool get isExtentHead => flags & PageFlags.extentHead != 0;
+
   /// Writes the header into [page] and computes the checksum over bytes
   /// `4..page.length-1`, as stored.
   void writeInto(Uint8List page) {
@@ -691,7 +693,7 @@ final class PageHeader {
           'computed 0x${actual.toRadixString(16)}',
           pageId: pageId);
     }
-    return PageHeader(
+    final h = PageHeader(
       pageType: bd.getUint8(4),
       flags: bd.getUint8(5),
       codecOrReserved: bd.getUint16(6, Endian.little),
@@ -702,5 +704,87 @@ final class PageHeader {
       storedLen: bd.getUint32(28, Endian.little),
       nonce: bd.getUint64(32, Endian.little),
     );
+    h._checkBounds(page.length, pageId);
+    return h;
+  }
+
+  /// `spec/14-security.md` section 9.1 — "a decoder MUST bounds-check against
+  /// the containing page or extent **before allocating**".
+  ///
+  /// The three length fields are read straight from the file and every one of
+  /// them is an offset into a buffer somewhere. Checking them here, at the one
+  /// place a header is ever parsed, is what makes that rule hold for every
+  /// consumer instead of at whichever call sites remembered — and one had not:
+  /// a `payload_len` of `0xFFFFFFFC` on a filter page reached
+  /// `Uint8List.sublistView` and produced a `RangeError`, which is an untyped
+  /// failure and so a section 9.1 violation regardless of what it was called.
+  ///
+  /// The bound is the **extent**, not the page: section 3 lets a multi-page
+  /// extent head declare a payload that runs across its interior pages, and
+  /// `extent_pages` is what says how far. An `extent_pages` of 0 is refused
+  /// because section 3 fixes it at "1 for an ordinary page; > 1 for a
+  /// multi-page extent head", and a 0 there makes every payload bound zero.
+  ///
+  /// **The arithmetic must not overflow.** `extent_pages` and `page_size` are
+  /// both `u32`-wide, so their product overflows a 32-bit signed int; an
+  /// implementation whose native int is 32 bits (or whose bound is computed in
+  /// one) gets a negative capacity and the check inverts into an accept. The
+  /// division below has the same meaning and cannot overflow anywhere.
+  void _checkBounds(int pageBytes, int? pageId) {
+    // Section 3 fixes `extent_pages` at "1 for an ordinary page; > 1 for a
+    // multi-page extent head", and a 0 there makes every payload bound zero.
+    //
+    // It is refused **only on an extent head**, and the reason is a
+    // divergence, not a courtesy. On a page that is not an extent head the
+    // field is pure redundancy — the page is one page by definition — and the
+    // Rust reference wrote a 0 there on every ordinary page it ever produced,
+    // because its `PageHeader` derived `Default` and the derived `u32` default
+    // is 0 rather than section 3's 1. Refusing it outright makes files that are
+    // otherwise perfectly readable unopenable, which is the opposite of what
+    // `00-conventions.md` section 9 resolves ambiguity toward. On an extent
+    // *head* it stays corruption: there the field is the only record of how far
+    // the extent runs, and guessing it would be guessing at the size of
+    // something.
+    final pages = extentPages < 1
+        ? (isExtentHead
+            ? throw CorruptionException(
+                'page header declares extent_pages $extentPages on an extent '
+                'head, which is the only record of the extent length',
+                pageId: pageId)
+            : 1)
+        : extentPages;
+    final capacityPerPage = pageBytes - size;
+    if (capacityPerPage < 0) {
+      throw CorruptionException('page shorter than its header', pageId: pageId);
+    }
+    // `payload_len <= extent_pages * page_bytes - size`, rearranged so no
+    // multiplication happens.
+    final maxPayload = capacityPerPage + (pages - 1) * pageBytes;
+    if (payloadLen > maxPayload) {
+      throw CorruptionException(
+          'page header declares payload_len $payloadLen, past its '
+          '$pages-page extent ($maxPayload usable)',
+          pageId: pageId);
+    }
+    if (storedLen > maxPayload) {
+      throw CorruptionException(
+          'page header declares stored_len $storedLen, past its '
+          '$pages-page extent ($maxPayload usable)',
+          pageId: pageId);
+    }
+  }
+
+  /// The payload of a **single-page** page, bounds-checked.
+  ///
+  /// Every reader of a page that is not an extent head wants exactly this, and
+  /// the shortest way to write it must be the safe one — [read]'s bound is the
+  /// whole extent, which is correct there and too loose here.
+  Uint8List payloadIn(Uint8List page, {int? pageId}) {
+    if (size + payloadLen > page.length) {
+      throw CorruptionException(
+          'page declares payload_len $payloadLen, past its single page',
+          pageId: pageId);
+    }
+    return Uint8List.sublistView(page, size, size + payloadLen);
   }
 }

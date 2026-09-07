@@ -22,6 +22,7 @@ import 'cke.dart';
 import 'container.dart';
 import 'cow.dart';
 import 'cve.dart';
+import 'errors.dart';
 import 'value.dart';
 
 /// One entry of tree 9.
@@ -53,13 +54,17 @@ final class Change {
       }));
 
   static Change decode(Uint8List keyBytes, Uint8List value) {
-    final k = decodeKey(keyBytes) as CArray;
-    final d = decodeValue(value) as CDoc;
+    final k = expectValue<CArray>(decodeKey(keyBytes), 'change feed key');
+    if (k.items.length < 2) {
+      throw const CorruptionException(
+          'change feed key: expected (tree_id, seq), found fewer items');
+    }
+    final d = expectValue<CDoc>(decodeValue(value), 'change feed record');
     return Change(
-      treeId: ((k.items[0] as CInt).magnitude).lo,
-      seq: ((k.items[1] as CInt).magnitude).lo,
-      op: (d['op']! as CStr).value,
-      key: (d['key']! as CBytes).value,
+      treeId: expectValue<CInt>(k.items[0], 'change feed tree_id').magnitude.lo,
+      seq: expectValue<CInt>(k.items[1], 'change feed seq').magnitude.lo,
+      op: expectField<CStr>(d, 'op', 'change feed record').value,
+      key: expectField<CBytes>(d, 'key', 'change feed record').value,
       id: d['id'],
     );
   }

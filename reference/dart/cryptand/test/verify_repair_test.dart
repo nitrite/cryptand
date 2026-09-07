@@ -42,7 +42,7 @@ void main() {
     test('a healthy database verifies clean', () {
       final e = seeded();
       final r = e.verifyStructure();
-      expect(r.isClean, isTrue, reason: r.toString());
+      expect(r.isSound, isTrue, reason: r.toString());
       expect(r.segmentsChecked, greaterThan(1));
       expect(r.entriesChecked, greaterThan(0));
     });
@@ -81,7 +81,7 @@ void main() {
       e.clearLevelCache();
 
       final r = e.verifyStructure(deep: false);
-      expect(r.isClean, isFalse);
+      expect(r.isSound, isFalse);
       expect(r.findings.map((f) => f.invariant), contains('11.6'));
       expect(r.findings.firstWhere((f) => f.invariant == '11.6').message,
           contains('levelled level MUST be disjoint'));
@@ -132,7 +132,7 @@ void main() {
       final victim = e.refsAt(e.lastLevel).first;
       e.extents[victim.segmentId]!.extent[4096 + 100] ^= 0xFF;
       final r = e.verifyStructure();
-      expect(r.isClean, isFalse);
+      expect(r.isSound, isFalse);
       expect(r.findings.first.invariant, '01§9.2');
       expect(r.findings.first.segmentId, victim.segmentId);
     });
@@ -176,7 +176,7 @@ void main() {
       expect(e.scanTree(tree).length, before);
       expect([for (var l = 0; l <= e.lastLevel; l++) e.refsAt(l).length],
           levelsBefore);
-      expect(e.verifyStructure().isClean, isTrue);
+      expect(e.verifyStructure().isSound, isTrue);
     });
 
     test('every field the manifest key needs survives in the header', () {

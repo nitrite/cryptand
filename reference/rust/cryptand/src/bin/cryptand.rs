@@ -196,10 +196,29 @@ fn backup(path: &str, dest: &str, incremental: bool) -> cryptand::Result<ExitCod
 /// finished." Every mutation must produce a named error, never a crash, a hang,
 /// or an unbounded allocation.
 ///
-/// Structure-aware matters: most of a database's bytes are unused value-log
-/// record space, so uniform bit flips land in padding and measure nothing. The
-/// targets here are the ones a hostile file would edit — the superblock's own
-/// fields, page headers, and the payloads behind them.
+/// Three things about it are not obvious and are the reason it finds anything:
+///
+///  * **Structure-aware.** Most of a database's bytes are unused value-log
+///    record space, so uniform bit flips land in padding and measure nothing.
+///    The targets here are the ones a hostile file would edit — the
+///    superblock's own fields, page headers, and the payloads behind them.
+///
+///  * **The checksum is repaired after the mutation.** This version did not do
+///    it, and that is the more interesting half. §3's `checksum` "verifies
+///    before decompression and before decryption", so a mutant with a stale
+///    checksum dies at the container gate and *no decoder sees a byte* — the
+///    run measures CRC-32C and reports it as a pass. Measured here: repairing
+///    the checksum moves the population from 43 mutants reaching the reader in
+///    400 to 233, a 5.4× change in what is actually under test. §9.4 is the
+///    same point from the other side — a CRC "is trivially recomputed by anyone
+///    who edits the file", so an attacker's file always has a valid one, and a
+///    fuzzer that assumes otherwise is not modelling the attacker §9 describes.
+///
+///  * **It reads, it does not only verify.** `verify()` walks structure and
+///    checksums; the decoders that turn bytes into values — CVE, CKE, the
+///    value-log record, an index entry — only run when something reads. The
+///    Dart port of this fuzzer found four untyped failures on its first runs
+///    and three of them were behind a read, not a verify.
 fn fuzz(path: &str, iterations: u64) -> cryptand::Result<ExitCode> {
     let original = std::fs::read(path)?;
     // `open_shared`, not `open`: the probe only reads, and taking the
@@ -248,20 +267,69 @@ fn fuzz(path: &str, iterations: u64) -> cryptand::Result<ExitCode> {
     let (mut panics, mut accepted, mut refused, mut found) = (0u64, 0u64, 0u64, 0u64);
     for _ in 0..iterations {
         let mut b = original.clone();
+        let mut touched: Vec<usize> = Vec::new();
         for _ in 0..1 + (next() % 4) {
             let (base, len) = structural[(next() as usize) % structural.len()];
             let at = base as usize + (next() as usize) % len.max(1);
-            if at < b.len() {
-                b[at] ^= 1 << (next() % 8);
+            if at >= b.len() {
+                continue;
             }
+            // A bit flip, a byte to 0x00, a byte to 0xFF, and a run of 0xFF.
+            // The last one matters on its own: a length field only becomes an
+            // allocation bomb when *all* its bytes are set, and one flipped bit
+            // almost never does that.
+            match next() % 4 {
+                0 => b[at] ^= 1 << (next() % 8),
+                1 => b[at] = 0x00,
+                2 => b[at] = 0xFF,
+                _ => {
+                    let w = 1 + (next() as usize) % 8;
+                    for k in 0..w {
+                        if at + k < b.len() {
+                            b[at + k] = 0xFF;
+                        }
+                    }
+                }
+            }
+            touched.push(at / page_size);
+        }
+        // Repair every touched page's checksum. Pages 0 and 1 are the
+        // superblock slots, which have their own rule; a mutation there is
+        // meant to be caught, and is.
+        for pg in touched {
+            if pg < 2 {
+                continue;
+            }
+            let off = pg * page_size;
+            if off + page_size > b.len() {
+                continue;
+            }
+            let page = &b[off..off + page_size];
+            let Ok(h) = cryptand::container::PageHeader::parse(page) else { continue };
+            // `checksum_range_end`, not `page_size`: a value-log head page
+            // checksums only its immutable header region, because records are
+            // appended into its tail for the life of the segment. A repair that
+            // covers the whole page writes a checksum that is wrong the moment
+            // it is written, and the mutation is then "caught" by the repair
+            // rather than by the reader.
+            let end = cryptand::container::PageHeader::checksum_range_end(page, &h);
+            let crc = cryptand::hash::crc32c(&b[off + 4..off + end]);
+            b[off..off + 4].copy_from_slice(&crc.to_le_bytes());
         }
         std::fs::write(&tmp, &b)?;
         let r = std::panic::catch_unwind(|| {
             let mut e = Engine::open(&tmp, None)?;
             let rep = e.verify()?;
-            Ok::<usize, cryptand::Error>(
-                rep.of(Class::Corruption).len() + rep.of(Class::Tampering).len(),
-            )
+            let n = rep.of(Class::Corruption).len() + rep.of(Class::Tampering).len();
+            // And then *read*, which is where the decoders are. Every tree the
+            // catalog names, every row in it, through the ordinary cursor path.
+            let cat = std::mem::replace(&mut e.catalog, cryptand::catalog::Catalog::new(0, 0, 16));
+            let all = cat.all(&mut e.pager);
+            e.catalog = cat;
+            for (_, d) in all.unwrap_or_default() {
+                let _ = e.scan_tree(d.tree_id(), None, None, None, true);
+            }
+            Ok::<usize, cryptand::Error>(n)
         });
         match r {
             Err(_) => panics += 1,

@@ -147,8 +147,10 @@ final class TreeDescriptor {
   /// The descriptor as stored, unknown fields included.
   final CDoc doc;
 
-  int get treeId => ((doc['tree_id']! as CInt).magnitude).lo;
-  String get kind => (doc['kind']! as CStr).value;
+  int get treeId =>
+      expectField<CInt>(doc, 'tree_id', 'tree descriptor').magnitude.lo;
+  String get kind =>
+      expectField<CStr>(doc, 'kind', 'tree descriptor').value;
   bool get levelled => (doc['levelled'] as CBool?)?.value ?? false;
   int get entries => ((doc['entries'] as CInt?)?.magnitude)?.lo ?? 0;
   int get features => ((doc['features'] as CInt?)?.magnitude)?.lo ?? 0;
@@ -184,7 +186,7 @@ final class TreeDescriptor {
   Uint8List encode() => encodeValue(doc);
 
   static TreeDescriptor decode(Uint8List bytes) =>
-      TreeDescriptor(decodeValue(bytes) as CDoc);
+      TreeDescriptor(expectValue<CDoc>(decodeValue(bytes), 'tree descriptor'));
 
   @override
   String toString() => 'tree ${doc['tree_id']} $kind';
@@ -256,7 +258,9 @@ final class Catalog {
 
   String? nameOf(int treeId) {
     final v = byId.get(_idKey(treeId));
-    return v == null ? null : (decodeValue(v) as CStr).value;
+    return v == null
+        ? null
+        : expectValue<CStr>(decodeValue(v), 'tree name').value;
   }
 
   /// §4: "A reader that does not recognize a `kind` MUST treat the tree as
@@ -281,7 +285,10 @@ final class Catalog {
 
   Iterable<(String, TreeDescriptor)> get all sync* {
     for (final (k, v) in tree.scan()) {
-      yield ((decodeKey(k) as CStr).value, TreeDescriptor.decode(v));
+      yield (
+        expectValue<CStr>(decodeKey(k), 'tree index key').value,
+        TreeDescriptor.decode(v)
+      );
     }
   }
 
@@ -383,7 +390,9 @@ final class Attributes {
 
   CDoc? get(String treeName) {
     final v = tree.get(encodeKey(CStr(treeName)));
-    return v == null ? null : decodeValue(v) as CDoc;
+    return v == null
+        ? null
+        : expectValue<CDoc>(decodeValue(v), 'store metadata');
   }
 
   void put(String treeName, CDoc attrs) =>

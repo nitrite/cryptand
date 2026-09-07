@@ -52,7 +52,17 @@ export 'src/cow.dart' show CowTree, PageStore;
 export 'src/crc32c.dart' show crc32c;
 export 'src/database.dart' show Collection, Database, kFormatVersion;
 export 'src/cve.dart'
-    show DocFlags, DocView, NameDict, decodeValue, encodeValue, readValue, writeDoc, writeValue;
+    show
+        DocFlags,
+        DocView,
+        NameDict,
+        decodeValue,
+        encodeValue,
+        expectField,
+        expectValue,
+        readValue,
+        writeDoc,
+        writeValue;
 export 'src/engine.dart'
     show
         CompactionJob,
@@ -61,7 +71,19 @@ export 'src/engine.dart'
         LocalityPolicy,
         ScanResult,
         percentile;
-export 'src/verify.dart' show EngineVerify, Finding, VerifyReport;
+export 'src/fuzz.dart'
+    show
+        FuzzFinding,
+        FuzzOutcome,
+        FuzzReport,
+        FuzzRng,
+        FuzzTarget,
+        fuzzImage,
+        fuzzTargets,
+        mutate,
+        repairChecksum;
+export 'src/verify.dart'
+    show EngineVerify, Finding, FindingClass, VerifyReport;
 export 'src/txn.dart'
     show
         Backpressure,

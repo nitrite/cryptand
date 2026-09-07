@@ -249,6 +249,7 @@ abstract final class DatabaseFile {
     int mCostKib = 65536,
     int parallelism = 1,
     String label = 'keyslot 0',
+    int? vlogSegmentBytes,
   }) {
     final uuid = randomBytes(16);
     uuid[6] = (uuid[6] & 0x0F) | 0x40;
@@ -290,7 +291,12 @@ abstract final class DatabaseFile {
     final e = Engine(
         pageSize: profile.pageSize,
         memtableEntries: memtableEntries,
-        vlogMin: profile.vlogMin);
+        vlogMin: profile.vlogMin,
+        // The profile's value unless the caller names one. A value-log segment
+        // extent is *preallocated*, so `mobile`'s 4 MiB is 4 MiB of file for
+        // one separated value — which is right for a device and wrong for a
+        // conformance fixture that lives in a repository forever.
+        vlogSegmentBytes: vlogSegmentBytes ?? profile.vlogSegmentBytes);
     e
       ..setProfile(profile)
       ..databaseUuid = uuid;

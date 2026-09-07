@@ -942,6 +942,30 @@ CValue _readVector(ByteReader r) {
 }
 
 /// Decodes a whole value and asserts nothing follows it.
+/// Narrows a value that came out of the file to the type the caller needs, or
+/// reports corruption.
+///
+/// `spec/14-security.md` section 9.1 requires a decoder to "fail with a typed
+/// corruption error rather than an allocation failure, a panic, an abort, or an
+/// unbounded recursion", and a failed cast is a panic wearing a different name.
+/// Every `as CDoc` over a decoded record is a place a hostile file chooses the
+/// exception class: a data tree holding a `CArray` where the reader expects a
+/// document produced a bare `_TypeError` out of an ordinary `get`, found by
+/// `lib/src/fuzz.dart` on its first long run.
+///
+/// This is deliberately one function rather than a check at each of the thirty
+/// or so sites, because the shortest way to write the narrowing has to be the
+/// safe one.
+T expectValue<T extends CValue>(CValue? v, String what) {
+  if (v is T) return v;
+  throw CorruptionException(
+      '$what: expected $T, found ${v == null ? 'nothing' : v.runtimeType}');
+}
+
+/// [expectValue] for a required field of a decoded document.
+T expectField<T extends CValue>(CDoc d, String field, String what) =>
+    expectValue<T>(d[field], '$what field `$field`');
+
 CValue decodeValue(Uint8List bytes, {NameDict? dict}) {
   final r = ByteReader(bytes);
   final v = readValue(r, dict: dict);

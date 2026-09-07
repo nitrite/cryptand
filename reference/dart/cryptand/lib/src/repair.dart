@@ -107,10 +107,16 @@ extension EngineRepair on Engine {
     clearLevelCache();
 
     final report = verifyStructure(deep: false);
-    if (!report.isClean) {
+    // `isSound`, not `isClean`: `spec/01-container.md` section 9 says in as many
+    // words that "a leak is repairable", so refusing to repair a file *because*
+    // it leaks refuses every file this format produces — a copy-on-write tree
+    // leaks its own pages by one commit, by construction.
+    if (!report.isSound) {
       manifest.tree.root = oldRoot;
       clearLevelCache();
-      notes.add('rebuild rejected: ${report.findings.length} findings; '
+      notes.add('rebuild rejected: '
+          '${report.of(FindingClass.corruption).length} corruption and '
+          '${report.of(FindingClass.tampering).length} tampering findings; '
           'the original manifest was kept');
       return RepairReport(
         action: 'rebuild_manifest (rejected)',

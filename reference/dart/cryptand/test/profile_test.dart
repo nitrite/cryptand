@@ -163,11 +163,11 @@ void main() {
         e.abandonCompaction();
         // Abandoning changes nothing a reader can see.
         expect(e.scanTree(tree).length, 2000);
-        expect(e.verifyStructure().isClean, isTrue);
+        expect(e.verifyStructure().isSound, isTrue);
       }
       e.drainCompaction();
       expect(e.scanTree(tree).length, 2000);
-      expect(e.verifyStructure().isClean, isTrue);
+      expect(e.verifyStructure().isSound, isTrue);
     });
 
     test('a full compaction is a bulk operation and is exempt', () {
@@ -258,7 +258,7 @@ void main() {
               reason: 'id ${entry.key} differs at $stage');
         }
         expect(e.scanTree(tree).length, expected.length, reason: stage);
-        expect(e.verifyStructure().isClean, isTrue, reason: stage);
+        expect(e.verifyStructure().isSound, isTrue, reason: stage);
       }
 
       checkAll('mobile');

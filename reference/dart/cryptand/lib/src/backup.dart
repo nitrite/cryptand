@@ -230,7 +230,7 @@ final class Backup {
 
     // §2.3: verify before reporting success.
     final report = destination.verifyStructure(deep: false);
-    if (!report.isClean) {
+    if (!report.isSound) {
       warnings.add('verification found ${report.findings.length} problems');
     }
 
@@ -242,7 +242,7 @@ final class Backup {
       databaseUuid: destination.databaseUuid,
       writers: writers,
       warnings: warnings,
-      verified: report.isClean,
+      verified: report.isSound,
     );
   }
 

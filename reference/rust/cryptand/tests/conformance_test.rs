@@ -771,3 +771,55 @@ fn an_integer_type_code_over_a_fractional_region_is_refused() {
     let f = cke::decode_all(&unhex("30034000c000000b")).unwrap();
     assert_eq!(f, Value::Float { w: NumType::F64, v: 1.5 });
 }
+
+// ---------------------------------------------------------------------------
+// `11-conformance.md` §6 and `14-security.md` §13 — the shared corpus of
+// golden and deliberately broken files.
+// ---------------------------------------------------------------------------
+
+/// Runs `reference/conformance/files/` through the `interop` binary's `corpus`
+/// command, which is where the logic lives so the CLI and CI run exactly the
+/// same thing.
+///
+/// The corpus's value is that these bytes were written by a *different*
+/// implementation. Its first run here produced two disagreements, both of them
+/// defects on this side: a `payload_len` of `0xFFFF_FFFC` read cleanly, because
+/// `PageHeader::verify` checked the checksum and no length; and
+/// `14-security.md` §6.1's cipher downgrade was reported as **corruption**
+/// rather than tampering, because `sb_mac` was verified only when the
+/// superblock said the file was encrypted — which is the one field the MAC
+/// exists to protect.
+#[test]
+fn the_shared_conformance_corpus_passes() {
+    // `support::ROOT` is `<manifest>/../../conformance/vectors`; the corpus is
+    // its sibling.
+    let dir = std::path::Path::new(support::ROOT).parent().unwrap().join("files");
+    if !dir.join("manifest.json").exists() {
+        panic!(
+            "{} is missing; generate it with `dart run tool/generate_corpus.dart` \
+             in reference/dart/cryptand. §6's suite is mandatory, so a run that \
+             skips it must say why rather than go green.",
+            dir.display()
+        );
+    }
+    let exe = env!("CARGO_BIN_EXE_interop");
+    let out = std::process::Command::new(exe)
+        .arg("corpus")
+        .arg(&dir)
+        .output()
+        .expect("running the interop binary");
+    let text = String::from_utf8_lossy(&out.stdout);
+    print!("{text}");
+    assert!(
+        out.status.success(),
+        "the corpus reported failures:\n{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A run that checked nothing must not pass. The corpus is the one test here
+    // whose fixtures live outside the repository's build, so an empty or
+    // truncated directory is a realistic way for it to silently stop measuring.
+    assert!(
+        text.lines().filter(|l| l.contains("ok    ")).count() >= 15,
+        "too few files were checked; is the corpus complete?\n{text}"
+    );
+}

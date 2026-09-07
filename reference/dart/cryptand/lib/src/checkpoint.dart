@@ -110,8 +110,9 @@ final class Checkpoint {
       }));
 
   static Checkpoint decode(String name, Uint8List bytes) {
-    final d = decodeValue(bytes) as CDoc;
-    int u(String f) => ((d[f]! as CInt).magnitude).lo;
+    final d = expectValue<CDoc>(decodeValue(bytes), 'checkpoint record');
+    int u(String f) =>
+        expectField<CInt>(d, f, 'checkpoint record').magnitude.lo;
     return Checkpoint(
       name: name,
       commitId: u('commit_id'),
@@ -161,7 +162,8 @@ final class CheckpointStore {
 
   Iterable<Checkpoint> get all sync* {
     for (final (k, v) in tree.scan()) {
-      yield Checkpoint.decode((decodeKey(k) as CStr).value, v);
+      yield Checkpoint.decode(
+          expectValue<CStr>(decodeKey(k), 'checkpoint name').value, v);
     }
   }
 

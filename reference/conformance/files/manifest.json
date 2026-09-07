@@ -1,0 +1,200 @@
+{
+  "format": "cryptand-conformance/1",
+  "spec": [
+    "spec/11-conformance.md#6",
+    "spec/14-security.md#13"
+  ],
+  "generated_by": "reference/dart/cryptand/tool/generate_corpus.dart",
+  "rules": [
+    "A file with expect=read MUST open, verify with no CORRUPTION and no TAMPERING finding, and reproduce both documents and digest. A LEAK is not damage: 01-container.md section 9 says \"a leak is repairable\", and a copy-on-write container leaks tree 1 own pages by one commit as a property of the format, so a runner that counts leaks fails every file this format can produce.",
+    "A file with expect=error MUST fail with an error of error_class, and MUST NOT crash, hang, or allocate unboundedly (11 section 6, 14 section 9.1).",
+    "at_open_or_read=false means the failure is permitted to surface only when the damaged part is read, not at open. Both are conforming; a runner MUST read every document before concluding a file was accepted.",
+    "tolerated_clean=true means a reader that reports nothing has not necessarily failed the corpus, but has demonstrably not exercised the mechanism the file is about; a runner SHOULD say so.",
+    "An implementation that does not support a feature a file needs (CIPHER, a codec) MUST refuse it by name rather than misread it, and that is conforming."
+  ],
+  "files": [
+    {
+      "name": "v1.0-core.cryptand",
+      "page_size": 4096,
+      "expect": "read",
+      "documents": 180,
+      "digest": "566914e8",
+      "key": null,
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "the golden file: 180 documents, an index, a name dictionary, several segments and a value log. Every other plaintext file in this corpus is these bytes with one thing done to them."
+    },
+    {
+      "name": "v1.0-corrupt-crc.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "corruption",
+      "key": null,
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "one payload byte flipped on live page 33 with the checksum left stale. Section 3: the checksum \"verifies before decompression and before decryption\", so this must be refused before any decoder runs."
+    },
+    {
+      "name": "v1.0-corrupt-truncated.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "corruption",
+      "key": null,
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "the file ends one page into the first segment extent, so the superblock names a page_count the file does not have. A reader that sizes a buffer from page_count before checking the file length allocates from a number an attacker chose."
+    },
+    {
+      "name": "v1.0-corrupt-torn-vlog.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "corruption",
+      "key": null,
+      "at_open_or_read": false,
+      "tolerated_clean": true,
+      "note": "a value-log record damaged in place. Section 3 excludes these bytes from the page checksum on purpose — records are appended into the head page for the life of the segment — so the only mechanism that catches this is the per-record crc32c, and it runs when the value is read, not when the file is opened. A reader that reports nothing here has not read the record; one that reports nothing after reading every document has no per-record check."
+    },
+    {
+      "name": "v1.0-corrupt-dangling-vlog.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "corruption",
+      "key": null,
+      "at_open_or_read": false,
+      "tolerated_clean": true,
+      "note": "the value-log head's data_offset moved past the end of its extent, so every pointer into the segment resolves outside it. The checksum is repaired, which is section 9.4 in one line: a CRC \"is trivially recomputed by anyone who edits the file\"."
+    },
+    {
+      "name": "v1.0-corrupt-huge-len.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "corruption",
+      "key": null,
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "payload_len set to 0xFFFFFFFC with the checksum repaired, so it reaches the decoder. Section 9.1: a decoder \"MUST bounds-check against the containing page or extent before allocating, and MUST fail with a typed corruption error rather than an allocation failure\". Read as a signed 32-bit int this is -4, which is the second way to fail it."
+    },
+    {
+      "name": "v1.0-corrupt-wild-root.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "corruption",
+      "key": null,
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "a segment header's root_page set to 0xFFFFFFFFFFFFFFFF. It is a u64, so a reader that holds it in a signed 64-bit int sees a negative page index and a bound written as \"< page_count\" alone lets it through — which is exactly how it reached a slice in one implementation."
+    },
+    {
+      "name": "v1.0-corrupt-bad-utf8.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "corruption",
+      "key": null,
+      "at_open_or_read": false,
+      "tolerated_clean": false,
+      "note": "ill-formed UTF-8 in a field name. Section 4: \"A reader encountering ill-formed UTF-8 MUST report corruption; it MUST NOT substitute replacement characters silently.\" The silent substitution is the failure worth testing for: it turns a broken file into a readable one with the wrong field names in it."
+    },
+    {
+      "name": "v1.0-corrupt-page-count.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "corruption",
+      "key": null,
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "page_count set to 4 294 967 295 in both superblock slots. A reader that trusts it sizes a page table from a number in the file; at 4 KiB pages that is 16 TiB of addressable space claimed by a 1 MiB file."
+    },
+    {
+      "name": "v1.0-future.cryptand",
+      "page_size": 4096,
+      "expect": "read",
+      "documents": 180,
+      "digest": "566914e8",
+      "key": null,
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "an unknown OPTIONAL feature bit set in features_optional. Section 3: a reader MUST open this file and read it exactly as it reads v1.0-core. This is the one file in the corpus whose failure mode is being too strict rather than too lax, and it is the expensive kind: a reader that refuses it makes every future minor version unreadable by every shipped copy of itself."
+    },
+    {
+      "name": "v1.0-future-required.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "unsupported",
+      "key": null,
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "an unknown REQUIRED feature bit. Section 3: a reader MUST refuse this, and the error must say the feature is unsupported rather than that the file is corrupt — the file is not corrupt, it is newer. The pair with v1.0-future.cryptand is the whole of section 3: the same bit in the other word means the opposite thing."
+    },
+    {
+      "name": "v1.0-encrypted.cryptand",
+      "page_size": 4096,
+      "expect": "read",
+      "documents": 180,
+      "digest": "566914e8",
+      "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "the encrypted golden file, under a published kdf = 0 credential. An SDK that does not implement the CIPHER feature refuses it by name, which section 13 says is equally conforming."
+    },
+    {
+      "name": "v1.0-security-tamper-page.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "tampering",
+      "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "at_open_or_read": false,
+      "tolerated_clean": false,
+      "note": "one ciphertext byte flipped, checksum repaired. This MUST be reported as tampering and NOT as corruption: section 9.4 — \"CRC-32C detects accidental corruption ... Integrity comes from the AEAD tag\". A reader that calls this corruption invites a repair pass over bytes an attacker chose."
+    },
+    {
+      "name": "v1.0-security-tamper-header.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "tampering",
+      "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "at_open_or_read": false,
+      "tolerated_clean": false,
+      "note": "the page header's tree_id edited. The ciphertext is untouched: section 5.2 makes the 40-byte header the AEAD's AAD, so this fails the tag. A reader that does not bind the header cannot tell this page from the one it is impersonating, and that is what relabelling a page between trees would buy an attacker."
+    },
+    {
+      "name": "v1.0-security-tamper-sb.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "tampering",
+      "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "cipher forced to 0 on a file that still carries keyslots — the downgrade of section 6.1. sb_mac is what catches it, and it is the reason sb_mac exists: without it anyone can turn the cipher off in one byte and the reader has no way to know the file was ever encrypted."
+    },
+    {
+      "name": "v1.0-security-downgrade-kdf.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "tampering",
+      "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "a keyslot's Argon2id t_cost lowered to 1. On its own this is free to do and cannot be caught by trying the key — the slot still opens, at a cost an attacker can brute-force. sb_mac covers the keyslot area for exactly this reason."
+    },
+    {
+      "name": "v1.0-security-splice.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "tampering",
+      "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "at_open_or_read": false,
+      "tolerated_clean": false,
+      "note": "page 33 copied over page 34. Every byte is authentic and every checksum is valid — the file was never edited, only rearranged. Section 4.2 binds the nonce to the page, which is the only thing that separates this from a legitimate page."
+    },
+    {
+      "name": "v1.0-security-foreign-slot.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "tampering",
+      "key": "c8c7c6c5c4c3c2c1c0bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9",
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "another database's keyslot pasted into this one, and the key that opens *that* database supplied. Both the wrap AAD (section 3.4) and sb_mac refuse it. Supplying the foreign key rather than this file's is deliberate: with the right key the slot is simply unused and nothing is proven."
+    }
+  ]
+}

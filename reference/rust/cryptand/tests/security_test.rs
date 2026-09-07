@@ -309,10 +309,27 @@ fn a_backup_of_an_encrypted_database_must_be_asked_for_by_name() {
 #[test]
 fn structure_aware_fuzzing_never_crashes_hangs_or_over_allocates() {
     // §9.3 — "A parser for a format read from untrusted sources that has never
-    // been fuzzed is not finished." Structure-aware matters: most of a
-    // database's bytes are unused value-log record space, so uniform bit flips
-    // land in padding and measure nothing. These targets are the ones a hostile
-    // file would edit.
+    // been fuzzed is not finished." Three things make it find anything:
+    //
+    //  * **Structure-aware.** Most of a database's bytes are unused value-log
+    //    record space, so uniform bit flips land in padding and measure
+    //    nothing. These targets are the ones a hostile file would edit.
+    //
+    //  * **The checksum is repaired after the mutation.** This test did not do
+    //    that, and that is the more interesting half. §3's `checksum` verifies
+    //    "before decompression and before decryption", so a mutant with a stale
+    //    checksum dies at the container gate and *no decoder sees a byte* — the
+    //    run measures CRC-32C and calls it a pass. Measured: the repair moves
+    //    the population from 43 mutants reaching the reader in 400 to 233.
+    //    §9.4 is the same point from the other side — a CRC "is trivially
+    //    recomputed by anyone who edits the file", so an attacker's file always
+    //    has a valid one, and a fuzzer that assumes otherwise is not modelling
+    //    the attacker §9 describes.
+    //
+    //  * **It reads, it does not only verify.** `verify()` walks structure and
+    //    checksums; the decoders that turn bytes into values only run when
+    //    something reads. The Dart port of this test found four untyped
+    //    failures on its first runs and three were behind a read.
     let t = TempDb::new("fuzz");
     {
         let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
@@ -351,27 +368,76 @@ fn structure_aware_fuzzing_never_crashes_hangs_or_over_allocates() {
     let (mut refused, mut reported, mut benign) = (0u32, 0u32, 0u32);
     for _ in 0..300 {
         let mut b = original.clone();
+        let mut touched: Vec<usize> = Vec::new();
         for _ in 0..1 + rng.below(4) {
             let (base, len) = targets[rng.below(targets.len() as u64) as usize];
             let at = base + rng.below(len.max(1) as u64) as usize;
-            if at < b.len() {
-                b[at] ^= 1 << rng.below(8);
+            if at >= b.len() {
+                continue;
             }
+            // A run of 0xFF has to be one of the mutations on its own: a length
+            // field only becomes an allocation bomb when *all* its bytes are
+            // set, and one flipped bit almost never does that.
+            match rng.below(4) {
+                0 => b[at] ^= 1 << rng.below(8),
+                1 => b[at] = 0x00,
+                2 => b[at] = 0xFF,
+                _ => {
+                    let w = 1 + rng.below(8) as usize;
+                    for k in 0..w {
+                        if at + k < b.len() {
+                            b[at + k] = 0xFF;
+                        }
+                    }
+                }
+            }
+            touched.push(at / page_size);
+        }
+        for pg in touched {
+            // Pages 0 and 1 are the superblock slots, which have their own
+            // rule; a mutation there is meant to be caught, and is.
+            if pg < 2 {
+                continue;
+            }
+            let off = pg * page_size;
+            if off + page_size > b.len() {
+                continue;
+            }
+            let page = &b[off..off + page_size];
+            let Ok(h) = cryptand::container::PageHeader::parse(page) else { continue };
+            // `checksum_range_end`, not `page_size`: a value-log head page
+            // checksums only its immutable header region, because records are
+            // appended into its tail for the life of the segment. A repair over
+            // the whole page writes a checksum that is wrong the moment it is
+            // written, and the mutation is then "caught" by the repair rather
+            // than by the reader — a fuzzer silently measuring itself.
+            let end = cryptand::container::PageHeader::checksum_range_end(page, &h);
+            let crc = cryptand::hash::crc32c(&b[off + 4..off + end]);
+            b[off..off + 4].copy_from_slice(&crc.to_le_bytes());
         }
         std::fs::write(&tmp.path, &b).unwrap();
         // No `catch_unwind`: a panic here fails the test, which is the point.
         match Engine::open(&tmp.path, None) {
             Err(_) => refused += 1,
-            Ok(mut e) => match e.verify() {
-                Err(_) => refused += 1,
-                Ok(r) => {
-                    if r.of(Class::Corruption).is_empty() && r.of(Class::Tampering).is_empty() {
-                        benign += 1;
-                    } else {
-                        reported += 1;
+            Ok(mut e) => {
+                let v = e.verify();
+                // Read, whatever the verifier said. `verify` walks structure and
+                // checksums; the decoders live behind a read.
+                for i in 0..300i64 {
+                    let _ = e.get(T, &Value::NitriteId(i));
+                }
+                let _ = e.scan_tree(T, None, None, None, true);
+                match v {
+                    Err(_) => refused += 1,
+                    Ok(r) => {
+                        if r.of(Class::Corruption).is_empty() && r.of(Class::Tampering).is_empty() {
+                            benign += 1;
+                        } else {
+                            reported += 1;
+                        }
                     }
                 }
-            },
+            }
         }
     }
     println!(
@@ -380,7 +446,15 @@ fn structure_aware_fuzzing_never_crashes_hangs_or_over_allocates() {
     // A mutation that changes nothing a reader may act on — a reserved byte, an
     // unread payload — is not a failure. What would be a failure is a panic,
     // and reaching this line means there was none.
-    assert!(refused + reported > 200, "too few mutations were detected: the targets are wrong");
+    // With the checksum repaired, most mutants now *reach* the reader instead
+    // of dying at the container gate, so the assertion that means something is
+    // the one about reach — a run where everything is refused has measured the
+    // CRC and nothing else.
+    assert!(
+        benign + reported > 100,
+        "too few mutants reached the reader ({benign} benign, {reported} reported): \
+         the checksum repair or the targets are wrong"
+    );
 }
 
 // ---------------------------------------------------------------------------

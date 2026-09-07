@@ -337,6 +337,153 @@ fn cmd_verify(path: &str) -> cryptand::Result<ExitCode> {
     })
 }
 
+/// `11-conformance.md` §6 and `14-security.md` §13 — the shared conformance
+/// corpus, run against **bytes this implementation did not write**.
+///
+/// That is the whole point of it. Every implementation already has thorough
+/// negative tests, and every one of them builds its own broken file with its
+/// own writer and checks that its own reader refuses it. Such a test can agree
+/// with itself and disagree with everyone else; phase 15 recorded the shape —
+/// "a self-generated vector set cannot contain this fix: the generator and its
+/// test both knew they were writing a prefix".
+///
+/// Reads the manifest by hand rather than through serde: the shape is fixed,
+/// this binary is not a JSON tool, and a dependency added for a test harness is
+/// a dependency an SDK adopter inherits.
+fn cmd_corpus(dir: &str) -> cryptand::Result<ExitCode> {
+    let manifest = std::fs::read_to_string(PathBuf::from(dir).join("manifest.json"))?;
+    let entries = parse_manifest(&manifest);
+    if entries.is_empty() {
+        return cryptand::corrupt("the manifest names no files");
+    }
+    let mut failed = 0usize;
+    for e in &entries {
+        let path = PathBuf::from(dir).join(&e.name);
+        let outcome = read_corpus_file(&path, e.key.as_deref());
+        let line = match (&e.expect[..], &outcome) {
+            ("read", Ok((findings, docs, dig))) => {
+                if *findings != 0 {
+                    failed += 1;
+                    format!("FAIL  a golden file must verify clean, {findings} findings")
+                } else if Some(*docs) != e.documents {
+                    failed += 1;
+                    format!("FAIL  {docs} documents, manifest says {:?}", e.documents)
+                } else if e.digest.as_deref() != Some(&format!("{dig:08x}")) {
+                    failed += 1;
+                    format!("FAIL  digest {dig:08x}, manifest says {:?}", e.digest)
+                } else {
+                    format!("ok    {docs} documents, digest {dig:08x}")
+                }
+            }
+            ("read", Err(err)) => {
+                failed += 1;
+                format!("FAIL  a golden file must open: {err}")
+            }
+            ("error", Err(err)) => {
+                let got = class_of(err);
+                if Some(got) == e.error_class.as_deref() {
+                    format!("ok    refused as {got}")
+                } else {
+                    failed += 1;
+                    format!("FAIL  refused as {got}, manifest says {:?}: {err}", e.error_class)
+                }
+            }
+            ("error", Ok((findings, _, _))) if *findings > 0 => {
+                format!("ok    opened, {findings} finding(s) from verify")
+            }
+            ("error", Ok(_)) => {
+                if e.tolerated_clean {
+                    format!("ok    accepted cleanly (tolerated; the mechanism did not run)")
+                } else {
+                    failed += 1;
+                    "FAIL  opened, read and verified with nothing reported".to_string()
+                }
+            }
+            _ => {
+                failed += 1;
+                format!("FAIL  unknown expect `{}`", e.expect)
+            }
+        };
+        println!("  {:<38} {line}", e.name);
+    }
+    println!("\n{} files, {failed} failed", entries.len());
+    Ok(if failed == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+/// Opens, verifies and **reads every document**. All three: the manifest's
+/// `at_open_or_read` exists because some breakages surface only on a read, and
+/// a runner that stops at `verify()` reports those as accepted.
+fn read_corpus_file(
+    path: &std::path::Path,
+    key: Option<&[u8]>,
+) -> cryptand::Result<(usize, usize, u32)> {
+    let mut e = Engine::open(path, key)?;
+    let r = e.verify()?;
+    let findings = r.of(Class::Corruption).len() + r.of(Class::Tampering).len();
+    let data = tree_id_of(&mut e, COLLECTION)
+        .ok_or_else(|| cryptand::Error::Corrupt(format!("no collection {COLLECTION}")))?;
+    let dict = tree_id_of(&mut e, NAME_DICT)
+        .ok_or_else(|| cryptand::Error::Corrupt(format!("no name dictionary {NAME_DICT}")))?;
+    let (names, by_id) = load_dict(&mut e, dict);
+    let index = tree_id_of(&mut e, INDEX).unwrap_or(0);
+    let mut db = Db { e, data, dict, index, names, by_id };
+    let rows = rows(&mut db)?;
+    Ok((findings, rows.len(), digest(&rows)))
+}
+
+fn class_of(e: &cryptand::Error) -> &'static str {
+    match e {
+        cryptand::Error::Tamper(_) | cryptand::Error::CannotUnlock => "tampering",
+        cryptand::Error::UnknownFeature { .. } | cryptand::Error::UnsupportedVersion(_) => {
+            "unsupported"
+        }
+        _ => "corruption",
+    }
+}
+
+struct CorpusEntry {
+    name: String,
+    expect: String,
+    error_class: Option<String>,
+    documents: Option<usize>,
+    digest: Option<String>,
+    key: Option<Vec<u8>>,
+    tolerated_clean: bool,
+}
+
+/// A deliberately small JSON reader for a file this repository generates.
+///
+/// It is not a JSON parser and does not try to be: it pulls the six fields the
+/// corpus defines out of a pretty-printed object per entry. A wrong answer here
+/// shows up as a missing field, which fails loudly, rather than as a
+/// misinterpreted one.
+fn parse_manifest(text: &str) -> Vec<CorpusEntry> {
+    let mut out = Vec::new();
+    for block in text.split("\"name\": \"").skip(1) {
+        let name = block[..block.find('"').unwrap_or(0)].to_string();
+        let field = |k: &str| -> Option<String> {
+            let at = block.find(&format!("\"{k}\": "))? + k.len() + 4;
+            let rest = &block[at..];
+            let end = rest.find([',', '\n'])?;
+            Some(rest[..end].trim().trim_matches('"').to_string())
+        };
+        let expect = field("expect").unwrap_or_default();
+        let key = field("key").filter(|k| k != "null").map(|k| {
+            (0..k.len() / 2).map(|j| u8::from_str_radix(&k[j * 2..j * 2 + 2], 16).unwrap()).collect()
+        });
+        out.push(CorpusEntry {
+            name,
+            expect,
+            error_class: field("error_class"),
+            documents: field("documents").and_then(|d| d.parse().ok()),
+            digest: field("digest"),
+            key,
+            tolerated_clean: field("tolerated_clean").as_deref() == Some("true"),
+        });
+    }
+    out
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let r = match args.first().map(|s| s.as_str()) {
@@ -346,8 +493,11 @@ fn main() -> ExitCode {
             cmd_mutate(&args[1], &args[2]).map(|_| ExitCode::SUCCESS)
         }
         Some("verify") if args.len() >= 2 => cmd_verify(&args[1]),
+        Some("corpus") if args.len() >= 2 => cmd_corpus(&args[1]),
         _ => {
-            eprintln!("interop write|read|mutate <tag>|verify <file> [--key <hex>]");
+            eprintln!(
+                "interop write|read|mutate <tag>|verify <file>|corpus <dir> [--key <hex>]"
+            );
             return ExitCode::from(2);
         }
     };

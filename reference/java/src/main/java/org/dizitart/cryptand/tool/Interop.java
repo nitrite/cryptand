@@ -370,6 +370,178 @@ public final class Interop {
         }
     }
 
+    // =================================================================
+    // The shared conformance corpus, 11 section 6 and 14 section 13
+    // =================================================================
+
+    /**
+     * Runs {@code reference/conformance/files/} against this reader — <strong>
+     * bytes this implementation did not write</strong>.
+     *
+     * <p>That is the whole point of it. Every implementation already has
+     * thorough negative tests, and every one of them builds its own broken file
+     * with its own writer and checks that its own reader refuses it. Such a
+     * test can agree with itself and disagree with everyone else; phase 15
+     * recorded the shape — "a self-generated vector set cannot contain this
+     * fix: the generator and its test both knew they were writing a prefix".
+     *
+     * <p>Its first run against the Rust implementation produced two
+     * disagreements, both in Rust: a {@code payload_len} of {@code 0xFFFFFFFC}
+     * read cleanly, and the section 6.1 cipher downgrade reported as corruption
+     * rather than tampering.
+     */
+    public static int corpus(String dir) throws java.io.IOException {
+        String manifest = Files.readString(Path.of(dir, "manifest.json"));
+        List<Map<String, String>> entries = parseManifest(manifest);
+        if (entries.isEmpty()) {
+            throw new CorruptionException("the manifest names no files");
+        }
+        int failed = 0;
+        for (Map<String, String> e : entries) {
+            String name = e.get("name");
+            byte[] key = e.get("key") == null || e.get("key").equals("null")
+                    ? null : unhex(e.get("key"));
+            String line;
+            try {
+                long[] r = readCorpusFile(Path.of(dir, name), key);
+                long findings = r[0];
+                long documents = r[1];
+                String dig = String.format("%08x", (int) r[2]);
+                if (e.get("expect").equals("read")) {
+                    if (findings != 0) {
+                        failed++;
+                        line = "FAIL  a golden file must verify clean, " + findings + " findings";
+                    } else if (documents != Long.parseLong(e.get("documents"))) {
+                        failed++;
+                        line = "FAIL  " + documents + " documents, manifest says " + e.get("documents");
+                    } else if (!dig.equals(e.get("digest"))) {
+                        failed++;
+                        line = "FAIL  digest " + dig + ", manifest says " + e.get("digest");
+                    } else {
+                        line = "ok    " + documents + " documents, digest " + dig;
+                    }
+                } else if (findings > 0) {
+                    line = "ok    opened, " + findings + " finding(s) from verify";
+                } else if ("true".equals(e.get("tolerated_clean"))) {
+                    line = "ok    accepted cleanly (tolerated; the mechanism did not run)";
+                } else {
+                    failed++;
+                    line = "FAIL  opened, read and verified with nothing reported";
+                }
+            } catch (org.dizitart.cryptand.CryptandException ex) {
+                if (e.get("expect").equals("read")) {
+                    failed++;
+                    line = "FAIL  a golden file must open: " + ex;
+                } else {
+                    String got = classOf(ex);
+                    if (got.equals(e.get("error_class"))) {
+                        line = "ok    refused as " + got;
+                    } else {
+                        failed++;
+                        line = "FAIL  refused as " + got + ", manifest says "
+                                + e.get("error_class") + ": " + ex;
+                    }
+                }
+            }
+            System.out.printf("  %-38s %s%n", name, line);
+        }
+        System.out.println();
+        System.out.println(entries.size() + " files, " + failed + " failed");
+        return failed == 0 ? 0 : 1;
+    }
+
+    /**
+     * Opens, verifies and <strong>reads every document</strong>. All three: the
+     * manifest's {@code at_open_or_read} exists because some breakages surface
+     * only on a read, and a runner that stops at {@code verify()} reports those
+     * as accepted.
+     *
+     * @return {findings, documents, digest}
+     */
+    private static long[] readCorpusFile(Path path, byte[] key) {
+        try (Db db = open(path.toString(), key)) {
+            // Corruption and tampering only. {@code spec/01-container.md} §9:
+            // "A leak is repairable" — it is wasted space in a sound file, not
+            // damage, and a copy-on-write container leaks tree 1's own pages by
+            // one commit as a property of the format. Counting leaks made this
+            // runner report nine findings on every golden file in the corpus,
+            // all of them the ordinary state of a file this format produces.
+            long findings = Verify.run(db.engine).findings().stream()
+                    // DOUBLE_ALLOCATION counts: §9 says "A double-allocation
+                    // is corruption" in the same breath as "a leak is
+                    // repairable", and this implementation gives it its own
+                    // kind. Two live structures naming one page means a write
+                    // to either overwrites the other.
+                    .filter(f -> f.kind() == Verify.Kind.CORRUPTION
+                            || f.kind() == Verify.Kind.TAMPERING
+                            || f.kind() == Verify.Kind.DOUBLE_ALLOCATION)
+                    .count();
+            List<Row> rows = rows(db);
+            return new long[] {findings, rows.size(), digest(rows) & 0xFFFFFFFFL};
+        }
+    }
+
+    private static String classOf(org.dizitart.cryptand.CryptandException e) {
+        if (e instanceof org.dizitart.cryptand.TamperingException
+                || e instanceof org.dizitart.cryptand.CannotUnlockException) {
+            return "tampering";
+        }
+        if (e instanceof org.dizitart.cryptand.UnsupportedFeatureException) {
+            return "unsupported";
+        }
+        return "corruption";
+    }
+
+    private static byte[] unhex(String s) {
+        byte[] b = new byte[s.length() / 2];
+        for (int i = 0; i < b.length; i++) {
+            b[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16);
+        }
+        return b;
+    }
+
+    /**
+     * A deliberately small JSON reader for a file this repository generates.
+     *
+     * <p>It is not a JSON parser and does not try to be: it pulls the fields the
+     * corpus defines out of a pretty-printed object per entry. A wrong answer
+     * here shows up as a missing field, which fails loudly, rather than as a
+     * misinterpreted one — and a JSON dependency added for a test harness is a
+     * dependency every adopter of this SDK inherits.
+     */
+    private static List<Map<String, String>> parseManifest(String text) {
+        List<Map<String, String>> out = new ArrayList<>();
+        String[] blocks = text.split("\"name\": \"");
+        for (int i = 1; i < blocks.length; i++) {
+            String block = blocks[i];
+            Map<String, String> m = new LinkedHashMap<>();
+            m.put("name", block.substring(0, block.indexOf('"')));
+            for (String k : new String[] {"expect", "error_class", "documents", "digest",
+                    "key", "tolerated_clean"}) {
+                int at = block.indexOf("\"" + k + "\": ");
+                if (at < 0) {
+                    continue;
+                }
+                String rest = block.substring(at + k.length() + 4);
+                int end = rest.indexOf(',');
+                int nl = rest.indexOf('\n');
+                if (end < 0 || (nl >= 0 && nl < end)) {
+                    end = nl;
+                }
+                if (end < 0) {
+                    continue;
+                }
+                String v = rest.substring(0, end).trim();
+                if (v.startsWith("\"") && v.endsWith("\"")) {
+                    v = v.substring(1, v.length() - 1);
+                }
+                m.put(k, v.equals("null") ? null : v);
+            }
+            out.add(m);
+        }
+        return out;
+    }
+
     public static void main(String[] args) {
         byte[] key = keyArg(args);
         try {
@@ -381,8 +553,11 @@ public final class Interop {
                 mutate(args[1], args[2], key);
             } else if (args.length >= 2 && args[0].equals("verify")) {
                 System.exit(verify(args[1], key));
+            } else if (args.length >= 2 && args[0].equals("corpus")) {
+                System.exit(corpus(args[1]));
             } else {
-                System.err.println("interop write|read|mutate <tag>|verify <file> [--key <hex>]");
+                System.err.println(
+                        "interop write|read|mutate <tag>|verify <file>|corpus <dir> [--key <hex>]");
                 System.exit(2);
             }
         } catch (Exception e) {

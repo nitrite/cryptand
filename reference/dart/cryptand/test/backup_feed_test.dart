@@ -178,7 +178,7 @@ void main() {
       final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
       final r = Backup.full(src, dst, newUuid: uuid(2));
       expect(r.verified, isTrue);
-      expect(dst.verifyStructure().isClean, isTrue);
+      expect(dst.verifyStructure().isSound, isTrue);
     });
   });
 
@@ -253,7 +253,7 @@ void main() {
       }
       expect(steps, greaterThan(0), reason: 'it really took several steps');
       expect(e.scanTree(tree).length, 2000);
-      expect(e.verifyStructure().isClean, isTrue);
+      expect(e.verifyStructure().isSound, isTrue);
     });
 
     test('collect and cluster report what they did', () {

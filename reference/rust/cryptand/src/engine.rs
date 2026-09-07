@@ -408,6 +408,39 @@ impl Engine {
         sb.check_features()?;
         crate::limits::check_vlog_min(sb.vlog_min, sb.page_size())?;
 
+        // `14-security.md` §6.1 — the downgrade, and it has to be checked
+        // *before* the `cipher != 0` branch below, not inside it.
+        //
+        // Turning `cipher` off is one byte, and the whole of §6.2's argument
+        // for `sb_mac` is that otherwise "anyone can set `cipher = 0` or weaken
+        // Argon2id cost". A reader that only verifies the MAC when the file
+        // says it is encrypted has made the MAC conditional on the field the
+        // MAC exists to protect.
+        //
+        // What it looked like before: the shared conformance corpus's
+        // `v1.0-security-tamper-sb.cryptand` was reported as **corruption**,
+        // because the reader believed the file was plaintext, read a page of
+        // ciphertext as a B+tree, and found the cell pointers overrunning the
+        // payload. That is the wrong class and the difference is not cosmetic:
+        // `13-operations.md` §3 lets a repair pass run over corruption and
+        // forbids it over tampering, so the wrong class here invites a rebuild
+        // driven by bytes an attacker chose.
+        //
+        // An occupied keyslot on a `cipher = 0` file is the signature, and it
+        // is one an attacker cannot erase without also destroying the thing
+        // they want to read.
+        if sb.cipher == 0 {
+            for i in 0..crate::security::keyslot::COUNT {
+                let at = i * crate::security::keyslot::SIZE;
+                if sb.keyslots[at + crate::security::keyslot::STATE] != 0 {
+                    return Err(Error::Tamper(format!(
+                        "the superblock says cipher = 0 and keyslot {i} is occupied: \
+                         14-security.md §6.1's downgrade"
+                    )));
+                }
+            }
+        }
+
         // Step 4: unwrap and verify `sb_mac` before acting on any other field.
         let keys = if sb.cipher != 0 {
             let Some(k) = key else { return Err(Error::CannotUnlock) };

@@ -26,6 +26,7 @@ import 'dart:typed_data';
 
 import 'cke.dart';
 import 'container.dart';
+import 'cow.dart';
 import 'errors.dart';
 import 'security.dart';
 import 'engine.dart';
@@ -33,18 +34,51 @@ import 'manifest.dart';
 import 'segment.dart';
 import 'vlog.dart';
 
+/// What a finding *means*, which decides what may be done about it.
+///
+/// `spec/01-container.md` section 9 states the taxonomy in two sentences and
+/// both are load-bearing: "A leak is repairable. A double-allocation is
+/// corruption. **A failed AEAD tag or `sb_mac` is neither** — it is tampering,
+/// and MUST be reported as its own class (`14-security.md` section 6.2),
+/// because 'your disk has a bad sector' and 'someone edited your database' call
+/// for different responses."
+///
+/// This implementation had no class at all until the shared conformance corpus
+/// asked three readers the same question. Every finding was a bare string, so a
+/// caller could not tell a reclaimable page from a tampered one, and
+/// `13-operations.md` section 3's rule — repair runs over corruption and MUST
+/// NOT run over tampering — was not expressible.
+enum FindingClass {
+  /// A checksum mismatch, a broken invariant, a double-allocation.
+  corruption,
+
+  /// A failed AEAD tag or `sb_mac`. Never repaired: repairing tampered data is
+  /// laundering it.
+  tampering,
+
+  /// A page neither reachable nor free. Costs space and nothing else, and
+  /// `13-operations.md` section 3 reclaims it.
+  leak,
+
+  /// A bound exceeded that the format permits exceeding — a locality debt over
+  /// its target, say. Not a defect in the file.
+  warning,
+}
+
 /// One thing a verifier found.
 final class Finding {
-  const Finding(this.invariant, this.message, {this.segmentId});
+  const Finding(this.invariant, this.message,
+      {this.segmentId, this.kind = FindingClass.corruption});
 
   /// The §11 invariant number, or a `01` §9 step.
   final String invariant;
   final String message;
   final int? segmentId;
+  final FindingClass kind;
 
   @override
-  String toString() =>
-      '[$invariant]${segmentId != null ? " seg $segmentId" : ""} $message';
+  String toString() => '[$invariant/${kind.name}]'
+      '${segmentId != null ? " seg $segmentId" : ""} $message';
 }
 
 /// What one verification pass found. Empty means clean.
@@ -55,7 +89,21 @@ final class VerifyReport {
   final int segmentsChecked;
   final int entriesChecked;
 
+  /// Findings of one class.
+  List<Finding> of(FindingClass c) =>
+      [for (final f in findings) if (f.kind == c) f];
+
+  /// Nothing at all was found — including leaks and warnings.
   bool get isClean => findings.isEmpty;
+
+  /// **The file is sound**, which is the question a caller usually has.
+  ///
+  /// A leak is not a damaged file; it is wasted space in a sound one, and
+  /// section 9 says so. A verifier that reported them alongside corruption made
+  /// the ordinary state of a copy-on-write file — which leaks tree 1's own
+  /// pages by one commit, by construction — look like damage.
+  bool get isSound =>
+      of(FindingClass.corruption).isEmpty && of(FindingClass.tampering).isEmpty;
 
   @override
   String toString() => isClean
@@ -105,7 +153,95 @@ extension EngineVerify on Engine {
 
     _checkDisjointness(f, byLevel);
     _checkLocalityDebt(f);
+    _checkPageAccounting(f);
     return VerifyReport(f, segs, entries);
+  }
+
+  /// `spec/01-container.md` section 9 step 7 — "reconciles reachable pages
+  /// against the free tree and reports leaks (neither reachable nor free) and
+  /// double-allocations".
+  ///
+  /// This step did not exist. The Java and Rust implementations both had it,
+  /// and the shared conformance corpus is what made that visible: Java reported
+  /// nine leaked pages in a file this implementation wrote and called clean.
+  /// Nine is the count `design/tradeoff-analysis.md` defect 55 predicts — tree
+  /// 1's own pages, leaked by one commit, a property of the format rather than
+  /// of the writer — so the file was in fact fine and the verifier that said so
+  /// was the one that could not have said otherwise.
+  ///
+  /// A double-allocation is the finding that matters here and it is corruption:
+  /// two live structures naming one page means one of them is about to be
+  /// overwritten by a write to the other.
+  void _checkPageAccounting(List<Finding> f) {
+    final owner = <int, String>{};
+    void claim(Iterable<int> pages, String what) {
+      for (final p in pages) {
+        final prior = owner[p];
+        if (prior != null) {
+          f.add(Finding('01§9.7', 'page $p is claimed by both $prior and $what',
+              kind: FindingClass.corruption));
+          continue;
+        }
+        owner[p] = what;
+      }
+    }
+
+    final trees = <(CowTree, String)>[
+      (manifest.tree, 'the manifest'),
+      (freelist, 'the free tree'),
+      (checkpoints.tree, 'the checkpoint tree'),
+      (changeFeed.tree, 'the change feed'),
+    ];
+    for (final (tree, name) in trees) {
+      try {
+        claim(tree.reachablePages(), name);
+      } on CryptandException catch (e) {
+        f.add(Finding('01§9.7', '$name is not walkable: ${e.runtimeType}',
+            kind: FindingClass.corruption));
+      }
+    }
+    for (final ref in manifest.all) {
+      if (ref.startPage == 0 || ref.pages == 0) continue;
+      claim([for (var i = 0; i < ref.pages; i++) ref.startPage + i],
+          'segment ${ref.segmentId}');
+    }
+    for (final seg in vlog.segments.values) {
+      if (seg.startPage == 0) continue;
+      claim([for (var i = 0; i < seg.pageCount; i++) seg.startPage + i],
+          'value-log segment ${seg.id}');
+    }
+
+    final free = <int>{};
+    for (final e in store.freeExtents) {
+      for (var i = 0; i < e.pages; i++) {
+        free.add(e.startPage + i);
+      }
+    }
+    // Pages 0 and 1 are the superblock slots, reserved before anything is
+    // allocated and owned by no tree.
+    //
+    // **The findings are capped.** `page_count` comes out of the file, and one
+    // finding per leaked page means a hostile superblock claiming four billion
+    // pages drives the verifier into four billion allocations — section 9.1's
+    // "MUST NOT ... allocate unboundedly" applies to the verifier's own output,
+    // not only to its decoders. The count is exact either way; only the list of
+    // page ids is bounded, and the page ids are the part that repeats.
+    const maxListed = 64;
+    var leaked = 0;
+    for (var p = 2; p < store.pageCount; p++) {
+      if (owner.containsKey(p) || free.contains(p)) continue;
+      leaked++;
+      if (leaked <= maxListed) {
+        f.add(Finding('01§9.7', 'page $p is neither reachable nor free',
+            kind: FindingClass.leak));
+      }
+    }
+    if (leaked > maxListed) {
+      f.add(Finding('01§9.7',
+          '$leaked pages are neither reachable nor free; '
+          'the first $maxListed are listed above',
+          kind: FindingClass.leak));
+    }
   }
 
   /// §11.5 — the manifest entry matches the header on every duplicated field.

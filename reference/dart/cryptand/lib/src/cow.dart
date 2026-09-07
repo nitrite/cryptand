@@ -725,6 +725,35 @@ final class CowTree {
     yield* _walk(root, lower, upper);
   }
 
+  /// Every page this tree occupies, internal and leaf.
+  ///
+  /// `spec/01-container.md` section 9 step 7 — "reconcile reachable pages
+  /// against the free tree and report leaks (neither reachable nor free) and
+  /// double-allocations". A verifier cannot do that without asking each tree
+  /// which pages it holds, and there was no way to ask.
+  Iterable<int> reachablePages() sync* {
+    if (root == 0) return;
+    yield* _reachable(root, 0);
+  }
+
+  Iterable<int> _reachable(int pageId, int depth) sync* {
+    // A cyclic or wildly deep tree is a hostile file's cheapest denial of
+    // service, and this walk is reachable from `verify` on a file the caller
+    // did not write. The bound is the same one section 8 of
+    // `00-conventions.md` puts on nesting.
+    if (depth > 100) {
+      throw CorruptionException(
+          'tree $treeId is deeper than 100 pages at page $pageId; a copy-on-'
+          'write tree that deep is a cycle');
+    }
+    yield pageId;
+    final n = _load(pageId);
+    if (n.isLeaf) return;
+    for (var i = 0; i < n.count; i++) {
+      yield* _reachable(_Node.childOf(n.payloads[i]).$1, depth + 1);
+    }
+  }
+
   Iterable<(Uint8List, Uint8List)> _walk(
       int pageId, Uint8List? lower, Uint8List? upper) sync* {
     final n = _load(pageId);

@@ -130,7 +130,7 @@ final class Collection {
         kind: TreeKind.index, owner: name, params: idx.params);
     // Backfill: every document already present produces its entries now.
     for (final e in _e.scanTree(treeId)) {
-      final doc = decodeValue(e.value) as CDoc;
+      final doc = expectValue<CDoc>(decodeValue(e.value), 'document');
       _writeIndexEntries(idx, d.treeId, doc, _idOf(e.cke), remove: false);
     }
     return d;
@@ -166,12 +166,12 @@ final class Collection {
 
   CDoc? get(CValue id) {
     final v = _e.get(treeId, id);
-    return v == null ? null : decodeValue(v) as CDoc;
+    return v == null ? null : expectValue<CDoc>(decodeValue(v), 'document');
   }
 
   Iterable<(CValue, CDoc)> get all sync* {
     for (final e in _e.scanTree(treeId)) {
-      yield (_idOf(e.cke), decodeValue(e.value) as CDoc);
+      yield (_idOf(e.cke), expectValue<CDoc>(decodeValue(e.value), 'document'));
     }
   }
 

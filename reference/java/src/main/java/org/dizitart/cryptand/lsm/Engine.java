@@ -326,8 +326,40 @@ public final class Engine implements AutoCloseable {
             } finally {
                 java.util.Arrays.fill(master, (byte) 0);
             }
-        } else if (options.password != null || options.rawKey != null) {
-            throw new InvalidArgumentException("a key was supplied but the file is not encrypted");
+        } else {
+            // §6.1's downgrade, and it has to be checked here rather than
+            // inside the branch above.
+            //
+            // Turning `cipher` off is one byte, and the whole of §6.2's
+            // argument for `sb_mac` is that otherwise "anyone can set
+            // `cipher = 0` or weaken Argon2id cost". A reader that only
+            // verifies the MAC when the file says it is encrypted has made the
+            // MAC conditional on the field the MAC exists to protect.
+            //
+            // What it looked like before: the shared conformance corpus's
+            // `v1.0-security-tamper-sb.cryptand` came back as an
+            // InvalidArgumentException — "a key was supplied but the file is
+            // not encrypted" — which classifies as corruption. §9.4 and §6.2
+            // require tampering, and the difference is not cosmetic:
+            // `13-operations.md` §3 lets a repair pass run over corruption and
+            // forbids it over tampering, so the wrong class invites a rebuild
+            // driven by bytes an attacker chose. Without a key supplied it was
+            // worse still: the file simply opened as plaintext.
+            //
+            // An occupied keyslot on a `cipher = 0` file is the signature, and
+            // it is one an attacker cannot erase without also destroying the
+            // thing they want to read.
+            for (Keyslot k : Keyslot.decodeAll(sb.keyslots)) {
+                if (k != null && k.occupied()) {
+                    throw new org.dizitart.cryptand.TamperingException(
+                            "the superblock says cipher = 0 and a keyslot is occupied: "
+                                    + "spec/14-security.md section 6.1's downgrade");
+                }
+            }
+            if (options.password != null || options.rawKey != null) {
+                throw new InvalidArgumentException(
+                        "a key was supplied but the file is not encrypted");
+            }
         }
         if (!options.readOnly) {
             sb.durabilityAchieved = file.achieved();
