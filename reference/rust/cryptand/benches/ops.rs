@@ -80,8 +80,12 @@ fn percentile(v: &mut Vec<u64>, p: f64) -> u64 {
     v[((v.len() - 1) as f64 * p).round() as usize]
 }
 
-/// Fills a database and returns `(logical bytes, elapsed seconds)`.
-fn fill(db: &mut Database, n: u64, with_index: bool) -> (u64, f64) {
+/// Fills a database and returns `(logical bytes, elapsed seconds, the index)`.
+fn fill(
+    db: &mut Database,
+    n: u64,
+    with_index: bool,
+) -> (u64, f64, Option<cryptand::database::IndexDescriptor>) {
     let mut c = db.collection("orders").unwrap();
     let idx = if with_index {
         Some(db.create_index(&c, &["ordStatusTxt"], "non_unique", false).unwrap())
@@ -99,7 +103,7 @@ fn fill(db: &mut Database, n: u64, with_index: bool) -> (u64, f64) {
         }
     }
     db.commit(Durability::Os).unwrap();
-    (logical, t0.elapsed().as_secs_f64())
+    (logical, t0.elapsed().as_secs_f64(), idx)
 }
 
 fn file_bytes(p: &Path) -> u64 {
@@ -116,7 +120,7 @@ fn main() {
     // ------------------------------------------------------------------
     let b = harness::Bench::new("ops");
     let mut db = Database::create(&b.path, Profile::Desktop).unwrap();
-    let (logical, secs) = fill(&mut db, n, true);
+    let (logical, secs, index) = fill(&mut db, n, true);
     let device = db.engine.pager.bytes_written_device;
     db.engine.drain_compaction().unwrap();
     db.commit(Durability::Os).unwrap();
@@ -189,8 +193,10 @@ fn main() {
     // ------------------------------------------------------------------
     // index lookup
     // ------------------------------------------------------------------
-    let idx = db.create_index(&c, &["ordStatusTxt"], "non_unique", false);
-    if let Ok(ix) = idx {
+    // The index the fill already created. Creating a second one here returned
+    // an error and the row was skipped **silently**, which is how a benchmark
+    // reports nothing and still looks like it ran.
+    if let Some(ix) = &index {
         let mut samples = Vec::with_capacity(2000);
         for i in 0..2000.min(n) {
             let pad = format!("{i:0>6}");
@@ -200,7 +206,7 @@ fn main() {
             }
             let scan = cryptand::index::scan_prefix(&[Value::Str(s)]).unwrap();
             let t = Instant::now();
-            let _ = db.index_scan(&ix, &scan).unwrap();
+            let _ = db.index_scan(ix, &scan).unwrap();
             samples.push(t.elapsed().as_nanos() as u64);
         }
         row(
@@ -215,21 +221,28 @@ fn main() {
     drop(b);
 
     // ------------------------------------------------------------------
-    // the codec, on the same data -- `01-container.md` §7's reason to exist
+    // the codec -- and the row is here because it measured ZERO, which is why
+    // `page_codec` is 0 in every profile now. `01-container.md` §7 carries the
+    // reasoning: a page is a fixed-size slot, so a compressed page occupies
+    // the same slot and is written with the same page_size-byte write. The row
+    // stays in the suite so that a container shape which *does* make it pay
+    // shows up here rather than in an argument.
     // ------------------------------------------------------------------
-    let bytes_on = on_disk;
-    let b2 = harness::Bench::new("ops-nocodec");
+    let bytes_off = on_disk;
+    let b2 = harness::Bench::new("ops-codec");
     let mut db2 = Database::create(&b2.path, Profile::Desktop).unwrap();
-    db2.engine.pager.page_codec = codec::NONE;
-    db2.engine.sb.page_codec = codec::NONE;
-    let (_, _) = fill(&mut db2, n, true);
+    db2.engine.pager.page_codec = codec::LZ4;
+    db2.engine.sb.page_codec = codec::LZ4;
+    let (_, _, _) = fill(&mut db2, n, true);
     db2.engine.drain_compaction().unwrap();
     db2.commit(Durability::Os).unwrap();
-    let bytes_off = file_bytes(&b2.path);
+    let bytes_on = file_bytes(&b2.path);
+    let device_on = db2.engine.pager.bytes_written_device;
     db2.close().unwrap();
     drop(b2);
     row("codec_bytes_on", bytes_on.to_string(), "bytes", true);
     row("codec_bytes_off", bytes_off.to_string(), "bytes", true);
+    row("codec_bytes_device_on", device_on.to_string(), "bytes", true);
     row(
         "codec_saving",
         format!("{:.4}", 1.0 - bytes_on as f64 / bytes_off.max(1) as f64),
@@ -245,7 +258,7 @@ fn main() {
     let mut db3 = Database {
         engine: Engine::create_encrypted(&b3.path, Profile::Desktop, &key, 0, 0, 0, 0).unwrap(),
     };
-    let (_, enc_secs) = fill(&mut db3, n, true);
+    let (_, enc_secs, _) = fill(&mut db3, n, true);
     db3.close().unwrap();
     drop(b3);
     row(

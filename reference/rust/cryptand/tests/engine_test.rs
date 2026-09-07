@@ -191,3 +191,61 @@ fn shrink_and_backup_round_trip() {
         );
     }
 }
+
+/// A bounded scan must cost the range, not the tree.
+///
+/// This is a **counter** assertion, and it has to be, for a reason worth
+/// stating: a scan that applies `lower`/`upper` to its *result* returns exactly
+/// the same rows as one that seeks, and once the segments are in memory it
+/// reads exactly the same number of pages. So neither the answers, nor the page
+/// counter this project treats as its primary result, nor the cross-language
+/// interop gate could tell the two apart. This implementation materialised the
+/// whole tree for a one-row index lookup — **7.76 ms, 2 page reads, 1 row** —
+/// while the Dart and Java implementations seeked. Only a count of *records
+/// examined* separates them, and after the fix the same lookup is 46 µs.
+///
+/// `04-segments.md` §8 makes cursors mandatory for exactly this.
+#[test]
+fn a_bounded_scan_examines_the_range_and_not_the_tree() {
+    use cryptand::value::Value;
+
+    let (_t, mut e) = engine("bounded-scan", cryptand::container::Profile::Desktop);
+    const T: u32 = 16;
+    let n = 20_000i64;
+    for i in 0..n {
+        e.put(T, &Value::NitriteId(i), format!("v{i}").as_bytes()).unwrap();
+    }
+    e.flush().unwrap();
+    e.drain_compaction().unwrap();
+
+    let one = cryptand::cke::encode(&Value::NitriteId(9_000)).unwrap();
+    let upper = cryptand::cke::successor(&one).unwrap();
+
+    e.reset_scan_counters();
+    let rows = e.scan_tree(T, Some(&one), Some(&upper), None, false).unwrap();
+    let examined = e.scan_records_examined();
+    assert_eq!(rows.len(), 1, "the range holds exactly one key");
+
+    // The bound is deliberately generous: a seek lands on a leaf and the walk
+    // stops at the first key past the range, so the cost is a handful of
+    // records per segment, not 20 000. Anything near `n` means the bounds went
+    // back to being a post-filter.
+    assert!(
+        examined < 200,
+        "a one-row bounded scan examined {examined} records out of {n}: the \
+         bounds are not reaching the segment walk"
+    );
+
+    // And the control: an *unbounded* scan of the same tree really does examine
+    // the tree, so the assertion above is measuring the bounds and not a
+    // counter that never moves.
+    e.reset_scan_counters();
+    let all = e.scan_tree(T, None, None, None, false).unwrap();
+    assert_eq!(all.len(), n as usize);
+    assert!(
+        e.scan_records_examined() >= n as u64,
+        "the unbounded control examined only {} records, so the counter is not \
+         measuring what the bounded case claims",
+        e.scan_records_examined()
+    );
+}

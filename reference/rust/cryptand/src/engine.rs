@@ -136,6 +136,9 @@ pub struct Counters {
 }
 
 pub struct Engine {
+    /// Records the bounded scans have examined. See
+    /// [`Engine::scan_records_examined`] for why this counter exists.
+    pub scan_examined: u64,
     pub pager: Pager,
     pub sb: Superblock,
     pub manifest: Manifest,
@@ -298,6 +301,7 @@ impl Engine {
         sb.set_feature(feature::CORE, true);
         let shards = pc.memtable_shards.max(1) as usize;
         let mut e = Engine {
+            scan_examined: 0,
             pager,
             manifest: Manifest::new(0),
             catalog: Catalog::new(0, 0, tree_id::FIRST_USER_TREE as u64),
@@ -418,6 +422,7 @@ impl Engine {
         let pc = ProfileConstants::from_superblock(&sb);
         let shards = sb.memtable_shards.max(1) as usize;
         let mut e = Engine {
+            scan_examined: 0,
             pager,
             manifest: Manifest::new(sb.manifest_root),
             catalog: Catalog::new(sb.catalog_root, 0, sb.next_tree_id),
@@ -1400,6 +1405,23 @@ impl Engine {
     /// Every live entry of one tree, in key order, at `at` (or the current
     /// snapshot). `value()` is lazy in the cursor sense: a key-only scan never
     /// touches the value log, so `values` selects that.
+    /// Records a bounded scan actually examined, since the engine was opened.
+    ///
+    /// This exists because the answers a scan returns are identical whether the
+    /// bounds were pushed into the segment walk or applied to the result, and
+    /// the page-read counter is identical too once the segments are cached. So
+    /// neither the tests nor the interop gate could see that this
+    /// implementation materialised the whole tree for a one-row lookup, while
+    /// the Dart and Java ones seeked. Only a counter over *records examined*
+    /// distinguishes them.
+    pub fn scan_records_examined(&self) -> u64 {
+        self.scan_examined
+    }
+
+    pub fn reset_scan_counters(&mut self) {
+        self.scan_examined = 0;
+    }
+
     pub fn scan_tree(
         &mut self,
         tree: u32,
@@ -1410,7 +1432,48 @@ impl Engine {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let ceiling = at.map(|s| s.seq).unwrap_or(u64::MAX);
         let rds = self.range_deletes_for(tree)?;
-        // Collect every version, then collapse per user key.
+
+        // The bounds, as **user keys** — `u32be(tree_id) || CKE(key)`, which is
+        // the order a segment is laid out in (§1). Pushing them down here is
+        // what makes a bounded scan cost the range rather than the tree.
+        //
+        // It did not, and the shape of the miss is worth keeping: every
+        // segment's every record was collected into a `BTreeMap` and `lower` /
+        // `upper` were applied to the *result*. A one-row index lookup on
+        // 20 000 documents therefore walked all 20 000 index entries and all
+        // 20 000 data entries, and measured **7.76 ms**. The page-read counter
+        // read 2 the whole time, because the segments were already in memory —
+        // so the counter this project relies on as its primary result was
+        // perfect while the CPU cost was linear in the tree. `04-segments.md`
+        // §8 makes cursors mandatory for exactly this reason.
+        let lower_uk: Option<Vec<u8>> = lower.map(|l| {
+            let mut v = tree.to_be_bytes().to_vec();
+            v.extend_from_slice(l);
+            v
+        });
+        let upper_uk: Option<Vec<u8>> = upper.map(|u| {
+            let mut v = tree.to_be_bytes().to_vec();
+            v.extend_from_slice(u);
+            v
+        });
+        let in_range = |uk: &[u8]| -> bool {
+            if uk.len() < 4 || uk[..4] != tree.to_be_bytes() {
+                return false;
+            }
+            if let Some(l) = &lower_uk {
+                if uk < l.as_slice() {
+                    return false;
+                }
+            }
+            if let Some(u) = &upper_uk {
+                if uk >= u.as_slice() {
+                    return false;
+                }
+            }
+            true
+        };
+
+        // Collect every version in range, then collapse per user key.
         let mut best: BTreeMap<Vec<u8>, SegRecord> = BTreeMap::new();
         let consider = |best: &mut BTreeMap<Vec<u8>, SegRecord>, rec: SegRecord| {
             if rec.seq() > ceiling {
@@ -1425,9 +1488,25 @@ impl Engine {
             }
         };
         for shard in &self.memtable {
-            for (ik, e) in shard.iter() {
+            // The memtable is ordered by internal key, so the range is a
+            // sub-map rather than a filtered walk.
+            let from = lower_uk.clone().unwrap_or_else(|| tree.to_be_bytes().to_vec());
+            for (ik, e) in shard.range(from..) {
+                if !in_range(&ik[..ik.len().saturating_sub(9)]) {
+                    // Past the upper bound, or into another tree: both mean
+                    // there is nothing further to find in this shard.
+                    if ik.len() >= 4 && ik[..4] == tree.to_be_bytes() {
+                        if let Some(u) = &upper_uk {
+                            if &ik[..ik.len() - 9] >= u.as_slice() {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    break;
+                }
                 let p = parse_internal_key(ik)?;
-                if p.tree_id != tree || p.op == op::RANGE_DELETE {
+                if p.op == op::RANGE_DELETE {
                     continue;
                 }
                 consider(
@@ -1446,15 +1525,49 @@ impl Engine {
             if self.quarantined.contains_key(&r.segment_id) {
                 continue;
             }
-            let seg = self.segment(&r)?;
-            for rec in seg.iter() {
-                let rec = rec?;
-                let p = parse_internal_key(&rec.internal_key)?;
-                if p.tree_id != tree || p.op == op::RANGE_DELETE {
+            // The manifest already carries each segment's `[min_key, max_key]`
+            // as user keys, so a segment that cannot hold anything in range is
+            // never opened at all.
+            if let Some(u) = &upper_uk {
+                if !r.min_key.is_empty() && r.min_key.as_slice() >= u.as_slice() {
                     continue;
                 }
-                consider(&mut best, rec);
             }
+            if let Some(l) = &lower_uk {
+                if !r.max_key.is_empty() && r.max_key.as_slice() < l.as_slice() {
+                    continue;
+                }
+            }
+            let seg = self.segment(&r)?;
+            // Seek to the lower bound, or to this **tree's own prefix** when
+            // there is none -- never to the first cell. A segment holds the
+            // entries of every tree an L0 flush covered, ordered by
+            // `u32be(tree_id) || CKE(key)`, so seeking to cell 0 lands in
+            // whichever tree sorts first and the `break` below would end the
+            // walk before reaching this one. That is what it did: an unbounded
+            // scan of an index tree returned zero rows.
+            let seek_to = lower_uk.clone().unwrap_or_else(|| tree.to_be_bytes().to_vec());
+            let mut cur = seg.seek(&seek_to)?;
+            let mut examined = 0u64;
+            while let Some(rec) = cur.record()? {
+                examined += 1;
+                let uk = rec.user_key();
+                if uk.len() >= 4 && uk[..4] != tree.to_be_bytes() {
+                    // Past this tree: the order is by tree id first, and the
+                    // seek above started at or after this tree's prefix.
+                    break;
+                }
+                if let Some(u) = &upper_uk {
+                    if uk >= u.as_slice() {
+                        break;
+                    }
+                }
+                if in_range(uk) && rec.op() != op::RANGE_DELETE {
+                    consider(&mut best, rec);
+                }
+                cur.next()?;
+            }
+            self.scan_examined += examined;
         }
 
         let mut out = Vec::new();

@@ -1334,6 +1334,56 @@ discovered later.** This project has now found the same shape four times —
 specifying a format change and shipping three implementations that ignore it
 would be the same mistake with better paperwork.
 
+### 8.20 Phase 23 — a bounded scan that cost the whole tree
+
+The first thing the new benchmark's index row measured was **7 782 µs for a
+one-row index lookup** on 20 000 documents. Profiling it took one probe: the
+lookup read **2 pages** and returned **1 row**. All of the time was CPU.
+
+Rust's `scan_tree` collected every record of every segment into a `BTreeMap`
+and applied `lower` / `upper` to the **result**. So a lookup for one key walked
+all 20 000 index entries and all 20 000 data entries, every time. After pushing
+the bounds into the segment walk — seek to the lower bound, stop at the upper,
+and skip a segment whose manifest `[min_key, max_key]` cannot intersect the
+range — the same lookup is **44.7 µs**, a **174×** difference, with the same 2
+page reads and the same row.
+
+**Dart and Java never had it.** Dart seeks every segment cursor to `lower` and
+runs a k-way merge; Java's `Cursor` carries `lowUk`/`highUk` and prunes on the
+manifest's `minKey` first. This was a Rust-only defect, and `04-segments.md`
+§8's "cursors are mandatory" is the rule it broke.
+
+**Why nothing caught it, and it is the sharpest instance of this yet.** A scan
+that post-filters returns *exactly the same rows* as one that seeks. Once the
+segments are resident it reads *exactly the same number of pages*. So:
+
+- every correctness test passed, because the answers were right;
+- the **page-read counter** — the number this project elevates over wall time,
+  for good reasons, in `design/performance-model.md` §8 — read 2 in both cases;
+- the twelve-direction interop gate passed, because the files are identical;
+- and P10, whose whole subject is how many segments a read touches, is about
+  *point* reads and never looked at a range.
+
+The instrument the project trusts most was blind here, and the instrument it
+distrusts — wall time — was the only one that could see it. That is not an
+argument for gating on wall time; it is an argument for **having a counter that
+counts the right thing**. `Engine::scan_records_examined` is that counter now,
+and the regression test asserts on it with an unbounded control, because a
+bound of "under 200 records" on a counter that never moves would measure
+nothing.
+
+**Sixth instance of "a control that cannot fail".** The bounded assertion alone
+would pass on an engine whose scan counter was never incremented. The control
+scans the same tree unbounded and requires the counter to reach 20 000.
+
+**One near-miss worth recording.** The first version of the fix seeked to the
+segment's *first* cell when there was no lower bound. A segment holds the
+entries of every tree an L0 flush covered, ordered by
+`u32be(tree_id) || CKE(key)`, so that landed in whichever tree sorts first and
+the walk's "past this tree, stop" branch ended it immediately: an unbounded scan
+of an index tree returned **zero rows**. The sparse-index test caught it. Seek
+to the tree's own prefix, never to cell 0.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.
