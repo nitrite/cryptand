@@ -40,10 +40,22 @@ fn main() -> ExitCode {
         "stats" if args.len() >= 2 => stats(&args[1]),
         "repair" if args.len() >= 2 => repair(&args[1]),
         "create" if args.len() >= 2 => create(&args[1]),
-        "backup" if args.len() >= 3 && args[1] == "--incremental" => {
+        // `>= 4`, not `>= 3`: the incremental form is
+        // `backup --incremental <file> <dest>`, so with three arguments
+        // `args[3]` is past the end and this arm panicked with an
+        // index-out-of-bounds -- exit 101 and a backtrace where the user
+        // should have got the usage text.
+        "backup" if args.len() >= 4 && args[1] == "--incremental" => {
             backup(&args[2], &args[3], true)
         }
-        "backup" if args.len() >= 3 => backup(&args[1], &args[2], false),
+        // `args[1] != "--incremental"` matters: without it, a mistyped
+        // `backup --incremental <file>` falls through to here and runs a
+        // *full* backup treating the flag itself as the source path. It then
+        // fails for the wrong reason -- "no such file: --incremental" -- when
+        // what the user needs is the usage text.
+        "backup" if args.len() >= 3 && args[1] != "--incremental" => {
+            backup(&args[1], &args[2], false)
+        }
         "fuzz" if args.len() >= 2 => {
             let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2000);
             fuzz(&args[1], n)
@@ -190,10 +202,23 @@ fn backup(path: &str, dest: &str, incremental: bool) -> cryptand::Result<ExitCod
 /// fields, page headers, and the payloads behind them.
 fn fuzz(path: &str, iterations: u64) -> cryptand::Result<ExitCode> {
     let original = std::fs::read(path)?;
-    let mut probe = cryptand::pager::Pager::open(&PathBuf::from(path), 4096, 1)?;
-    let sb = cryptand::container::Superblock::parse(&probe.read_at(0, 4096)?)
-        .or_else(|_| cryptand::container::Superblock::parse(&probe.read_at(4096, 4096)?))?;
-    let page_size = sb.page_size();
+    // `open_shared`, not `open`: the probe only reads, and taking the
+    // exclusive writer lock here made the second `Pager::open` below fail
+    // against *this same process* -- `01-container.md` §10's lock is per open
+    // file description, so `fuzz` could never run at all. `Engine::open` uses
+    // `open_shared` for its own superblock probe for exactly this reason.
+    let page_size = {
+        let mut probe = cryptand::pager::Pager::open_shared(&PathBuf::from(path), 4096, 1)?;
+        let sb = cryptand::container::Superblock::parse(&probe.read_at(0, 4096)?)
+            .or_else(|_| cryptand::container::Superblock::parse(&probe.read_at(4096, 4096)?))?;
+        sb.page_size()
+    };
+    let sb = {
+        let mut probe =
+            cryptand::pager::Pager::open_shared(&PathBuf::from(path), page_size, u64::MAX)?;
+        cryptand::container::Superblock::parse(&probe.read_at(0, 4096)?)
+            .or_else(|_| cryptand::container::Superblock::parse(&probe.read_at(page_size as u64, 4096)?))?
+    };
 
     // Every page that carries a header, and the two superblock slots.
     let mut structural: Vec<(u64, usize)> = vec![(0, 4096), (page_size as u64, 4096)];

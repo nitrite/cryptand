@@ -225,6 +225,31 @@ void encryptionTests() {
     7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
   ];
 
+  test('create refuses to overwrite a database that is already there', () {
+    // `writeAsBytesSync` truncates, so `create` on an existing path used to
+    // destroy the database silently and unrecoverably. Two of the three
+    // reference implementations did this; only the Java one refused. It is a
+    // plausible thing for an operator or a deploy script to do, and there is
+    // no undo.
+    final path = tmp('nooverwrite');
+    final db = DatabaseFile.create(path, credential: key, kdf: Keyslot.kdfRaw);
+    db.engine.put(t, CNitriteId(1), Uint8List.fromList('keep me'.codeUnits));
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+    final before = File(path).lengthSync();
+    expect(before, greaterThan(0));
+
+    expect(
+        () => DatabaseFile.create(path, credential: key, kdf: Keyslot.kdfRaw),
+        throwsA(isA<InvalidArgumentException>()));
+
+    // And the refusal left the file alone rather than half-writing it.
+    expect(File(path).lengthSync(), before);
+    final back = DatabaseFile.open(path, key: key);
+    expect(back.engine.get(t, CNitriteId(1)), isNotNull,
+        reason: 'the original data must still be there');
+  });
+
   test('an encrypted database round-trips and refuses the wrong key', () {
     final path = tmp('aead');
     final db = DatabaseFile.create(path,

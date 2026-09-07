@@ -317,6 +317,24 @@ abstract final class DatabaseFile {
     final blank = Uint8List(2 * profile.pageSize)
       ..setRange(0, Sb.size, image)
       ..setRange(profile.pageSize, profile.pageSize + Sb.size, image);
+    // **Refuse to overwrite an existing database.** `writeAsBytesSync` on an
+    // existing path truncates it, so `create` on a file that already held a
+    // database destroyed it silently — unrecoverable, and a plausible thing
+    // for an operator or a script to do. Two of the three reference
+    // implementations did this; only the Java one refused.
+    //
+    // This is a check followed by a write, not an atomic exclusive create:
+    // `dart:io` exposes no `O_EXCL`, so a file appearing between the two
+    // would still be overwritten. That window is narrow and is not the case
+    // this guards — it guards the operator who typed the wrong path — and
+    // saying so is better than implying an atomicity this cannot provide.
+    // The real defence against two writers is `01-container.md` §10's
+    // exclusive advisory lock, which the store takes below.
+    if (File(path).existsSync() && File(path).lengthSync() != 0) {
+      throw InvalidArgumentException(
+          '$path already exists and is not empty; use open '
+          '(spec/01-container.md section 2)');
+    }
     File(path).writeAsBytesSync(blank, flush: true);
 
     // §4.1 rule 1, now that there is somewhere durable to publish to — and

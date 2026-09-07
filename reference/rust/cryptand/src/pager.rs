@@ -89,9 +89,30 @@ pub struct Pager {
 }
 
 impl Pager {
+    /// Creates a new file, and **refuses to overwrite an existing one**.
+    ///
+    /// `create_new` rather than `create` + `truncate`: the earlier form
+    /// silently destroyed a database on `cryptand create <an existing file>`,
+    /// which is a plausible thing for an operator to type and is unrecoverable.
+    /// The Java implementation already refused; this one and the Dart one did
+    /// not, so two of three reference implementations lost the file.
+    ///
+    /// The check is here rather than in the caller because it must hold for
+    /// every path into creation, and because `create_new` makes it atomic --
+    /// an `exists()` test followed by an open is a race, and the race is
+    /// between "someone else made this database" and "I deleted it".
     pub fn create(path: &Path, page_size: usize) -> Result<Pager> {
         check_page_size(page_size)?;
-        let file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
+        let file = match OpenOptions::new().read(true).write(true).create_new(true).open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return invalid(format!(
+                    "{} already exists; use open (spec/01-container.md section 2)",
+                    path.display()
+                ))
+            }
+            Err(e) => return Err(e.into()),
+        };
         take_writer_lock(&file, path)?;
         let mut p = Pager::new_common(page_size);
         p.file = Some(file);

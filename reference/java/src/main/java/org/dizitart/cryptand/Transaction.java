@@ -75,9 +75,29 @@ public final class Transaction implements AutoCloseable {
         if (isolation == Isolation.SERIALIZABLE) {
             readSet.add(k);
         }
+        // Newest first, so a later write wins over an earlier one -- and so a
+        // point write after a range delete resurrects its key, which is what
+        // the same two operations do when the batch reaches the engine.
         for (int i = staged.size() - 1; i >= 0; i--) {
             Staged s = staged.get(i);
-            if (s.treeId() == treeId && BtreePage.memcmp(s.key(), cke) == 0) {
+            if (s.treeId() != treeId) {
+                continue;
+            }
+            if (s.op() == BtreePage.Op.RANGE_DELETE) {
+                // A range delete this transaction buffered covers this key.
+                // Without this branch a transaction could not see its own
+                // range delete: `removeRange` then `get` inside the range
+                // returned the *old value*, so application code decided the
+                // row still existed and acted on it. A point `remove` was
+                // visible and a range delete was not, which is the worst
+                // shape -- the difference is invisible until it matters.
+                if (BtreePage.memcmp(s.key(), cke) <= 0
+                        && BtreePage.memcmp(cke, s.rangeEnd()) < 0) {
+                    return null;
+                }
+                continue;
+            }
+            if (BtreePage.memcmp(s.key(), cke) == 0) {
                 return s.op() == BtreePage.Op.DELETE ? null : s.value();
             }
         }
@@ -119,7 +139,15 @@ public final class Transaction implements AutoCloseable {
     }
 
     public long commit() {
-        requireWritable();
+        // Not `requireWritable`: committing is not writing. A read-only
+        // transaction has nothing staged and commits trivially, and refusing
+        // it forced callers to remember which isolation level needs `rollback`
+        // instead of `commit` -- a distinction no other implementation makes.
+        // `detectConflicts` already has a READ_ONLY early return, which was
+        // unreachable while this line threw first.
+        if (finished) {
+            throw new IllegalStateException("the transaction is already committed or rolled back");
+        }
         finished = true;
         try {
             if (staged.isEmpty()) {
