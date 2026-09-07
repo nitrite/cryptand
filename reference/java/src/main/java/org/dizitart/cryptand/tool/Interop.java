@@ -387,6 +387,9 @@ public final class Interop {
             }
         } catch (Exception e) {
             System.err.println(e);
+            if (System.getenv("CRYPTAND_TRACE") != null) {
+                e.printStackTrace();
+            }
             System.exit(1);
         }
     }

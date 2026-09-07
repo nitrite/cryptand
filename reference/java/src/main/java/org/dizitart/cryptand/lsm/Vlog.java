@@ -34,6 +34,34 @@ import java.util.concurrent.atomic.AtomicLong;
  * reservation has completed, and only records entirely below it may be
  * referenced by a pointer.
  */
+/**
+ * <strong>Every mutating entry point is {@code synchronized} on this
+ * instance.</strong>
+ *
+ * <p>Two threads reach the value log. The committer calls {@link #append} from
+ * {@code Engine.commitBatch}, which takes <em>no</em> structural lock; the
+ * compactor calls {@link #appendCold} from {@code Engine.compactOnce}, which
+ * holds {@code structure}. So the shared state here — the {@code hot} and
+ * {@code known} maps, each {@code Open}'s watermark bookkeeping, and its
+ * {@code completed} {@code TreeMap} — was mutated concurrently with no lock at
+ * all.
+ *
+ * <p>The symptom was
+ * {@code NullPointerException: Cannot assign field "color" because "this.root"
+ * is null} — {@code java.util.TreeMap.fixAfterInsertion} on a tree two threads
+ * had corrupted — surfacing in about one run in six of
+ * {@code reference/conformance/interop/run.sh} and in none of the 300 unit
+ * tests, which do not run long enough for the two threads to overlap on the
+ * same log.
+ *
+ * <p>An NPE is the <em>lucky</em> outcome. The same race silently loses a
+ * `completed` entry, which leaves the durable watermark short of what was
+ * written, which is a value-log record that no longer resolves.
+ *
+ * <p>There is no lock-order inversion: {@code commitBatch} never takes
+ * {@code structure}, so the only nesting is {@code structure} then this
+ * monitor, always in that order.
+ */
 public final class Vlog {
 
     /** An open, appendable segment. */
@@ -74,7 +102,7 @@ public final class Vlog {
     private FileCipher cipher;
 
     /** Installs the record cipher. Null means the value log is written in the clear. */
-    public void setCipher(FileCipher cipher) {
+    public synchronized void setCipher(FileCipher cipher) {
         this.cipher = cipher;
     }
 
@@ -85,11 +113,11 @@ public final class Vlog {
         this.nextSegmentId = new AtomicLong(nextSegmentId);
     }
 
-    public long nextSegmentId() {
+    public synchronized long nextSegmentId() {
         return nextSegmentId.get();
     }
 
-    public void setCurrentSeq(long seq) {
+    public synchronized void setCurrentSeq(long seq) {
         this.createdSeq = seq;
     }
 
@@ -105,7 +133,7 @@ public final class Vlog {
      * rather than encryption-only, because a rule that applies sometimes is a
      * rule that gets implemented wrong.
      */
-    public void sealOrphans() {
+    public synchronized void sealOrphans() {
         for (Map.Entry<byte[], byte[]> e : new ArrayList<>(statsTree.map().entrySet())) {
             VlogStats s = VlogStats.fromValue(e.getKey(), Cve.decode(e.getValue()));
             if (!s.sealed) {
@@ -120,7 +148,7 @@ public final class Vlog {
     // ==================================================================
 
     /** Appends one record to the hot tier, routed by heat class. */
-    public VlogPointer append(int treeId, byte[] cke, byte[] value, int heatClass) {
+    public synchronized VlogPointer append(int treeId, byte[] cke, byte[] value, int heatClass) {
         return appendTo(openHot(heatClass), treeId, cke, value);
     }
 
@@ -129,7 +157,7 @@ public final class Vlog {
      * (§6.3) and by a bulk writer with a sorted batch (§6.3's last bullet),
      * which may skip the hot tier and the promotion write entirely.
      */
-    public VlogPointer appendCold(int treeId, byte[] cke, byte[] value) {
+    public synchronized VlogPointer appendCold(int treeId, byte[] cke, byte[] value) {
         return appendTo(openCold(), treeId, cke, value);
     }
 
@@ -271,7 +299,7 @@ public final class Vlog {
     // reading
     // ==================================================================
 
-    public VlogSegment segment(long id) {
+    public synchronized VlogSegment segment(long id) {
         VlogSegment s = known.get(id);
         if (s != null) {
             return s;
@@ -295,7 +323,7 @@ public final class Vlog {
     }
 
     /** Resolves a pointer. One sized read, because the pointer carries the record's total length. */
-    public VlogSegment.Record read(VlogPointer p) {
+    public synchronized VlogSegment.Record read(VlogPointer p) {
         Open open = openOf(p.segmentId());
         VlogSegment s = open != null ? open.seg : segment(p.segmentId());
         // §6.4: `offset + len` must be at most `data_offset + bytes`. Tree 7's
@@ -326,7 +354,7 @@ public final class Vlog {
      * @return the records in the order the pointers were given, and the number
      *         of physical reads issued
      */
-    public Resolved readMany(List<VlogPointer> pointers) {
+    public synchronized Resolved readMany(List<VlogPointer> pointers) {
         List<Integer> order = new ArrayList<>(pointers.size());
         for (int i = 0; i < pointers.size(); i++) {
             order.add(i);
@@ -442,13 +470,13 @@ public final class Vlog {
      * whose value-log records are not already durable, and a commit that
      * appended none has none to make durable.
      */
-    public boolean consumeAppendFlag() {
+    public synchronized boolean consumeAppendFlag() {
         boolean any = appendedSinceBarrier;
         appendedSinceBarrier = false;
         return any;
     }
 
-    public void publishStats() {
+    public synchronized void publishStats() {
         for (Open o : hot.values()) {
             publish(o, false);
         }
@@ -499,7 +527,7 @@ public final class Vlog {
     }
 
     /** The tree-7 view of every segment the database knows about. */
-    public List<VlogStats> allStats() {
+    public synchronized List<VlogStats> allStats() {
         List<VlogStats> out = new ArrayList<>();
         for (Map.Entry<byte[], byte[]> e : statsTree.map().entrySet()) {
             out.add(VlogStats.fromValue(e.getKey(), Cve.decode(e.getValue())));
@@ -541,7 +569,7 @@ public final class Vlog {
      *
      * @return whether the walk reached the watermark
      */
-    public boolean walk(VlogStats stats, java.util.function.Consumer<Walked> consumer) {
+    public synchronized boolean walk(VlogStats stats, java.util.function.Consumer<Walked> consumer) {
         VlogSegment seg;
         try {
             seg = segment(stats.segmentId);
@@ -574,7 +602,7 @@ public final class Vlog {
         return true;
     }
 
-    public void recomputeLiveness(java.util.function.BiFunction<Integer, byte[], VlogPointer> live) {
+    public synchronized void recomputeLiveness(java.util.function.BiFunction<Integer, byte[], VlogPointer> live) {
         for (VlogStats s : allStats()) {
             long[] counts = new long[2];
             walk(s, w -> {

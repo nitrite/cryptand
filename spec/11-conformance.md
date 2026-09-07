@@ -291,6 +291,16 @@ Rules:
   implementation A, mutate it, close it, open it in B, verify, mutate, close,
   reopen in A. This is the actual product claim and it must be tested as such,
   in CI, on every SDK's every commit.
+- **And it MUST be run repeatedly, not once.** The round trip drives a
+  realistic amount of work through a complete engine, which makes it the one
+  thing in a conformance suite that can surface a *race* — and a race does not
+  fail every run. A reference implementation carried an unsynchronized
+  `TreeMap` shared between its committer and its compactor threads; the gate
+  caught it in about **one run in six**, and had been run once per change for
+  as long as it had existed, so it reported "pass" five times out of six on a
+  build that was corrupting a value log's durable watermark. Ten consecutive
+  runs is the minimum that means anything; a single green run of this gate is
+  evidence about that run and not about the build.
 - **A concurrency test is mandatory** for any implementation claiming full
   Level 0: *N* threads writing overlapping key ranges while *M* threads scan,
   with a compaction forced throughout. Every reader must observe a snapshot

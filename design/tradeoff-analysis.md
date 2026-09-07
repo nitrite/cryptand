@@ -1384,6 +1384,55 @@ the walk's "past this tree, stop" branch ended it immediately: an unbounded scan
 of an index tree returned **zero rows**. The sparse-index test caught it. Seek
 to the tree's own prefix, never to cell 0.
 
+### 8.21 Phase 24 — a data race the whole gate found and no test could
+
+Running `reference/conformance/interop/run.sh` in a loop, rather than once,
+produced:
+
+```
+java.lang.NullPointerException: Cannot assign field "color" because "this.root" is null
+   FAIL java could not mutate
+```
+
+about **one run in six**. `color` and `root` are `java.util.TreeMap.Entry`
+fields; that exception from `fixAfterInsertion` is the signature of a `TreeMap`
+two threads have corrupted. No such field exists anywhere in the Cryptand
+sources — the whole trace is inside the JDK, which is why grepping for it found
+nothing.
+
+**The race.** Two threads reach `Vlog`. The committer calls `append` from
+`Engine.commitBatch`, which takes **no structural lock**; the compactor calls
+`appendCold` from `Engine.compactOnce`, which holds `structure`. The shared
+state — the `hot` and `known` maps, each `Open`'s watermark bookkeeping, and its
+`completed` `TreeMap` — had no lock at all. `Vlog` contained the word
+`synchronized` zero times.
+
+**An NPE is the lucky outcome.** The same race silently drops a `completed`
+entry, which leaves the durable watermark short of what was actually written,
+which is a value-log record that no longer resolves. That is
+[[cryptand-gc-visibility-defect]]'s failure mode reached by a different road.
+
+Fixed by synchronizing `Vlog`'s entry points on the instance. There is no
+lock-order inversion to worry about: `commitBatch` never takes `structure`, so
+the only nesting is `structure` then this monitor, always in that order. Ten
+consecutive gate runs clean afterwards.
+
+**Why 300 unit tests could not see it**, and this is the part worth keeping.
+The suite's engine tests are short. The committer and the compactor overlap on
+the same value log only when a database is large enough that compaction is
+still running while new commits arrive — which is what the interop fixture's
+400 documents with a 900-byte note every tenth row produces, and what a
+150-millisecond unit test does not. The gate was not written to find races; it
+found one because it is the only thing in the project that drives a *realistic*
+amount of work through a *complete* engine.
+
+**The lesson is about how the gate is run, not what it contains.** It had been
+run once per change since it was written, and it passes about five times in six.
+A gate whose failure rate is 1/6 and which is run once reports "pass" 83 % of
+the time on a broken build. `11-conformance.md` §6 should say to run it
+repeatedly, and the honest reading of every previous "the gate passes" in this
+document is *"it passed the time we ran it"*.
+
 ## 10. Is the trade right?
 
 Yes, and round two removed the condition that round one had to attach.
