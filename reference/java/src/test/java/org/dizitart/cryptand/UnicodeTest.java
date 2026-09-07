@@ -1,5 +1,7 @@
 package org.dizitart.cryptand;
 
+import org.dizitart.cryptand.text.Unicode;
+
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 

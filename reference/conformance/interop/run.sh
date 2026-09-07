@@ -37,7 +37,7 @@ run_impl() {
   case "$impl" in
     rust) "$RUST" "$@" ${extra[@]+"${extra[@]}"} ;;
     dart) (cd "$dart" && dart run tool/interop.dart "$@" ${extra[@]+"${extra[@]}"}) ;;
-    java) java -cp "$JAVA_CP" org.dizitart.cryptand.Interop "$@" ${extra[@]+"${extra[@]}"} ;;
+    java) java -cp "$JAVA_CP" org.dizitart.cryptand.tool.Interop "$@" ${extra[@]+"${extra[@]}"} ;;
     *) echo "unknown implementation $impl" >&2; return 2 ;;
   esac
 }

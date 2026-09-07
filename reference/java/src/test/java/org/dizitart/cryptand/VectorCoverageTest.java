@@ -1,5 +1,8 @@
 package org.dizitart.cryptand;
 
+import org.dizitart.cryptand.text.Porter2;
+import org.dizitart.cryptand.text.Unicode;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

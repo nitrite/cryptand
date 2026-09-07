@@ -1,5 +1,7 @@
 package org.dizitart.cryptand;
 
+import org.dizitart.cryptand.container.Superblock;
+
 /**
  * A sequence number plus the structural state at one commit —
  * {@code spec/10-transactions.md} §1.

@@ -84,6 +84,37 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
             </plugin>
+            <!--
+              Coverage. Bound to the default phases so `mvn test` writes
+              target/site/jacoco/jacoco.xml and `mvn verify` fails the build if
+              the ratchet below is not met. The interop/bench entry points are
+              excluded: they are driven by reference/conformance/interop/run.sh
+              and by hand, not by the suite, so counting them measures the
+              harness rather than the engine.
+            -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.12</version>
+                <configuration>
+                    <excludes>
+                        <exclude>org/dizitart/cryptand/tool/Interop*</exclude>
+                        <exclude>org/dizitart/cryptand/bench/**</exclude>
+                        <exclude>org/dizitart/cryptand/text/UnicodeTables*</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals><goal>prepare-agent</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals><goal>report</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-source-plugin</artifactId>
