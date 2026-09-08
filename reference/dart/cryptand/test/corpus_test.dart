@@ -67,7 +67,15 @@ final class Result {
 /// a runner that stops at `verify()` reports those as accepted.
 Result readFile(String path, Uint8List? key) {
   try {
-    final db = DatabaseFile.open(path, key: key);
+    // **Read-only, and that is not a detail.** The corpus is the fixture
+    // `11-conformance.md` §6 defines conformance *by*, so a runner that writes
+    // to it moves the target on every run. This one did: an encrypted
+    // database's open publishes a nonce floor (`14-security.md` §4.1) with a
+    // durable superblock write, so merely reading the corpus rewrote both
+    // superblock slots of four files — `v1.0-encrypted` and three
+    // `v1.0-security-*`, which means it wrote to files it was about to reject
+    // as tampered.
+    final db = DatabaseFile.openReadOnly(path, key: key);
     // Corruption and tampering only. `spec/01-container.md` section 9: "A leak
     // is repairable" — it is wasted space in a sound file, not damage, and a
     // copy-on-write container leaks tree 1's own pages by one commit as a
@@ -184,5 +192,47 @@ void main() {
                 'document was read)'}');
       });
     }
+
+    test('reading the corpus does not modify it', () {
+      // The corpus is the fixture section 6 defines conformance *by*, so a
+      // runner that writes to it moves the target on every run. This one did,
+      // and nothing here could see it: an encrypted database's open publishes
+      // a nonce floor (14-security.md section 4.1) with a durable superblock
+      // write, so a plain `dart test` rewrote both superblock slots of four
+      // files -- v1.0-encrypted and three v1.0-security-*. That means the
+      // runner wrote to files it was about to reject as tampered, and that a
+      // parallel run of another implementation's suite failed against files it
+      // was only reading.
+      //
+      // The check is on the bytes rather than on the open mode, because the
+      // property is "the corpus did not change" and a future write through some
+      // other path would satisfy an assertion about the mode.
+      int digestOf(File f) => f.readAsBytesSync().fold<int>(
+          0x811c9dc5, (a, b) => ((a ^ b) * 0x01000193) & 0xFFFFFFFF);
+
+      Map<String, int> snapshot() {
+        final out = <String, int>{};
+        for (final e in dir.listSync()) {
+          if (e is File) out[e.uri.pathSegments.last] = digestOf(e);
+        }
+        return out;
+      }
+
+      final before = snapshot();
+      expect(before.length, greaterThanOrEqualTo(15),
+          reason: 'too few corpus files to be measuring anything');
+
+      for (final f in files) {
+        final path = '${dir.path}/${f['name']}';
+        try {
+          DatabaseFile.openReadOnly(path, key: unhex(f['key'] as String?));
+        } catch (_) {
+          // Every corrupt and tampered fixture throws here; that it throws is
+          // what the tests above assert. This one only cares about the bytes.
+        }
+      }
+
+      expect(snapshot(), before, reason: 'reading the corpus modified it');
+    });
   });
 }

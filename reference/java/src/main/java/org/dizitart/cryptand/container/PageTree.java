@@ -37,6 +37,19 @@ public final class PageTree {
     private final List<Long> oldPages = new ArrayList<>();
     private long root;
     private boolean dirty;
+    /**
+     * Bumped by every content change, so a decoded view of this tree can tell
+     * whether it is stale without rebuilding to find out.
+     *
+     * <p>{@code volatile} so a reader can check it without taking the lock that
+     * guards {@code entries}. Reading the version is safe lock-free; *building*
+     * from {@code entries} is not, and never happens without the lock.
+     *
+     * <p>{@code put} and {@code remove} are the only ways to change the
+     * content, so bumping there is exhaustive — {@code load} starts a fresh
+     * instance, which no cache can already hold a version of.
+     */
+    private volatile long version;
 
     private PageTree(Pager pager, int treeId, long root) {
         this.pager = pager;
@@ -103,13 +116,20 @@ public final class PageTree {
         byte[] old = entries.put(key.clone(), value.clone());
         if (old == null || !Arrays.equals(old, value)) {
             dirty = true;
+            version++;
         }
     }
 
     public void remove(byte[] key) {
         if (entries.remove(key) != null) {
             dirty = true;
+            version++;
         }
+    }
+
+    /** Changes on every {@link #put} or {@link #remove} that alters content. */
+    public long version() {
+        return version;
     }
 
     /** Every entry, in {@code memcmp} order. */

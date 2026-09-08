@@ -65,3 +65,7 @@ path = "src/bin/interop.rs"
 [[bin]]
 name = "filter_probe"
 path = "benches/filter_probe.rs"
+
+[[bin]]
+name = "crud_bench"
+path = "benches/crud.rs"

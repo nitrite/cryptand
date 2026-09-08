@@ -390,6 +390,28 @@ abstract final class DatabaseFile {
     }
   }
 
+  /// Opens a database **without writing to the file**.
+  ///
+  /// `11-conformance.md` §3's reader matrix requires this mode outright — a
+  /// file whose `write_version_minor` exceeds what the implementation supports
+  /// MUST open read-only rather than be refused — and it is what any reader of
+  /// a file it does not own needs: a golden fixture, a file under examination,
+  /// a database another process owns.
+  ///
+  /// The difference from [open] is `14-security.md` §4.1's nonce floor. An
+  /// encrypted database's ordinary open publishes `persisted_next_nonce +
+  /// 2^20` durably, which rewrites both superblock slots before anything is
+  /// read. §4.1's rule is that the floor is published before nonces are
+  /// *allocated*, and a handle that never writes a page allocates none — so a
+  /// reader needs no floor, and taking one modifies a file it only meant to
+  /// look at. Reading the shared conformance corpus rewrote four of its files
+  /// on every run this way, `v1.0-security-*` among them, which means it wrote
+  /// to files it was about to reject as tampered.
+  ///
+  /// It takes no writer lock, so several readers may hold one at once.
+  static Database openReadOnly(String path, {List<int>? key}) =>
+      _open(path, key, readOnly: true);
+
   /// `spec/01-container.md` §10 — "one writing **process** per database,
   /// enforced by an exclusive advisory lock on the database file
   /// (`flock` / `LockFileEx`) held for its writing lifetime", and "a second
@@ -411,7 +433,7 @@ abstract final class DatabaseFile {
     return f;
   }
 
-  static Database _open(String path, List<int>? key) {
+  static Database _open(String path, List<int>? key, {bool readOnly = false}) {
     final bytes = File(path).readAsBytesSync();
     if (bytes.length < 2 * Sb.size) {
       throw const CorruptionException('file is shorter than two superblocks');
@@ -514,10 +536,15 @@ abstract final class DatabaseFile {
       // successive crashed sessions both start at W and hand out the same
       // values. It is published *here*, before the segments below are read
       // and long before anything is written.
+      // A read-only handle publishes no floor because it allocates no nonce;
+      // see `openReadOnly`. `NonceAllocator.readOnly` hands out nothing, so
+      // the absence of a floor cannot turn into a reused nonce.
       e.installKeys(
           ring,
-          NonceAllocator.open(
-              sb.nextNonce, (floor) => _publishNonceFloor(path, sb, ring, floor)));
+          readOnly
+              ? NonceAllocator.readOnly(sb.nextNonce)
+              : NonceAllocator.open(sb.nextNonce,
+                  (floor) => _publishNonceFloor(path, sb, ring, floor)));
     }
 
     // §6: the free tree, read back so this session reuses space rather than

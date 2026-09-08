@@ -74,6 +74,21 @@ public final class Pager {
     private final java.util.concurrent.atomic.AtomicLong pageReads =
             new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * {@code 12-profiles.md} §1's page cache, in access order so the eldest
+     * entry is the least recently used. Guarded by its own monitor rather than
+     * the pager's, because reads must not serialize against the write path.
+     */
+    private final java.util.LinkedHashMap<Long, byte[]> cache =
+            new java.util.LinkedHashMap<>(64, 0.75f, true);
+    private long pageCacheBytes = 64L * 1024 * 1024;
+    private final java.util.concurrent.atomic.AtomicLong cacheHits =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong cacheMisses =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong cacheEvictions =
+            new java.util.concurrent.atomic.AtomicLong();
+
     public Pager(PageFile file, int pageSize, long pageCount, long commitId, long minRetainedCommit) {
         Limits.checkPageSize(pageSize);
         this.file = file;
@@ -318,10 +333,135 @@ public final class Pager {
         if (pageId < 0) {
             throw new CorruptionException("negative page id " + pageId);
         }
+        byte[] hit;
+        synchronized (cache) {
+            hit = cache.get(pageId);
+        }
+        if (hit != null) {
+            cacheHits.incrementAndGet();
+            // A copy, because callers own what they are handed and some of them
+            // decode in place. The uncached path allocated a page per read too,
+            // so this is not a new cost.
+            return hit.clone();
+        }
+        cacheMisses.incrementAndGet();
         pageReads.incrementAndGet();
         byte[] page = new byte[pageSize];
         file.readFully(offsetOf(pageId), page, 0, pageSize);
+        admit(pageId, page);
         return page;
+    }
+
+    /**
+     * Caches a page and evicts until the resident set is inside
+     * {@code 12-profiles.md} §1's budget.
+     *
+     * <p>This implementation had <strong>no page cache at all</strong>: every
+     * {@code readRaw} was a real {@code readFully}, so a point lookup that
+     * walks a segment's B+tree paid one I/O per node. Measured on the CRUD
+     * matrix at 20 000 documents: <strong>228 page reads per point lookup</strong>,
+     * 716 per update and 808 per delete, against 1 and 0 for the other two.
+     *
+     * <p>ponytail: a {@code LinkedHashMap} in access order is the eviction
+     * policy, which is LRU and nothing more. Its ceiling is that it is one
+     * global lock; if a profile ever wants a cache large enough for that to
+     * show, shard it by {@code pageId} and the accounting below does not
+     * change.
+     */
+    private void admit(long pageId, byte[] page) {
+        // **Pages 0 and 1 are never cached.** They are the two superblock slots
+        // ({@code 01-container.md} §2), and {@link
+        // org.dizitart.cryptand.lsm.Engine} writes them straight to the
+        // {@code PageFile} rather than through {@link #writePage} — so a cached
+        // copy would go stale behind this class's back on every commit.
+        // Excluding them is two pages of lost caching and one fewer invariant
+        // to remember at a call site that is not in this file.
+        if (pageId < 2) {
+            return;
+        }
+        synchronized (cache) {
+            cache.put(pageId, page);
+            while (cache.size() > 1 && (long) cache.size() * pageSize > pageCacheBytes) {
+                java.util.Iterator<java.util.Map.Entry<Long, byte[]>> it =
+                        cache.entrySet().iterator();
+                it.next();
+                it.remove();
+                cacheEvictions.incrementAndGet();
+            }
+        }
+    }
+
+    /**
+     * Drops a page from the cache. Called wherever the bytes on the device
+     * change, so the cache can never serve a stale page.
+     */
+    private void invalidate(long pageId) {
+        synchronized (cache) {
+            cache.remove(pageId);
+        }
+    }
+
+    /**
+     * Writes bytes at a byte offset and invalidates every page they cover.
+     *
+     * <p><strong>Use this rather than {@code pager.file().write(...)}.</strong>
+     * Whole extents are written in one I/O by {@code SegmentBuilder},
+     * {@code Vlog}, {@code Blob} and {@code VectorRegion}, all of which reach
+     * past {@link #writePage}. With a page cache in place that is a
+     * correctness bug rather than a style one: a page freed, reallocated and
+     * rewritten through one of those paths leaves the old bytes cached, and the
+     * next read of that page id returns them. It showed up as
+     * "subtree_entries sum to 11, its header declares 8" — a verifier finding
+     * on a database that was written correctly and read stale.
+     */
+    public void writeAt(long offset, byte[] bytes) {
+        file.write(offset, bytes);
+        long first = offset / pageSize;
+        long last = (offset + Math.max(1, bytes.length) - 1) / pageSize;
+        synchronized (cache) {
+            for (long p = first; p <= last; p++) {
+                cache.remove(p);
+            }
+        }
+    }
+
+    /** {@code 13-operations.md} §6's {@code page_cache_hit_rate}, as a count. */
+    public long pageCacheHits() {
+        return cacheHits.get();
+    }
+
+    public long pageCacheMisses() {
+        return cacheMisses.get();
+    }
+
+    public long pageCacheEvictions() {
+        return cacheEvictions.get();
+    }
+
+    /** Bytes of page currently resident. */
+    public long pageCacheResidentBytes() {
+        synchronized (cache) {
+            return (long) cache.size() * pageSize;
+        }
+    }
+
+    /** {@code 12-profiles.md} §1's budget for this pager. */
+    public long pageCacheBudgetBytes() {
+        return pageCacheBytes;
+    }
+
+    /** Sets the budget from the profile. Evicts immediately if it shrank. */
+    public void pageCacheBytes(long bytes) {
+        this.pageCacheBytes = Math.max(bytes, (long) pageSize * 2);
+        synchronized (cache) {
+            while (cache.size() > 1 && (long) cache.size() * pageSize > pageCacheBytes) {
+                java.util.Iterator<java.util.Map.Entry<Long, byte[]>> it =
+                        cache.entrySet().iterator();
+                it.next();
+                it.remove();
+                cacheEvictions.incrementAndGet();
+            }
+        }
     }
 
     public PageHeader readHeader(long pageId) {
@@ -365,6 +505,7 @@ public final class Pager {
     public synchronized void writePage(long pageId, PageHeader h, byte[] payload) {
         byte[] page = buildPage(pageId, h, payload);
         file.write(offsetOf(pageId), page);
+        invalidate(pageId);
         if (pageId >= pageCount) {
             pageCount = pageId + 1;
         }

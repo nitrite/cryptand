@@ -140,6 +140,53 @@ is at the flat end of several curves in this format. When a change is O(some
 dimension), measure along that dimension; this suite answers "what does an
 implementation do per second", which is a different and equally real question.
 
+## The CRUD-under-load matrix, beside it
+
+`reference/rust/cryptand/benches/crud.rs`,
+`reference/dart/cryptand/bench/crud.dart` and
+`org.dizitart.cryptand.bench.CrudBench`, run the same way as the suite above:
+
+```bash
+cd reference/rust          && cargo run --release --bin crud_bench
+cd reference/dart/cryptand && dart run bench/crud.dart
+cd reference/java          && mvn -q -B compile exec:java -Dexec.mainClass=org.dizitart.cryptand.bench.CrudBench -Dexec.classpathScope=compile
+```
+
+Both take an optional document count and mixed-operation count.
+
+It exists because the suite above measures **C** and **R** and nothing else: a
+bulk insert, a point read, a scan, an index lookup. There is no **U** and no
+**D** anywhere in it, and every phase runs against a database that has just been
+compacted and is otherwise idle. That is each operation's best case, and it is
+not what a person is asking about when they say "under load".
+
+The matrix adds update and delete, and runs every operation twice — once in
+isolation, and once in a sustained 70/20/5/5 read/update/insert/delete mix with
+compaction running underneath rather than drained first. **The difference
+between the two columns is the point**; the isolated numbers are the ceiling and
+the mixed ones are the steady state.
+
+**"Under load" here means the shape of the work, not the number of threads.**
+That is deliberate and it is the same reason the section below gives: Dart has
+no shared-memory threads, so a concurrency row would not mean the same thing in
+each of the three. Load is a mixed workload against a database with maintenance
+in flight, and all three can honour that definition.
+
+Three counters in it found more than the wall-clock rows did, which is the usual
+outcome under §8's rule:
+
+| counter | what it caught |
+|---|---|
+| `read_page_reads_per_op` | Rust re-walked the manifest B-tree through the pager **once per level on every point read** — 5 of the 6 page reads a lookup cost, with the sixth being the value it wanted. `mobile` paid 5 I/Os for the point read `12-profiles.md` §2.1 promises in **one**, which is the profile's whole defining choice |
+| `update_page_reads_per_op` / `delete_page_reads_per_op` | the Java engine had **no page cache at all**, so every `readRaw` was a real `readFully`: 228 page reads per point lookup, 716 per update, 808 per delete |
+| `page_cache_resident_bytes` against `page_cache_budget_bytes` | `12-profiles.md` §1's page cache budget was honoured by none of the three. Rust's segment cache was unbounded and held 70 MB against `mobile`'s stated 4 MiB at 150 000 documents, growing linearly with the data |
+
+The `*_us_p999` rows are there for a cost the p50 and p99 hide entirely: the
+Java implementation's p99.9 for every write operation is **150–430 ms**, against
+`desktop`'s `max_foreground_stall_ms` of 25. `MAX_DELAY_MS` caps one
+backpressure delay at 100 ms, so a 430 ms operation is waiting on something
+else. That is recorded here as a measured, open finding rather than a fixed one.
+
 ## What it does not measure
 
 Concurrency. `10 §2`'s multi-writer scaling is P3, it needs threads, and it has

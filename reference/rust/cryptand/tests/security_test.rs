@@ -600,3 +600,54 @@ fn secure_zero_clears_under_release_optimization() {
     cryptand::security::secure_zero(&mut secret);
     assert!(secret.iter().all(|&b| b == 0), "secure_zero left bytes behind");
 }
+
+#[test]
+fn a_read_only_handle_writes_nothing_at_open_and_refuses_writes_after() {
+    // `11-conformance.md` §3's reader matrix requires this mode: a file whose
+    // `write_version_minor` exceeds what the implementation supports MUST open
+    // read-only rather than be refused. It is also what any reader of a file it
+    // does not own needs.
+    //
+    // Both halves are asserted, because either alone is satisfiable by
+    // accident: a handle that writes nothing at open but accepts a `put` is
+    // not read-only, and one that refuses writes while still publishing a
+    // nonce floor has already modified the file it promised not to touch.
+    let t = TempDb::new("readonly");
+    let key = [9u8; 32];
+    {
+        let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &key, 0, 0, 0, 0).unwrap();
+        for i in 0..200i64 {
+            e.put(16, &Value::NitriteId(i), b"payload").unwrap();
+        }
+        e.flush().unwrap();
+        e.commit(Durability::Sync).unwrap();
+        e.close(true).unwrap();
+    }
+
+    let digest = |p: &std::path::Path| -> u64 {
+        std::fs::read(p)
+            .unwrap()
+            .iter()
+            .fold(1469598103934665603u64, |a, x| (a ^ *x as u64).wrapping_mul(1099511628211))
+    };
+    let before = digest(&t.path);
+
+    let mut e = Engine::open_read_only(&t.path, Some(&key)).unwrap();
+
+    // Half one: opening changed nothing. On an encrypted database the ordinary
+    // open publishes a nonce floor (`14-security.md` §4.1) with a synchronous
+    // superblock write, so this is the half that actually used to fail.
+    assert_eq!(digest(&t.path), before, "opening read-only modified the file");
+
+    // And it is a real handle, not an inert one: the data reads back.
+    assert_eq!(e.get(16, &Value::NitriteId(7)).unwrap().as_deref(), Some(&b"payload"[..]));
+    assert_eq!(e.scan_tree(16, None, None, None, false).unwrap().len(), 200);
+
+    // Half two: every write path refuses. They all pass through `arm`, so this
+    // is a sample of the paths rather than a list of them.
+    assert!(e.put(16, &Value::NitriteId(1), b"nope").is_err(), "put succeeded on a read-only handle");
+    assert!(e.remove(16, &Value::NitriteId(1)).is_err(), "remove succeeded on a read-only handle");
+    assert!(e.flush().is_err(), "flush succeeded on a read-only handle");
+
+    assert_eq!(digest(&t.path), before, "a refused write still changed the file");
+}

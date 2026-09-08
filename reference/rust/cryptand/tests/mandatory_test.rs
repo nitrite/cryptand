@@ -478,3 +478,54 @@ fn a_crash_at_a_randomized_point_leaves_a_structurally_valid_database() {
         }
     }
 }
+
+#[test]
+fn the_resident_page_cache_stays_inside_the_profile_budget() {
+    // `12-profiles.md` §1 gives `mobile` a 4 MiB page cache budget and
+    // `design/performance-model.md` P7 predicts resident set bounded by it.
+    //
+    // The budget was a decoration: `page_cache_bytes` was declared in the
+    // profile table and read by nothing, so the segment cache grew with the
+    // data. Measured on `mobile` before the bound: 28 MB resident over 30
+    // segments at 60 000 documents, and 70 MB over 75 at 150 000 — linear in
+    // the data touched, which is the definition of unbounded.
+    //
+    // The check is a counter, not a wall clock: `page_cache_resident_bytes`
+    // against the profile's own number. It is machine-independent, so it can
+    // be asserted in CI (`design/performance-model.md` §8).
+    let (_t, mut e) = engine("cachebound", Profile::Mobile);
+    let budget = e.profile.page_cache_bytes;
+    let payload = vec![b'x'; 400];
+    let n = 15_000i64;
+    for i in 0..n {
+        e.put(16, &Value::NitriteId(i), &payload).unwrap();
+    }
+    e.flush().unwrap();
+    e.compact().unwrap();
+
+    // Touch every key, which is what makes an unbounded cache hold everything.
+    for i in 0..n {
+        assert!(e.get(16, &Value::NitriteId(i)).unwrap().is_some(), "key {i} vanished");
+    }
+
+    let resident = e.page_cache_resident_bytes();
+    assert!(
+        resident <= budget,
+        "resident {resident} B over {} segments exceeds the mobile budget of {budget} B",
+        e.page_cache_segments()
+    );
+
+    // A control that can fail: the workload must actually have pressed on the
+    // budget. Without this, an engine that cached nothing would pass, and a
+    // check that cannot fail measures nothing — this project's own recurring
+    // lesson.
+    assert!(
+        e.counters.page_cache_evictions > 0,
+        "nothing was evicted, so the bound was never tested: \
+         raise the document count until the resident set would exceed {budget} B"
+    );
+
+    // And eviction must not have cost correctness: a miss re-reads through the
+    // pager, so every key is still there.
+    assert!(e.get(16, &Value::NitriteId(n - 1)).unwrap().is_some());
+}

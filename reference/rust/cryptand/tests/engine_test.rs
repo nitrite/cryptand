@@ -154,6 +154,41 @@ fn range_delete_is_one_write_and_hides_the_interval() {
 }
 
 #[test]
+fn a_range_delete_still_in_the_memtable_hides_the_interval() {
+    // The test above flushes after `remove_range`, so its range delete is
+    // always resolved out of a **segment**. Nothing exercised the other half of
+    // `range_deletes_for` — the memtable one — and the gap was invisible until
+    // a control asked it to be: with the memtable half disabled outright, the
+    // entire suite still passed.
+    //
+    // §4 resolves a range delete at read time from wherever it currently
+    // lives, and between `remove_range` and the next flush that is the
+    // memtable. A reader that consults only segments returns deleted data,
+    // which is the definition of wrong.
+    let (_t, mut e) = engine("rangedelete-mem", Profile::Desktop);
+    for i in 0..100i64 {
+        e.put(T, &Value::NitriteId(i), b"x").unwrap();
+    }
+    e.flush().unwrap();
+
+    // No flush after this one: the range delete stays in the memtable.
+    e.remove_range(T, &Value::NitriteId(20), &Value::NitriteId(40)).unwrap();
+
+    assert!(e.get(T, &Value::NitriteId(19)).unwrap().is_some(), "19 is outside the interval");
+    assert!(e.get(T, &Value::NitriteId(20)).unwrap().is_none(), "an unflushed range delete did not hide its start");
+    assert!(e.get(T, &Value::NitriteId(30)).unwrap().is_none(), "an unflushed range delete did not hide its middle");
+    assert!(e.get(T, &Value::NitriteId(39)).unwrap().is_none(), "an unflushed range delete did not hide its end");
+    assert!(e.get(T, &Value::NitriteId(40)).unwrap().is_some(), "the interval is half-open");
+    assert_eq!(e.scan_tree(T, None, None, None, false).unwrap().len(), 80, "a scan must honour it too");
+
+    // And it survives the flush, so the memtable path and the segment path
+    // agree rather than merely both existing.
+    e.flush().unwrap();
+    assert!(e.get(T, &Value::NitriteId(30)).unwrap().is_none());
+    assert_eq!(e.scan_tree(T, None, None, None, false).unwrap().len(), 80);
+}
+
+#[test]
 fn ttl_is_evaluated_at_read_time_and_a_backwards_clock_resurrects() {
     // §9: "an implementation MUST treat a backwards clock jump as resurrecting
     // entries rather than as corruption."

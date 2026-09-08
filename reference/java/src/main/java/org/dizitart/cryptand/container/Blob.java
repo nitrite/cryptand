@@ -72,7 +72,7 @@ public record Blob(long startPage, int byteLen, int crc32c) {
         h.writeInto(head);
         System.arraycopy(head, 0, extent, 0, pageSize);
 
-        pager.file().write(pager.offsetOf(start), extent);
+        pager.writeAt(pager.offsetOf(start), extent);
         return new Blob(start, value.length, Crc32c.of(value, 0, value.length));
     }
 
@@ -151,7 +151,7 @@ public record Blob(long startPage, int byteLen, int crc32c) {
             System.arraycopy(sealed, 0, extent, i * pageSize, sealed.length);
             pos += n;
         }
-        pager.file().write(pager.offsetOf(start), extent);
+        pager.writeAt(pager.offsetOf(start), extent);
         return new Blob(start, value.length, Crc32c.of(value, 0, value.length));
     }
 

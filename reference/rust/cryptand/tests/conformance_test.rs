@@ -823,3 +823,60 @@ fn the_shared_conformance_corpus_passes() {
         "too few files were checked; is the corpus complete?\n{text}"
     );
 }
+
+/// A digest of every corpus file, by name.
+fn corpus_digests(dir: &std::path::Path) -> std::collections::BTreeMap<String, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(dir).expect("reading the corpus directory") {
+        let p = entry.expect("a corpus entry").path();
+        if !p.is_file() {
+            continue;
+        }
+        let b = std::fs::read(&p).expect("reading a corpus file");
+        let h = b.iter().fold(1469598103934665603u64, |a, x| (a ^ *x as u64).wrapping_mul(1099511628211));
+        out.insert(p.file_name().unwrap().to_string_lossy().into_owned(), h);
+    }
+    out
+}
+
+#[test]
+fn reading_the_corpus_does_not_modify_it() {
+    // The corpus is the fixture §6 defines conformance *by*, so a runner that
+    // writes to it moves the target on every run. This one did, and nothing
+    // here could see it.
+    //
+    // An encrypted database's open publishes a nonce floor with a synchronous
+    // superblock write (`14-security.md` §4.1), and `seal_unsealed_vlog_segments`
+    // runs right after, so a plain `cargo test` rewrote superblock slot B of
+    // four files — `v1.0-encrypted` and three `v1.0-security-*`. That means the
+    // runner **wrote to files it was about to reject as tampered**, and that a
+    // parallel run of another implementation's suite failed against files it
+    // was only reading, because these were write-locked.
+    //
+    // The check is on the bytes rather than on the open mode: the property is
+    // "the corpus did not change", and a future write through some other path
+    // would satisfy an assertion about the mode.
+    let dir = std::path::Path::new(support::ROOT).parent().unwrap().join("files");
+    if !dir.join("manifest.json").exists() {
+        panic!("{} is missing; see the corpus test above", dir.display());
+    }
+    let before = corpus_digests(&dir);
+    assert!(before.len() >= 15, "too few corpus files to be measuring anything");
+
+    let exe = env!("CARGO_BIN_EXE_interop");
+    std::process::Command::new(exe)
+        .arg("corpus")
+        .arg(&dir)
+        .output()
+        .expect("running the interop binary");
+
+    let after = corpus_digests(&dir);
+    for (name, h) in &before {
+        assert_eq!(
+            after.get(name),
+            Some(h),
+            "reading the conformance corpus modified {name}"
+        );
+    }
+    assert_eq!(before.len(), after.len(), "the corpus gained or lost a file");
+}

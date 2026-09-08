@@ -168,16 +168,57 @@ public final class Database implements AutoCloseable {
         }
     }
 
-    /** Every catalog entry, name and descriptor. */
+    /**
+     * A decoded catalog and the tree version it was decoded from.
+     *
+     * <p>Immutable, and published through a {@code volatile} field, so a reader
+     * that finds a current one uses it without any lock at all.
+     */
+    private record CachedCatalog(long version, Map<String, TreeDescriptor> entries) {
+    }
+
+    private volatile CachedCatalog catalogCache;
+
+    /**
+     * Every catalog entry, name and descriptor.
+     *
+     * <p><strong>This is on the write path.</strong>
+     * {@code Collection.stage} calls {@code Collection.indexes()} for every
+     * document written, and that walked the whole catalog here — decoding a CKE
+     * key and a {@code TreeDescriptor} per entry into a fresh map — while
+     * holding {@link Engine#lockStructure}, the <em>global</em> lock the
+     * committer and the compactor hold for the whole of their critical
+     * sections.
+     *
+     * <p>So every insert queued behind whatever maintenance was running. A
+     * sample of 25 stacks during the CRUD matrix found the main thread parked on
+     * that lock in 24 of them, all from this method. It is what made Java's
+     * p99.9 hundreds of milliseconds against {@code desktop}'s 25 ms
+     * {@code max_foreground_stall_ms}, while its p50 stayed at 27 µs — the
+     * engine was fast and almost never running.
+     *
+     * <p>The catalog changes only when a collection or an index is created or
+     * dropped, so it is cached against {@link PageTree#version()}. The hot path
+     * now reads one {@code volatile} and returns.
+     */
     public Map<String, TreeDescriptor> catalog() {
+        CachedCatalog c = catalogCache;
+        if (c != null && c.version() == engine.catalogTree().version()) {
+            return c.entries();
+        }
         engine.lockStructure();
         try {
+            // Read the version *inside* the lock and before the build, so the
+            // cached version describes the content actually decoded.
+            long v = engine.catalogTree().version();
             Map<String, TreeDescriptor> out = new LinkedHashMap<>();
             for (Map.Entry<byte[], byte[]> e : engine.catalogTree().map().entrySet()) {
                 String name = ((Value.Str) Cke.decode(e.getKey())).value();
                 out.put(name, TreeDescriptor.decode(e.getValue(), null));
             }
-            return out;
+            Map<String, TreeDescriptor> frozen = java.util.Collections.unmodifiableMap(out);
+            catalogCache = new CachedCatalog(v, frozen);
+            return frozen;
         } finally {
             engine.unlockStructure();
         }

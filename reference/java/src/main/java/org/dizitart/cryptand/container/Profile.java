@@ -27,19 +27,19 @@ import org.dizitart.cryptand.crypto.Argon2id;
 public enum Profile {
 
     /** 0 — the constants were set individually and match no named profile. */
-    CUSTOM(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    CUSTOM(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
 
     MOBILE(1, 4096, 1, 1024, 65536, 2, 4, 2, 1, 2 * 1024 * 1024, 4 * 1024 * 1024,
-            12, 10, 120, 20, 128, 8),
+            12, 10, 120, 20, 128, 8, 4 * 1024 * 1024),
 
     TABLET(2, 4096, 2, 1024, 131072, 4, 6, 3, 2, 8 * 1024 * 1024, 16 * 1024 * 1024,
-            14, 10, 130, 20, 256, 8),
+            14, 10, 130, 20, 256, 8, 16 * 1024 * 1024),
 
     DESKTOP(3, 8192, 8, 256, 262144, 4, 8, 4, 2, 32 * 1024 * 1024, 64 * 1024 * 1024,
-            16, 10, 150, 20, 256, 25),
+            16, 10, 150, 20, 256, 25, 64 * 1024 * 1024),
 
     SERVER(4, 16384, 32, 256, 262144, 8, 10, 6, 3, 128 * 1024 * 1024, 256 * 1024 * 1024,
-            16, 10, 150, 25, 1024, 100);
+            16, 10, 150, 25, 1024, 100, 512 * 1024 * 1024);
 
     private final int id;
     private final int pageSize;
@@ -58,12 +58,21 @@ public enum Profile {
     private final int localityDebtPct;
     private final int readaheadWindow;
     private final int maxForegroundStallMs;
+    /**
+     * {@code 12-profiles.md} §1's "page cache budget" row — 4 / 16 / 64 /
+     * 512 MiB.
+     *
+     * <p>It was missing here and unread in the other two implementations, which
+     * made a normative row of the profile table a decoration. See
+     * {@link org.dizitart.cryptand.container.Pager} for what now honours it.
+     */
+    private final int pageCacheBytes;
 
     Profile(int id, int pageSize, int memtableShards, int vlogMin, int blobThreshold,
             int l0Trigger, int fanout, int tierWidth, int overlapBound,
             int segmentTargetBytes, int vlogSegmentBytes, int filterBitsUpper,
             int filterBitsLast, int vlogSpaceTargetPct, int localityDebtPct,
-            int readaheadWindow, int maxForegroundStallMs) {
+            int readaheadWindow, int maxForegroundStallMs, int pageCacheBytes) {
         this.id = id;
         this.pageSize = pageSize;
         this.memtableShards = memtableShards;
@@ -81,6 +90,7 @@ public enum Profile {
         this.localityDebtPct = localityDebtPct;
         this.readaheadWindow = readaheadWindow;
         this.maxForegroundStallMs = maxForegroundStallMs;
+        this.pageCacheBytes = pageCacheBytes;
     }
 
     public int id() {
@@ -157,6 +167,11 @@ public enum Profile {
      * {@code spec/12-profiles.md} §4's foreground stall budget. 8 ms on a phone
      * because a UI thread that blocks for 16 ms drops a frame.
      */
+    /** {@code 12-profiles.md} §1's page cache budget, in bytes. */
+    public int pageCacheBytes() {
+        return pageCacheBytes;
+    }
+
     public int maxForegroundStallMs() {
         return maxForegroundStallMs;
     }

@@ -179,6 +179,14 @@ void main() {
       expect(m.isAvailable('unencrypted_pages'), isFalse);
       expect(m.isAvailable('locality_debt'), isTrue);
       expect(m.isAvailable('segments_probed_per_lookup_p99'), isTrue);
+
+      // The metric section 6 names by name. An engine that has fetched no
+      // page has observed no hit and no miss; 0/0 is not 1.0, and the
+      // sentence in section 6 is about this exact reading.
+      expect(m.isAvailable('page_cache_hit_rate'), isFalse,
+          reason: 'a rate over zero accesses is unavailable, not perfect');
+      expect(m.pageCacheHitRate, isNot(1.0),
+          reason: 'the forbidden value is the reassuring one');
     });
 
     test('page_cache_hit_rate is measured from the segment counters', () {

@@ -7,6 +7,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.util.Map;
+import java.util.TreeMap;
 
 import org.dizitart.cryptand.tool.Interop;
 
@@ -71,5 +74,61 @@ class CorpusTest {
         // measuring.
         assertTrue(text.lines().filter(l -> l.contains("ok    ")).count() >= 15,
                 "too few files were checked; is the corpus complete?\n" + text);
+    }
+
+    @Test
+    @DisplayName("reading the corpus does not modify it")
+    void corpusIsReadOnly() throws Exception {
+        // The corpus is the fixture §6 defines conformance *by*, so a runner
+        // that writes to it moves the target on every run.
+        //
+        // This one did, and nothing here could see it. `Database.open` records
+        // the writer id when the handle is writable (`05-catalog.md` §7), and
+        // the corpus runner opened every file writable, so a plain
+        // `mvn test` left 12 of the 18 files modified — superblock `commit_id`
+        // advanced, a page appended — `v1.0-corrupt-*` and `v1.0-security-*`
+        // included. Two things followed, and the second is the worse: a
+        // parallel run of another implementation's suite failed on files it
+        // was only reading, because these were write-locked; and this runner
+        // **wrote to files it was about to report as corrupt**.
+        //
+        // The check is on the bytes rather than on the open mode, because the
+        // property that matters is "the corpus did not change", and a future
+        // write from some other path would satisfy an open-mode assertion.
+        Path dir = corpusDir();
+        if (!Files.exists(dir.resolve("manifest.json"))) {
+            fail(dir + " is missing; generate it with "
+                    + "`dart run tool/generate_corpus.dart` in reference/dart/cryptand");
+        }
+        Map<String, String> before = digestCorpus(dir);
+        assertTrue(before.size() >= 15, "too few corpus files to be measuring anything");
+
+        PrintStream original = System.out;
+        try {
+            System.setOut(new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+            Interop.corpus(dir.toString());
+        } finally {
+            System.setOut(original);
+        }
+
+        Map<String, String> after = digestCorpus(dir);
+        assertEquals(before, after, "reading the conformance corpus modified it");
+    }
+
+    /** SHA-256 of every corpus file, by name. */
+    private static Map<String, String> digestCorpus(Path dir) throws Exception {
+        Map<String, String> out = new TreeMap<>();
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        try (var files = Files.list(dir)) {
+            for (Path p : files.toList()) {
+                if (!Files.isRegularFile(p)) {
+                    continue;
+                }
+                md.reset();
+                out.put(p.getFileName().toString(),
+                        java.util.HexFormat.of().formatHex(md.digest(Files.readAllBytes(p))));
+            }
+        }
+        return out;
     }
 }

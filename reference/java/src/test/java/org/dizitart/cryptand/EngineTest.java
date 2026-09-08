@@ -112,6 +112,96 @@ class EngineTest {
         }
     }
 
+    /**
+     * The other half of the test above. That one asserts collection is
+     * <em>safe</em> — every value survives. This one asserts it makes
+     * <em>progress</em>, and the two fail in opposite directions: a GC that
+     * collects nothing passes every safety check ever written.
+     *
+     * <p>It exists because {@code Vlog.recomputeLiveness} now scans without
+     * holding the value-log monitor, and adds back everything appended while it
+     * scanned. That correction is deliberately conservative — {@code
+     * 04-segments.md} §6.7 lets statistics overstate liveness and never
+     * understate it — and the risk it carries is exactly this: liveness that is
+     * always overstated is liveness that never falls below the collection
+     * threshold. The correction applies only to the <strong>open</strong>
+     * segment, which is the one being appended to and the one GC would not pick
+     * anyway, but "would not" is an argument and this is a measurement.
+     */
+    @Test
+    @DisplayName("collection reclaims value-log space, not merely preserves it")
+    void collectionReclaimsSpace(@TempDir Path dir) {
+        // `mobile`, because its `vlog_segment_bytes` is 4 MiB against
+        // `desktop`'s 64. A collection candidate is a **sealed** segment that
+        // is mostly dead, so the workload has to fill and seal several — with
+        // 64 MiB segments this fixture writes one partial segment that never
+        // seals, and measures nothing at all.
+        Engine.Options o = options();
+        o.profile = Profile.MOBILE;
+        int rows = 150;
+        try (Engine e = Engine.create(dir.resolve("gcspace.cryptand"), o)) {
+            Random rnd = new Random(11);
+            // Above `mobile`'s `vlog_min` of 1024, or the value is inlined and
+            // the value log stays empty — which is a fixture that measures
+            // nothing while looking like it measures collection.
+            byte[] big = new byte[2000];
+            for (int i = 0; i < rows; i++) {
+                rnd.nextBytes(big);
+                e.batch().put(TREE, key(i), big.clone()).commit();
+            }
+            e.commitNow();
+            e.compact();
+            e.maintain();
+
+            // Twenty generations of the same keys: the early value-log
+            // segments end up almost entirely dead.
+            for (int gen = 0; gen < 24; gen++) {
+                for (int i = 0; i < rows; i++) {
+                    rnd.nextBytes(big);
+                    e.batch().put(TREE, key(i), big.clone()).commit();
+                }
+            }
+            e.commitNow();
+            e.compact();
+
+            // Recompute, then ask what it concluded. **A counter, not a
+            // reclaim**: whether the collector has actually freed a segment by
+            // the time this line runs depends on the background compactor, and
+            // an assertion on that measures the scheduler
+            // (`design/performance-model.md` §8). What is deterministic is the
+            // liveness it computes, and that is the thing the correction above
+            // could break.
+            e.maintain();
+            long live = 0;
+            long total = 0;
+            for (org.dizitart.cryptand.lsm.VlogStats st : e.vlog().allStats()) {
+                live += st.liveBytes;
+                total += st.bytes;
+            }
+
+            // A control that can fail: there has to be dead space to find, or
+            // this measures nothing. 150 keys of 2 000 B are live; 24
+            // generations of them were written.
+            assertTrue(total > 8 * rows * 2000L,
+                    "the fixture wrote too little to have superseded anything: " + total + " B");
+
+            // Overstating is allowed and understating is not (§6.7), so the
+            // bound is one-sided and generous. What it rules out is liveness
+            // pinned near 100 %, which is what a correction that adds back too
+            // much would produce — and which no collector would ever act on.
+            assertTrue(live < total / 4,
+                    "liveness is overstated to uselessness: " + live + " B live of " + total
+                            + " B written, with only " + (rows * 2000L) + " B actually live");
+
+            // And it is still safe.
+            for (int i = 0; i < rows; i++) {
+                assertNotNull(e.get(TREE, key(i)), "key " + i + " after collection");
+            }
+            Verify.Report r = Verify.run(e);
+            assertTrue(r.of(Verify.Kind.CORRUPTION).isEmpty(), r.toString());
+        }
+    }
+
     @Test
     @DisplayName("a put is readable, and survives close and reopen")
     void putGetReopen(@TempDir Path dir) {

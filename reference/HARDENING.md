@@ -991,3 +991,519 @@ never moved (defect 34 in §7's table)"), and a scan confirms it was the only on
 in `spec/` or `design/`.
 
 `retype build`: **117 pages, 0 errors, 0 warnings** — the recorded baseline.
+
+---
+
+# The CRUD-under-load pass — findings 78–84
+
+A second pass, driven by a question the existing benchmarks could not be asked:
+**what does each implementation cost per operation under a sustained mixed
+workload?** `reference/bench/ops.*` measures a bulk insert, a point read, a scan
+and an index lookup — **C** and **R**, each in isolation, each against a freshly
+compacted and otherwise idle database. There was no **U**, no **D**, and no
+phase in which maintenance was running.
+
+Baseline before this pass, all green: **Rust 307, Dart 651, Java 317.**
+After: **Rust 311, Dart 652, Java 318**, and the corpus is byte-identical after
+a run of all three in parallel, which it was not before.
+
+The new matrix is `reference/rust/cryptand/benches/crud.rs`,
+`reference/dart/cryptand/bench/crud.dart` and
+`org.dizitart.cryptand.bench.CrudBench`. Every defect below was found by one of
+its **counters**, not by a wall-clock row — which is `design/performance-model.md`
+§8's rule earning its keep for the eighth time.
+
+---
+
+## Defect 78 — Dart reports the one value `13-operations.md` §6 forbids by name
+
+§6 is unusually specific:
+
+> "A metric an implementation cannot compute MUST be reported as unavailable, by
+> name, and MUST NOT be given a plausible-looking value. A fabricated answer
+> defeats this section more thoroughly than a missing one, because a caller
+> cannot tell the two apart: **`page_cache_hit_rate: 1.0` from an engine with no
+> page-cache accounting reads exactly like a perfect cache.**"
+
+A fresh Dart engine returned exactly that:
+
+```
+page_cache_hit_rate = 1.0
+isAvailable = true
+```
+
+from `accesses == 0 ? 1 : (accesses - misses) / accesses`. Rust returns
+`Metric::Unavailable` for the same state and Java declares it unconditionally,
+so Dart was alone.
+
+**Fixed**: the empty case joins the `unavailable` list, beside the
+`unencrypted_pages` case directly below it that was already reasoned through
+correctly.
+
+### Why nothing saw it
+
+The mechanism, the doc comment and the test were all present — and all aimed one
+inch to the left of the defect:
+
+- `metrics.dart` carries an `unavailable` list, and its doc comment names this
+  defect: *"An earlier version of this file returned `page_cache_hit_rate: 1.0`
+  and `unencrypted_pages: 0` from an engine that measured neither."* The fix was
+  applied to `unencrypted_pages` and to the prose. Not to the rate.
+- `operations_test.dart` has a test named *"a metric this engine cannot compute
+  is declared, not faked"*. It asserts on `unencrypted_pages`.
+- It has a second test, *"page_cache_hit_rate is measured from the segment
+  counters"*, which puts 500 documents in first. It exercises `accesses > 0` and
+  only that.
+
+**Nothing asked a fresh engine what its hit rate was**, which is the one state
+where the answer is 0/0.
+
+---
+
+## Defect 79 — `12-profiles.md` §1's page cache budget was honoured by none of the three
+
+The profile table gives a **page cache budget** — 4 / 16 / 64 / 512 MiB — and
+`design/performance-model.md` P7 predicts resident set bounded by it.
+
+| | before |
+|---|---|
+| Rust | a segment cache with **no eviction at all**; `page_cache_bytes` was declared in `profile.rs` and read by nothing in the crate |
+| Java | **no page cache of any kind**; `readRaw` was a `readFully` every time, and `Profile` did not carry the constant |
+| Dart | every segment extent resident, by construction |
+
+Measured on Rust, `mobile`, 400-byte payloads:
+
+| documents | resident | segments | × the 4 MiB budget |
+|---|---|---|---|
+| 60 000 | 28.0 MB | 30 | 6.7× |
+| 150 000 | 70.0 MB | 75 | **16.7×** |
+
+2.5× the data, 2.5× the resident set: it was not oversized, it was **unbounded**.
+On `mobile` — the profile whose whole purpose is a phone's memory ceiling.
+
+**Fixed in Rust** (`Engine::admit`, an LRU bounded by `page_cache_bytes`): the
+same 150 000-document workload now holds **3.74 MB, 0.89× the budget**, an
+18.7× reduction, with every document still read and no change in wall time.
+Eviction is safe because every segment is written through the pager *before* it
+is cached, so a miss is always re-readable.
+
+**Fixed in Java** by adding the cache (see defect 84 for what that exposed).
+
+**Not fixed in Dart**, and declared rather than quietly left: Dart's segment
+extents never enter the `PageStore` at all — a limit `REPORT.md` already
+recorded — so there is nothing to evict *to*. A budget is enforceable only if a
+miss has somewhere to read from. `REPORT.md` now ties the two together instead
+of stating them as separate facts.
+
+---
+
+## Defect 80 — every Rust point read re-walked the manifest, once per level
+
+`candidates_for` loops `0..=last_level()` calling `refs_at`, and `refs_at` did a
+**B-tree scan of tree 6 through the pager** on every call. `range_deletes_for`,
+which a point read also calls, did a whole-manifest scan on top of that.
+
+Per point read, measured at 20 000 documents with the segment cache warm:
+
+| profile | before | after | what the remainder is |
+|---|---|---|---|
+| `desktop` | 6.000 pages | **1.000** | the value-log read it actually wanted |
+| `mobile` | 5.000 pages | **0.000** | the value is inline; nothing is left to read |
+
+The `mobile` row is the one that matters. `12-profiles.md` §2.1 justifies
+`vlog_min = 1024` — the profile's defining choice — on the grounds that
+"a point read costs **one** I/O rather than two". It was costing five, and none
+of them were the document.
+
+**Fixed**: tree 6's decoded levels are cached, keyed on a `(epoch, root)` stamp.
+The epoch is drawn from a process-global counter by `Manifest::new`, `add` and
+`remove` — global rather than per-instance because a manifest is also *replaced
+whole* by repair and by checkpoint restore, and a per-instance counter restarts
+at 0, which is a value a cache may already hold. Both of those paths served a
+stale manifest until the counter became global, and **the engine's own
+operations test caught both**; the root half of the stamp closes
+`checkpoint.rs`'s direct `manifest.tree.root = …`, which edits tree 6 without
+passing through either mutator.
+
+Effect on the matrix (`desktop`, 20 000 documents, 20 000 mixed ops):
+
+| row | before | after |
+|---|---|---|
+| `read_ops_per_s` | 8 916 | **187 196** (21×) |
+| `read_us_p50` | 109 µs | **4 µs** |
+| `mixed_ops_per_s` | 10 925 | **163 477** (15×) |
+
+---
+
+## Defect 81 — a range-delete lookup scanned the whole memtable on every read, and no test covered the path at all
+
+`range_deletes_for` iterates **every entry of every memtable shard** parsing
+internal keys, on every point read, to find range deletes — of which there are
+almost always none.
+
+**Fixed** by counting range deletes at `insert_mem`, the single point every
+memtable write passes through, and skipping the scan when the count is zero.
+Skipped, not sampled: zero is a proof, not a heuristic.
+
+### Why nothing saw it — and the control that said so
+
+Disabling the memtable half of `range_deletes_for` **outright**, so a range
+delete in the memtable could never be found:
+
+```
+CONTROL PASSED: 308 FAILED: 0
+```
+
+The whole suite passed with the path dead. `range_delete_is_one_write_and_hides_the_interval`
+flushes immediately after `remove_range`, so its range delete is always resolved
+out of a *segment*; the memtable half had never been exercised by anything.
+
+`a_range_delete_still_in_the_memtable_hides_the_interval` now covers it, and
+fails on the first assertion with the path disabled.
+
+---
+
+## Defect 82 — all three implementations wrote to the shared conformance corpus while reading it
+
+`11-conformance.md` §6: *"Conformance is defined as passing the vectors, not as
+matching the reference implementation's source."* A runner that writes to the
+vectors moves the target on every run.
+
+All three did, by two different mechanisms:
+
+| | files changed | mechanism |
+|---|---|---|
+| Java | **12 of 18** | `Database.open` records the writer id when the handle is writable (`05-catalog.md` §7) — superblock `commit_id` advanced, a page appended |
+| Rust | 4 | opening an encrypted database publishes a nonce floor (`14-security.md` §4.1) with a synchronous superblock write |
+| Dart | 4 | the same nonce floor |
+
+The corrupt and security fixtures were among them in every case, which is the
+part worth stating plainly: **each implementation wrote to files it was about to
+reject as corrupt or tampered.** §4.1 requires a floor before nonces are
+*allocated*; a handle that writes nothing allocates none.
+
+It also broke parallel runs. The very first act of this session — running the
+three suites at once — produced three Rust conformance failures reading
+`locked by another process … open for writing by another process`, because Java
+held write locks on files it was only reading.
+
+**Fixed** in all three: the corpus runners open read-only. Each now carries a
+`reading the corpus does not modify it` test that digests every file before and
+after, and each control fails, naming the files.
+
+The Rust control incidentally shows how thin the previous margin was:
+`v1.0-corrupt-crc.cryptand` used to be reported as *"refused as corruption"* and
+is now *"opened, 1 finding from verify"*. Both satisfy the manifest, but the
+earlier refusal came from the reader's own **write** hitting the bad page — the
+corruption was being detected as a side effect of an operation that should never
+have happened.
+
+---
+
+## Defect 83 — Rust had no read-only mode, and read-only handles took the exclusive writer lock
+
+`11-conformance.md` §3's reader matrix requires read-only opening outright:
+`write_version_minor > supported` → *"open **read-only**"*. `Engine` had no such
+mode, so that row was unimplementable.
+
+Adding it surfaced a second half. `Engine::open_read_only` still took
+`Pager::open`'s **exclusive writer lock**, so two readers of one file refused
+each other — `01-container.md` §10 is "one writing *process* per database", and
+a handle that cannot write is not a writer. `13-operations.md` §8's coordinating
+readers depend on several holding the file at once. This is the same lock that
+made the parallel suite run fail in defect 82.
+
+**Fixed**: `open_read_only` skips the open-time writes and uses
+`Pager::open_shared`. Writes are refused at `Engine::arm` **and** at
+`Engine::write` — two checks because they are not the same set:
+`put_with_expiry` arms and `put` does not, so `arm` alone let a read-only handle
+accept a `put`. It would never have reached the device, but it would have been
+visible to that handle's own `get` — a read-only view returning data that is not
+in the file.
+
+`a_read_only_handle_writes_nothing_at_open_and_refuses_writes_after` asserts both
+halves, because either alone is satisfiable by accident.
+
+---
+
+## Defect 84 — eight call sites write to the device around the pager, which only a page cache could reveal
+
+Adding Java's page cache (defect 79) broke **19 tests** with findings like:
+
+```
+CORRUPTION: segment 19's subtree_entries sum to 11, its header declares 8
+InvalidArgumentException: segment input is not strictly increasing
+```
+
+Written correctly, read stale. `SegmentBuilder`, `Vlog`, `Blob` and
+`VectorRegion` write whole extents in one I/O through `pager.file().write(…)`,
+reaching past `Pager.writePage` — so a page freed, reallocated and rewritten
+through one of those left the old bytes cached.
+
+Harmless for as long as there was no cache, which is exactly why it survived:
+**the bypass was invisible until something depended on the pager seeing every
+write.**
+
+**Fixed**: `Pager.writeAt(offset, bytes)` writes and invalidates every page the
+write covers, and all eight sites use it. The two superblock slots are never
+cached at all — `Engine` writes them straight to the `PageFile` on every commit,
+so excluding pages 0 and 1 costs two pages of caching and removes an invariant
+that would otherwise have to be remembered in a file where the cache is not
+visible.
+
+Effect on Java's counters, at 20 000 documents:
+
+| counter | before | after |
+|---|---|---|
+| `read_page_reads_per_op` | 227.9 | **1.049** |
+| `update_page_reads_per_op` | 715.8 | **0.020** |
+| `delete_page_reads_per_op` | 808.3 | **1.107** |
+| `mixed_page_reads_per_op` | 334.5 | **0.605** |
+
+---
+
+## One finding measured and left open
+
+Java's `*_us_p999` is **136–423 ms** for every operation, against `desktop`'s
+`max_foreground_stall_ms` of **25** and `13-operations.md` §5's "none may block
+longer than `max_foreground_stall_ms` per step". `MAX_DELAY_MS` caps a single
+backpressure delay at 100 ms, so an operation waiting 423 ms is waiting on
+something that is not backpressure — most likely contention with the background
+compactor.
+
+It is recorded here rather than fixed, and the `*_us_p999` rows exist in the
+matrix so it stays visible. The p50 and p99 hide it completely: Java's read p50
+is 7 µs, better than Dart's 12 µs.
+
+---
+
+# The Java stall pass — defects 85–87, and two reverted fixes
+
+Java's p99.9 was **136–423 ms on every operation** against `desktop`'s
+`max_foreground_stall_ms` of **25**, while its p50 sat at 7–27 µs. The engine was
+fast and almost never running.
+
+It was root-caused by sampling rather than reading: 25 `jstack` samples of the
+main thread during the CRUD matrix, then 40 more after each change. That is the
+whole method, and it named the holder every time.
+
+---
+
+## Defect 85 — every insert read the catalog under the global structure lock
+
+24 of the first 25 samples had the main thread parked on
+`Engine.lockStructure`, all from one path:
+
+```
+Engine.lockStructure  <-  Database.catalog  <-  Collection.indexes  <-  Collection.stage
+```
+
+`Collection.stage` asks for the collection's indexes on **every document
+written**, and `Database.catalog` answered by decoding the whole catalog — a CKE
+key and a `TreeDescriptor` per entry, into a fresh map — while holding
+`structure`, the lock the committer and the compactor hold for the whole of
+their critical sections. So every insert queued behind whatever maintenance was
+running.
+
+**Fixed**: the decoded catalog is cached against a new `PageTree.version()`,
+bumped by `put` and `remove` — the only two ways to change a tree's content, so
+bumping there is exhaustive. The version is `volatile`, so the hot path reads
+one field and returns; the map is immutable and published through a `volatile`
+reference, so a reader that finds a current one takes no lock at all.
+
+Delete went from 650 to 3 642 ops/s and its p99.9 from **422 632 µs to 291 µs**.
+
+---
+
+## Defect 86 — the exact liveness scan ran on every maintenance tick, before deciding whether it was needed
+
+With the catalog fixed, the samples moved to `Vlog.append` **`BLOCKED` on the
+value-log monitor**, held by the compactor inside `Vlog.recomputeLiveness`.
+
+`recomputeLiveness` reads **every record of every value-log segment**, and it is
+`synchronized` on the object every append needs. Worse, `collectIfNeeded0`
+called it *unconditionally and first*, before computing the debt and space
+triggers that decide whether collection is wanted at all. Every maintenance tick
+paid for a whole-database walk.
+
+**Fixed**, in the direction §6.7 allows. Between scans `Vlog.publish` maintains
+`live_bytes` incrementally and only ever raises it for an append, so stale
+statistics **overstate** liveness — which `04-segments.md` §6.7 explicitly
+permits ("may overstate liveness and must never understate"). The cost of
+overstating is a collection deferred, not a record lost. The scan now runs on a
+byte budget — a quarter of a value-log segment of growth forces the next one, so
+collection still makes progress. `11-conformance.md` §1.3 puts the GC victim
+policy on the implementation's side of the line.
+
+## Defect 87 — the walk did two syscalls per record
+
+`Vlog.walk` framed each record with a 16-byte `readFully` and then read it with
+a second one, inside that same monitor: ~40 000 syscalls under the lock at
+20 000 documents. It now reads in 64 KiB windows.
+
+---
+
+## Two fixes built, measured, and reverted
+
+Both removed the stall. Both bought it back with a correctness violation that a
+test caught, and neither shipped. They are recorded because the measurement is
+the useful part, and because the next attempt should start from what they hit.
+
+**Scanning without the monitor** — snapshot under the lock, scan outside it,
+apply under it — measured **mixed 1 573 → 52 697 ops/s (33x)** and read p99.9
+**147 574 µs → 91 µs**. It races: two appends completing out of order leave the
+earlier reservation as a hole, `complete` advances the watermark only over a
+contiguous prefix, and the later pointer is published past it. The compactor
+found it:
+
+```
+value-log pointer to segment 1 ends at 4163294, past the durable watermark 4161273
+```
+
+**A byte-budgeted resumable sweep**, which is what `13-operations.md` §5 asks
+for, *understated* liveness on a segment whose extent was not yet published when
+its sweep began, and the verifier said so:
+
+```
+CORRUPTION: value-log segment 15 declares 0 live bytes but holds 212346;
+liveness statistics MUST NOT understate
+```
+
+Understating is the direction that frees a segment still holding live data. A
+correct incremental version needs a segment's true extent before its first
+publish, and needs a partial count to leave the previous value standing rather
+than replace it.
+
+**A third change was reverted for being pointless rather than wrong**: moving
+the value-log `pwrite` outside the monitor, which is literally what
+`10-transactions.md` §2.2's reserve-then-`pwrite` asks for. It measured nothing
+on this workload — the contended holder was the liveness scan, not the append —
+and it introduced the watermark race above. The honest state is recorded in
+`Vlog.append`'s comment: **this implementation serializes value-log appends,
+which `11-conformance.md` §1.1 makes a Level 0 gap.**
+
+---
+
+## Where Java ended, and what is still open
+
+At 20 000 documents, against the numbers at the start of the pass:
+
+| | before | after |
+|---|---|---|
+| `delete_ops_per_s` | 650 | **5 731** (8.8x) |
+| `delete_us_p999` | 422 632 | **335** (1 262x) |
+| `update_ops_per_s` | 494 | **1 767** (3.6x) |
+| `create_ops_per_s` | 2 017 | **4 617** (2.3x) |
+| `read_ops_per_s` | 2 279 | **4 513** (2.0x) |
+| `mixed_ops_per_s` | 1 394 | **3 206** (2.3x) |
+
+**Delete's stall is fixed; create, read and update still show 60–172 ms at
+p99.9.** The remaining holder is the same one: a single monitor on `Vlog` that
+covers reads, appends and maintenance alike, so `Engine.resolveValue` contends
+with `Vlog.append` contends with the compactor. Narrowing it is the fix, and the
+two attempts above are the evidence for how carefully it has to be done.
+
+Java is now ahead of Dart on p50 for every operation and behind it on
+throughput, because throughput here is still a tail story.
+
+## One open defect, pre-existing, not fixed
+
+The CRUD matrix's mixed phase intermittently fails with
+
+```
+CorruptionException: value-log segment 5 has no entry in tree 7
+```
+
+A live pointer into a value-log segment whose tree-7 entry has been removed —
+the collector freeing a segment something still references. It reproduced **on
+unmodified sources** before any change in this pass, so it is not caused by the
+work above; the frequency moved from roughly 2 in 5 runs to 1 in 30, which is
+timing, not a fix. It is the same failure mode as the value-log GC visibility
+defect this project has met before, and it is the most important thing left in
+the Java implementation.
+
+
+---
+
+# The tree-7 collection race — defect 88, partly fixed
+
+The open defect at the end of the previous section, chased with instrumentation
+rather than reading:
+
+```
+CorruptionException: value-log segment 6 has no entry in tree 7
+```
+
+Two real causes were found and fixed. **A third remains**, and the rate went
+from roughly **2 runs in 5** to **1 in 50** of the CRUD matrix's mixed phase —
+which is a reduction, not a fix, and is recorded as such.
+
+## Cause 1 — liveness was judged at `visible_seq`, which is not the set of seqs a reader can reach
+
+`collectSegment`, `mergeColdRuns` and `refreshLiveness` all asked
+`lookup(treeId, key, visibleSeq, now)` — "is this record the current entry?".
+`visible_seq` is wrong in both directions:
+
+- **Above it**: a batch written into the memtable whose `visible_seq` has not
+  yet advanced is invisible to that lookup, so the record it points at reads as
+  dead — while the entry pointing at it survives every compaction and becomes
+  visible moments later. This one is intermittent by construction, because it
+  depends on whether the committer has caught up.
+- **Below it**: a live snapshot resolves to the newest version at *its* seq,
+  which may be a superseded version whose value the current view no longer
+  names.
+
+**Fixed**: liveness is now judged at every seq a reader can still resolve —
+`nextSeq` (everything written, visible or not) and each live snapshot's own seq.
+The callback changed from "what pointer does this key have" to "is this exact
+`(segment_id, offset)` referenced", because the answer is a disjunction over
+that set and a single pointer cannot express it. Every seq added can only mark
+*more* records live, which is the direction §6.7 allows.
+
+## Cause 2 — the extent was freed before the commit carrying its pointer rewrites
+
+`04-segments.md` §6.8's second invariant is explicit: "a segment's extent is not
+freed until the pointer-rewrite commit is durable." Collection rewrote the
+survivors, called `flushShards` and `makeVisible`, and then **immediately**
+removed the tree-7 entry and freed the extent — with no superblock yet naming
+the rewrites.
+
+Two ways that loses:
+
+- `makeVisible` cannot always deliver visibility. `visible_seq` advances only
+  over a **contiguous** prefix of completed reservations (§2.3), so a foreground
+  batch holding a lower seq range keeps the watermark below the rewrites. A
+  rewrite that is not visible is one every reader resolves *past*, back to the
+  old pointer, into the extent being freed.
+- Even when visible, nothing had been published.
+
+**Fixed**, and the fix is an ordering rather than a wait: a collected segment
+goes into `pendingVlogRemoval`, and `retireCollectedSegments` releases its
+tree-7 entry and extent only after `publishSuperblock`. A collection whose
+rewrites are not yet visible is **deferred entirely** rather than waited on —
+counted in `deferredCollections` — because waiting here would block the
+compactor while it holds `structure`, which is the stall the rest of this pass
+exists to remove. The cost is one deferred reclaim; the alternative is a lost
+record.
+
+## What is still there
+
+At 1 in 50 runs, with both fixes in, the diagnostic reads:
+
+```
+retire visible=24657 next=24658 commit=38 liveBytes=161950 bytes=916350 sealed=true tier=1
+```
+
+Everything written is visible, the commit is published, and the collector's own
+walk examined the whole segment — so the surviving cause is something that makes
+a *currently referenced* record read as unreferenced during the walk. The two
+candidates not yet eliminated are the promotion path in `compactLevel`, which
+resolves value-log pointers for entries retained only by §5's condition 2, and
+the `levels` snapshot a liveness lookup reads while the committer republishes it.
+
+**No regression test ships for this.** One was written and deleted: it drove
+collection against a concurrent writer for 40–110 s and passed with the fix
+removed, so it did not exercise the defect. A control that cannot fail measures
+nothing, and this project's own rule is that such a test is worse than none. The
+only known reproducer is `CrudBench`'s mixed phase, run repeatedly at 1 000 and
+5 000 documents.

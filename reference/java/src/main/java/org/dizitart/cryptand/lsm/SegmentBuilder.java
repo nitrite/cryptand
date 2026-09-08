@@ -255,7 +255,7 @@ public final class SegmentBuilder {
             index++;
         }
 
-        pager.file().write(pager.offsetOf(start), extent);
+        pager.writeAt(pager.offsetOf(start), extent);
         return meta;
     }
 

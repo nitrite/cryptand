@@ -189,6 +189,23 @@ public final class Engine implements AutoCloseable {
     private final AtomicLong bytesValue = new AtomicLong();
     private final AtomicLong bytesKeyIndex = new AtomicLong();
     private final AtomicLong bytesGc = new AtomicLong();
+    /**
+     * Collections deferred because their pointer rewrites were not yet visible.
+     * A counter, so "the segment stays whole and the next pass takes it" is
+     * observable rather than assumed.
+     */
+    private final AtomicLong deferredCollections = new AtomicLong();
+
+    /**
+     * Value-log segments whose survivors have been rewritten but whose commit
+     * is not yet published. See {@link #retireCollectedSegments}.
+     */
+    private final List<VlogStats> pendingVlogRemoval = new ArrayList<>();
+
+    public long deferredCollections() {
+        return deferredCollections.get();
+    }
+
     private final AtomicLong stallEvents = new AtomicLong();
     private final AtomicLong stallTotalMs = new AtomicLong();
     private final AtomicLong filterProbes = new AtomicLong();
@@ -253,6 +270,10 @@ public final class Engine implements AutoCloseable {
         PageFile file = new PageFile(path, false, options.durability);
         sb.durabilityAchieved = file.achieved();
         Pager pager = new Pager(file, sb.pageSize(), sb.pageCount, sb.commitId, 0);
+        // `12-profiles.md` §1's page cache budget. Until this line the row was
+        // a decoration in every implementation: declared and unread in Rust,
+        // absent here, and this pager read through to the file on every page.
+        pager.pageCacheBytes(options.profile.pageCacheBytes());
         Engine e = new Engine(file, pager, sb, options);
         if (options.encrypt) {
             e.enableEncryption();
@@ -387,6 +408,10 @@ public final class Engine implements AutoCloseable {
             // from and give the accumulating list nothing to accumulate.
         }
         Pager pager = new Pager(file, sb.pageSize(), sb.pageCount, sb.commitId, sb.minRetainedCommit);
+        // `12-profiles.md` §1's page cache budget. Until this line the row was
+        // a decoration in every implementation: declared and unread in Rust,
+        // absent here, and this pager read through to the file on every page.
+        pager.pageCacheBytes(options.profile.pageCacheBytes());
         Engine e = new Engine(file, pager, sb, options);
         if (cipher != null) {
             e.installCipher(cipher);
@@ -1992,7 +2017,7 @@ public final class Engine implements AutoCloseable {
 
     private void collectIfNeeded0() {
         {
-            refreshLiveness();
+            refreshLivenessIfDue();
             double debt = vlog.localityDebt();
             long live = 0;
             long total = 0;
@@ -2041,19 +2066,120 @@ public final class Engine implements AutoCloseable {
             }
             mergeColdRuns(surplus);
             publishSuperblock(visibleSeq);
+            retireCollectedSegments();
         } finally {
             structure.unlock();
         }
     }
 
-    /** Requires {@link #structure}. Recomputes tree 7's liveness against the trees. */
+    /** Value-log bytes at the last exact liveness scan. See {@link #refreshLivenessIfDue}. */
+    private long vlogBytesAtLastLiveness;
+
+    /**
+     * Runs the exact liveness scan only when enough has been written to make it
+     * worth what it costs.
+     *
+     * <p>{@link #collectIfNeeded0} called {@link #refreshLiveness}
+     * <strong>unconditionally, before deciding whether collection was needed at
+     * all</strong> — so every maintenance tick paid for a whole-database walk of
+     * every value-log record, under the monitor every append needs. That is the
+     * stall: {@code 13-operations.md} §5 requires no step to block longer than
+     * {@code max_foreground_stall_ms}, and Java's p99.9 was in the hundreds of
+     * milliseconds against {@code desktop}'s 25 ms.
+     *
+     * <p>Skipping a scan is safe in the direction that matters. Between scans
+     * {@code Vlog.publish} maintains {@code live_bytes} incrementally and only
+     * ever raises it for an append, so stale statistics <em>overstate</em>
+     * liveness — which {@code 04-segments.md} §6.7 explicitly allows ("may
+     * overstate liveness and must never understate"). The cost of overstating
+     * is a collection deferred, not a record lost.
+     *
+     * <p>The budget keeps that deferral bounded: a quarter of a value-log
+     * segment of growth forces the next exact scan, so collection still makes
+     * progress on a database that keeps being written to.
+     * {@code 11-conformance.md} §1.3 puts the GC victim policy on the
+     * implementation's side of the line, and this is that.
+     */
+    private void refreshLivenessIfDue() {
+        long total = 0;
+        for (VlogStats s : vlog.allStats()) {
+            total += s.bytes;
+        }
+        long budget = Math.max(1 << 20, sb.vlogSegmentBytes / 4);
+        if (vlogBytesAtLastLiveness != 0 && total - vlogBytesAtLastLiveness < budget) {
+            return;
+        }
+        vlogBytesAtLastLiveness = total;
+        refreshLiveness();
+    }
+
+    /**
+     * Every sequence number at which some reader can still resolve a key.
+     *
+     * <p>{@code visibleSeq} alone is <strong>not</strong> that set, and using it
+     * as if it were is how a value-log record that is still referenced gets
+     * collected. Two ways it falls short:
+     *
+     * <ul>
+     *   <li><strong>Above it.</strong> A batch that has been written into the
+     *       memtable but whose {@code visible_seq} has not yet advanced is
+     *       invisible to a lookup at {@code visibleSeq}, so the record it points
+     *       at reads as dead — while the entry pointing at it survives every
+     *       compaction and becomes visible moments later. This is the
+     *       intermittent one, because it depends on whether the committer has
+     *       caught up.</li>
+     *   <li><strong>Below it.</strong> A live snapshot resolves to the newest
+     *       version at <em>its</em> seq, which may be a superseded version whose
+     *       value {@code visibleSeq}'s view no longer names.</li>
+     * </ul>
+     *
+     * <p>So liveness is judged against the newest version overall
+     * ({@code nextSeq}, which covers everything written whether visible or not)
+     * and against each live snapshot's own view. The set is small and bounded,
+     * and every seq added can only mark <em>more</em> records live —
+     * {@code 04-segments.md} §6.7 allows overstating and forbids understating,
+     * and understating here is the failure that loses data.
+     */
+    private long[] livenessSeqs() {
+        List<long[]> snaps = new ArrayList<>(liveSnapshots);
+        long[] out = new long[snaps.size() + 1];
+        // Everything written, visible or not. `nextSeq` is the next to be
+        // handed out, so this is at or above every seq in the memtable.
+        out[0] = nextSeq.get();
+        for (int i = 0; i < snaps.size(); i++) {
+            out[i + 1] = snaps.get(i)[0];
+        }
+        return out;
+    }
+
+    /**
+     * Whether any of {@code seqs}' views of this key resolves to a VLOG pointer
+     * naming exactly this record.
+     */
+    private boolean referencedAt(long[] seqs, int treeId, byte[] cke, long segmentId,
+            long offset, long nowMs) {
+        for (long at : seqs) {
+            BtreePage.Leaf entry = lookup(treeId, cke, at, nowMs);
+            if (entry != null && entry.kind() == BtreePage.Kind.VLOG) {
+                VlogPointer p = VlogPointer.decode(entry.value());
+                if (p.segmentId() == segmentId && p.offset() == offset) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Requires {@link #structure}. Recomputes tree 7's liveness against the
+     * trees, at every seq some reader can still resolve — see
+     * {@link #livenessSeqs}.
+     */
     private void refreshLiveness() {
         long now = options.clock.getAsLong();
-        vlog.recomputeLiveness((treeId, cke) -> {
-            BtreePage.Leaf entry = lookup(treeId, cke, visibleSeq, now);
-            return entry != null && entry.kind() == BtreePage.Kind.VLOG
-                    ? VlogPointer.decode(entry.value()) : null;
-        });
+        long[] seqs = livenessSeqs();
+        vlog.recomputeLiveness((treeId, cke, segmentId, offset) ->
+                referencedAt(seqs, treeId, cke, segmentId, offset, now));
     }
 
     /** Requires {@link #structure}. One merge, in {@code (tree_id, CKE(key))} order. */
@@ -2063,15 +2189,23 @@ public final class Engine implements AutoCloseable {
         List<Survivor> survivors = new ArrayList<>();
         List<VlogStats> merged = new ArrayList<>();
         long now = options.clock.getAsLong();
+        // Every seq a reader can still resolve — see `livenessSeqs`. This
+        // frees extents and removes tree-7 entries just as `collectSegment`
+        // does, so it needs the same test; judging at `visibleSeq` alone drops
+        // records a written-but-not-yet-visible batch still points at.
+        long[] seqs = livenessSeqs();
         for (VlogStats stats : runs) {
             int before = survivors.size();
             boolean complete = vlog.walk(stats, w -> {
-                BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), visibleSeq, now);
-                if (live != null && live.kind() == BtreePage.Kind.VLOG) {
-                    VlogPointer p = VlogPointer.decode(live.value());
-                    if (p.segmentId() == stats.segmentId && p.offset() == w.offset()) {
-                        survivors.add(new Survivor(w.record().treeId(), w.record().key(),
-                                w.record().value(), live));
+                for (long at : seqs) {
+                    BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), at, now);
+                    if (live != null && live.kind() == BtreePage.Kind.VLOG) {
+                        VlogPointer p = VlogPointer.decode(live.value());
+                        if (p.segmentId() == stats.segmentId && p.offset() == w.offset()) {
+                            survivors.add(new Survivor(w.record().treeId(), w.record().key(),
+                                    w.record().value(), live));
+                            return;
+                        }
                     }
                 }
             });
@@ -2095,6 +2229,7 @@ public final class Engine implements AutoCloseable {
         survivors.sort(java.util.Comparator
                 .comparingInt(Survivor::treeId)
                 .thenComparing(Survivor::key, BtreePage::memcmp));
+        long lastRewriteSeq = 0;
         for (Survivor s : survivors) {
             VlogPointer moved = vlog.appendCold(s.treeId(), s.key(), s.value());
             bytesGc.addAndGet(moved.len());
@@ -2103,15 +2238,20 @@ public final class Engine implements AutoCloseable {
             shardFor(s.treeId(), s.key()).put(ik, new BtreePage.Leaf(ik, BtreePage.Kind.VLOG,
                     s.entry().expiryMs(), s.entry().hasExpiry(), moved.encode(), 0));
             completeRange(seq, seq);
+            lastRewriteSeq = Math.max(lastRewriteSeq, seq);
         }
         vlog.sealCold();
         long visible = Math.max(visibleSeq, completedThrough());
         flushShards(visible);
         makeVisible(visible);
-        for (VlogStats stats : merged) {
-            pager.freeExtent(stats.startPage, stats.pages);
-            vlogStatsTree.remove(VlogStats.key(stats.segmentId));
+        // §6.8's second invariant, as in `collectSegment` — see the note there.
+        if (lastRewriteSeq > visibleSeq) {
+            deferredCollections.incrementAndGet();
+            return;
         }
+        // As in `collectSegment`: retired here, released after the superblock
+        // naming the rewrites is published.
+        pendingVlogRemoval.addAll(merged);
     }
 
     /**
@@ -2151,6 +2291,8 @@ public final class Engine implements AutoCloseable {
         if (budget > 0) {
             republishLevels();
             publishSuperblock(visibleSeq);
+            // Only now is the rewrite commit durable — §6.8's second invariant.
+            retireCollectedSegments();
         }
     }
 
@@ -2159,12 +2301,22 @@ public final class Engine implements AutoCloseable {
         }
         List<Survivor> survivors = new ArrayList<>();
         long now = options.clock.getAsLong();
+        // Every seq a reader can still resolve, not just `visibleSeq` — see
+        // `livenessSeqs`. This is the check that decides what gets freed, so it
+        // is the one where understating loses data: a record referenced only by
+        // a batch that is written but not yet visible read as dead here, was
+        // collected, and its still-live pointer then failed on the next read
+        // with "value-log segment N has no entry in tree 7".
+        long[] seqs = livenessSeqs();
         boolean complete = vlog.walk(stats, w -> {
-            BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), visibleSeq, now);
-            if (live != null && live.kind() == BtreePage.Kind.VLOG) {
-                VlogPointer p = VlogPointer.decode(live.value());
-                if (p.segmentId() == stats.segmentId && p.offset() == w.offset()) {
-                    survivors.add(new Survivor(w.record(), live));
+            for (long at : seqs) {
+                BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), at, now);
+                if (live != null && live.kind() == BtreePage.Kind.VLOG) {
+                    VlogPointer p = VlogPointer.decode(live.value());
+                    if (p.segmentId() == stats.segmentId && p.offset() == w.offset()) {
+                        survivors.add(new Survivor(w.record(), live));
+                        return;
+                    }
                 }
             }
         });
@@ -2180,6 +2332,7 @@ public final class Engine implements AutoCloseable {
         // Step 4: the updated pointers go through the normal commit path, which
         // is what makes GC crash-safe by construction. A partly finished GC
         // leaves duplicate value records, which are garbage, not corruption.
+        long lastRewriteSeq = 0;
         for (Survivor s : survivors) {
             VlogSegment.Record rec = s.record();
             BtreePage.Leaf old = s.entry();
@@ -2194,17 +2347,60 @@ public final class Engine implements AutoCloseable {
                     old.hasExpiry(), moved.encode(), 0);
             shardFor(rec.treeId(), rec.key()).put(ik, cell);
             completeRange(seq, seq);
+            lastRewriteSeq = Math.max(lastRewriteSeq, seq);
         }
         long visible = Math.max(visibleSeq, completedThrough());
         flushShards(visible);
         // The rewrites have to be visible before the next pass computes
         // liveness against them - see makeVisible.
         makeVisible(visible);
-        // Step 5: the extent is freed at this commit id, and does not become
-        // allocatable until min_retained_commit passes it - which is exactly
-        // "no live snapshot predates it".
-        pager.freeExtent(stats.startPage, stats.pages);
-        vlogStatsTree.remove(VlogStats.key(stats.segmentId));
+
+        // §6.8's second invariant: "a segment's extent is not freed until the
+        // pointer-rewrite commit is durable". `makeVisible` cannot always
+        // deliver that. `visible_seq` advances only over a **contiguous**
+        // prefix of completed reservations (§2.3), so a foreground batch that
+        // has taken a lower seq range and not yet finished it holds the
+        // watermark below these rewrites — and a rewrite that is not visible is
+        // one every reader resolves *past*, back to the old pointer, into the
+        // extent about to be freed.
+        //
+        // That is the whole of "value-log segment N has no entry in tree 7": a
+        // segment collected correctly, with its survivors rewritten correctly,
+        // freed while the old pointers were still the ones being read.
+        //
+        // Freeing is therefore skipped, not waited on. The segment stays whole
+        // and the next pass collects it, which costs one deferred reclaim and
+        // never a lost record. Waiting here would block the compactor while it
+        // holds `structure`, which is the stall this pass exists to remove.
+        if (lastRewriteSeq > visibleSeq) {
+            deferredCollections.incrementAndGet();
+            return;
+        }
+        // Step 5, and the ordering is the whole of §6.8's second invariant:
+        // "a segment's extent is not freed until the pointer-rewrite commit is
+        // durable". The rewrites above are in the memtable and visible, but
+        // nothing has published a superblock naming them yet — so this segment
+        // is retired into `pendingVlogRemoval` and its tree-7 entry and extent
+        // are released by `retireCollectedSegments` *after*
+        // `publishSuperblock`.
+        //
+        // Removing tree 7 here instead is what produced "value-log segment N
+        // has no entry in tree 7": the entry vanished while a reader could
+        // still reach a pointer into the segment, and a value-log read has no
+        // way to resolve a pointer whose segment it cannot look up.
+        pendingVlogRemoval.add(stats);
+    }
+
+    /**
+     * Releases the segments {@link #collectSegment} retired, once the commit
+     * carrying their pointer rewrites has been published.
+     */
+    private void retireCollectedSegments() {
+        for (VlogStats stats : pendingVlogRemoval) {
+            pager.freeExtent(stats.startPage, stats.pages);
+            vlogStatsTree.remove(VlogStats.key(stats.segmentId));
+        }
+        pendingVlogRemoval.clear();
     }
 
     // ==================================================================

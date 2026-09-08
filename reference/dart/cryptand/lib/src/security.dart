@@ -259,6 +259,16 @@ final class NonceAllocator {
     return NonceAllocator._(persistedNextNonce, floor);
   }
 
+  /// An allocator for a handle that will never write, and so needs no floor.
+  ///
+  /// `published` is left equal to `next`, which makes [mustPublish] true from
+  /// the start, so [allocate] throws rather than handing out a value from a
+  /// watermark that was never made durable. That is the safe direction: the
+  /// hazard rule 1 exists to prevent is allocating below an unpublished floor,
+  /// and this allocates nothing at all.
+  factory NonceAllocator.readOnly(int persistedNextNonce) =>
+      NonceAllocator._(persistedNextNonce, persistedNextNonce);
+
   int _next;
   int _published;
 

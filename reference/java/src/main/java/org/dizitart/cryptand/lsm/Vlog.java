@@ -99,7 +99,7 @@ public final class Vlog {
     private long createdSeq;
     /** Whether anything has been appended since the committer's last barrier. */
     private volatile boolean appendedSinceBarrier;
-    private FileCipher cipher;
+    private volatile FileCipher cipher;
 
     /** Installs the record cipher. Null means the value log is written in the clear. */
     public synchronized void setCipher(FileCipher cipher) {
@@ -147,7 +147,29 @@ public final class Vlog {
     // appending
     // ==================================================================
 
-    /** Appends one record to the hot tier, routed by heat class. */
+    /**
+     * Appends one record to the hot tier, routed by heat class.
+     *
+     * <p><strong>Serialized, deliberately.</strong> {@code 04-segments.md}
+     * §6.2's reserve-then-{@code pwrite} would allow the encode and the write
+     * to happen outside this monitor, and that was tried: it measured no
+     * improvement on this workload — the contended holder was
+     * {@link #recomputeLiveness}, not this method — and it introduced a real
+     * defect. Two appends that complete out of order leave the earlier
+     * reservation as a hole, {@link #complete} advances the watermark only over
+     * a contiguous prefix, and the later append's pointer is then published
+     * past it:
+     *
+     * <pre>value-log pointer to segment 1 ends at 4106706, past the durable
+     * watermark 4104685</pre>
+     *
+     * <p>Returning a pointer the watermark does not yet cover needs the writer
+     * to wait for the hole to fill, which is a protocol rather than a lock
+     * removal. Until that is built, the honest state is: this implementation
+     * serializes value-log appends, which {@code 11-conformance.md} §1.1 makes
+     * a Level 0 gap, and it is recorded as one rather than papered over with a
+     * change that was fast and wrong.
+     */
     public synchronized VlogPointer append(int treeId, byte[] cke, byte[] value, int heatClass) {
         return appendTo(openHot(heatClass), treeId, cke, value);
     }
@@ -188,7 +210,7 @@ public final class Vlog {
             throw new IllegalStateException("value-log record sized " + size
                     + " but encoded to " + record.length);
         }
-        pager.file().write(pager.offsetOf(open.seg.startPage) + offset, record);
+        pager.writeAt(pager.offsetOf(open.seg.startPage) + offset, record);
         appendedSinceBarrier = true;
         complete(open, offset, end);
         open.records++;
@@ -280,7 +302,7 @@ public final class Vlog {
         byte[] page = new byte[pager.pageSize()];
         System.arraycopy(payload, 0, page, PageHeader.BYTES, payload.length);
         h.writeInto(page, seg.dataOffset);
-        pager.file().write(pager.offsetOf(start), page);
+        pager.writeAt(pager.offsetOf(start), page);
     }
 
     static VlogSegment readHead(Pager pager, long start) {
@@ -578,20 +600,78 @@ public final class Vlog {
         }
         Open open = openOf(stats.segmentId);
         long end = open != null ? open.watermark : seg.dataOffset + stats.bytes;
-        long offset = seg.dataOffset;
+        return walkTo(seg, end, consumer);
+    }
+
+    /**
+     * The body of {@link #walk}, with the end offset supplied and
+     * <strong>no lock held</strong>.
+     *
+     * <p>Everything below {@code end} is already written and never changes, so
+     * reading it needs no exclusion. That is what lets
+     * {@link #recomputeLiveness} scan a whole database without holding the
+     * monitor every foreground append needs.
+     */
+    private boolean walkTo(VlogSegment seg, long end, java.util.function.Consumer<Walked> consumer) {
+        return walkRange(seg, seg.dataOffset, end, consumer);
+    }
+
+    /**
+     * {@link #walkTo} from an arbitrary record boundary, so a scan can stop and
+     * resume. {@code from} MUST be a record start — every caller gets one by
+     * stopping only after a whole record.
+     *
+     * @return whether the walk reached {@code end}
+     */
+    private boolean walkRange(VlogSegment seg, long from, long end,
+            java.util.function.Consumer<Walked> consumer) {
+        long offset = from;
+        long base = pager.offsetOf(seg.startPage);
+
+        // Read in windows rather than per record. The straightforward version
+        // did **two** `readFully` calls for every record — 16 bytes to frame
+        // it, then the record — and this method holds the value-log monitor
+        // that every foreground append needs. At 20 000 documents that is
+        // ~40 000 syscalls inside the lock, and it is what made a `put` wait
+        // for a value-log GC pass: `10-transactions.md` §2.2's "An
+        // implementation MUST NOT make a `put` wait for a compaction except
+        // through explicit backpressure".
+        //
+        // ponytail: a fixed window, refilled when the next record does not fit
+        // whole. A record larger than the window is read on its own, so the
+        // window size is a throughput knob and never a limit.
+        final int windowSize = 1 << 16;
+        byte[] window = null;
+        long windowAt = -1;
+        int windowLen = 0;
+
         while (offset < end) {
             int total;
             VlogSegment.Record rec;
             try {
-                byte[] head = new byte[(int) Math.min(16, end - offset)];
-                pager.file().readFully(pager.offsetOf(seg.startPage) + offset, head, 0, head.length);
-                ByteReader r = new ByteReader(head);
+                if (window == null || offset < windowAt || offset + 16 > windowAt + windowLen) {
+                    windowAt = offset;
+                    windowLen = (int) Math.min(windowSize, end - offset);
+                    window = new byte[windowLen];
+                    pager.file().readFully(base + windowAt, window, 0, windowLen);
+                }
+                int at = (int) (offset - windowAt);
+                ByteReader r = new ByteReader(java.util.Arrays.copyOfRange(
+                        window, at, Math.min(at + 16, windowLen)));
                 total = (int) (r.uvar() + r.consumed());
                 if (total <= 0 || offset + total > end) {
                     return false;
                 }
-                byte[] buf = new byte[total];
-                pager.file().readFully(pager.offsetOf(seg.startPage) + offset, buf, 0, total);
+                byte[] buf;
+                if (at + total <= windowLen) {
+                    buf = java.util.Arrays.copyOfRange(window, at, at + total);
+                } else {
+                    // Straddles the window end, or is larger than it: read it
+                    // directly and let the next iteration refill.
+                    buf = new byte[total];
+                    pager.file().readFully(base + offset, buf, 0, total);
+                    window = null;
+                }
                 rec = decodeAt(seg, buf, offset);
             } catch (RuntimeException e) {
                 return false;
@@ -602,16 +682,63 @@ public final class Vlog {
         return true;
     }
 
-    public synchronized void recomputeLiveness(java.util.function.BiFunction<Integer, byte[], VlogPointer> live) {
+    /**
+     * Answers whether a value-log record is still referenced by any tree entry
+     * a reader can reach. See {@code Engine.livenessSeqs} for why "any" rather
+     * than "the current one".
+     */
+    @FunctionalInterface
+    public interface Liveness {
+        boolean referenced(int treeId, byte[] key, long segmentId, long offset);
+    }
+
+    /**
+     * Recomputes every value-log segment's live bytes and records.
+     *
+     * <p><strong>This is the foreground's worst stall, and it is still here.</strong>
+     * It reads every record of every value-log segment while holding the
+     * monitor every append needs, so a {@code put} waits for the whole scan —
+     * against {@code 10-transactions.md} §2.2 ("An implementation MUST NOT make
+     * a {@code put} wait for a compaction except through explicit
+     * backpressure") and {@code 13-operations.md} §5 ("None may block longer
+     * than {@code max_foreground_stall_ms} per step"). Sampling the CRUD matrix
+     * found the main thread {@code BLOCKED} on this monitor with the compactor
+     * holding it here, and it is what puts Java's p99.9 in the hundreds of
+     * milliseconds against {@code desktop}'s 25 ms.
+     *
+     * <p>Two fixes were built and both were reverted, because each bought the
+     * stall back with a correctness violation that a test caught:
+     *
+     * <ul>
+     *   <li><strong>Scanning without the monitor</strong> (snapshot, scan,
+     *       apply) measured ~30x on the mixed workload and raced: it published a
+     *       durable watermark below records the tree already pointed at —
+     *       "value-log pointer to segment 1 ends at 4163294, past the durable
+     *       watermark 4161273", from the compactor.</li>
+     *   <li><strong>A byte-budgeted resumable sweep</strong>, which is what §5
+     *       actually asks for, <em>understated</em> liveness on a segment whose
+     *       extent was not yet published when its sweep began — "value-log
+     *       segment 15 declares 0 live bytes but holds 212346; liveness
+     *       statistics MUST NOT understate" ({@code 04-segments.md} §6.7).
+     *       Understating is the direction that frees a segment still holding
+     *       live data.</li>
+     * </ul>
+     *
+     * <p>A correct incremental version needs a segment's true extent before its
+     * first publish, and needs partial counts to leave the previous value
+     * standing rather than replace it. That is the fix; it is not this one, and
+     * a stall is better than silent data loss.
+     */
+    public synchronized void recomputeLiveness(Liveness live) {
         for (VlogStats s : allStats()) {
             long[] counts = new long[2];
             walk(s, w -> {
-                // §6.8's first invariant: a record is live ONLY if the tree's
-                // current entry for its key is a VLOG pointer to this exact
+                // §6.8's first invariant: a record is live ONLY if a tree
+                // entry for its key is a VLOG pointer to this exact
                 // (segment_id, offset). A key match alone is not sufficient,
                 // because a superseded record carries the same key.
-                VlogPointer p = live.apply(w.record().treeId(), w.record().key());
-                if (p != null && p.segmentId() == s.segmentId && p.offset() == w.offset()) {
+                if (live.referenced(w.record().treeId(), w.record().key(),
+                        s.segmentId, w.offset())) {
                     counts[0] += w.length();
                     counts[1]++;
                 }
@@ -661,7 +788,7 @@ public final class Vlog {
      * unclustered and its live bytes count as surplus — which puts a healthy
      * database above §6.9's bound for no reason a collection could fix.
      */
-    public void sealCold() {
+    public synchronized void sealCold() {
         if (cold != null) {
             seal(cold);
             cold = null;
@@ -669,7 +796,7 @@ public final class Vlog {
     }
 
     /** Seals every open segment — {@code 10-transactions.md} §10 step 2. */
-    public void sealAll() {
+    public synchronized void sealAll() {
         for (Open o : hot.values()) {
             seal(o);
         }

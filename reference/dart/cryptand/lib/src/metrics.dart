@@ -292,8 +292,11 @@ extension EngineMetrics on Engine {
       encryptedPages: store.encryptedPages,
       noncesAllocated: nonces == null ? 0 : nonces!.next,
       nonceFloor: nonces?.publishedWatermark ?? 0,
+      // 0 accesses is "nothing has been observed", not "everything hit".
+      // The value is declared unavailable below; this number is only ever
+      // read when `isAvailable` says it means something.
       pageCacheHitRate:
-          accesses == 0 ? 1 : (accesses - misses) / accesses,
+          accesses == 0 ? 0 : (accesses - misses) / accesses,
       segmentsProbedP50: percentile(probes, 0.50),
       segmentsProbedP99: percentile(probes, 0.99),
       filterFalsePositiveRate:
@@ -316,6 +319,12 @@ extension EngineMetrics on Engine {
       // is exactly what §8.3 calls the dangerous answer.
       unavailable: [
         'bytes_written_device',
+        // An engine that has fetched no page has observed no hit and no miss,
+        // and the ratio 0/0 has no value. §6 names this exact case: a
+        // `page_cache_hit_rate: 1.0` from an engine with no accounting "reads
+        // exactly like a perfect cache", so the empty case is declared rather
+        // than rounded up to the reassuring answer.
+        if (accesses == 0) 'page_cache_hit_rate',
         if (keys == null) ...[
           'unencrypted_pages',
           'encrypted_pages',

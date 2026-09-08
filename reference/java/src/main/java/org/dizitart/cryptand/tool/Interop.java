@@ -139,8 +139,19 @@ public final class Interop {
         return o;
     }
 
+    /** As {@link #open}, but the handle may not write. See the caller. */
+    private static Db openReadOnly(String path, byte[] key) {
+        Engine.Options o = options(key);
+        o.readOnly = true;
+        return open(path, o);
+    }
+
     private static Db open(String path, byte[] key) {
-        Database db = Database.open(Path.of(path), options(key));
+        return open(path, options(key));
+    }
+
+    private static Db open(String path, Engine.Options opts) {
+        Database db = Database.open(Path.of(path), opts);
         TreeDescriptor data = db.descriptor(COLLECTION);
         TreeDescriptor dict = db.descriptor(NAME_DICT);
         if (data == null || dict == null) {
@@ -459,7 +470,22 @@ public final class Interop {
      * @return {findings, documents, digest}
      */
     private static long[] readCorpusFile(Path path, byte[] key) {
-        try (Db db = open(path.toString(), key)) {
+        // **Read-only, and that is not a detail.** The corpus is the fixture
+        // `11-conformance.md` §6 defines conformance *by* — "conformance is
+        // defined as passing the vectors, not as matching the reference
+        // implementation's source" — so a runner that writes to it redefines
+        // the standard on every run.
+        //
+        // This one did. `Database.open` records the writer id when the handle
+        // is writable (`05-catalog.md` §7), so reading the corpus committed to
+        // it: 12 of the 18 files came back modified, superblock `commit_id`
+        // advanced and a page appended, `v1.0-corrupt-*` and
+        // `v1.0-security-*` among them. Two consequences, the second worse
+        // than the first — it took a write lock, so a parallel run of another
+        // implementation's suite failed against files it was only reading;
+        // and it **wrote to a file it was about to report as corrupt**, which
+        // is a write to storage the runner itself has not yet accepted.
+        try (Db db = openReadOnly(path.toString(), key)) {
             // Corruption and tampering only. {@code spec/01-container.md} §9:
             // "A leak is repairable" — it is wasted space in a sound file, not
             // damage, and a copy-on-write container leaks tree 1's own pages by

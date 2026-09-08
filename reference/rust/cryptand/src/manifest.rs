@@ -171,18 +171,49 @@ pub fn manifest_key(level: u8, group: u8, min_internal_key: &[u8]) -> Vec<u8> {
     .expect("manifest key components are all CKE-encodable")
 }
 
+/// Hands out a value no manifest state has had before. See `Manifest::epoch`.
+fn next_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Tree 6.
 pub struct Manifest {
     pub tree: CowTree,
+    /// A value no other manifest state has had, so a cache of a decoded level
+    /// can tell whether it is stale without re-reading the tree to find out.
+    ///
+    /// It is drawn from a **process-global** counter, and both `new` and every
+    /// mutator take a fresh one. Two things follow, and the second is why it is
+    /// global rather than an instance counter starting at zero:
+    ///
+    /// - `add` and `remove` are the only ways to *edit* tree 6, so bumping
+    ///   there is exhaustive where bumping at the call sites is a list a later
+    ///   caller can fail to join.
+    /// - but a manifest is also **replaced whole** — `repair` rebuilds one from
+    ///   the segment headers, a checkpoint restore rolls its root back — and a
+    ///   per-instance counter restarts at 0 on each of those, which is a value
+    ///   a cache may already be holding. Both paths served a stale manifest
+    ///   until the counter became global.
+    ///
+    /// Keying on `root()` instead does not work either: a copy-on-write root
+    /// page can be freed and handed back by the allocator, so one root number
+    /// can name two different trees.
+    epoch: u64,
 }
 
 impl Manifest {
     pub fn new(root: u64) -> Manifest {
-        Manifest { tree: CowTree::new(crate::catalog::tree_id::MANIFEST, root) }
+        Manifest { tree: CowTree::new(crate::catalog::tree_id::MANIFEST, root), epoch: next_epoch() }
     }
 
     pub fn root(&self) -> u64 {
         self.tree.root
+    }
+
+    /// Changes on every `add` or `remove`. See the field.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Two segments in one `(level, group)` cannot share a `min_internal_key`:
@@ -197,10 +228,12 @@ impl Manifest {
                 r.level, r.group
             ));
         }
+        self.epoch = next_epoch();
         self.tree.put(pager, &k, &r.encode())
     }
 
     pub fn remove(&mut self, pager: &mut Pager, r: &SegmentRef) -> Result<bool> {
+        self.epoch = next_epoch();
         self.tree.remove(pager, &r.key())
     }
 

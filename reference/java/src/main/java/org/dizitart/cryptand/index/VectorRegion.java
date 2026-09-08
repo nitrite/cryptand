@@ -154,7 +154,7 @@ public final class VectorRegion {
         // slots begin at data_offset and are rewritten for the life of the
         // region, exactly as a value-log segment's records are.
         h.writeInto(head, PageHeader.BYTES + HEADER_BYTES);
-        pager.file().write(pager.offsetOf(v.startPage), head);
+        pager.writeAt(pager.offsetOf(v.startPage), head);
         return v;
     }
 
@@ -207,7 +207,7 @@ public final class VectorRegion {
             writeEncrypted(pager, slot, buf);
             return;
         }
-        pager.file().write(offsetOf(pager, slot), buf);
+        pager.writeAt(offsetOf(pager, slot), buf);
     }
 
     public float[] read(Pager pager, long slot) {
@@ -259,7 +259,7 @@ public final class VectorRegion {
             // counter is the same key and the same nonce over different
             // plaintext, which is the whole failure §4 exists to prevent.
             byte[] sealed = cipher.encryptChunk(startPage, chunk, plain);
-            pager.file().write(pager.offsetOf(startPage + chunk), sealed);
+            pager.writeAt(pager.offsetOf(startPage + chunk), sealed);
             written += n;
         }
     }

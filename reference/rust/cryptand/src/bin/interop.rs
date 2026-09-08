@@ -417,7 +417,19 @@ fn read_corpus_file(
     path: &std::path::Path,
     key: Option<&[u8]>,
 ) -> cryptand::Result<(usize, usize, u32)> {
-    let mut e = Engine::open(path, key)?;
+    // **Read-only, and that is not a detail.** The corpus is the fixture
+    // `11-conformance.md` §6 defines conformance *by* — "conformance is defined
+    // as passing the vectors, not as matching the reference implementation's
+    // source" — so a runner that writes to it moves the target every run.
+    //
+    // This one did. An encrypted database's open publishes a nonce floor with a
+    // synchronous superblock write (`14-security.md` §4.1), and sealing runs
+    // right after it, so merely *reading* the corpus rewrote superblock slot B
+    // of four files — `v1.0-encrypted` and three `v1.0-security-*` among them,
+    // which means it **wrote to files it was about to reject as tampered**.
+    // §4.1 requires a floor before nonces are *allocated*; a handle that cannot
+    // write allocates none.
+    let mut e = Engine::open_read_only(path, key)?;
     let r = e.verify()?;
     let findings = r.of(Class::Corruption).len() + r.of(Class::Tampering).len();
     let data = tree_id_of(&mut e, COLLECTION)

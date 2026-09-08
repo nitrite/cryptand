@@ -123,6 +123,8 @@ pub struct Counters {
     pub stall_total_ms: u64,
     pub page_cache_hits: u64,
     pub page_cache_misses: u64,
+    /// Segments dropped to stay inside `12-profiles.md` §1's budget.
+    pub page_cache_evictions: u64,
     pub segments_probed: Vec<u32>,
     pub filter_probes: u64,
     pub filter_false_positives: u64,
@@ -172,7 +174,25 @@ pub struct Engine {
     pub auto_collect: bool,
 
     /// Open segment extents, cached by `segment_id`.
+    ///
+    /// Bounded by `12-profiles.md` §1's page cache budget — see
+    /// [`Engine::admit`]. It used to be unbounded, which made the budget row a
+    /// decoration: at 150 000 documents on `mobile` it held 70 MB against a
+    /// stated 4 MiB, and grew linearly with the data touched.
     segments: HashMap<u64, Arc<Segment>>,
+    /// Last-use ticks for the eviction order, parallel to `segments`.
+    segment_lru: HashMap<u64, u64>,
+    lru_clock: u64,
+    /// Decoded tree 6 by level, valid for `manifest_cache_epoch`.
+    /// When set, this handle may not write, and it performed no write when it
+    /// opened. See [`Engine::open_read_only`].
+    read_only: bool,
+    /// Range deletes currently in the memtable. See `insert_mem`.
+    memtable_range_deletes: u64,
+    manifest_cache: HashMap<u8, Vec<SegmentRef>>,
+    /// The whole of tree 6, for `all_refs`, on the same epoch.
+    manifest_all_cache: Option<Vec<SegmentRef>>,
+    manifest_cache_epoch: (u64, u64),
     /// `13-operations.md` §4 — segments a checksum failure has taken out of
     /// service, and the key range each covered.
     pub quarantined: HashMap<u64, SegmentRef>,
@@ -325,6 +345,13 @@ impl Engine {
             filters: true,
             auto_collect: true,
             segments: HashMap::new(),
+            segment_lru: HashMap::new(),
+            lru_clock: 0,
+            read_only: false,
+            memtable_range_deletes: 0,
+            manifest_cache: HashMap::new(),
+            manifest_all_cache: None,
+            manifest_cache_epoch: (u64::MAX, u64::MAX),
             quarantined: HashMap::new(),
             vlog_open: BTreeMap::new(),
             vlog_cold_open: None,
@@ -380,6 +407,24 @@ impl Engine {
 
     /// `01-container.md` §2.1 and `10-transactions.md` §4 — no log replay.
     pub fn open(path: &Path, key: Option<&[u8]>) -> Result<Engine> {
+        Engine::open_with(path, key, false)
+    }
+
+    /// Opens a handle that **writes nothing**, at open or afterwards.
+    ///
+    /// `11-conformance.md` §3's reader matrix requires this mode outright — a
+    /// file whose `write_version_minor` exceeds what the implementation
+    /// supports MUST be opened read-only rather than refused — and it is what
+    /// any reader of a file it does not own needs: a golden fixture, a shared
+    /// database, a file under forensic examination.
+    ///
+    /// Writes are refused at [`Engine::arm`], which every write path calls, so
+    /// the guarantee is one check rather than a list.
+    pub fn open_read_only(path: &Path, key: Option<&[u8]>) -> Result<Engine> {
+        Engine::open_with(path, key, true)
+    }
+
+    fn open_with(path: &Path, key: Option<&[u8]>, read_only: bool) -> Result<Engine> {
         // Read both slots without knowing the page size yet: slot A is always
         // at offset 0 and is exactly 4096 bytes.
         let mut probe = Pager::open_shared(path, 4096, u64::MAX)?;
@@ -451,7 +496,19 @@ impl Engine {
             None
         };
 
-        let pager = Pager::open(path, sb.page_size(), sb.page_count)?;
+        // A read-only handle takes **no writer lock**. `01-container.md` §10 is
+        // "one writing *process* per database"; a handle that cannot write is
+        // not a writer, and `13-operations.md` §8's coordinating readers depend
+        // on several of them holding the file at once. Taking the exclusive
+        // lock here made two readers of the same file refuse each other — which
+        // is how a parallel run of this repository's Rust and Java suites
+        // failed against the shared conformance corpus, each reporting the
+        // other's read as "open for writing by another process".
+        let pager = if read_only {
+            Pager::open_shared(path, sb.page_size(), sb.page_count)?
+        } else {
+            Pager::open(path, sb.page_size(), sb.page_count)?
+        };
         let pc = ProfileConstants::from_superblock(&sb);
         let shards = sb.memtable_shards.max(1) as usize;
         let mut e = Engine {
@@ -479,6 +536,13 @@ impl Engine {
             filters: true,
             auto_collect: true,
             segments: HashMap::new(),
+            segment_lru: HashMap::new(),
+            lru_clock: 0,
+            read_only,
+            memtable_range_deletes: 0,
+            manifest_cache: HashMap::new(),
+            manifest_all_cache: None,
+            manifest_cache_epoch: (u64::MAX, u64::MAX),
             quarantined: HashMap::new(),
             vlog_open: BTreeMap::new(),
             vlog_cold_open: None,
@@ -522,10 +586,21 @@ impl Engine {
         e.reload_changefeed_trees()?;
         e.refresh_checkpoint_floors()?;
         // `01-container.md` §2.1 step 8 and `14-security.md` §4.1 and §4.3.
-        if e.sb.cipher != 0 {
-            e.publish_nonce_floor()?;
+        //
+        // Both of these **write**, and a read-only handle does neither. §4.1's
+        // rule is that a floor is published before nonces are *allocated*; a
+        // handle that cannot write allocates none, so it needs no floor, and
+        // sealing a value-log segment is a repair a reader has no business
+        // performing. Doing them unconditionally meant opening any encrypted
+        // database modified it — including one about to be rejected as
+        // tampered, and including the shared conformance corpus, whose files
+        // this changed on every run.
+        if !read_only {
+            if e.sb.cipher != 0 {
+                e.publish_nonce_floor()?;
+            }
+            e.seal_unsealed_vlog_segments()?;
         }
-        e.seal_unsealed_vlog_segments()?;
         e.events.push(StoreEvent::Opened);
         Ok(e)
     }
@@ -709,6 +784,12 @@ impl Engine {
     /// Encryption can be switched on after open — `14-security.md` §8.3's
     /// conversion — so this cannot live in `open` alone.
     fn arm(&mut self) -> Result<()> {
+        // Every write path passes through here, so refusing here is exhaustive.
+        if self.read_only {
+            return Err(Error::Invalid(
+                "this handle was opened read-only and may not write".into(),
+            ));
+        }
         self.ensure_nonces(Engine::NONCE_HEADROOM)
     }
 
@@ -822,6 +903,15 @@ impl Engine {
         if self.closed {
             return invalid("the database is closed");
         }
+        // Checked here as well as in `arm`, because these two are not the same
+        // set: `put_with_expiry` arms and `put` does not, so `arm` alone let a
+        // read-only handle accept a `put`. It would not have reached the device
+        // — the flush refuses — but it would have been visible to this handle's
+        // own `get`, which is a read-only view returning data that is not in
+        // the file.
+        if self.read_only {
+            return invalid("this handle was opened read-only and may not write");
+        }
         let cke_key = cke::encode(key)?;
         crate::limits::check_key_len(&cke_key, self.pager.page_size)?;
         let seq = self.allocate_seq(1);
@@ -859,7 +949,16 @@ impl Engine {
     fn insert_mem(&mut self, ik: Vec<u8>, e: MemEntry) {
         self.memtable_bytes += ik.len() + e.value.len() + 16;
         let user = user_part(&ik).to_vec();
-        let seq = parse_internal_key(&ik).map(|p| p.seq).unwrap_or(0);
+        let parsed = parse_internal_key(&ik).ok();
+        let seq = parsed.as_ref().map(|p| p.seq).unwrap_or(0);
+        // Every memtable write funnels through here, so counting range deletes
+        // at this one point is exhaustive. `range_deletes_for` runs on **every
+        // point read** and its memtable half is a full iteration of every
+        // shard; the count lets that half be skipped when there is nothing to
+        // find, which is the overwhelmingly common case.
+        if parsed.as_ref().map(|p| p.op) == Some(op::RANGE_DELETE) {
+            self.memtable_range_deletes += 1;
+        }
         self.written_at.insert(user, seq);
         let s = self.shard_of(&ik);
         self.memtable[s].insert(ik, e);
@@ -1171,6 +1270,7 @@ impl Engine {
         }
         all.sort_by(|a, b| a.0.cmp(&b.0));
         self.memtable_bytes = 0;
+        self.memtable_range_deletes = 0;
 
         let mut b = SegmentBuilder::with_reserve(
             self.pager.page_size,
@@ -1200,7 +1300,7 @@ impl Engine {
         self.counters.write_amp_key_index += extent.len() as u64;
         let seg = Segment::open(extent, self.pager.page_size)?;
         let r = SegmentRef::of(&seg, level, group, start);
-        self.segments.insert(r.segment_id, Arc::new(seg));
+        self.admit(r.segment_id, Arc::new(seg));
         let mut m = std::mem::replace(&mut self.manifest, Manifest::new(0));
         m.tree.commit_id = self.sb.commit_id;
         let res = m.add(&mut self.pager, &r);
@@ -1209,15 +1309,74 @@ impl Engine {
         Ok(r)
     }
 
+    /// Bytes of segment extent currently held in memory.
+    ///
+    /// `12-profiles.md` §1 gives a per-profile page cache budget and
+    /// `design/performance-model.md` P7 predicts resident set bounded by it, so
+    /// the bound needs a counter to be checkable from outside rather than an
+    /// assurance.
+    pub fn page_cache_resident_bytes(&self) -> usize {
+        self.segments.values().map(|s| s.extent.len()).sum()
+    }
+
+    /// How many segment extents are resident.
+    pub fn page_cache_segments(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// Records a use of `id` for the eviction order in [`Self::admit`].
+    fn touch(&mut self, id: u64) {
+        self.lru_clock += 1;
+        self.segment_lru.insert(id, self.lru_clock);
+    }
+
+    /// Caches `seg` and evicts until the resident set is inside
+    /// `12-profiles.md` §1's page cache budget.
+    ///
+    /// The cache is safe to evict from because **every segment is written
+    /// through the pager before it is cached** — `publish_segment` and
+    /// `rotate_output` both `write_extent` first — so a miss is always
+    /// re-readable, and [`Self::segment`] reloads it.
+    ///
+    /// The most-recently-touched entry is never the victim, so the segment a
+    /// caller just asked for survives its own admission even when it alone
+    /// exceeds the budget: a budget is a target for the *set*, and refusing to
+    /// hold the one segment being read would make a read impossible rather
+    /// than merely uncached.
+    ///
+    /// ponytail: victim search is a linear scan of the resident set, which is
+    /// tens of segments at the sizes `12-profiles.md` targets (75 at 150 000
+    /// documents on `mobile`). If a profile ever holds thousands, replace the
+    /// scan with an intrusive LRU list; the accounting above does not change.
+    fn admit(&mut self, id: u64, seg: Arc<Segment>) {
+        self.segments.insert(id, seg);
+        self.touch(id);
+        let budget = self.profile.page_cache_bytes;
+        while self.segments.len() > 1 && self.page_cache_resident_bytes() > budget {
+            let victim = self
+                .segments
+                .keys()
+                .filter(|k| **k != id)
+                .min_by_key(|k| self.segment_lru.get(k).copied().unwrap_or(0))
+                .copied();
+            let Some(v) = victim else { break };
+            self.segments.remove(&v);
+            self.segment_lru.remove(&v);
+            self.counters.page_cache_evictions += 1;
+        }
+    }
+
     pub fn segment(&mut self, r: &SegmentRef) -> Result<Arc<Segment>> {
         if let Some(s) = self.segments.get(&r.segment_id) {
+            let s = s.clone();
             self.counters.page_cache_hits += 1;
-            return Ok(s.clone());
+            self.touch(r.segment_id);
+            return Ok(s);
         }
         self.counters.page_cache_misses += 1;
         let extent = self.pager.read_extent(r.start_page, r.pages)?;
         let s = Arc::new(Segment::open(extent, self.pager.page_size)?);
-        self.segments.insert(r.segment_id, s.clone());
+        self.admit(r.segment_id, s.clone());
         Ok(s)
     }
 
@@ -1228,11 +1387,48 @@ impl Engine {
     /// range, "never with a wrong or empty answer". Dropping the entry here
     /// would make the read silently resolve against whatever survives lower
     /// down, which is exactly the wrong answer that rule forbids.
+    /// What the manifest cache is valid for: the mutation epoch **and** the
+    /// root page.
+    ///
+    /// The epoch alone is not enough. `checkpoint.rs`'s restore rolls the
+    /// manifest back by assigning `manifest.tree.root` directly, which edits
+    /// tree 6 without going through `add` or `remove`, so the epoch does not
+    /// move and a cache keyed on it alone serves the pre-restore manifest. The
+    /// engine's own operations test caught exactly that.
+    ///
+    /// Root alone is not enough either — a copy-on-write root page can be
+    /// freed and reallocated — so the stamp is both. Together they are
+    /// complete: an edit through the mutators moves the epoch, and any other
+    /// way of changing the tree's contents has to move the root.
+    fn manifest_stamp(&self) -> (u64, u64) {
+        (self.manifest.epoch(), self.manifest.root())
+    }
+
     pub fn refs_at(&mut self, level: u8) -> Result<Vec<SegmentRef>> {
+        // Tree 6 is read on **every point read, once per level**, and it is
+        // written only when a segment is published or retired. Before this
+        // cache a `get` re-walked the manifest B-tree through the pager for
+        // each level: measured at 20 000 documents on `desktop`, 5 of the 6
+        // page reads a point read cost were this walk, and the sixth was the
+        // value it actually wanted.
+        //
+        // The cache is keyed on `Manifest::epoch`, which every mutator bumps,
+        // so it cannot serve a stale level.
+        let epoch = self.manifest_stamp();
+        if self.manifest_cache_epoch != epoch {
+            self.manifest_cache.clear();
+            self.manifest_all_cache = None;
+            self.manifest_cache_epoch = epoch;
+        }
+        if let Some(hit) = self.manifest_cache.get(&level) {
+            return Ok(hit.clone());
+        }
         let m = std::mem::replace(&mut self.manifest, Manifest::new(0));
         let r = m.level(&mut self.pager, level);
         self.manifest = m;
-        r
+        let refs = r?;
+        self.manifest_cache.insert(level, refs.clone());
+        Ok(refs)
     }
 
     /// The subset a compaction may read.
@@ -1245,10 +1441,25 @@ impl Engine {
     }
 
     pub fn all_refs(&mut self) -> Result<Vec<SegmentRef>> {
+        // Cached for the same reason and on the same epoch as `refs_at`:
+        // `range_deletes_for` calls this on **every point read**, so an
+        // uncached whole-manifest scan is a per-lookup cost that grows with the
+        // number of segments.
+        let epoch = self.manifest_stamp();
+        if self.manifest_cache_epoch != epoch {
+            self.manifest_cache.clear();
+            self.manifest_all_cache = None;
+            self.manifest_cache_epoch = epoch;
+        }
+        if let Some(hit) = &self.manifest_all_cache {
+            return Ok(hit.clone());
+        }
         let m = std::mem::replace(&mut self.manifest, Manifest::new(0));
         let r = m.all(&mut self.pager);
         self.manifest = m;
-        r
+        let refs = r?;
+        self.manifest_all_cache = Some(refs.clone());
+        Ok(refs)
     }
 
     // ---------------------------------------------------------------
@@ -1386,18 +1597,23 @@ impl Engine {
     /// row — a per-row lookup makes a scan O(rows x segments).
     pub fn range_deletes_for(&mut self, tree: u32) -> Result<Vec<RangeDelete>> {
         let mut out = Vec::new();
-        for shard in &self.memtable {
-            for (ik, e) in shard.iter() {
-                let p = parse_internal_key(ik)?;
-                if p.op != op::RANGE_DELETE || p.tree_id != tree {
-                    continue;
+        // Skipped, not sampled: the counter is maintained at the single point
+        // every memtable write passes through, so zero means there is provably
+        // nothing here to find.
+        if self.memtable_range_deletes > 0 {
+            for shard in &self.memtable {
+                for (ik, e) in shard.iter() {
+                    let p = parse_internal_key(ik)?;
+                    if p.op != op::RANGE_DELETE || p.tree_id != tree {
+                        continue;
+                    }
+                    out.push(RangeDelete {
+                        tree_id: tree,
+                        start: user_part(ik).to_vec(),
+                        end: crate::segment::decode_range_delete_payload(&e.value)?,
+                        seq: p.seq,
+                    });
                 }
-                out.push(RangeDelete {
-                    tree_id: tree,
-                    start: user_part(ik).to_vec(),
-                    end: crate::segment::decode_range_delete_payload(&e.value)?,
-                    seq: p.seq,
-                });
             }
         }
         let refs = self.all_refs()?;
@@ -1960,7 +2176,7 @@ impl Engine {
             match Segment::open(extent, self.pager.page_size) {
                 Ok(seg) => {
                     let r = SegmentRef::of(&seg, job.target_level, job.target_group, start);
-                    self.segments.insert(r.segment_id, Arc::new(seg));
+                    self.admit(r.segment_id, Arc::new(seg));
                     if let Err(e) = m.add(&mut self.pager, &r) {
                         err = Some(e);
                     }
@@ -1977,6 +2193,7 @@ impl Engine {
         for r in &job.inputs {
             self.pager.free_extent(r.start_page, r.pages, self.sb.commit_id);
             self.segments.remove(&r.segment_id);
+            self.segment_lru.remove(&r.segment_id);
         }
         self.events.push(StoreEvent::Compacted {
             from: job.inputs[0].level,
@@ -2457,6 +2674,7 @@ impl Engine {
             if r.segment_id == segment_id {
                 self.quarantined.insert(segment_id, r.clone());
                 self.segments.remove(&segment_id);
+                self.segment_lru.remove(&segment_id);
                 return Ok(Some(r));
             }
         }
