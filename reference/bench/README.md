@@ -181,11 +181,15 @@ outcome under §8's rule:
 | `update_page_reads_per_op` / `delete_page_reads_per_op` | the Java engine had **no page cache at all**, so every `readRaw` was a real `readFully`: 228 page reads per point lookup, 716 per update, 808 per delete |
 | `page_cache_resident_bytes` against `page_cache_budget_bytes` | `12-profiles.md` §1's page cache budget was honoured by none of the three. Rust's segment cache was unbounded and held 70 MB against `mobile`'s stated 4 MiB at 150 000 documents, growing linearly with the data |
 
-The `*_us_p999` rows are there for a cost the p50 and p99 hide entirely: the
-Java implementation's p99.9 for every write operation is **150–430 ms**, against
-`desktop`'s `max_foreground_stall_ms` of 25. `MAX_DELAY_MS` caps one
-backpressure delay at 100 ms, so a 430 ms operation is waiting on something
-else. That is recorded here as a measured, open finding rather than a fixed one.
+The `*_us_p999` rows are there for a cost the p50 and p99 hide entirely, and
+they earned their place: Java's p99.9 for every operation was **150–430 ms**
+against `desktop`'s `max_foreground_stall_ms` of 25, while its p50 sat at
+7–27 µs. The engine was fast and almost never running. Three holders, each
+found by sampling stacks rather than by reading code — the catalog decoded under
+the global structure lock on every insert, an exact value-log liveness scan run
+on every maintenance tick before deciding it was needed, and a single monitor on
+`Vlog` covering reads, appends and maintenance alike. `reference/HARDENING.md`
+carries the pass. Every Java p99.9 is now inside the 25 ms budget.
 
 ## What it does not measure
 

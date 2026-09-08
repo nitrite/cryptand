@@ -65,6 +65,18 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class Vlog {
 
     /** An open, appendable segment. */
+    /**
+     * Reads that resolved a record lying beyond the contiguous watermark —
+     * behind a hole left by an append still in flight.
+     *
+     * <p>A counter rather than a comment, because it is the only way to tell a
+     * working watermark-hole protocol from one that is never reached. A test
+     * that exercises concurrent appends and sees this stay at zero has not
+     * tested the protocol at all, whatever else it asserts.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong HOLE_READS =
+            new java.util.concurrent.atomic.AtomicLong();
+
     private static final class Open {
         final VlogSegment seg;
         final AtomicLong tail;
@@ -86,6 +98,39 @@ public final class Vlog {
             this.seg = seg;
             this.tail = new AtomicLong(seg.dataOffset);
             this.watermark = seg.dataOffset;
+        }
+
+        /**
+         * Whether {@code [offset, offset+len)} is written and therefore
+         * readable — <strong>the read half of the watermark-hole protocol</strong>.
+         *
+         * <p>{@code watermark} is the <em>contiguous</em> durable prefix
+         * ({@code 10-transactions.md} §2.3), and under concurrent appends a
+         * finished write can sit beyond it behind an earlier reservation that
+         * has not landed yet. Such a record is written and perfectly readable;
+         * it is only not yet <em>recoverable</em>. Judging readability by the
+         * watermark alone rejects it:
+         *
+         * <pre>value-log pointer to segment 1 ends at 4163294, past the durable
+         * watermark 4161273</pre>
+         *
+         * <p>So readability consults the contiguous prefix and, failing that,
+         * the completed-but-not-yet-folded ranges. Recoverability still uses
+         * the watermark alone, which is what {@link Vlog#publish} records.
+         */
+        boolean covers(long offset, long len) {
+            long end = offset + len;
+            if (end <= watermark) {
+                return true;
+            }
+            HOLE_READS.incrementAndGet();
+            Map.Entry<Long, Long> e = completed.floorEntry(offset);
+            return e != null && e.getKey() <= offset && e.getValue() >= end;
+        }
+
+        /** Whether every reservation has landed: no holes, nothing in flight. */
+        boolean quiesced() {
+            return watermark >= tail.get();
         }
     }
 
@@ -148,30 +193,15 @@ public final class Vlog {
     // ==================================================================
 
     /**
-     * Appends one record to the hot tier, routed by heat class.
-     *
-     * <p><strong>Serialized, deliberately.</strong> {@code 04-segments.md}
-     * §6.2's reserve-then-{@code pwrite} would allow the encode and the write
-     * to happen outside this monitor, and that was tried: it measured no
-     * improvement on this workload — the contended holder was
-     * {@link #recomputeLiveness}, not this method — and it introduced a real
-     * defect. Two appends that complete out of order leave the earlier
-     * reservation as a hole, {@link #complete} advances the watermark only over
-     * a contiguous prefix, and the later append's pointer is then published
-     * past it:
-     *
-     * <pre>value-log pointer to segment 1 ends at 4106706, past the durable
-     * watermark 4104685</pre>
-     *
-     * <p>Returning a pointer the watermark does not yet cover needs the writer
-     * to wait for the hole to fill, which is a protocol rather than a lock
-     * removal. Until that is built, the honest state is: this implementation
-     * serializes value-log appends, which {@code 11-conformance.md} §1.1 makes
-     * a Level 0 gap, and it is recorded as one rather than papered over with a
-     * change that was fast and wrong.
+     * A reserved byte range and the bytes to put in it. The record is written
+     * <strong>outside</strong> the monitor — see {@link #write}.
      */
-    public synchronized VlogPointer append(int treeId, byte[] cke, byte[] value, int heatClass) {
-        return appendTo(openHot(heatClass), treeId, cke, value);
+    private record Reservation(Open open, long offset, long end, int size, byte[] record) {
+    }
+
+    /** Appends one record to the hot tier, routed by heat class. */
+    public VlogPointer append(int treeId, byte[] cke, byte[] value, int heatClass) {
+        return write(reserve(true, heatClass, treeId, cke, value));
     }
 
     /**
@@ -179,11 +209,55 @@ public final class Vlog {
      * (§6.3) and by a bulk writer with a sorted batch (§6.3's last bullet),
      * which may skip the hot tier and the promotion write entirely.
      */
-    public synchronized VlogPointer appendCold(int treeId, byte[] cke, byte[] value) {
-        return appendTo(openCold(), treeId, cke, value);
+    public VlogPointer appendCold(int treeId, byte[] cke, byte[] value) {
+        return write(reserve(false, 0, treeId, cke, value));
     }
 
-    private VlogPointer appendTo(Open open, int treeId, byte[] cke, byte[] value) {
+    /**
+     * The {@code pwrite} half of {@code 04-segments.md} §6.2's
+     * <strong>reserve-then-{@code pwrite}</strong>, and it runs with
+     * <strong>no lock held</strong>.
+     *
+     * <p>{@code 10-transactions.md} §2.2 states it as a MUST: appends are
+     * routed this way "so that writers do not serialize on a shared buffer or a
+     * lock … Writers do not contend even while sharing a segment, because each
+     * takes a disjoint byte range with one {@code fetch_add} and writes into it
+     * directly". {@code 11-conformance.md} §1.1: "An implementation that
+     * serializes writers is <strong>not</strong> Level 0."
+     *
+     * <p>Writing outside the monitor is safe because the range is
+     * <strong>disjoint by construction</strong> — no two reservations overlap,
+     * so no two writers touch the same bytes — and because a pointer that lands
+     * beyond the contiguous watermark is still readable through
+     * {@link Open#covers}. That is the piece this needed and did not have the
+     * first time it was tried: without it a completed write behind an earlier
+     * in-flight one was rejected by its own reader.
+     */
+    private VlogPointer write(Reservation r) {
+        pager.writeAt(pager.offsetOf(r.open().seg.startPage) + r.offset(), r.record());
+        completeWrite(r);
+        return new VlogPointer(r.open().seg.segmentId, r.offset(), r.size());
+    }
+
+    /**
+     * Folds a finished write into the contiguous watermark — after the
+     * {@code pwrite}, never before, because §2.3's watermark advances only over
+     * reservations that are actually written.
+     */
+    private synchronized void completeWrite(Reservation r) {
+        appendedSinceBarrier = true;
+        complete(r.open(), r.offset(), r.end());
+    }
+
+    /**
+     * The reservation half: pick the segment, take a disjoint byte range, and
+     * do every piece of bookkeeping that touches shared state. Encoding is here
+     * too, because §5.3 puts the reserved offset in the nonce and
+     * {@code allocateNonce} is shared state of its own.
+     */
+    private synchronized Reservation reserve(
+            boolean hotTier, int heatClass, int treeId, byte[] cke, byte[] value) {
+        Open open = hotTier ? openHot(heatClass) : openCold();
         VlogSegment.Record rec = new VlogSegment.Record(treeId, cke, value);
         // The size has to be known before the reservation, because the
         // reservation fixes the offset and §5.3 puts the offset in the nonce.
@@ -198,10 +272,13 @@ public final class Vlog {
             // contiguous watermark exists to tolerate.
             open.tail.addAndGet(-size);
             seal(open);
-            Open fresh = open.seg.tier == VlogSegment.TIER_COLD
-                    ? openCold(true)
-                    : openHot(open.seg.heatClass, true);
-            return appendTo(fresh, treeId, cke, value);
+            boolean cold = open.seg.tier == VlogSegment.TIER_COLD;
+            if (cold) {
+                openCold(true);
+            } else {
+                openHot(open.seg.heatClass, true);
+            }
+            return reserve(!cold, open.seg.heatClass, treeId, cke, value);
         }
         byte[] record = cipher == null
                 ? rec.encode()
@@ -210,9 +287,6 @@ public final class Vlog {
             throw new IllegalStateException("value-log record sized " + size
                     + " but encoded to " + record.length);
         }
-        pager.writeAt(pager.offsetOf(open.seg.startPage) + offset, record);
-        appendedSinceBarrier = true;
-        complete(open, offset, end);
         open.records++;
         open.liveBytes += size;
         open.liveRecords++;
@@ -228,7 +302,7 @@ public final class Vlog {
         if (open.maxKey == null || BtreePage.memcmp(sortKey, open.maxKey) > 0) {
             open.maxKey = sortKey;
         }
-        return new VlogPointer(open.seg.segmentId, offset, size);
+        return new Reservation(open, offset, end, size, record);
     }
 
     /** Folds a completed reservation into the contiguous watermark. */
@@ -239,6 +313,9 @@ public final class Vlog {
             open.completed.pollFirstEntry();
             open.watermark = Math.max(open.watermark, first.getValue());
         }
+        // Wakes a `drain` waiting for this segment to quiesce. Cheap: nothing
+        // waits unless a seal is in progress.
+        notifyAll();
     }
 
     private Open openHot(int heatClass) {
@@ -348,13 +425,27 @@ public final class Vlog {
     public synchronized VlogSegment.Record read(VlogPointer p) {
         Open open = openOf(p.segmentId());
         VlogSegment s = open != null ? open.seg : segment(p.segmentId());
-        // §6.4: `offset + len` must be at most `data_offset + bytes`. Tree 7's
-        // `bytes` counts record space, so the extent-relative watermark the
-        // pointer is checked against is `data_offset` plus it.
-        long watermark = open != null ? open.watermark : s.dataOffset + durableBytesOf(p.segmentId());
-        if (p.offset() + p.len() > watermark) {
-            throw new CorruptionException("value-log pointer to segment " + p.segmentId() + " ends at "
-                    + (p.offset() + p.len()) + ", past the durable watermark " + watermark);
+        // §6.4: `offset + len` must be at most `data_offset + bytes`.
+        //
+        // For an **open** segment the authority is the in-memory state, and it
+        // is deliberately not the contiguous watermark alone — see
+        // `Open.covers`. For a **closed** one there are no in-flight writes
+        // left, so tree 7's `bytes` is the whole truth; `seal` guarantees it
+        // covers every record by draining first.
+        if (open != null) {
+            if (!open.covers(p.offset(), p.len())) {
+                throw new CorruptionException("value-log pointer to segment " + p.segmentId()
+                        + " ends at " + (p.offset() + p.len())
+                        + ", past the written extent of the open segment (watermark "
+                        + open.watermark + ", tail " + open.tail.get() + ")");
+            }
+        } else {
+            long watermark = s.dataOffset + durableBytesOf(p.segmentId());
+            if (p.offset() + p.len() > watermark) {
+                throw new CorruptionException("value-log pointer to segment " + p.segmentId()
+                        + " ends at " + (p.offset() + p.len())
+                        + ", past the durable watermark " + watermark);
+            }
         }
         byte[] buf = new byte[(int) p.len()];
         pager.file().readFully(pager.offsetOf(s.startPage) + p.offset(), buf, 0, buf.length);
@@ -508,6 +599,20 @@ public final class Vlog {
     }
 
     private void publish(Open o, boolean sealNow) {
+        // **The publish half of the watermark-hole protocol.** `bytes` below is
+        // the contiguous watermark, which is the right answer for recovery and
+        // the wrong one for a segment that is about to stop being open: once
+        // `completed` is gone, `Open.covers` is gone with it and tree 7's
+        // `bytes` is the only thing a read can consult. Sealing with a hole
+        // still open would leave every record beyond it permanently
+        // unreadable — written, checksummed, and unreachable.
+        //
+        // So a seal drains first. It is rare — once per `vlog_segment_bytes` —
+        // and a hole is one `pwrite` wide, so this waits for microseconds or,
+        // as long as appends are serialized, not at all.
+        if (sealNow) {
+            drain(o);
+        }
         VlogStats s = existing(o.seg.segmentId);
         s.segmentId = o.seg.segmentId;
         s.bytes = o.watermark - o.seg.dataOffset;
@@ -536,6 +641,37 @@ public final class Vlog {
             }
         }
         statsTree.put(s.key(), Cve.encode(s.toValue()));
+    }
+
+    /**
+     * Waits until every reservation in {@code o} has landed, so
+     * {@code watermark == tail} and the contiguous prefix covers the whole
+     * segment. Called before a seal — see {@link #publish}.
+     *
+     * <p>It <strong>waits rather than spins</strong>, and that is not a style
+     * choice: this runs holding the monitor, and the appender it is waiting for
+     * needs that same monitor to fold its range in. A spin here deadlocks the
+     * moment appends stop being serialized, which is the exact change this
+     * protocol exists to allow. {@link Object#wait} releases the monitor;
+     * {@code completeWrite} signals.
+     */
+    private void drain(Open o) {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        while (!o.quiesced()) {
+            long left = deadline - System.nanoTime();
+            if (left <= 0) {
+                throw new CorruptionException("value-log segment " + o.seg.segmentId
+                        + " still has writes in flight at seal: watermark " + o.watermark
+                        + ", tail " + o.tail.get());
+            }
+            try {
+                wait(Math.max(1, left / 1_000_000), (int) (left % 1_000_000));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CorruptionException("interrupted draining value-log segment "
+                        + o.seg.segmentId + " at seal");
+            }
+        }
     }
 
     private VlogStats existing(long id) {
@@ -729,29 +865,67 @@ public final class Vlog {
      * standing rather than replace it. That is the fix; it is not this one, and
      * a stall is better than silent data loss.
      */
-    public synchronized void recomputeLiveness(Liveness live) {
-        for (VlogStats s : allStats()) {
+    /** One segment's state at the moment the scan below snapshotted it. */
+    private record LivenessSnapshot(long segmentId, VlogSegment seg, long end, long records) {
+    }
+
+    public void recomputeLiveness(Liveness live) {
+        List<LivenessSnapshot> snapshot = new ArrayList<>();
+        synchronized (this) {
+            for (VlogStats s : allStats()) {
+                VlogSegment seg;
+                try {
+                    seg = segment(s.segmentId);
+                } catch (RuntimeException e) {
+                    continue;
+                }
+                Open open = openOf(s.segmentId);
+                long end = open != null ? open.watermark : seg.dataOffset + s.bytes;
+                snapshot.add(new LivenessSnapshot(s.segmentId, seg, end,
+                        open != null ? open.records : 0));
+            }
+        }
+
+        Map<Long, long[]> counted = new java.util.LinkedHashMap<>();
+        for (LivenessSnapshot snap : snapshot) {
             long[] counts = new long[2];
-            walk(s, w -> {
-                // §6.8's first invariant: a record is live ONLY if a tree
-                // entry for its key is a VLOG pointer to this exact
-                // (segment_id, offset). A key match alone is not sufficient,
-                // because a superseded record carries the same key.
+            walkTo(snap.seg(), snap.end(), w -> {
                 if (live.referenced(w.record().treeId(), w.record().key(),
-                        s.segmentId, w.offset())) {
+                        snap.segmentId(), w.offset())) {
                     counts[0] += w.length();
                     counts[1]++;
                 }
             });
-            s.liveBytes = counts[0];
-            s.liveRecords = counts[1];
-            statsTree.put(s.key(), Cve.encode(s.toValue()));
-            Open open = openOf(s.segmentId);
-            if (open != null) {
-                open.liveBytes = counts[0];
-                open.liveRecords = counts[1];
-                open.publishedLiveBytes = counts[0];
-                open.publishedLiveRecords = counts[1];
+            counted.put(snap.segmentId(), counts);
+        }
+
+        synchronized (this) {
+            Map<Long, VlogStats> current = new java.util.LinkedHashMap<>();
+            for (VlogStats st : allStats()) {
+                current.put(st.segmentId, st);
+            }
+            for (LivenessSnapshot snap : snapshot) {
+                long[] counts = counted.get(snap.segmentId());
+                VlogStats s = current.get(snap.segmentId());
+                if (counts == null || s == null) {
+                    continue;
+                }
+                long liveBytes = counts[0];
+                long liveRecords = counts[1];
+                Open open = openOf(snap.segmentId());
+                if (open != null) {
+                    liveBytes += Math.max(0, open.watermark - snap.end());
+                    liveRecords += Math.max(0, open.records - snap.records());
+                }
+                s.liveBytes = liveBytes;
+                s.liveRecords = liveRecords;
+                statsTree.put(s.key(), Cve.encode(s.toValue()));
+                if (open != null) {
+                    open.liveBytes = liveBytes;
+                    open.liveRecords = liveRecords;
+                    open.publishedLiveBytes = liveBytes;
+                    open.publishedLiveRecords = liveRecords;
+                }
             }
         }
     }

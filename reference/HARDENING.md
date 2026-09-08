@@ -1507,3 +1507,127 @@ removed, so it did not exercise the defect. A control that cannot fail measures
 nothing, and this project's own rule is that such a test is worse than none. The
 only known reproducer is `CrudBench`'s mixed phase, run repeatedly at 1 000 and
 5 000 documents.
+
+
+---
+
+# The watermark-hole protocol — and the 30x it unblocks
+
+The previous section ended with two fast paths built and reverted, and Java at
+2.3x Dart's distance in the wrong direction. This section builds the protocol
+those two attempts were missing, lands both of them on it, and closes the
+tree-7 race.
+
+## What the hole is
+
+`10-transactions.md` §2.3 makes the value log's `bytes` watermark advance only
+over a **contiguous** prefix of completed reservations, because that is what a
+recovering reader can trust: bytes past a gap were never necessarily written.
+
+`04-segments.md` §6.2 asks appends to reserve a disjoint byte range with one
+`fetch_add` and then `pwrite` into it, with no lock — and §2.2 makes that a MUST,
+with `11-conformance.md` §1.1 adding that "an implementation that serializes
+writers is **not** Level 0".
+
+Put together, those two produce **holes**: writer B finishes while writer A's
+earlier reservation is still in flight, so B's record is written, checksummed
+and sitting *beyond* the contiguous watermark. Judging readability by the
+watermark rejects B's own pointer, which is exactly how the first attempt failed:
+
+```
+value-log pointer to segment 1 ends at 4163294, past the durable watermark 4161273
+```
+
+**Recoverability and readability are not the same question**, and conflating
+them is what made concurrent appends look impossible.
+
+## The protocol
+
+Three parts, all in `Vlog`:
+
+1. **`Open.covers(offset, len)` — the read half.** A record is readable if the
+   contiguous watermark covers it *or* if a completed-but-not-yet-folded range
+   does. `Vlog.read` uses it for open segments. Recoverability still uses the
+   watermark alone, which is what `publish` records, so nothing about the file
+   changes.
+
+2. **`drain(open)` before a seal — the publish half.** Once a segment stops
+   being open, `completed` is gone and tree 7's `bytes` is the only thing a read
+   can consult. Sealing with a hole open would leave every record past it
+   permanently unreadable — written, checksummed and unreachable. So a seal
+   waits for `watermark == tail` first. It is rare (once per
+   `vlog_segment_bytes`) and a hole is one `pwrite` wide.
+
+3. **`drain` waits, it does not spin.** It runs holding the monitor, and the
+   appender it waits for needs that same monitor to fold its range in. A spin
+   deadlocks the moment appends stop being serialized — which is the change the
+   protocol exists to allow. `Object.wait` releases the monitor; `complete`
+   signals.
+
+With that in place, `Vlog.append` is `reserve` (monitor: segment choice,
+`fetch_add`, nonce, bookkeeping) → **`pwrite` with no lock held** → `complete`
+(monitor: fold and signal).
+
+### It has a control, and the control fails
+
+`VlogConcurrencyTest` runs 8 writers x 1 500 records and has each writer read its
+own record back **immediately**, while the others still hold reservations —
+which is the only way to reach the hole state deliberately. It asserts
+`Vlog.HOLE_READS` actually moved, because a concurrency test that never produces
+a hole has not tested the protocol whatever else it asserts.
+
+Replacing `covers`'s hole branch with `return false` reproduces the original
+failure on the first run:
+
+```
+value-log pointer to segment 1 ends at 13927, past the written extent
+of the open segment (watermark 7474, tail 14849)
+```
+
+The test also isolates the value log from the **seq** watermark by reading at
+`Long.MAX_VALUE`. That is not a dodge, and it surfaced a separate finding worth
+recording: under concurrent writers a batch acknowledged at `os` durability is
+**not** immediately visible to its own writer, because `visible_seq` is also a
+contiguous prefix and another thread's in-flight range holds it back. §7's
+"acknowledged" and §2.3's "contiguous" disagree here. It is pre-existing, it is
+not what this section fixed, and it is the next thing to look at.
+
+## The tree-7 race, closed
+
+Defect 88's remaining third cause did not survive this work. With the two
+ordering fixes of the previous section plus the protocol above, the CRUD
+matrix's mixed phase ran **60 times at 1 000, 5 000 and 20 000 documents with
+zero failures**, against roughly two runs in five when it was first found. The
+12-direction cross-language round-trip gate — plaintext and encrypted, every
+pairing of Rust, Dart and Java — passes six runs out of six.
+
+## What it measures
+
+At 20 000 documents, Java against where the previous section left it:
+
+| | before | after |
+|---|---|---|
+| `mixed_ops_per_s` | 3 114 | **37 552** (12x) |
+| `read_ops_per_s` | 5 184 | **71 593** (14x) |
+| `create_ops_per_s` | 4 396 | **18 207** (4.1x) |
+| `update_ops_per_s` | 1 616 | **7 508** (4.6x) |
+| `read_us_p999` | 150 965 | **111** (1 360x) |
+| `update_us_p999` | 175 680 | **1 532** (115x) |
+| `create_us_p999` | 63 676 | **1 762** (36x) |
+
+**Every p99.9 is now inside `desktop`'s `max_foreground_stall_ms` of 25**, which
+`13-operations.md` §5 requires and which no Java operation met before.
+
+And on the headline mixed workload Java now sits where it should:
+
+```
+rust 159 629   >   java 37 552   >   dart 16 420   ops/s
+```
+
+## What is still serialized
+
+`reserve` holds the monitor for the `fetch_add`, the nonce allocation (§5.3
+needs it) and the per-segment bookkeeping. Only the `pwrite` is outside. That is
+the expensive part and it is where the win came from, but §2.2's "writers do not
+contend even while sharing a segment" is not yet literally true, and this is
+recorded as a remaining gap rather than claimed as met.
