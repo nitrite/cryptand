@@ -134,16 +134,38 @@ public final class Collection {
     }
 
     public void update(long id, Value.Doc doc) {
-        Value.Doc previous = get(id);
+        // The previous document is read for **one** purpose: removing the index
+        // entries it produced (see `stage`, where `previous` is used only
+        // inside the index loop). With no index on this collection there is
+        // nothing to remove, and the read is a value-log fetch and a full CVE
+        // decode spent on a value that is then discarded.
+        Value.Doc previous = indexed() ? get(id) : null;
         Engine.Batch b = engine.batch();
         stage(b, id, withId(doc, id), previous);
         b.commit();
     }
 
     public void remove(long id) {
-        Value.Doc previous = get(id);
-        if (previous == null) {
-            return;
+        // As in `update`: the document itself is needed only to derive the
+        // index entries to retract. Without indexes the question is just
+        // "does this key exist", and `containsKey` answers it without
+        // resolving the value — which on a `desktop` profile is a value-log
+        // read per delete. Semantics are unchanged: a delete of an absent key
+        // is still a no-op rather than a tombstone.
+        Value.Doc previous;
+        if (indexed()) {
+            previous = get(id);
+            if (previous == null) {
+                return;
+            }
+        } else {
+            previous = null;
+            // The engine's own read horizon, which is what `get` above uses.
+            // Checking at `visibleSeq` instead made a just-written document
+            // look absent and the delete a no-op.
+            if (!engine.containsKey(descriptor.treeId(), documentKey(id))) {
+                return;
+            }
         }
         Engine.Batch b = engine.batch();
         b.remove(descriptor.treeId(), documentKey(id));
@@ -759,6 +781,40 @@ public final class Collection {
             }
         }
         return List.copyOf(vectorIndexes);
+    }
+
+    /**
+     * Whether this collection has any index at all — secondary, spatial,
+     * vector or full-text.
+     *
+     * <p>Cached on the identity of the catalog map, which {@code Database}
+     * replaces only when the catalog actually changes, so this costs a
+     * reference comparison on the write path.
+     */
+    private Map<String, TreeDescriptor> indexedFor;
+    private boolean indexedValue;
+
+    private boolean indexed() {
+        Map<String, TreeDescriptor> catalog = db.catalog();
+        if (catalog != indexedFor) {
+            boolean any = false;
+            for (TreeDescriptor d : catalog.values()) {
+                if (!name.equals(d.owner())) {
+                    continue;
+                }
+                String kind = d.kind();
+                if (TreeDescriptor.Kind.INDEX.equals(kind)
+                        || TreeDescriptor.Kind.RTREE.equals(kind)
+                        || TreeDescriptor.Kind.VECTOR_GRAPH.equals(kind)
+                        || TreeDescriptor.Kind.POSTINGS.equals(kind)) {
+                    any = true;
+                    break;
+                }
+            }
+            indexedValue = any;
+            indexedFor = catalog;
+        }
+        return indexedValue;
     }
 
     /** Opens the spatial indexes this collection already has. */

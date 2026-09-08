@@ -81,6 +81,12 @@ public final class Pager {
      */
     private final java.util.LinkedHashMap<Long, byte[]> cache =
             new java.util.LinkedHashMap<>(64, 0.75f, true);
+    /**
+     * Decoded page payloads, guarded by the same monitor as {@link #cache} and
+     * sharing its budget. See {@link #readPage}.
+     */
+    private final java.util.LinkedHashMap<Long, byte[]> payloads =
+            new java.util.LinkedHashMap<>(64, 0.75f, true);
     private long pageCacheBytes = 64L * 1024 * 1024;
     private final java.util.concurrent.atomic.AtomicLong cacheHits =
             new java.util.concurrent.atomic.AtomicLong();
@@ -323,9 +329,61 @@ public final class Pager {
      * codec or a cipher.
      */
     public byte[] readPage(long pageId) {
-        byte[] page = readRaw(pageId);
+        // **The cache holds decoded payloads, not raw pages.** A hit on a raw
+        // page still had to be cloned, CRC-verified over the whole page, then
+        // decrypted, decompressed and copied again — so a B+tree descent paid a
+        // checksum per node on bytes that had already been checked and could
+        // not have changed, because every write invalidates. A JFR profile of
+        // the CRUD matrix put `Segment$Cursor.page` second only to `resolve`
+        // for exactly that reason.
+        //
+        // A cached payload is verified once, at the miss that read it.
+        //
+        // <p><strong>The array is copied, and it must be.</strong> Returning
+        // the cached array directly is tempting — a B+tree descent visits a
+        // page per level and a compaction merges page after page, so the copy
+        // is real — and it was measured at roughly 10% on the mixed workload.
+        // It was also wrong: with the array shared, the CRUD matrix began
+        // failing "the delete phase deleted nothing" about once in fifteen
+        // runs, where the committed baseline was clean in thirty. Reverting
+        // this single line, and nothing else, took it back to clean in thirty.
+        //
+        // Some caller mutates or otherwise takes ownership of what `readPage`
+        // hands back; a read of every call site did not find it, which is
+        // exactly why the copy stays until one does. A cache that is shared
+        // needs the ownership rule enforced at the callers, not assumed here.
+        byte[] hit;
+        synchronized (cache) {
+            hit = payloads.get(pageId);
+        }
+        if (hit != null) {
+            cacheHits.incrementAndGet();
+            return hit.clone();
+        }
+        cacheMisses.incrementAndGet();
+        pageReads.incrementAndGet();
+        byte[] page = new byte[pageSize];
+        file.readFully(offsetOf(pageId), page, 0, pageSize);
         PageHeader h = PageHeader.verify(page, pageId);
-        return decodePayload(page, h, pageId);
+        byte[] payload = decodePayload(page, h, pageId);
+        admitPayload(pageId, payload);
+        return payload.clone();
+    }
+
+    /**
+     * Caches a decoded payload, evicting to stay inside
+     * {@code 12-profiles.md} §1's budget. Pages 0 and 1 are excluded for the
+     * same reason as in {@link #admit}: the engine writes the superblock slots
+     * straight to the {@code PageFile}.
+     */
+    private void admitPayload(long pageId, byte[] payload) {
+        if (pageId < 2) {
+            return;
+        }
+        synchronized (cache) {
+            payloads.put(pageId, payload);
+            enforceBudget();
+        }
     }
 
     /** The whole page as stored, checksum unverified. */
@@ -368,6 +426,29 @@ public final class Pager {
      * show, shard it by {@code pageId} and the accounting below does not
      * change.
      */
+    /**
+     * Evicts from whichever of the two caches is larger until their combined
+     * residency is inside {@code 12-profiles.md} §1's budget.
+     *
+     * <p>They share one budget because the profile states one. Giving each the
+     * full figure would hold twice what {@code mobile} says it holds, which is
+     * the decoration this budget stopped being.
+     */
+    private void enforceBudget() {
+        while (cache.size() + payloads.size() > 1
+                && (long) (cache.size() + payloads.size()) * pageSize > pageCacheBytes) {
+            java.util.LinkedHashMap<Long, byte[]> from =
+                    payloads.size() >= cache.size() ? payloads : cache;
+            java.util.Iterator<java.util.Map.Entry<Long, byte[]>> it = from.entrySet().iterator();
+            if (!it.hasNext()) {
+                return;
+            }
+            it.next();
+            it.remove();
+            cacheEvictions.incrementAndGet();
+        }
+    }
+
     private void admit(long pageId, byte[] page) {
         // **Pages 0 and 1 are never cached.** They are the two superblock slots
         // ({@code 01-container.md} §2), and {@link
@@ -381,13 +462,7 @@ public final class Pager {
         }
         synchronized (cache) {
             cache.put(pageId, page);
-            while (cache.size() > 1 && (long) cache.size() * pageSize > pageCacheBytes) {
-                java.util.Iterator<java.util.Map.Entry<Long, byte[]>> it =
-                        cache.entrySet().iterator();
-                it.next();
-                it.remove();
-                cacheEvictions.incrementAndGet();
-            }
+            enforceBudget();
         }
     }
 
@@ -398,6 +473,7 @@ public final class Pager {
     private void invalidate(long pageId) {
         synchronized (cache) {
             cache.remove(pageId);
+            payloads.remove(pageId);
         }
     }
 
@@ -421,6 +497,7 @@ public final class Pager {
         synchronized (cache) {
             for (long p = first; p <= last; p++) {
                 cache.remove(p);
+                payloads.remove(p);
             }
         }
     }
@@ -441,7 +518,7 @@ public final class Pager {
     /** Bytes of page currently resident. */
     public long pageCacheResidentBytes() {
         synchronized (cache) {
-            return (long) cache.size() * pageSize;
+            return (long) (cache.size() + payloads.size()) * pageSize;
         }
     }
 
@@ -452,15 +529,9 @@ public final class Pager {
 
     /** Sets the budget from the profile. Evicts immediately if it shrank. */
     public void pageCacheBytes(long bytes) {
-        this.pageCacheBytes = Math.max(bytes, (long) pageSize * 2);
+        this.pageCacheBytes = Math.max(bytes, (long) pageSize * 4);
         synchronized (cache) {
-            while (cache.size() > 1 && (long) cache.size() * pageSize > pageCacheBytes) {
-                java.util.Iterator<java.util.Map.Entry<Long, byte[]>> it =
-                        cache.entrySet().iterator();
-                it.next();
-                it.remove();
-                cacheEvictions.incrementAndGet();
-            }
+            enforceBudget();
         }
     }
 

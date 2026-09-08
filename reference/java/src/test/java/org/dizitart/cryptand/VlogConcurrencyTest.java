@@ -99,15 +99,13 @@ class VlogConcurrencyTest {
                             // Reading here is what the first attempt at
                             // reserve-then-pwrite failed on, and it is the only
                             // way to reach that state deliberately.
-                            // At `Long.MAX_VALUE` rather than `visibleSeq`:
-                            // this isolates the value-log protocol from the
-                            // *seq* watermark, which is a separate contiguous
-                            // prefix and legitimately lags behind a concurrent
-                            // writer's own batch. What is under test here is
-                            // whether the pointer resolves, not whether the
-                            // entry is visible yet.
-                            byte[] back = e.get(TREE, key(id), Long.MAX_VALUE,
-                                    System.currentTimeMillis());
+                            // A plain `get`, at the engine's own read horizon.
+                            // `os` durability acknowledges when the batch
+                            // returns, and §7 says acknowledged data is
+                            // readable — including by the writer that just
+                            // wrote it, while seven other writers hold ranges
+                            // in flight around it.
+                            byte[] back = e.get(TREE, key(id));
                             if (back == null || !Arrays.equals(value(id), back)) {
                                 throw new AssertionError("id " + id
                                         + " did not read back immediately after its own append");

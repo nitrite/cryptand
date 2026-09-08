@@ -49,6 +49,10 @@ public final class SegmentBuilder {
     private final List<byte[]> distinctUserKeys = new ArrayList<>();
     private final Map<Integer, Long> treeSpan = new TreeMap<>();
 
+    /** Running state for the fit test in {@link #add}. */
+    private int batchPrefix;
+    private int batchBytes;
+
     private byte[] lastKey;
     private byte[] lastUserKey;
     private byte[] firstKey;
@@ -137,24 +141,83 @@ public final class SegmentBuilder {
             lastUserKey = uk;
         }
 
-        batch.add(cell);
-        if (BtreePage.encodeLeaves(batch, payloadSize, batch.size()) == null) {
-            batch.remove(batch.size() - 1);
+        // **Does it fit? — answered by arithmetic, not by encoding.**
+        //
+        // This used to append the cell and then call
+        // `BtreePage.encodeLeaves(batch, ...)`, which re-encodes **every cell in
+        // the page** to discover whether the newest one fits. Adding the k-th
+        // cell encoded k cells, so filling a page of K cells cost K^2/2
+        // cell-encodings against the K it needs — and then `emitLeaf` encoded
+        // them once more. At a hundred-odd cells to a page that is a ~50x
+        // multiplier, and it made `encodeLeaves` the single top frame in the
+        // profile of *both* the compactor and the foreground.
+        //
+        // The packed size is computable directly:
+        //
+        //     HEADER + prefix_len + sum(leafCellBytes(cell, prefix_len))
+        //
+        // which is exactly `pack`'s `free_start + total`, because
+        // `leafCellBytes` already counts each cell's two-byte pointer. The
+        // prefix is the one moving part: keys arrive sorted, so it is the
+        // common prefix of the batch's first key and its newest, and it only
+        // ever shrinks. When it does, every earlier cell's suffix grows, and
+        // the running total is recomputed in one pass — rare, and O(k) rather
+        // than O(k) per add.
+        int newPrefix = batchPrefixLen(cell.key());
+        if (newPrefix != batchPrefix) {
+            batchPrefix = newPrefix;
+            batchBytes = 0;
+            for (BtreePage.Leaf c : batch) {
+                batchBytes += BtreePage.leafCellBytes(c, newPrefix);
+            }
+        }
+        int cost = BtreePage.leafCellBytes(cell, newPrefix);
+        if (BtreePage.HEADER + newPrefix + batchBytes + cost > payloadSize) {
             if (batch.isEmpty()) {
                 throw new LimitException("a single segment entry of " + BtreePage.leafCellBytes(cell, 0)
                         + " bytes does not fit a " + pager.pageSize() + "-byte page");
             }
             emitLeaf();
-            batch.add(cell);
+            // A fresh page: the prefix is this cell's whole key.
+            batchPrefix = batchPrefixLen(cell.key());
+            batchBytes = 0;
+            cost = BtreePage.leafCellBytes(cell, batchPrefix);
         }
+        batch.add(cell);
+        batchBytes += cost;
+    }
+
+    /**
+     * The prefix length {@link BtreePage#commonPrefix} would return for the
+     * batch once {@code newKey} joins it — the shared prefix of the batch's
+     * first key and {@code newKey}, since the input is sorted, capped where
+     * {@code prefix_len} stops fitting a u16.
+     */
+    private int batchPrefixLen(byte[] newKey) {
+        if (batch.isEmpty()) {
+            return Math.min(newKey.length, 0xFFFF);
+        }
+        byte[] first = batch.get(0).key();
+        int max = Math.min(first.length, newKey.length);
+        int i = java.util.Arrays.mismatch(first, 0, max, newKey, 0, max);
+        return Math.min(i < 0 ? max : i, 0xFFFF);
     }
 
     private void emitLeaf() {
         byte[] payload = BtreePage.encodeLeaves(batch, payloadSize, batch.size());
+        if (payload == null) {
+            // The arithmetic above and `pack` disagreed, which they must not.
+            // Failing loudly here beats writing a short page: a segment whose
+            // last cell silently vanished passes every checksum.
+            throw new IllegalStateException("leaf page overflowed after the fit test said it would not: "
+                    + batch.size() + " cells, prefix " + batchPrefix + ", " + batchBytes + " body bytes");
+        }
         long index = 1 + treePages.size();
         treePages.add(payload);
         leafSeparators.add(new BtreePage.Internal(batch.get(0).key(), index, batch.size()));
         batch.clear();
+        batchPrefix = 0;
+        batchBytes = 0;
 
         sinceStep += pager.pageSize();
         if (onStep != null && sinceStep >= stepBytes) {

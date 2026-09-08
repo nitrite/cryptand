@@ -268,13 +268,74 @@ public final class BtreePage {
         int hi = cellCount;
         while (lo < hi) {
             int mid = (lo + hi) >>> 1;
-            if (memcmp(key(mid), target) < 0) {
+            if (compareCellKey(mid, target) < 0) {
                 lo = mid + 1;
             } else {
                 hi = mid;
             }
         }
         return lo;
+    }
+
+    /**
+     * {@code memcmp(key(i), target)} <strong>without materialising
+     * {@code key(i)}</strong>.
+     *
+     * <p>A stored key is {@code prefix + suffix}, and {@link #key} rebuilds it
+     * into a fresh array — two allocations and two copies. Both binary searches
+     * on this page call it once per probe, so a single descent through a
+     * segment allocated on the order of {@code log2(cell_count)} keys per
+     * level, all of them garbage the moment the comparison returned. It was
+     * the top frame in the compactor's profile, with {@code Arrays.copyOf}
+     * right behind it.
+     *
+     * <p>The comparison does not need the bytes joined. The prefix is shared by
+     * every cell, so it is compared against the head of {@code target} first;
+     * if that decides the order it decides it for the whole page. Only when the
+     * prefix matches does the suffix matter, and that is compared in place out
+     * of the payload.
+     */
+    private int compareCellKey(int i, byte[] target) {
+        int n = Math.min(prefix.length, target.length);
+        int c = Arrays.compareUnsigned(prefix, 0, n, target, 0, n);
+        if (c != 0) {
+            return c;
+        }
+        if (prefix.length > target.length) {
+            // The target ran out inside the shared prefix, so every key on this
+            // page sorts after it.
+            return 1;
+        }
+        int off = cellOffset(i);
+        if (off < ptrOffset + 2 * cellCount || off > payloadLen) {
+            throw new CorruptionException("btree cell pointer " + off + " is outside the cell area");
+        }
+        ByteReader r = new ByteReader(payload, base + off, payloadLen - off);
+        long rawSuffixLen = r.uvar();
+        int suffixAt = base + off + r.consumed();
+        // **The length is attacker-controlled and must be checked before it is
+        // used in arithmetic**, not after. `key(i)` got this for free from
+        // `ByteReader.bytes`, which refuses a length it cannot satisfy; the
+        // in-place comparison reads the bytes itself and so has to do it here.
+        //
+        // Skipping it turned a corrupt page into
+        // `IllegalArgumentException: fromIndex(6405) > toIndex(6404)` out of
+        // `Arrays.compareUnsigned` — untyped, which `14-security.md` §9.1
+        // forbids outright. `FuzzTest` caught it: "600 mutants ... 2 UNTYPED".
+        if (rawSuffixLen < 0 || rawSuffixLen > payloadLen
+                || suffixAt + rawSuffixLen > (long) base + payloadLen) {
+            throw new CorruptionException("btree cell suffix of " + rawSuffixLen
+                    + " bytes overruns a " + payloadLen + "-byte payload");
+        }
+        int suffixLen = (int) rawSuffixLen;
+        int rest = target.length - prefix.length;
+        int m = Math.min(suffixLen, rest);
+        c = Arrays.compareUnsigned(payload, suffixAt, suffixAt + m,
+                target, prefix.length, prefix.length + m);
+        if (c != 0) {
+            return c;
+        }
+        return Integer.compare(suffixLen, rest);
     }
 
     /**
@@ -287,7 +348,11 @@ public final class BtreePage {
         int hi = cellCount;
         while (lo < hi) {
             int mid = (lo + hi) >>> 1;
-            if (memcmp(internal(mid).separator(), target) <= 0) {
+            // The separator has the same `prefix + suffix` layout as a leaf
+            // key, so the same in-place comparison applies — and this probe was
+            // the more expensive of the two, allocating the suffix, the joined
+            // separator and an `Internal` record per step.
+            if (compareCellKey(mid, target) <= 0) {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -426,21 +491,52 @@ public final class BtreePage {
     // helpers
     // ==================================================================
 
+    /**
+     * Whether {@code keys} is non-decreasing. Cheap next to the prefix scan it
+     * guards, and it keeps {@link #commonPrefix} correct for any caller rather
+     * than correct only for the two that happen to sort their input.
+     */
+    private static boolean isSorted(List<byte[]> keys) {
+        for (int i = 1; i < keys.size(); i++) {
+            if (Arrays.compareUnsigned(keys.get(i - 1), keys.get(i)) > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static byte[] commonPrefix(List<byte[]> keys) {
         if (keys.isEmpty()) {
             return new byte[0];
         }
         byte[] first = keys.get(0);
-        int n = first.length;
-        for (byte[] k : keys) {
-            int i = 0;
-            int max = Math.min(n, k.length);
-            while (i < max && k[i] == first[i]) {
-                i++;
-            }
-            n = i;
-            if (n == 0) {
-                break;
+        int n;
+        // **Both callers pass a sorted list**, and for sorted keys the common
+        // prefix of the whole list is the common prefix of the *first and
+        // last* — any key between them agrees with both wherever they agree.
+        // `SegmentBuilder.add` refuses input that is not strictly increasing,
+        // which is what makes that true here.
+        //
+        // The general loop below is O(cells x prefix) and ran on every page a
+        // compaction built; it was the top frame in the compactor's profile,
+        // with `Arrays.mismatch` above it. Two keys is O(prefix).
+        if (isSorted(keys)) {
+            byte[] last = keys.get(keys.size() - 1);
+            int max = Math.min(first.length, last.length);
+            int i = Arrays.mismatch(first, 0, max, last, 0, max);
+            n = i < 0 ? max : i;
+        } else {
+            n = first.length;
+            for (byte[] k : keys) {
+                int i = 0;
+                int max = Math.min(n, k.length);
+                while (i < max && k[i] == first[i]) {
+                    i++;
+                }
+                n = i;
+                if (n == 0) {
+                    break;
+                }
             }
         }
         // A prefix must not swallow a whole key: a zero-length suffix is legal,

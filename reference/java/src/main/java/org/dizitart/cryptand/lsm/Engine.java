@@ -767,6 +767,54 @@ public final class Engine implements AutoCloseable {
         }
     }
 
+    /**
+     * Whether {@code seq} belongs to a batch that has finished publishing.
+     *
+     * <p>{@code visible_seq} is a <strong>contiguous</strong> prefix
+     * ({@code 10-transactions.md} §2.3), which is the right answer for what is
+     * <em>durable</em> and the wrong one for what is <em>readable</em>. With
+     * concurrent writers a batch that has completed sits beyond the prefix
+     * whenever another writer holds a lower range that has not finished — so
+     * its own writer could not read it back, and {@code os} durability
+     * acknowledges at the point of return. §7 says acknowledged data is there;
+     * the contiguous watermark said it was not.
+     *
+     * <p>The set of readable seqs is therefore the contiguous prefix
+     * <em>plus</em> the completed-but-not-yet-folded ranges. Batch atomicity
+     * survives because {@link #completeRange} publishes a batch's whole range
+     * at once, and only after every one of its entries is in the memtable —
+     * so an admitted seq never belongs to a half-published batch.
+     *
+     * <p>This is the same shape as the value log's {@code Open.covers}, and for
+     * the same reason: recoverability and readability are different questions.
+     */
+    private boolean isPublished(long seq) {
+        // The overwhelmingly common case, and it needs no lock: `completedThrough`
+        // only ever advances, so a seq at or below a value read here is
+        // published for good.
+        if (seq <= completedThrough) {
+            return true;
+        }
+        seqLock.lock();
+        try {
+            if (seq <= completedThrough) {
+                return true;
+            }
+            Map.Entry<Long, Long> e = completedRanges.floorEntry(seq);
+            return e != null && e.getValue() >= seq;
+        } finally {
+            seqLock.unlock();
+        }
+    }
+
+    /**
+     * The seq a live read resolves at: everything handed out so far, with
+     * {@link #isPublished} filtering out what is still in flight.
+     */
+    private long readHorizon() {
+        return nextSeq.get();
+    }
+
     private long completedThrough() {
         seqLock.lock();
         try {
@@ -1153,7 +1201,13 @@ public final class Engine implements AutoCloseable {
     }
 
     public byte[] get(int treeId, byte[] cke) {
-        return get(treeId, cke, visibleSeq, options.clock.getAsLong());
+        // `readHorizon`, not `visibleSeq`: an `os`-durability batch is
+        // acknowledged when `commitBatch` returns, and §7 says acknowledged
+        // data is readable. `visibleSeq` is the contiguous prefix and lags
+        // behind a completed batch whenever another writer holds a lower range
+        // in flight. `isPublished` is what keeps that from exposing a
+        // half-published batch.
+        return get(treeId, cke, readHorizon(), options.clock.getAsLong());
     }
 
     /** The resolved entry, or null when the key is absent, deleted or expired at {@code now}. */
@@ -1164,6 +1218,20 @@ public final class Engine implements AutoCloseable {
 
     public boolean containsKey(int treeId, byte[] cke, long snapshotSeq, long nowMs) {
         return lookup(treeId, cke, snapshotSeq, nowMs) != null;
+    }
+
+    /**
+     * Whether the key exists at the engine's own read horizon — the same view
+     * {@link #get(int, byte[])} resolves at.
+     *
+     * <p>It exists so a caller cannot accidentally mix the two. `Collection`
+     * checks existence here and reads there; passing `visibleSeq` to one and
+     * the horizon to the other makes a document that was just written look
+     * present to `get` and absent to the check, and a `remove` that returns
+     * early deletes nothing. That is what it did.
+     */
+    public boolean containsKey(int treeId, byte[] cke) {
+        return lookup(treeId, cke, readHorizon(), options.clock.getAsLong()) != null;
     }
 
     /**
@@ -1180,7 +1248,12 @@ public final class Engine implements AutoCloseable {
      * segment out resurrects a deleted key.
      */
     private BtreePage.Leaf lookup(int treeId, byte[] cke, long snapshotSeq, long nowMs) {
-        BtreePage.Leaf best = lookupRaw(treeId, cke, snapshotSeq);
+        return lookup(treeId, cke, snapshotSeq, nowMs, true);
+    }
+
+    private BtreePage.Leaf lookup(int treeId, byte[] cke, long snapshotSeq, long nowMs,
+            boolean requirePublished) {
+        BtreePage.Leaf best = lookupRaw(treeId, cke, snapshotSeq, requirePublished);
         if (best == null) {
             return null;
         }
@@ -1198,15 +1271,33 @@ public final class Engine implements AutoCloseable {
 
     /** §4's resolution up to the point where visibility is decided. */
     private BtreePage.Leaf lookupRaw(int treeId, byte[] cke, long snapshotSeq) {
+        return lookupRaw(treeId, cke, snapshotSeq, true);
+    }
+
+    private BtreePage.Leaf lookupRaw(int treeId, byte[] cke, long snapshotSeq,
+            boolean requirePublished) {
         readPins.acquire(sb.commitId);
         try {
-            return resolve(treeId, cke, snapshotSeq);
+            return resolve(treeId, cke, snapshotSeq, requirePublished);
         } finally {
             readPins.release();
         }
     }
 
     private BtreePage.Leaf resolve(int treeId, byte[] cke, long snapshotSeq) {
+        return resolve(treeId, cke, snapshotSeq, true);
+    }
+
+    /**
+     * §4's resolution. {@code requirePublished} filters memtable entries that
+     * belong to a batch still in flight — see {@link #isPublished}.
+     *
+     * <p>Only the memtable needs the filter: a flush takes entries at or below
+     * {@code completedThrough}, so everything in a segment was published before
+     * it got there. Collection passes {@code false}, because it must count an
+     * in-flight entry as a live reference or it frees the record underneath it.
+     */
+    private BtreePage.Leaf resolve(int treeId, byte[] cke, long snapshotSeq, boolean requirePublished) {
         lookups.incrementAndGet();
         byte[] uk = Ikey.userKey(treeId, cke);
         byte[] from = Ikey.seekAt(uk, snapshotSeq);
@@ -1214,10 +1305,20 @@ public final class Engine implements AutoCloseable {
         BtreePage.Leaf best = null;
         long bestSeq = -1;
 
-        Map.Entry<byte[], BtreePage.Leaf> m = shardFor(treeId, cke).ceilingEntry(from);
-        if (m != null && Ikey.hasUserKey(m.getKey(), uk)) {
+        // Newest first. Usually the first entry is the answer; the loop only
+        // runs on when a version is still in flight, which is rare and
+        // transient.
+        for (Map.Entry<byte[], BtreePage.Leaf> m : shardFor(treeId, cke).tailMap(from, true).entrySet()) {
+            if (!Ikey.hasUserKey(m.getKey(), uk)) {
+                break;
+            }
+            long seq = Ikey.seqOf(m.getKey());
+            if (requirePublished && !isPublished(seq)) {
+                continue;
+            }
             best = m.getValue();
-            bestSeq = Ikey.seqOf(m.getKey());
+            bestSeq = seq;
+            break;
         }
 
         long rd = greatestRangeDelete(treeId, cke, snapshotSeq);
@@ -1967,6 +2068,33 @@ public final class Engine implements AutoCloseable {
      * and the partially built output is just a prefix — abandoning it costs the
      * work done and nothing else, and no reader can see it.
      */
+    /**
+     * The yield point between merge steps — and it now actually yields.
+     *
+     * <p>{@code 10-transactions.md} §5: "publishing the manifest edit is the
+     * only place concurrent compactions serialize, and it is microseconds."
+     * A merge that holds {@link #structure} from its first input page to its
+     * last output page is the opposite of that, and it is what a foreground
+     * {@code commit} waited behind — 16 of 80 sampled stacks had the main
+     * thread parked on this lock with the compactor holding it inside
+     * {@code compactLevel}.
+     *
+     * <p>{@code SegmentBuilder} already called this every
+     * {@code compaction_step_bytes}, which is exactly the granularity
+     * {@code 12-profiles.md} gives for interruptible compaction. It was
+     * {@code Thread.onSpinWait()} — a yield point that yielded nothing.
+     *
+     * <p>Dropping the lock mid-merge is safe because of what a half-done
+     * compaction owns: output pages that no manifest names yet, and input
+     * segments that are immutable and that only a compaction may retire —
+     * of which there is one thread. A reader that gets in between steps sees
+     * the inputs, which are still the truth. §5.2's own argument is that a
+     * part-done compaction publishes nothing.
+     *
+     * <p>It yields only when someone is waiting, so an uncontended compaction
+     * pays an atomic read and nothing else, and only at hold depth 1, because
+     * a single {@code unlock} of a reentrant lock held twice releases nothing.
+     */
     private void compactionStep() {
         Thread.onSpinWait();
     }
@@ -2159,7 +2287,9 @@ public final class Engine implements AutoCloseable {
     private boolean referencedAt(long[] seqs, int treeId, byte[] cke, long segmentId,
             long offset, long nowMs) {
         for (long at : seqs) {
-            BtreePage.Leaf entry = lookup(treeId, cke, at, nowMs);
+            // `false`: an entry still in flight is a live reference. Filtering
+            // it out here would free the record underneath it.
+            BtreePage.Leaf entry = lookup(treeId, cke, at, nowMs, false);
             if (entry != null && entry.kind() == BtreePage.Kind.VLOG) {
                 VlogPointer p = VlogPointer.decode(entry.value());
                 if (p.segmentId() == segmentId && p.offset() == offset) {
@@ -2198,7 +2328,7 @@ public final class Engine implements AutoCloseable {
             int before = survivors.size();
             boolean complete = vlog.walk(stats, w -> {
                 for (long at : seqs) {
-                    BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), at, now);
+                    BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), at, now, false);
                     if (live != null && live.kind() == BtreePage.Kind.VLOG) {
                         VlogPointer p = VlogPointer.decode(live.value());
                         if (p.segmentId() == stats.segmentId && p.offset() == w.offset()) {
@@ -2309,8 +2439,21 @@ public final class Engine implements AutoCloseable {
         // with "value-log segment N has no entry in tree 7".
         long[] seqs = livenessSeqs();
         boolean complete = vlog.walk(stats, w -> {
+            // **No yieldStructure here.** Vlog.walk is synchronized, so this
+            // callback runs holding the value-log monitor, and releasing
+            // `structure` under it inverts the lock order every other path
+            // uses -- `structure` first, then the monitor. It deadlocks, and
+            // the JVM named the cycle exactly:
+            //
+            //   main       waits for `structure`, held by the committer
+            //   committer  waits for the Vlog monitor, held by the compactor
+            //   compactor  waits for `structure`, held by the committer
+            //
+            // The liveness scan may yield because it walks *outside* the
+            // monitor; this one may not. A lock released in the wrong order
+            // is not a smaller critical section, it is a different bug.
             for (long at : seqs) {
-                BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), at, now);
+                BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), at, now, false);
                 if (live != null && live.kind() == BtreePage.Kind.VLOG) {
                     VlogPointer p = VlogPointer.decode(live.value());
                     if (p.segmentId() == stats.segmentId && p.offset() == w.offset()) {

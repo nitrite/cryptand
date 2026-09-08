@@ -1631,3 +1631,370 @@ needs it) and the per-segment bookkeeping. Only the `pwrite` is outside. That is
 the expensive part and it is where the win came from, but §2.2's "writers do not
 contend even while sharing a segment" is not yet literally true, and this is
 recorded as a remaining gap rather than claimed as met.
+
+
+---
+
+# The `os` visibility gap, and the read path — defects 89–92
+
+## Defect 89 — an acknowledged write was not readable by its own writer
+
+Found by the concurrency test built for the watermark-hole protocol, which
+failed on a plain `get`:
+
+```
+id 4500 did not read back immediately after its own append
+```
+
+`10-transactions.md` §7 acknowledges an `os`-durability batch when
+`commitBatch` returns. §2.3 makes `visible_seq` a **contiguous** prefix. Under
+concurrent writers those disagree: a batch that has completed sits beyond the
+prefix whenever another writer holds a lower range still in flight, so the
+writer could not read back what it had just been told was written.
+
+**Fixed with the same shape as the value log's `Open.covers`**, and for the same
+reason — recoverability and readability are different questions. A live read
+resolves at `readHorizon()` (everything handed out) and `isPublished(seq)`
+filters what is still in flight: the contiguous prefix **plus** the completed
+ranges. Batch atomicity survives because `completeRange` publishes a batch's
+whole range at once, after every one of its entries is in the memtable, so an
+admitted seq never belongs to a half-published batch.
+
+Only the memtable needs the filter — a flush takes entries at or below
+`completedThrough`, so anything in a segment was published before it got there.
+Collection passes `requirePublished = false`, because an in-flight entry is a
+live reference and filtering it out would free the record underneath it.
+
+Reverting `get` to `visibleSeq` reproduces the failure on the first run.
+
+## Defect 90 — the interruptible-compaction yield point yielded nothing
+
+`SegmentBuilder` called `compactionStep()` every `compaction_step_bytes`, which
+is exactly the granularity `12-profiles.md` gives for interruptible compaction.
+The method was `Thread.onSpinWait()` — with `structure` still held. §5's
+"publishing the manifest edit is the only place concurrent compactions
+serialize, and it is microseconds" was not what the code did: a merge held the
+lock from its first input page to its last output page, and 18 of 50 sampled
+stacks had the main thread parked on it inside `Database.commit`.
+
+It now releases and reacquires, but **only when a thread is actually waiting**
+and **only at hold depth 1** — a single `unlock` of a reentrant lock held twice
+releases nothing.
+
+### The first version live-locked
+
+Applying the same yield per **record** in the liveness and collection walks took
+the test suite from four minutes to not finishing. Releasing and reacquiring a
+contended lock on every record means maintenance loses it as fast as it takes
+it. The yield is now on a 4 096-call interval. A yield point that yields too
+often is not a slow path, it is a stall of a different shape.
+
+## Defect 91 — every delete and update read and decoded a document to maintain indexes that did not exist
+
+`Collection.remove` and `Collection.update` fetch the previous document, and it
+is used for exactly one thing: retracting the index entries it produced —
+`previous` appears only inside `stage`'s index loop. On a collection with no
+index that is a value-log read and a full CVE decode per operation, spent on a
+value immediately discarded.
+
+**Fixed** with `indexed()`, cached on the identity of the catalog map so it
+costs a reference comparison. `remove` falls back to `containsKey`, which
+answers "does this key exist" without resolving the value, so the semantics are
+unchanged: deleting an absent key is still a no-op rather than a tombstone.
+
+| counter | before | after |
+|---|---|---|
+| `delete_page_reads_per_op` | 1.101 | **0.027** (Rust: 0.006) |
+
+## Defect 92 — the page cache held raw pages, so every B+tree node was re-checksummed
+
+A JFR profile put `Segment$Cursor.page` second only to `resolve`. Each visit to
+a **cached** page cloned 8 KiB, ran CRC-32C over all of it, then decrypted,
+decompressed and copied again — a checksum per node on bytes that had already
+been verified and could not have changed, because every write invalidates.
+
+The cache now holds **decoded payloads**, verified once at the miss that read
+them. `Cursor.page` fell from 166 samples to 47.
+
+Both caches share **one** budget, because `12-profiles.md` §1 states one:
+sizing each to the full figure would hold twice what `mobile` says it holds,
+which is the decoration that budget stopped being.
+
+## Where Java ended
+
+Medians of five runs at 20 000 documents, against the start of this pass:
+
+| | before | after |
+|---|---|---|
+| `mixed_ops_per_s` | 38 549 | **60 113** |
+| `read_ops_per_s` | 82 376 | **94 598** |
+| `update_ops_per_s` | 10 541 | **15 173** |
+| `delete_ops_per_s` | 5 249 | **15 274** |
+| `create_ops_per_s` | 18 107 | **16 970** |
+
+**Java is now ahead of Dart on every operation**, and on the counters — the
+results `design/performance-model.md` §8 makes primary — it is at parity with
+Rust: mixed `pages/op` 0.570 against 0.537, mixed read p50 6 µs against 5 µs.
+Every p99.9 is inside `desktop`'s 25 ms budget.
+
+The remaining throughput gap to Rust is 2.5x on the mixed workload and is
+**not** a counter gap. Two things are in it, and only the first is a defect:
+
+- Compaction is now roughly as expensive as the read path in the profile
+  (`SegmentBuilder.add` and `BtreePage.encodeLeaves`, 85 samples each), and in
+  Java it runs on a background thread **during** the measured phases.
+- The isolated CREATE/READ/UPDATE/DELETE phases are not like-for-like across
+  implementations: Rust's engine compacts only when the benchmark asks it to,
+  so its isolated phases pay no concurrent maintenance at all, while Java's
+  compactor runs throughout. The delete loop measured **0.035 s uncontended and
+  0.68 s with the compactor active** in two runs of the same binary. The
+  **mixed** phase is the fair comparison, because all three drive maintenance
+  through it.
+
+
+---
+
+# Making compaction cheaper — defects 93–95
+
+The previous section closed with the remaining gap attributed to compaction:
+`SegmentBuilder.add` and `BtreePage.encodeLeaves` at 85 JFR samples each, with
+compaction running on a background thread during the measured phases. This
+section attacks that, and every finding came from profiling the **compactor
+thread by name** rather than the process.
+
+## Defect 93 — the page cache copied every page it served
+
+`readPage` returned `payload.clone()`. A B+tree descent visits a page per level
+and a compaction merges page after page, so an 8 KiB copy per visit was the
+largest single cost left on both paths — `Segment$Cursor.page` was second only
+to `resolve`.
+
+**Fixed** by sharing the cached array. Every caller decodes out of it and none
+writes: `BtreePage.parse` and `BlockedBloom.decode` read lazily, `ByteReader`
+cannot write. The contract is now stated on the method — a caller that needs to
+mutate must clone — and the cache never writes to a payload after admitting it,
+because a page whose bytes change on the device is invalidated rather than
+edited. `Cursor.page` left the profile entirely.
+
+## Defect 94 — both binary searches allocated a key per probe
+
+`lowerBound` compared with `memcmp(key(mid), target)`, and `key(i)` rebuilds
+`prefix + suffix` into a fresh array — two allocations and two copies. Per
+probe. `childIndexFor` was worse: `internal(mid)` also built the joined
+separator and an `Internal` record. A single descent allocated on the order of
+`log2(cell_count)` keys per level, all garbage the moment the comparison
+returned. `lowerBound` was the compactor's top frame, with `Arrays.copyOf`
+behind it.
+
+**Fixed** with `compareCellKey`, which compares in place: the prefix against the
+head of the target first — it is shared by every cell, so it decides the order
+for the whole page when it differs — and only then the suffix, straight out of
+the payload. Both searches use it; separators have the same layout as keys.
+
+Equivalence against `memcmp(key(i), target)` was asserted inside the method and
+the whole suite run five times with the assertion live, including the
+conformance vectors and the order tests.
+
+## Defect 95 — and the one the fuzzer caught, which was mine
+
+`FuzzTest` failed roughly one run in six:
+
+```
+fuzz: 600 mutants, 276 refused, 82 reported, 240 benign, 2 UNTYPED
+java.lang.IllegalArgumentException: fromIndex(6405) > toIndex(6404)
+    at java.util.Arrays.compareUnsigned
+    at BtreePage.compareCellKey
+```
+
+`key(i)` validated the suffix length for free, because `ByteReader.bytes`
+refuses a length it cannot satisfy. Reading the bytes in place skipped that, so
+an attacker-controlled varint reached `Arrays.compareUnsigned` as a negative
+length and came back **untyped** — which `14-security.md` §9.1 forbids outright.
+
+**Fixed** by bounds-checking the length before it is used in arithmetic rather
+than after. The lesson is not the bug, it is that an optimisation which moves a
+read off a validated path inherits the obligation to validate, and that the
+instrument built for exactly this caught it within a few runs of the suite.
+
+## Defect 96 — the common prefix scanned every key on the page
+
+`commonPrefix` compared every key against the first, O(cells x prefix), on every
+page a compaction built. Both callers pass a **sorted** list — `SegmentBuilder`
+refuses input that is not strictly increasing — and for sorted keys the common
+prefix of the whole list is the common prefix of the **first and last**: any key
+between them agrees with both wherever they agree. That is one `Arrays.mismatch`
+instead of a scan. The sortedness is checked rather than assumed, so the
+function stays correct for any caller.
+
+## Where Java ended
+
+Medians of seven runs at 20 000 documents, against the start of this pass:
+
+| | before | after |
+|---|---|---|
+| `read_ops_per_s` | 94 598 | **102 714** |
+| `update_ops_per_s` | 15 173 | **19 989** |
+| `mixed_ops_per_s` | 60 113 | **66 065** |
+| `delete_ops_per_s` | 15 274 | 11 946 |
+
+```
+MIXED    rust 150 085   >   java 66 065   >   dart 15 865   ops/s
+```
+
+**On the read path Java is now at Rust's speed**: mixed read p50 **5 µs against
+Rust's 6**, p99 12 against 12, `pages/op` 0.570 against 0.537. Java leads Dart
+on every operation.
+
+The remaining 2.3x on mixed throughput is dominated by the write path — create
+and update are 5x and 6x from Rust — and by compaction running concurrently in
+Java where Rust's benchmark compacts only when asked. Both remain honest gaps
+rather than measurement artefacts, and the counters say the read path is done.
+
+
+---
+
+# The write path — defects 97–100
+
+With the read path at Rust's speed, the gap was create and update. Every
+finding here came from JFR **allocation** profiling rather than CPU sampling:
+on a JVM the write path's cost is largely what it allocates.
+
+## Defect 96b — the page cache tried to stop copying, and could not
+
+`readPage` returns `payload.clone()`. Returning the cached array directly is
+tempting — a B+tree descent visits a page per level and a compaction merges page
+after page — and it measured roughly **10 %** on the mixed workload.
+
+It was also wrong. With the array shared, the CRUD matrix began failing
+
+```
+IllegalStateException: the delete phase deleted nothing
+```
+
+about once in fifteen runs at 5 000 documents, where the committed baseline was
+clean in thirty. Bisecting one file at a time found it: restoring that single
+`clone()`, and changing nothing else, went back to **0 failures in 40**.
+
+A read of every `readPage` call site did not find the caller that mutates or
+takes ownership of the result, which is the reason the copy stays rather than a
+reason to remove it. **A shared cache needs the ownership rule enforced at the
+callers, not assumed in the cache.** The payload cache itself — which is what
+skips the per-visit CRC and decode — is unaffected and keeps its win.
+
+This is also a note on method. The bug was rare enough that three earlier
+bisection steps came back 1/30, 2/30 and 14/30 and pointed at the wrong files;
+what settled it was stressing the **committed baseline** first (0/30) to prove
+the regression was mine, then reverting one file at a time against that number.
+
+## Defect 97 — filling a leaf page was O(n²)
+
+`SegmentBuilder.add` appended the cell and then called
+`BtreePage.encodeLeaves(batch, ...)` — **re-encoding every cell in the page** —
+to discover whether the new one fitted. Adding the k-th cell encoded k cells, so
+filling a page of K cells cost K²/2 cell-encodings against the K it needs, and
+then `emitLeaf` encoded them once more. At a hundred-odd cells to a page that is
+a ~50× multiplier, and it made `encodeLeaves` the top frame in the profile of
+**both** the compactor and the foreground.
+
+The packed size is arithmetic:
+
+```
+HEADER + prefix_len + sum(leafCellBytes(cell, prefix_len))
+```
+
+which is exactly what `pack` computes as `free_start + total`, because
+`leafCellBytes` already counts each cell's two-byte pointer. The prefix is the
+only moving part: keys arrive sorted, so it is the shared prefix of the batch's
+first key and its newest, it only ever shrinks, and when it does the running
+total is recomputed in one pass — O(k) on a rare event rather than O(k) on every
+add.
+
+**Controlled**: the old trial encode was run alongside the new arithmetic for a
+whole suite run, asserting they reach the same verdict. They never disagreed, so
+page packing is byte-for-byte what it was.
+
+## Defect 98 — `Utf8.encode` built a `CharsetEncoder` per string
+
+The strict encoder exists because `00-conventions.md` requires an unpaired
+surrogate to be **reported**, not silently replaced with U+FFFD. But it was
+allocated fresh on every call, along with a `CharBuffer`, a `ByteBuffer` and the
+result array — and a document carries twenty strings. It was, by a wide margin,
+the largest allocator on the write path.
+
+The two encoders differ on exactly one class of input, and **ill-formed UTF-16
+requires a surrogate code unit to be present**. A string with none cannot be
+malformed, so `String.getBytes(UTF_8)` — intrinsified, one allocation — is
+byte-for-byte identical there. Scanning for a surrogate is an allocation-free
+pass over the chars.
+
+`Utf8.decode` got the mirror of it: pure ASCII is valid UTF-8 by definition, and
+ISO-8859-1 maps those bytes one-to-one onto the same characters, which the JDK
+stores as a Latin-1 `String` with no transcoding. Everything else still goes
+through the strict `CharsetDecoder`.
+
+`PrimitivesTest` and `CkeConformanceTest` already assert the reporting
+behaviour — "an unpaired surrogate is refused on write, not replaced" — and both
+still pass.
+
+## Defect 99 — the liveness scan decoded values it never read
+
+`04-segments.md` §6.8's scan asks one question of every record in the value log:
+is this key's current entry a pointer to this exact offset. It never looks at
+the value. `decodeRecord` materialised it anyway, which made `Vlog.walkRange`
+the single largest allocator in the process.
+
+`decodeRecordKeyOnly` skips the copy and **keeps the checksum**: not decoding the
+value is not the same as not verifying it, and §6.4's framing depends on the CRC.
+It applies only in the clear — an encrypted record is one AEAD unit, so leaving
+its value undecrypted would leave it unauthenticated.
+
+## Defect 100 — two read paths in one class, at two different horizons
+
+Introduced by this work and caught by the CRUD matrix, one run in twenty-four:
+
+```
+IllegalStateException: the delete phase deleted nothing
+```
+
+`Collection.remove` skips the previous-document read when the collection has no
+index (defect 91) and asks `containsKey` instead. It passed `visibleSeq`, while
+`get` had moved to the read horizon of defect 89. A document written moments
+earlier was therefore *present* to `get` and *absent* to the check, so `remove`
+returned early and deleted nothing.
+
+**Fixed** by giving the engine a `containsKey(treeId, cke)` that resolves at the
+same horizon `get` uses, so the two cannot drift apart at a call site. The
+lesson is narrow and worth stating: adding a second visibility horizon to an
+engine means every existing read has to be told which one it is on.
+
+## Where Java ended
+
+Medians of eleven runs at 20 000 documents, against the start of this pass:
+
+| | before | after |
+|---|---|---|
+| `create_ops_per_s` | 17 219 | **29 937** (1.7x) |
+| `read_ops_per_s` | 102 714 | **111 021** |
+| `update_ops_per_s` | 19 989 | **23 881** |
+| `delete_ops_per_s` | 11 946 | **28 618** (2.4x) |
+| `mixed_ops_per_s` | 66 065 | **73 817** |
+
+Against the other two, at 20 000 documents:
+
+```
+CREATE   rust  96 188   >  java  29 937   >  dart  7 165
+READ     rust 178 976   >  java 111 021   >  dart 72 710
+UPDATE   rust 122 209   >  java  23 881   >  dart  7 540
+DELETE   rust 1 152 572 >  java  28 618   >  dart  8 840
+MIXED    rust 151 525   >  java  73 817   >  dart 15 849
+```
+
+Java is between Dart and Rust on every operation, several times Dart's
+throughput on all four, and on the mixed workload its read p50 is **5 µs against
+Rust's 6** with p99 identical at 12. Every p99.9 is inside `desktop`'s 25 ms
+budget — the worst is create at 1.3 ms.
+
+The remaining distance to Rust is widest on `DELETE`, where Rust's is a bare
+memtable tombstone at a p50 below a microsecond, and on `CREATE`/`UPDATE`, where
+the JVM's encode-and-allocate path is doing genuine work the counters agree on:
+`pages/op` is 0.015 against 0.004 for update and 0.020 against 0.006 for delete.

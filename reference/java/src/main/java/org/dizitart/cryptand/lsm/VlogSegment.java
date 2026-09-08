@@ -238,6 +238,48 @@ public final class VlogSegment {
      * from the CRC, and {@code 14-security.md} §9.4 is emphatic that these are
      * not the same thing.
      */
+    /** Shared empty value for {@link #decodeRecordKeyOnly}. */
+    private static final byte[] NO_VALUE = new byte[0];
+
+    /**
+     * {@link #decodeRecord} without materialising the value.
+     *
+     * <p>The liveness scan of {@code 04-segments.md} §6.8 asks one question of
+     * every record in the value log — "is this key's current entry a pointer to
+     * this exact offset" — and never looks at the value. Decoding it anyway
+     * allocated the whole record body per record per pass, and made
+     * {@code Vlog.walkRange} the single largest allocator in the process.
+     *
+     * <p>The checksum is still verified over the whole body: skipping the copy
+     * is not the same as skipping the integrity check, and §6.4's framing
+     * depends on it.
+     *
+     * <p>The returned record's {@code value()} is empty, not absent — a caller
+     * that needs the value must use {@link #decodeRecord}.
+     */
+    public static Record decodeRecordKeyOnly(byte[] buf, int off, int limit) {
+        ByteReader r = new ByteReader(buf, off, limit - off);
+        long recordLen = r.uvar();
+        if (recordLen < 5 || recordLen > r.remaining()) {
+            throw new CorruptionException("value-log record declares " + recordLen
+                    + " bytes but only " + r.remaining() + " remain");
+        }
+        int bodyStart = r.position();
+        int bodyLen = (int) recordLen - 4;
+        int crcAt = bodyStart + bodyLen;
+        int stored = (buf[crcAt] & 0xFF) | ((buf[crcAt + 1] & 0xFF) << 8)
+                | ((buf[crcAt + 2] & 0xFF) << 16) | ((buf[crcAt + 3] & 0xFF) << 24);
+        int actual = Crc32c.of(buf, bodyStart, bodyLen);
+        if (stored != actual) {
+            throw new CorruptionException(String.format(
+                    "value-log record checksum mismatch: stored %08x, computed %08x", stored, actual));
+        }
+        int treeId = r.u32();
+        int keyLen = r.uvarLength("value-log record key");
+        byte[] key = r.bytes(keyLen);
+        return new Record(treeId, key, NO_VALUE);
+    }
+
     public static Record decodeRecord(byte[] buf, int off, int limit) {
         ByteReader r = new ByteReader(buf, off, limit - off);
         long recordLen = r.uvar();

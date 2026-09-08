@@ -544,9 +544,22 @@ public final class Vlog {
      * database.
      */
     public VlogSegment.Record decodeAt(VlogSegment seg, byte[] buf, long offset) {
-        return cipher == null
-                ? VlogSegment.decodeRecord(buf, 0, buf.length)
-                : VlogSegment.decodeEncryptedRecord(buf, 0, buf.length, seg.segmentId, offset, cipher);
+        return decodeAt(seg, buf, offset, false);
+    }
+
+    /**
+     * {@code keysOnly} skips materialising the value — see
+     * {@code VlogSegment.decodeRecordKeyOnly}. It is honoured only in the clear:
+     * an encrypted record is one AEAD unit, so its value cannot be left
+     * undecrypted without also leaving it unauthenticated.
+     */
+    public VlogSegment.Record decodeAt(VlogSegment seg, byte[] buf, long offset, boolean keysOnly) {
+        if (cipher != null) {
+            return VlogSegment.decodeEncryptedRecord(buf, 0, buf.length, seg.segmentId, offset, cipher);
+        }
+        return keysOnly
+                ? VlogSegment.decodeRecordKeyOnly(buf, 0, buf.length)
+                : VlogSegment.decodeRecord(buf, 0, buf.length);
     }
 
     private Open openOf(long id) {
@@ -749,7 +762,12 @@ public final class Vlog {
      * monitor every foreground append needs.
      */
     private boolean walkTo(VlogSegment seg, long end, java.util.function.Consumer<Walked> consumer) {
-        return walkRange(seg, seg.dataOffset, end, consumer);
+        return walkRange(seg, seg.dataOffset, end, consumer, false);
+    }
+
+    /** {@link #walkTo} that does not decode record values. */
+    private boolean walkKeysTo(VlogSegment seg, long end, java.util.function.Consumer<Walked> consumer) {
+        return walkRange(seg, seg.dataOffset, end, consumer, true);
     }
 
     /**
@@ -761,6 +779,11 @@ public final class Vlog {
      */
     private boolean walkRange(VlogSegment seg, long from, long end,
             java.util.function.Consumer<Walked> consumer) {
+        return walkRange(seg, from, end, consumer, false);
+    }
+
+    private boolean walkRange(VlogSegment seg, long from, long end,
+            java.util.function.Consumer<Walked> consumer, boolean keysOnly) {
         long offset = from;
         long base = pager.offsetOf(seg.startPage);
 
@@ -808,7 +831,7 @@ public final class Vlog {
                     pager.file().readFully(base + offset, buf, 0, total);
                     window = null;
                 }
-                rec = decodeAt(seg, buf, offset);
+                rec = decodeAt(seg, buf, offset, keysOnly);
             } catch (RuntimeException e) {
                 return false;
             }
@@ -889,7 +912,7 @@ public final class Vlog {
         Map<Long, long[]> counted = new java.util.LinkedHashMap<>();
         for (LivenessSnapshot snap : snapshot) {
             long[] counts = new long[2];
-            walkTo(snap.seg(), snap.end(), w -> {
+            walkKeysTo(snap.seg(), snap.end(), w -> {
                 if (live.referenced(w.record().treeId(), w.record().key(),
                         snap.segmentId(), w.offset())) {
                     counts[0] += w.length();
