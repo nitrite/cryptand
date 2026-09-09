@@ -66,7 +66,15 @@ public final class ByteReader {
     }
 
     private void need(int n) {
-        if (n < 0 || pos + n > limit) {
+        // `(long) pos + n`, not `pos + n`. An attacker-controlled length near
+        // `Integer.MAX_VALUE` overflows the int addition to a negative number,
+        // the check passes, and `Arrays.copyOfRange` throws
+        // `OutOfMemoryError: Requested array size exceeds VM limit` — untyped,
+        // which `14-security.md` §9.1 forbids: a hostile file must produce "a
+        // typed corruption error rather than an allocation failure". The
+        // structure-aware fuzzer reached it through `BtreePage.key`, which is
+        // the path every segment cursor and the verifier take.
+        if (n < 0 || (long) pos + n > limit) {
             throw new LimitException(
                     "truncated: need " + n + " byte(s) at offset " + (pos - start) + ", " + remaining() + " remain");
         }

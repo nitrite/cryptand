@@ -101,13 +101,36 @@ public final class BlockedBloom {
         BlockedBloom f = new BlockedBloom(blockCount, bitsPerKey, probes, distinctKeys,
                 new byte[blockCount * BLOCK_BYTES]);
         for (byte[] k : userKeys) {
-            f.add(k);
+            f.addHash(Cfh64.hash(k));
         }
         return f;
     }
 
-    private void add(byte[] userKey) {
-        long hash = Cfh64.hash(userKey);
+    /**
+     * The same filter from the keys' hashes rather than the keys.
+     *
+     * <p>A segment's user keys are prefixes of its internal keys, so a builder
+     * that keeps them keeps a copy of every key in the segment — 20 000 array
+     * allocations for a flush of 20 000 documents, held until the filter is
+     * built at the end. {@link org.dizitart.cryptand.util.Cfh64} hashes a range
+     * of an array, so the prefix can be hashed where it already is and only the
+     * {@code long} kept.
+     *
+     * @param hashes {@code Cfh64.hash} of each distinct user key
+     * @param count  how many of {@code hashes} are populated
+     */
+    public static BlockedBloom buildFromHashes(long[] hashes, int count, int bitsPerKey) {
+        int blockCount = blockCountFor(count, bitsPerKey);
+        int probes = probesFor(bitsPerKey);
+        BlockedBloom f = new BlockedBloom(blockCount, bitsPerKey, probes, count,
+                new byte[blockCount * BLOCK_BYTES]);
+        for (int i = 0; i < count; i++) {
+            f.addHash(hashes[i]);
+        }
+        return f;
+    }
+
+    private void addHash(long hash) {
         int base = blockOf(hash) * BLOCK_BYTES;
         int h1 = (int) hash;
         int h2 = (int) (hash >>> 32) | 1;

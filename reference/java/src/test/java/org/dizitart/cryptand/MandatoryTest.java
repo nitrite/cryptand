@@ -155,16 +155,29 @@ class MandatoryTest {
      * clustered promotion, cold-tier collection, the locality-debt bound, and
      * value readahead.
      */
+    /**
+     * {@code 11-conformance.md} §6: <strong>the fixture MUST set
+     * {@code vlog_min} below its own documents.</strong> Every profile now puts
+     * it at a quarter page ({@code 12-profiles.md} §2.5), so a 400-byte value is
+     * inline and none of the four mechanisms this test enforces engages at all.
+     * The literal 400 used to clear {@code desktop}'s old 256 by accident.
+     */
+    private static Engine.Options separatingOptions() {
+        Engine.Options o = options();
+        o.vlogMin = 256;
+        return o;
+    }
+
     @Test
     @DisplayName("aged scan: 10x its size in updates costs no more than 1.5x, debt within bound")
     void agedScan(@TempDir Path dir) {
         int rows = 600;
         Path f = dir.resolve("a.cryptand");
-        try (Engine e = Engine.create(f, options())) {
+        try (Engine e = Engine.create(f, separatingOptions())) {
             Engine.Batch b = e.batch();
             for (int i = 0; i < rows; i++) {
-                // Above desktop's vlog_min of 256, so every value is separated
-                // and the scan is a value-log scan.
+                // Above the fixture's vlog_min, so every value is separated and
+                // the scan is a value-log scan — see `separatingOptions`.
                 b.put(TREE, key(i), value(i, 400));
                 if (b.size() >= 100) {
                     b.commit();
@@ -326,12 +339,43 @@ class MandatoryTest {
                     b.commit();
                     b = e.batch();
                 }
+                // Flush twice, so the run ends with three L0 segments.
+                //
+                // Under `os` durability the committer has nothing to do —
+                // `commitBatch` publishes visibility itself — so without this
+                // the whole run flushes once, as a single segment, and §4's
+                // per-segment containment has nothing to contain. Twice rather
+                // than more because `l0_trigger` is 4: reach it and the
+                // compactor merges them straight back into one. Rust's version
+                // of this test drives the same shape off memtable pressure.
+                if (i == 700 || i == 1400) {
+                    b.commit();
+                    b = e.batch();
+                    e.commitNow();
+                }
             }
             b.commit();
             e.commitNow();
-            e.maintain();
+            // **No `maintain()` here, and the segment count is asserted.**
+            //
+            // Containment is per segment, so this property is only observable
+            // when more than one exists: compact a fixture this small into a
+            // single segment and damaging its root takes out every key, which
+            // makes `served > 0` fail for a reason that has nothing to do with
+            // §4. That is what happened when a flush stopped emitting one
+            // segment per memtable shard — the fixture had been relying on
+            // shard count for its segmentation without saying so.
+            //
+            // The Rust implementation's version of this test carries the same
+            // precondition ("the fixture needs more than one segment"), and it
+            // is a precondition rather than a comment because a fixture that
+            // degenerates silently measures nothing.
+            List<SegmentMeta> all = e.manifest().all();
+            assertTrue(all.size() > 1,
+                    "the fixture needs more than one segment for containment to be observable, got "
+                            + all.size());
             SegmentMeta victim = null;
-            for (SegmentMeta m : e.manifest().all()) {
+            for (SegmentMeta m : all) {
                 if (victim == null || m.entryCount > victim.entryCount) {
                     victim = m;
                 }

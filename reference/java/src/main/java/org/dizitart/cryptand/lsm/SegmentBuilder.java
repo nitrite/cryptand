@@ -46,7 +46,14 @@ public final class SegmentBuilder {
     private final List<byte[]> treePages = new ArrayList<>();
     private final List<BtreePage.Leaf> batch = new ArrayList<>();
     private final List<BtreePage.Internal> leafSeparators = new ArrayList<>();
-    private final List<byte[]> distinctUserKeys = new ArrayList<>();
+    /**
+     * {@code Cfh64} of each distinct user key, for the filter — not the keys
+     * themselves. See {@link BlockedBloom#buildFromHashes}.
+     */
+    private long[] distinctHashes = new long[1024];
+    private int distinctCount;
+    private int lastTreeId = -1;
+    private long lastTreeCount;
     private final Map<Integer, Long> treeSpan = new TreeMap<>();
 
     /** Running state for the fit test in {@link #add}. */
@@ -133,12 +140,26 @@ public final class SegmentBuilder {
             default -> {
             }
         }
-        treeSpan.merge(Ikey.treeIdOf(ik), 1L, Long::sum);
+        // Almost every segment holds one tree, and consecutive entries of one
+        // tree are adjacent because `tree_id` leads the internal key. Counting
+        // through `Map.merge` boxed an `Integer` and a `Long` and ran a lambda
+        // per entry to increment the same bucket 20 000 times in a row.
+        int tid = Ikey.treeIdOf(ik);
+        if (tid == lastTreeId) {
+            lastTreeCount++;
+        } else {
+            flushTreeSpan();
+            lastTreeId = tid;
+            lastTreeCount = 1;
+        }
 
-        byte[] uk = Ikey.userKeyOf(ik);
-        if (lastUserKey == null || BtreePage.memcmp(lastUserKey, uk) != 0) {
-            distinctUserKeys.add(uk);
-            lastUserKey = uk;
+        if (lastUserKey == null || !Ikey.sameUserKey(lastUserKey, ik)) {
+            if (distinctCount == distinctHashes.length) {
+                distinctHashes = Arrays.copyOf(distinctHashes, distinctCount * 2);
+            }
+            distinctHashes[distinctCount++] =
+                    org.dizitart.cryptand.util.Cfh64.hash(ik, 0, ik.length - 9);
+            lastUserKey = ik;
         }
 
         // **Does it fit? — answered by arithmetic, not by encoding.**
@@ -232,6 +253,7 @@ public final class SegmentBuilder {
      * {@code pages} filled in.
      */
     public SegmentMeta finish() {
+        flushTreeSpan();
         if (!batch.isEmpty()) {
             emitLeaf();
         }
@@ -244,14 +266,43 @@ public final class SegmentBuilder {
         while (level.size() > 1) {
             List<BtreePage.Internal> next = new ArrayList<>();
             List<BtreePage.Internal> group = new ArrayList<>();
+            // The fit test is arithmetic, not a trial encode. This asked
+            // `encodeInternals(group, ...)` whether the group still fitted
+            // after **every** cell added to it, and that call re-encodes every
+            // cell in the group and allocates a whole `payload_size` page to
+            // do it — so building one internal page of k separators cost
+            // O(k^2) encoding and k page allocations. It is the same mistake
+            // `add` already fixed for leaves, in the sibling loop, and it put
+            // `encodeInternals`, `pack` and `ByteWriter.uvar` at the top of the
+            // write profile.
+            //
+            // A page holds `HEADER + prefix_len + sum(internalCellBytes(c,
+            // prefix_len))`, and `internalCellBytes` counts each cell's
+            // two-byte pointer. Keys arrive sorted, so the prefix is the common
+            // prefix of the group's first separator and its newest and only
+            // ever shrinks; when it does, every earlier suffix grows by the
+            // same amount and the total is recomputed in one pass.
+            int prefix = 0;
+            int bytes = 0;
             for (BtreePage.Internal c : level) {
-                group.add(c);
-                if (BtreePage.encodeInternals(group, payloadSize) == null) {
-                    group.remove(group.size() - 1);
-                    next.add(emitInternal(group));
-                    group.clear();
-                    group.add(c);
+                int newPrefix = groupPrefixLen(group, c.separator());
+                if (newPrefix != prefix) {
+                    prefix = newPrefix;
+                    bytes = 0;
+                    for (BtreePage.Internal g : group) {
+                        bytes += BtreePage.internalCellBytes(g, newPrefix);
+                    }
                 }
+                int cost = BtreePage.internalCellBytes(c, newPrefix);
+                if (!group.isEmpty() && BtreePage.HEADER + newPrefix + bytes + cost > payloadSize) {
+                    next.add(emitInternal(group));
+                    group = new ArrayList<>();
+                    prefix = groupPrefixLen(group, c.separator());
+                    bytes = 0;
+                    cost = BtreePage.internalCellBytes(c, prefix);
+                }
+                group.add(c);
+                bytes += cost;
             }
             if (!group.isEmpty()) {
                 next.add(emitInternal(group));
@@ -278,7 +329,8 @@ public final class SegmentBuilder {
         // share one entry.
         List<byte[]> filterPages = new ArrayList<>();
         if (meta.filterBitsPerKey > 0) {
-            BlockedBloom f = BlockedBloom.build(distinctUserKeys, distinctUserKeys.size(), meta.filterBitsPerKey);
+            BlockedBloom f = BlockedBloom.buildFromHashes(distinctHashes, distinctCount,
+                    meta.filterBitsPerKey);
             byte[] encoded = f.encode();
             meta.filterPage = 1 + treePages.size();
             for (int off = 0; off < encoded.length; off += payloadSize) {
@@ -304,26 +356,53 @@ public final class SegmentBuilder {
         int index = 1;
         for (byte[] payload : treePages) {
             PageHeader h = new PageHeader();
-            BtreePage b = BtreePage.parse(payload, 0, payload.length);
-            h.pageType = b.isLeaf() ? PageHeader.Type.BTREE_LEAF : PageHeader.Type.BTREE_INTERNAL;
-            byte[] page = pager.buildExtentPage(start + index, h, payload);
-            System.arraycopy(page, 0, extent, index * pager.pageSize(), page.length);
+            h.pageType = BtreePage.isLeafPayload(payload)
+                    ? PageHeader.Type.BTREE_LEAF : PageHeader.Type.BTREE_INTERNAL;
+            pager.buildExtentPageInto(start + index, h, payload, extent, index * pager.pageSize());
             index++;
         }
         for (byte[] payload : filterPages) {
             PageHeader h = new PageHeader();
             h.pageType = PageHeader.Type.SEGMENT_FILTER;
-            byte[] page = pager.buildExtentPage(start + index, h, payload);
-            System.arraycopy(page, 0, extent, index * pager.pageSize(), page.length);
+            pager.buildExtentPageInto(start + index, h, payload, extent, index * pager.pageSize());
             index++;
         }
 
         pager.writeAt(pager.offsetOf(start), extent);
+        // The write invalidated every page it covered; put the tree pages back,
+        // parsed, because the read path is about to ask for them. See
+        // `Pager.admitTreePage`.
+        for (int i = 0; i < treePages.size(); i++) {
+            pager.admitTreePage(start + 1 + i, treePages.get(i));
+        }
         return meta;
+    }
+
+    private void flushTreeSpan() {
+        if (lastTreeCount > 0) {
+            treeSpan.merge(lastTreeId, lastTreeCount, Long::sum);
+            lastTreeCount = 0;
+        }
+    }
+
+    /** {@link #batchPrefixLen}, for a group of separators rather than the leaf batch. */
+    private static int groupPrefixLen(List<BtreePage.Internal> group, byte[] newKey) {
+        if (group.isEmpty()) {
+            return Math.min(newKey.length, 0xFFFF);
+        }
+        byte[] first = group.get(0).separator();
+        int max = Math.min(first.length, newKey.length);
+        int i = java.util.Arrays.mismatch(first, 0, max, newKey, 0, max);
+        return Math.min(i < 0 ? max : i, 0xFFFF);
     }
 
     private BtreePage.Internal emitInternal(List<BtreePage.Internal> cells) {
         byte[] payload = BtreePage.encodeInternals(cells, payloadSize);
+        if (payload == null) {
+            // As in `emitLeaf`: the arithmetic and `pack` must not disagree.
+            throw new IllegalStateException("internal page overflowed after the fit test said it "
+                    + "would not: " + cells.size() + " cells");
+        }
         long index = 1 + treePages.size();
         treePages.add(payload);
         long entries = 0;

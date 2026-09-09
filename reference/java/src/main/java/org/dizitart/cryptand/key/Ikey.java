@@ -123,6 +123,54 @@ public final class Ikey {
         return out;
     }
 
+    /**
+     * Whether a segment whose internal keys span {@code [minKey, maxKey]} can
+     * hold a version of {@code userKey} — {@code minKey <= seekCeiling(uk)} and
+     * {@code seekFloor(uk) <= maxKey}, decided <strong>without building
+     * either</strong>.
+     *
+     * <p>Both bounds are the user key with nine bytes appended (zeros for the
+     * floor, {@code 0xFF} for the ceiling), so the comparison is settled by the
+     * shared prefix in every case where the prefix differs, and by lengths when
+     * it does not. Materialising them allocated two arrays per segment probed,
+     * per point read, to answer a question about bytes that were already there.
+     */
+    public static boolean covers(byte[] minKey, byte[] maxKey, byte[] uk) {
+        return compareToPadded(minKey, uk, (byte) 0xFF) <= 0
+                && compareToPadded(maxKey, uk, (byte) 0) >= 0;
+    }
+
+    /** {@code memcmp(key, uk || pad*9)}. */
+    private static int compareToPadded(byte[] key, byte[] uk, byte pad) {
+        int n = Math.min(key.length, uk.length);
+        int c = Arrays.compareUnsigned(key, 0, n, uk, 0, n);
+        if (c != 0) {
+            return c;
+        }
+        if (key.length < uk.length) {
+            return -1;
+        }
+        // The prefix matched and `key` runs on; what is left of it is compared
+        // against the nine pad bytes.
+        int extra = key.length - uk.length;
+        int limit = Math.min(extra, 9);
+        for (int i = 0; i < limit; i++) {
+            int d = (key[uk.length + i] & 0xFF) - (pad & 0xFF);
+            if (d != 0) {
+                return d;
+            }
+        }
+        return Integer.compare(extra, 9);
+    }
+
+    /** True when two internal keys are versions of the same user key. */
+    public static boolean sameUserKey(byte[] a, byte[] b) {
+        checkLength(a);
+        checkLength(b);
+        return a.length == b.length
+                && Arrays.equals(a, 0, a.length - 9, b, 0, b.length - 9);
+    }
+
     /** True when {@code ik} is a version of {@code userKey}. */
     public static boolean hasUserKey(byte[] ik, byte[] userKey) {
         return ik.length == userKey.length + 9

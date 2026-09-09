@@ -35,6 +35,21 @@ pub struct BlockedBloom {
 
 impl BlockedBloom {
     pub fn build(keys: &[Vec<u8>], bits_per_key: u32, distinct_keys: u64) -> BlockedBloom {
+        Self::build_from_hashes(
+            &keys.iter().map(|k| cfh64(k)).collect::<Vec<_>>(),
+            bits_per_key,
+            distinct_keys,
+        )
+    }
+
+    /// The same filter from the keys' hashes rather than the keys.
+    ///
+    /// A segment's user keys are prefixes of its internal keys, so a builder
+    /// that keeps them keeps a copy of every key in the segment — one
+    /// allocation per distinct key, held until the filter is built at the end.
+    /// `cfh64` hashes a slice, so the prefix can be hashed where it already is
+    /// and only the `u64` kept.
+    pub fn build_from_hashes(hashes: &[u64], bits_per_key: u32, distinct_keys: u64) -> BlockedBloom {
         let block_count = block_count_for(distinct_keys, bits_per_key);
         let probes = probes_for(bits_per_key);
         let mut f = BlockedBloom {
@@ -44,14 +59,17 @@ impl BlockedBloom {
             probes,
             distinct_keys,
         };
-        for k in keys {
-            f.add(k);
+        for h in hashes {
+            f.add_hash(*h);
         }
         f
     }
 
     fn locate(&self, key: &[u8]) -> (usize, u32, u32) {
-        let hash = cfh64(key);
+        self.locate_hash(cfh64(key))
+    }
+
+    fn locate_hash(&self, hash: u64) -> (usize, u32, u32) {
         let h1 = (hash & 0xFFFF_FFFF) as u32;
         let h2 = ((hash >> 32) as u32) | 1; // forced odd, so the probes spread
         let block = ((h1 as u64 * self.block_count) >> 32) as usize;
@@ -59,7 +77,11 @@ impl BlockedBloom {
     }
 
     pub fn add(&mut self, key: &[u8]) {
-        let (block, h1, h2) = self.locate(key);
+        self.add_hash(cfh64(key));
+    }
+
+    fn add_hash(&mut self, hash: u64) {
+        let (block, h1, h2) = self.locate_hash(hash);
         for i in 0..self.probes {
             let bit = h1.wrapping_add(i.wrapping_mul(h2)) % BLOCK_BITS as u32;
             let byte = block * BLOCK_BYTES + (bit / 8) as usize;

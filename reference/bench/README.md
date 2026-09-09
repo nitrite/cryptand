@@ -66,6 +66,15 @@ space win in the format — but it means the *denominator* of
 `write_amplification` is not the same quantity in all three, so that ratio
 compares an implementation to itself and not to its neighbours.
 
+There is a third, and it catches anyone who puts the CRUD matrices side by
+side: **`benches/crud.rs` and `bench/crud.dart` drive a `Collection`, and
+`CompareBench.java` drives the `Engine`.** The collection path builds the
+document, encodes it, assigns an id and maintains the change feed inside the
+timed loop; the engine path is handed already-encoded bytes, because it exists
+to put Cryptand next to MVStore and RocksDB and those two are key-value stores.
+Reading Rust's `create_ops_per_s` against Java's `create` compares a document
+insert with a keyed byte write, and the ratio is a measure of the fixture.
+
 **Nothing here is comparable between implementations except `codec_saving`**,
 which is a ratio of one implementation's own two runs and which all three
 independently report as zero. Every other row compares a number to itself

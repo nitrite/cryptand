@@ -61,9 +61,12 @@ class VlogConcurrencyTest {
     }
 
     private static byte[] value(int i) {
-        // Well above desktop's vlog_min of 256, so every value is separated and
-        // the value log is what is being tested.
-        byte[] v = new byte[900];
+        // Well above desktop's vlog_min, so every value is separated and the
+        // value log is what is being tested. Sized off the profile rather than
+        // off a number: the cut-off moved from 256 to a quarter page, and a
+        // literal that happened to clear the old one silently stopped reaching
+        // the value log at all.
+        byte[] v = new byte[Profile.DESKTOP.vlogMin() + 512];
         Arrays.fill(v, (byte) (i % 251));
         v[0] = (byte) (i >>> 24);
         v[1] = (byte) (i >>> 16);

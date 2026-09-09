@@ -448,7 +448,23 @@ public final class Vlog {
             }
         }
         byte[] buf = new byte[(int) p.len()];
-        pager.file().readFully(pager.offsetOf(s.startPage) + p.offset(), buf, 0, buf.length);
+        if (open == null) {
+            // A **sealed** segment through the page cache — see
+            // `Pager.readExtentInto`. This was a bare `pread` per record, so
+            // every point read of a separated value cost a syscall even when
+            // the page it lived in had just been read.
+            //
+            // Only sealed. An open segment's pages are still being filled by
+            // other writers, and a reader that caches one holds a page with a
+            // hole in it where an in-flight reservation has not landed yet;
+            // the next read of a neighbouring record in that page then decodes
+            // zeros. `VlogConcurrencyTest` catches it in about a third of a
+            // second. Sealing is what makes an extent immutable, and immutable
+            // is what the cache requires.
+            pager.readExtentInto(pager.offsetOf(s.startPage) + p.offset(), buf, 0, buf.length);
+        } else {
+            pager.file().readFully(pager.offsetOf(s.startPage) + p.offset(), buf, 0, buf.length);
+        }
         pager.countReads(pagesSpanned(p.offset(), buf.length));
         return decodeAt(s, buf, p.offset());
     }

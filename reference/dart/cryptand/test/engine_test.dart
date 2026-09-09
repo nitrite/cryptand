@@ -171,7 +171,17 @@ void main() {
     ({ScanResult fresh, ScanResult aged, Engine engine}) age(
         LocalityPolicy policy) {
       final dict = benchDict();
-      final e = Engine(memtableEntries: 1000, policy: policy, cachePages: 64);
+      // `vlogMin` below the 388-byte document **on purpose**. This test is
+      // about value-log locality — promotion, readahead, `locality_debt` — and
+      // none of those mechanisms engages for a value that stays inline. Every
+      // profile now sets `vlog_min` to a quarter page
+      // (`12-profiles.md` section 2.5), so a document-shaped value is inline by
+      // default and the fixture has to ask for separation rather than get it by
+      // accident. It used to get it by accident, and when the default moved the
+      // test measured nothing: `value pages 0`, ratio 1.0, and both bounds
+      // trivially met.
+      final e = Engine(
+          memtableEntries: 1000, policy: policy, cachePages: 64, vlogMin: 256);
       for (var i = 0; i < docs; i++) {
         e.put(17, CNitriteId(snowflakeId(i)), docBytes(dict, i));
       }
@@ -249,6 +259,7 @@ void main() {
         localityDebtPct: 1000, // never trigger on debt
         vlogSpaceTargetPct: 1000000, // never trigger on space
         cachePages: 64,
+        vlogMin: 256, // separated on purpose — see the note in `age`
       );
       for (var i = 0; i < docs; i++) {
         e.put(17, CNitriteId(snowflakeId(i)), docBytes(dict, i));

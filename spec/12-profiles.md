@@ -26,7 +26,7 @@ converted to the other by ordinary compaction.
 | page cache budget | 4 MiB | 16 MiB | 64 MiB | 512 MiB |
 | memtable budget (total) | 2 MiB | 8 MiB | 32 MiB | 256 MiB |
 | **`memtable_shards`** | 1 | 2 | 8 | 32 |
-| **`vlog_min`** (MUST be ≤ `page_size`/4) | **1024** | 1024 | 256 | 256 |
+| **`vlog_min`** (MUST be ≤ `page_size`/4) | **1024** | **1024** | **2048** | **4096** |
 | `blob_threshold` | 65536 | 131072 | 262144 | 262144 |
 | **`l0_trigger`** | 2 | 4 | 4 | 8 |
 | **`fanout`** | 4 | 6 | 8 | 10 |
@@ -120,15 +120,49 @@ frame-budget-aware, because tablets run the same Flutter UI.
 
 ### 2.3 `desktop` — the balanced default
 
-The profile the rest of this specification quotes. Separation at 256 B, eight
-memtable shards, four compaction threads, continuous paced compaction, 8 KiB
-pages.
+The profile the rest of this specification quotes. Eight memtable shards, four
+compaction threads, continuous paced compaction, 8 KiB pages, and separation at
+a quarter page.
 
 ### 2.4 `server` — throughput
 
 16 KiB pages, 32 memtable shards, aggressive tiering (`fanout = 10`,
 `tier_width = 6`), a 1024-entry readahead window, and a 100 ms foreground stall
 allowance because there is no frame budget to protect.
+
+### 2.5 `vlog_min` is at its ceiling in every profile, and that is a change
+
+`desktop` and `server` separated at **256 bytes** until this revision. §2.1's
+argument for `mobile` was written as if it were a phone argument — 400 µs random
+reads, a UI thread — and it is not. It is an argument about **document
+databases**, and it applies wherever one runs:
+
+- §1 of `design/performance-model.md` fixes this format's reference document at
+  20 fields and ~500 bytes; encoded, the one the benchmarks use is **639
+  bytes**. At `vlog_min = 256` that document is separated. Every write of one
+  costs a `pwrite` of its own, every read of one costs a second fetch, and a
+  `vlog_segment_bytes` extent — 64 MiB on `desktop` — is preallocated to hold
+  what fits in the tree.
+- Measured on the CRUD matrix at 20 000 such documents, moving the cut-off above
+  the document was worth **2.5× on create and 2× on point read**, and took the
+  file from 137 MB to a size dominated by real data rather than by reserved
+  value-log space.
+- What separation buys is write amplification, and that is worth buying for
+  **attachments** — an image, an audio clip, a blob — which is what
+  `blob_threshold` and the value log are for. It is not worth two I/Os per
+  document fetch on the operation an application performs most.
+
+So every profile now sits at the ceiling `00-conventions.md` §8 sets:
+`page_size / 4`, which is 1024 at 4 KiB, 2048 at 8 KiB and 4096 at 16 KiB. An
+application whose values are genuinely large still gets separation, because they
+exceed the threshold; an application storing documents no longer pays for a
+value log it does not need.
+
+**This changes nothing about the format.** `vlog_min` is a superblock field and
+a *writer's* choice (§3): a file written under the old constant and one written
+under the new one are the same format, mutually readable, and either converts to
+the other by ordinary compaction. A reader MUST continue to resolve a `vlog`
+cell of any size.
 
 ## 3. Profiles are a writer's choice, never a reader's
 
@@ -207,8 +241,8 @@ Existing data converts **lazily, through ordinary compaction**:
 
 | change | how existing data converts |
 |---|---|
-| `vlog_min` lowered (e.g. mobile → desktop) | values above the new threshold move to the value log as segments are rewritten; until then they stay inline, which is always valid |
-| `vlog_min` raised (desktop → mobile) | values below the new threshold are re-inlined during compaction; the vacated value-log segments become garbage and are collected |
+| `vlog_min` lowered | values above the new threshold move to the value log as segments are rewritten; until then they stay inline, which is always valid |
+| `vlog_min` raised (e.g. mobile → desktop, or a file written before §2.5) | values below the new threshold are re-inlined during compaction; the vacated value-log segments become garbage and are collected |
 | `fanout`, `tier_width`, `overlap_bound` | the next compactions produce the new shape |
 | filter bits | new segments get the new rate; old segments keep theirs |
 | `page_codec` | per page, so a mixture is normal |

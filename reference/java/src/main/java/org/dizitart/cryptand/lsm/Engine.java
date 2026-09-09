@@ -66,6 +66,18 @@ public final class Engine implements AutoCloseable {
     /** Everything a caller may set that is not already a superblock field. */
     public static final class Options {
         public Profile profile = Profile.DESKTOP;
+        /**
+         * Overrides the profile's {@code vlog_min} at creation, or null to take
+         * it from the profile.
+         *
+         * <p>{@code vlog_min} is a superblock field and a writer's choice
+         * (`12-profiles.md` §3), and since §2.5 put every profile's default at
+         * a quarter page there is no profile that separates a
+         * document-shaped value. A caller that wants separation for values that
+         * size — `11-conformance.md` §6's aged-scan fixture is the one that
+         * MUST — has to say so. Must be at most {@code page_size / 4}.
+         */
+        public Integer vlogMin;
         public int durability = Superblock.Durability.SYNC;
         public boolean readOnly;
         public int levelCount = 4;
@@ -111,7 +123,34 @@ public final class Engine implements AutoCloseable {
      * read path consults with no lock at all. The committer publishes a new one
      * after every manifest edit.
      */
-    record LevelState(List<Segment> segments, int levelCount) {
+    record LevelState(List<Segment> segments, int levelCount, int[] perLevel) {
+
+        LevelState(List<Segment> segments, int levelCount) {
+            this(segments, levelCount, histogram(segments, levelCount));
+        }
+
+        /**
+         * Segments per level, counted once when the snapshot is published.
+         *
+         * <p>{@link Engine#applyBackpressure} recounted this on every commit by
+         * walking {@code segments}. The snapshot is immutable, so the count
+         * cannot change under it, and a single-document write should not pay a
+         * scan of the whole manifest to find out how full L0 is.
+         */
+        private static int[] histogram(List<Segment> segments, int levelCount) {
+            int[] out = new int[Math.max(2, levelCount + 2)];
+            for (Segment seg : segments) {
+                int l = seg.meta().level;
+                if (l >= 0 && l < out.length) {
+                    out[l]++;
+                }
+            }
+            return out;
+        }
+
+        int at(int level) {
+            return level >= 0 && level < perLevel.length ? perLevel[level] : 0;
+        }
 
         List<Segment> covering(byte[] internalKeyFloor) {
             List<Segment> out = new ArrayList<>();
@@ -144,6 +183,16 @@ public final class Engine implements AutoCloseable {
     private Vlog vlog;
 
     private final ConcurrentSkipListMap<byte[], BtreePage.Leaf>[] shards;
+    /**
+     * Entries resident in each memtable shard, and their total.
+     *
+     * <p>{@code ConcurrentSkipListMap.size()} is documented O(n) — it walks the
+     * list — so neither {@link #applyBackpressure} nor {@link #flushShards} may
+     * ask a shard how big it is on the write path.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger[] shardEntries;
+    private final java.util.concurrent.atomic.AtomicLong residentEntries =
+            new java.util.concurrent.atomic.AtomicLong();
     private final CopyOnWriteArrayList<RangeDelete> pendingRangeDeletes = new CopyOnWriteArrayList<>();
     private final AtomicLong nextSeq;
     private volatile long visibleSeq;
@@ -163,7 +212,13 @@ public final class Engine implements AutoCloseable {
      * written look committed.
      */
     private final java.util.TreeMap<Long, Long> completedRanges = new java.util.TreeMap<>();
-    private long completedThrough;
+    /**
+     * Volatile because {@link #isPublished} reads it without the lock on the
+     * read path. It only ever advances, so a stale read is conservative — but
+     * an unsynchronized read of a non-volatile {@code long} is not a stale
+     * read, it is undefined.
+     */
+    private volatile long completedThrough;
     /**
      * Guards {@link #completedRanges} and carries {@link #visibleChanged}.
      *
@@ -184,9 +239,11 @@ public final class Engine implements AutoCloseable {
 
     // §6's counters. Every one of them is accumulated where the fact is known,
     // never derived after the event from a difference that cannot see it.
-    private final AtomicLong bytesLogical = new AtomicLong();
+    private final java.util.concurrent.atomic.LongAdder bytesLogical =
+            new java.util.concurrent.atomic.LongAdder();
     private final AtomicLong bytesDevice = new AtomicLong();
-    private final AtomicLong bytesValue = new AtomicLong();
+    private final java.util.concurrent.atomic.LongAdder bytesValue =
+            new java.util.concurrent.atomic.LongAdder();
     private final AtomicLong bytesKeyIndex = new AtomicLong();
     private final AtomicLong bytesGc = new AtomicLong();
     /**
@@ -211,7 +268,8 @@ public final class Engine implements AutoCloseable {
     private final AtomicLong filterProbes = new AtomicLong();
     private final AtomicLong filterFalsePositives = new AtomicLong();
     private final AtomicLong pinnedBySnapshots = new AtomicLong();
-    private final AtomicLong liveBytes = new AtomicLong();
+    private final java.util.concurrent.atomic.LongAdder liveBytes =
+            new java.util.concurrent.atomic.LongAdder();
     private final List<String> unavailableRanges = new CopyOnWriteArrayList<>();
     private volatile long oldestSnapshotOpenedAtMs;
     private final AtomicLong flushes = new AtomicLong();
@@ -234,8 +292,10 @@ public final class Engine implements AutoCloseable {
         // page is decompressed on the way out.
         pager.setPageCodec(sb.pageCodec);
         this.shards = new ConcurrentSkipListMap[Math.max(1, sb.memtableShards)];
+        this.shardEntries = new java.util.concurrent.atomic.AtomicInteger[shards.length];
         for (int i = 0; i < shards.length; i++) {
             shards[i] = new ConcurrentSkipListMap<>(BtreePage::memcmp);
+            shardEntries[i] = new java.util.concurrent.atomic.AtomicInteger();
         }
         this.nextSeq = new AtomicLong(sb.nextSeq);
         this.visibleSeq = sb.visibleSeq;
@@ -260,6 +320,10 @@ public final class Engine implements AutoCloseable {
         sb.nextSeq = 1;
         sb.visibleSeq = 0;
         sb.levelCount = options.levelCount;
+        if (options.vlogMin != null) {
+            sb.vlogMin = options.vlogMin;
+            org.dizitart.cryptand.container.Limits.checkVlogMin(sb.vlogMin, sb.pageSize());
+        }
         sb.writerId = options.writerId;
         sb.createdUtcMs = options.clock.getAsLong();
         sb.modifiedUtcMs = sb.createdUtcMs;
@@ -588,33 +652,62 @@ public final class Engine implements AutoCloseable {
     // ==================================================================
 
     /** One writer's buffered batch. Nothing durable is written before it is sequenced. */
-    public final class Batch {
-        private final List<Object[]> staged = new ArrayList<>();
-        private final Set<Long> written = new HashSet<>();
+    /**
+     * One staged write, resolved in place.
+     *
+     * <p>This was an {@code Object[6]} per entry plus a second one per entry
+     * built by {@code commitBatch}'s resolution pass, so a single-document
+     * {@code put} allocated two arrays and a list to carry six fields, three
+     * of which were boxed. It is the same six fields, typed, written once and
+     * then rewritten in place by {@link Engine#commitBatch}.
+     */
+    private static final class Staged {
+        final int treeId;
+        final byte[] cke;
+        byte[] value;
+        final int op;
+        final long expiryMs;
+        final boolean hasExpiry;
+        int kind;
 
-        /** {@code treeId, cke, value, kind, expiryMs|null} */
+        Staged(int treeId, byte[] cke, byte[] value, int op, long expiryMs, boolean hasExpiry,
+                int kind) {
+            this.treeId = treeId;
+            this.cke = cke;
+            this.value = value;
+            this.op = op;
+            this.expiryMs = expiryMs;
+            this.hasExpiry = hasExpiry;
+            this.kind = kind;
+        }
+    }
+
+    /** {@code kind} is decided at commit unless the caller forces one. */
+    private static final int KIND_UNSET = -1;
+
+    public final class Batch {
+        private final List<Staged> staged = new ArrayList<>(4);
+
         public Batch put(int treeId, byte[] cke, byte[] value) {
-            staged.add(new Object[]{treeId, cke, value, BtreePage.Op.PUT, null, null});
-            written.add(hashOf(treeId, cke));
+            staged.add(new Staged(treeId, cke, value, BtreePage.Op.PUT, 0, false, KIND_UNSET));
             return this;
         }
 
         public Batch putWithExpiry(int treeId, byte[] cke, byte[] value, long expiryMs) {
-            staged.add(new Object[]{treeId, cke, value, BtreePage.Op.PUT, expiryMs, null});
-            written.add(hashOf(treeId, cke));
+            staged.add(new Staged(treeId, cke, value, BtreePage.Op.PUT, expiryMs, true, KIND_UNSET));
             return this;
         }
 
         /** An index-tree entry: the key carries the information, so the value is {@code EMPTY}. */
         public Batch putEmpty(int treeId, byte[] cke) {
-            staged.add(new Object[]{treeId, cke, new byte[0], BtreePage.Op.PUT, null, BtreePage.Kind.EMPTY});
-            written.add(hashOf(treeId, cke));
+            staged.add(new Staged(treeId, cke, new byte[0], BtreePage.Op.PUT, 0, false,
+                    BtreePage.Kind.EMPTY));
             return this;
         }
 
         public Batch remove(int treeId, byte[] cke) {
-            staged.add(new Object[]{treeId, cke, new byte[0], BtreePage.Op.DELETE, null, null});
-            written.add(hashOf(treeId, cke));
+            staged.add(new Staged(treeId, cke, new byte[0], BtreePage.Op.DELETE, 0, false,
+                    BtreePage.Kind.EMPTY));
             return this;
         }
 
@@ -624,16 +717,13 @@ public final class Engine implements AutoCloseable {
          * writes rather than O(n) tombstones.
          */
         public Batch removeRange(int treeId, byte[] startCke, byte[] endCke) {
-            staged.add(new Object[]{treeId, startCke, endCke, BtreePage.Op.RANGE_DELETE, null, null});
+            staged.add(new Staged(treeId, startCke, endCke, BtreePage.Op.RANGE_DELETE, 0, false,
+                    BtreePage.Kind.EMPTY));
             return this;
         }
 
         public int size() {
             return staged.size();
-        }
-
-        public Set<Long> writtenKeys() {
-            return written;
         }
 
         /** Discards everything staged after this point — §3's savepoint, which is free. */
@@ -657,11 +747,21 @@ public final class Engine implements AutoCloseable {
         return new Batch();
     }
 
+    /**
+     * Routes a key to a memtable shard.
+     *
+     * <p>Deliberately <strong>not</strong> {@code Cfh64.hash(Ikey.userKey(...))},
+     * which is what it was: that materialises {@code u32be(tree_id) || cke} into
+     * a fresh array on every {@code put} purely to hash it and throw it away.
+     * Nothing persists this value and nothing else compares against it — shard
+     * assignment is session-local — so mixing the tree id in afterwards is
+     * equivalent and allocates nothing.
+     */
     private static long hashOf(int treeId, byte[] cke) {
-        return Cfh64.hash(Ikey.userKey(treeId, cke));
+        return Cfh64.hash(cke, 0, cke.length) ^ (treeId * 0xC2B2AE3D27D4EB4FL);
     }
 
-    private long commitBatch(List<Object[]> staged) {
+    private long commitBatch(List<Staged> staged) {
         checkCommitter();
         if (staged.isEmpty()) {
             return visibleSeq;
@@ -671,82 +771,79 @@ public final class Engine implements AutoCloseable {
         // Step 3: values. Every record is written to its final location before
         // any sequence number is taken, so a batch that dies here leaves debris
         // that nothing points at - never a dangling pointer.
-        List<Object[]> resolved = new ArrayList<>(staged.size());
-        for (Object[] s : staged) {
-            int treeId = (int) s[0];
-            byte[] cke = (byte[]) s[1];
-            int op = (int) s[3];
-            Integer forcedKind = (Integer) s[5];
-            if (op == BtreePage.Op.RANGE_DELETE || op == BtreePage.Op.DELETE) {
-                resolved.add(new Object[]{treeId, cke, s[2], op, s[4], BtreePage.Kind.EMPTY});
+        //
+        // Resolution rewrites each entry in place. It used to build a parallel
+        // list of fresh `Object[]`s, which for the common single-document batch
+        // meant a list, a backing array and a six-element array to carry six
+        // fields that were already sitting in the entry it was copying from.
+        for (Staged e : staged) {
+            if (e.op == BtreePage.Op.RANGE_DELETE || e.op == BtreePage.Op.DELETE
+                    || e.kind == BtreePage.Kind.EMPTY) {
                 continue;
             }
-            byte[] value = (byte[]) s[2];
-            bytesLogical.addAndGet(cke.length + value.length);
-            liveBytes.addAndGet(cke.length + value.length);
-            int kind;
-            byte[] stored;
-            if (forcedKind != null && forcedKind == BtreePage.Kind.EMPTY) {
-                kind = BtreePage.Kind.EMPTY;
-                stored = new byte[0];
-            } else if (sb.blobThreshold > 0 && value.length >= sb.blobThreshold) {
-                kind = BtreePage.Kind.BLOB;
-                stored = Blob.write(pager, value).encode();
+            byte[] value = e.value;
+            bytesLogical.add(e.cke.length + value.length);
+            liveBytes.add(e.cke.length + value.length);
+            if (sb.blobThreshold > 0 && value.length >= sb.blobThreshold) {
+                e.kind = BtreePage.Kind.BLOB;
+                e.value = Blob.write(pager, value).encode();
             } else if (sb.vlogMin > 0 && value.length >= sb.vlogMin) {
-                kind = BtreePage.Kind.VLOG;
-                stored = vlog.append(treeId, cke, value, VlogSegment.HEAT_FIRST).encode();
-                bytesValue.addAndGet(VlogSegment.recordSize(cke, value));
+                e.kind = BtreePage.Kind.VLOG;
+                e.value = vlog.append(e.treeId, e.cke, value, VlogSegment.HEAT_FIRST).encode();
+                bytesValue.add(VlogSegment.recordSize(e.cke, value));
             } else {
-                kind = BtreePage.Kind.INLINE;
-                stored = value;
+                e.kind = BtreePage.Kind.INLINE;
             }
-            resolved.add(new Object[]{treeId, cke, stored, op, s[4], kind});
         }
 
         // Step 4: one fetch_add on next_seq. The only serialization point on
         // the write path.
-        long base = nextSeq.getAndAdd(resolved.size());
+        long base = nextSeq.getAndAdd(staged.size());
+        boolean filled = false;
 
         // Step 5: publish into the memtable shards.
         long seq = base;
-        for (Object[] r : resolved) {
-            int treeId = (int) r[0];
-            byte[] cke = (byte[]) r[1];
-            int op = (int) r[3];
-            Long expiry = (Long) r[4];
-            int kind = (int) r[5];
-            byte[] ik = Ikey.of(treeId, cke, seq, op);
+        for (Staged e : staged) {
+            byte[] ik = Ikey.of(e.treeId, e.cke, seq, e.op);
             BtreePage.Leaf cell;
-            if (op == BtreePage.Op.RANGE_DELETE) {
-                byte[] endCke = (byte[]) r[2];
-                RangeDelete rd = new RangeDelete(treeId, cke, endCke, seq);
+            if (e.op == BtreePage.Op.RANGE_DELETE) {
+                RangeDelete rd = new RangeDelete(e.treeId, e.cke, e.value, seq);
                 cell = BtreePage.Leaf.inline(ik, rd.encodePayload());
                 pendingRangeDeletes.add(rd);
             } else {
-                cell = new BtreePage.Leaf(ik, kind, expiry == null ? 0 : expiry, expiry != null,
-                        (byte[]) r[2], 0);
+                cell = new BtreePage.Leaf(ik, e.kind == KIND_UNSET ? BtreePage.Kind.EMPTY : e.kind,
+                        e.expiryMs, e.hasExpiry, e.value, 0);
             }
-            shardFor(treeId, cke).put(ik, cell);
+            int sh = shardIndex(e.treeId, e.cke);
+            if (shards[sh].put(ik, cell) == null) {
+                // The shard this write landed in is the only one whose
+                // occupancy this batch changed, so it is the only one worth
+                // testing. `flushDue()` scans every shard, and doing that per
+                // commit is the same shape of mistake as counting the memtable
+                // per commit was.
+                filled |= shardEntries[sh].incrementAndGet() >= options.memtableEntries;
+                residentEntries.incrementAndGet();
+            }
             seq++;
         }
         long end = seq - 1;
 
-        // Step 6: register the range with the committer.
-        completeRange(base, end);
-        wake(committer);
-        // Step 7. `none` and `os` acknowledge here, so their writes must be
-        // visible here: the batch is acknowledged, and §7 says acknowledged
-        // data survives a process crash under `none`. Waiting for the
-        // committer's barrier would make those modes unreadable rather than
-        // merely less durable.
-        if (options.durability <= Superblock.Durability.OS) {
-            seqLock.lock();
-            try {
-                visibleSeq = Math.max(visibleSeq, completedThrough);
-            } finally {
-                seqLock.unlock();
-            }
-        } else {
+        // Steps 6 and 7 under one acquisition of `seqLock`. They were two, and
+        // for a single-document commit — which is what an application does —
+        // the lock was more of the cost than the work inside it.
+        boolean acknowledgeHere = options.durability <= Superblock.Durability.OS;
+        completeRange(base, end, acknowledgeHere);
+        // Waking it is only worth a syscall when it has something to do.
+        // `none` and `os` acknowledge below without waiting for it, and the
+        // committer polls on a 2 ms period, so unparking it on every
+        // single-document commit bought nothing and cost an `unpark` per
+        // operation. A shard that has reached its budget is the one case where
+        // 2 ms of latency is worth removing, because a writer is about to be
+        // stalled behind that flush.
+        if (!acknowledgeHere || filled) {
+            wake(committer);
+        }
+        if (!acknowledgeHere) {
             awaitVisible(end);
         }
         return end;
@@ -754,13 +851,41 @@ public final class Engine implements AutoCloseable {
 
     /** Folds a finished batch into the contiguous prefix of completed sequence numbers. */
     private void completeRange(long start, long end) {
+        completeRange(start, end, false);
+    }
+
+    /**
+     * @param acknowledge also publish {@code visible_seq} — §2's step 7 for
+     *                    {@code none} and {@code os}, which acknowledge in the
+     *                    writer. The batch is acknowledged when this returns, and
+     *                    §7 says acknowledged data is readable, so the watermark
+     *                    has to move here; waiting for the committer's barrier
+     *                    would make those modes unreadable rather than merely
+     *                    less durable.
+     */
+    private void completeRange(long start, long end, boolean acknowledge) {
         seqLock.lock();
         try {
+            if (completedRanges.isEmpty() && start == completedThrough + 1) {
+                // The single-writer case, which is most of them: the range that
+                // just completed is the next one, so it folds straight into the
+                // prefix. Going through the `TreeMap` to discover that costs a
+                // boxed put, a `firstEntry`, a `pollFirstEntry` and the garbage
+                // from all three, per commit.
+                completedThrough = end;
+                if (acknowledge && end > visibleSeq) {
+                    visibleSeq = end;
+                }
+                return;
+            }
             completedRanges.put(start, end);
             Map.Entry<Long, Long> first;
             while ((first = completedRanges.firstEntry()) != null && first.getKey() <= completedThrough + 1) {
                 completedRanges.pollFirstEntry();
                 completedThrough = Math.max(completedThrough, first.getValue());
+            }
+            if (acknowledge && completedThrough > visibleSeq) {
+                visibleSeq = completedThrough;
             }
         } finally {
             seqLock.unlock();
@@ -831,8 +956,11 @@ public final class Engine implements AutoCloseable {
     }
 
     private ConcurrentSkipListMap<byte[], BtreePage.Leaf> shardFor(int treeId, byte[] cke) {
-        long h = hashOf(treeId, cke);
-        return shards[(int) Long.remainderUnsigned(h, shards.length)];
+        return shards[shardIndex(treeId, cke)];
+    }
+
+    private int shardIndex(int treeId, byte[] cke) {
+        return (int) Long.remainderUnsigned(hashOf(treeId, cke), shards.length);
     }
 
     private void awaitVisible(long seq) {
@@ -876,18 +1004,36 @@ public final class Engine implements AutoCloseable {
 
     private void committerLoop() {
         while (!closing) {
-            if (completedThrough() <= visibleSeq) {
+            // Two triggers, and the second one was missing. `completedThrough >
+            // visibleSeq` is the durability trigger, and under `none`/`os` the
+            // writer advances `visible_seq` itself — so it is almost never true
+            // and the committer almost never ran. Flushing then happened only
+            // by winning a race against the writer, which is not a policy: a
+            // memtable over its budget with no new writes arriving would sit
+            // there while backpressure stalled the writer that was waiting for
+            // it to drain, forever.
+            if (completedThrough() <= visibleSeq && !flushDue()) {
                 java.util.concurrent.locks.LockSupport.parkNanos(2_000_000L);
                 continue;
             }
             try {
-                commitNow();
+                commitNow(options.durability >= Superblock.Durability.SYNC);
             } catch (RuntimeException e) {
                 committerFailure = e;
                 signalVisible();
                 return;
             }
         }
+    }
+
+    /** Whether any memtable shard has reached {@code memtable_entries} — §2's step D. */
+    private boolean flushDue() {
+        for (java.util.concurrent.atomic.AtomicInteger c : shardEntries) {
+            if (c.get() >= options.memtableEntries) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void signalVisible() {
@@ -936,6 +1082,16 @@ public final class Engine implements AutoCloseable {
      * over a contiguous prefix of completed reservations.
      */
     public void commitNow() {
+        commitNow(true);
+    }
+
+    /**
+     * @param forceFlush whether step D empties every shard or only the ones
+     *                   over budget — see {@link #flushShards}. The background
+     *                   committer passes {@code false} under a mode that has
+     *                   already acknowledged; every explicit caller forces.
+     */
+    public void commitNow(boolean forceFlush) {
         structure.lock();
         try {
             // A: collect - every batch whose records are fully written, which
@@ -954,7 +1110,7 @@ public final class Engine implements AutoCloseable {
             }
 
             // D: flush memtable shards into L0 segments and edit the manifest.
-            boolean flushed = flushShards(target);
+            boolean flushed = flushShards(target, forceFlush);
 
             // E.
             if (flushed) {
@@ -1149,44 +1305,121 @@ public final class Engine implements AutoCloseable {
         }
     }
 
-    /** Requires {@link #structure}. Returns whether anything was written. */
+    /**
+     * §2's step D, and its budget gate: <strong>"any memtable shard
+     * <em>over its budget</em>"</strong>.
+     *
+     * <p>The gate was missing. Every shard with anything in it was built into
+     * an L0 segment on every commit, so a workload that commits one document at
+     * a time got one segment per document: 525 flushes and 42 compactions for
+     * 20 000 mixed operations of which 5 000 were writes, 119 MB to device for
+     * 3.2 MB of documents, and 648 ms of the 866 ms wall clock spent stalled in
+     * backpressure that the flushing itself created. A memtable that is emptied
+     * on every commit is not a memtable.
+     *
+     * <p>{@code force} is what the modes that must not defer pass: `close`,
+     * value-log GC — whose next pass computes liveness against these very
+     * rewrites — and any commit under a durability mode that acknowledges only
+     * after the write is on the device. §8: "a conforming implementation
+     * advances `visible_seq` whenever a batch's records become durable, which
+     * for a single writer is the memtable flush of §2 step D." An inline value
+     * lives nowhere but the memtable until this runs, so `sync` and `full` MUST
+     * force it, and `none` and `os` — which acknowledge before the committer
+     * has run at all — MUST NOT be read as promising more than they do.
+     *
+     * <p>Requires {@link #structure}. Returns whether anything was written.
+     */
     private boolean flushShards(long target) {
-        boolean any = false;
-        for (ConcurrentSkipListMap<byte[], BtreePage.Leaf> shard : shards) {
+        return flushShards(target, true);
+    }
+
+    private boolean flushShards(long target, boolean force) {
+        // **One L0 segment per flush, not one per shard.** The shards partition
+        // the key space by hash, so their contents are disjoint and each is
+        // already in internal-key order: merging them costs a bounded heap and
+        // produces a single sorted run.
+        //
+        // Emitting one segment per shard put `memtable_shards` segments into L0
+        // at once. On `desktop` that is 8 against an `l0_trigger` of 4, so a
+        // single full flush cycle overshot the trigger by 2x on its own and the
+        // very next write was stalled by backpressure for 11 ms waiting for a
+        // compaction that the flush had just made necessary. The two profile
+        // constants are not independent, and the one that has to give is this:
+        // `l0_trigger` counts runs, and a flush produces one run.
+        List<EntrySource> sources = new ArrayList<>(shards.length);
+        List<int[]> taken = new ArrayList<>(shards.length);
+        List<List<byte[]>> keys = new ArrayList<>(shards.length);
+        for (int si = 0; si < shards.length; si++) {
+            ConcurrentSkipListMap<byte[], BtreePage.Leaf> shard = shards[si];
             if (shard.isEmpty()) {
                 continue;
             }
-            List<Map.Entry<byte[], BtreePage.Leaf>> take = new ArrayList<>();
-            for (Map.Entry<byte[], BtreePage.Leaf> e : shard.entrySet()) {
-                if (Ikey.seqOf(e.getKey()) <= target) {
-                    take.add(e);
-                }
-            }
-            if (take.isEmpty()) {
+            if (!force && shardEntries[si].get() < options.memtableEntries) {
                 continue;
             }
-            SegmentBuilder b = new SegmentBuilder(pager, sb.nextSegmentId++, 0, 0, sb.filterBitsUpper);
-            for (Map.Entry<byte[], BtreePage.Leaf> e : take) {
-                b.add(e.getValue());
+            // Taken in the shard's own order, into a plain list. Copying them
+            // into a sorted map first re-sorted keys that a skip list already
+            // had in order — 20 000 comparator calls per flush to reproduce an
+            // ordering that was handed over for free.
+            List<byte[]> tookKeys = new ArrayList<>();
+            List<BtreePage.Leaf> tookCells = new ArrayList<>();
+            for (Map.Entry<byte[], BtreePage.Leaf> e : shard.entrySet()) {
+                if (Ikey.seqOf(e.getKey()) <= target) {
+                    tookKeys.add(e.getKey());
+                    tookCells.add(e.getValue());
+                }
             }
-            SegmentMeta built = b.finish();
-            bytesKeyIndex.addAndGet((long) built.pages * sb.pageSize());
-            bytesDevice.addAndGet((long) built.pages * sb.pageSize());
-            manifest.add(built);
-            // The new segment is published BEFORE the entries leave the shard,
-            // so a concurrent reader sees the entry in both places rather than
-            // in neither. Removing first opens a window in which a committed
-            // key is invisible - a wrong answer, and one that only appears
-            // under a durability mode that lets a reader run during the flush.
-            republishLevels();
-            for (Map.Entry<byte[], BtreePage.Leaf> e : take) {
-                shard.remove(e.getKey());
+            if (tookKeys.isEmpty()) {
+                continue;
             }
-            pendingRangeDeletes.removeIf(rd -> rd.seq() <= target);
-            flushes.incrementAndGet();
-            any = true;
+            sources.add(new EntrySource.OfLists(tookKeys, tookCells));
+            taken.add(new int[]{si});
+            keys.add(tookKeys);
         }
-        return any;
+        if (sources.isEmpty()) {
+            return false;
+        }
+
+        SegmentBuilder b = new SegmentBuilder(pager, sb.nextSegmentId++, 0, 0, sb.filterBitsUpper);
+        EntrySource.Merge merge = new EntrySource.Merge(sources);
+        while (merge.isValid()) {
+            b.add(merge.entry());
+            merge.next();
+        }
+        SegmentMeta built = b.finish();
+        bytesKeyIndex.addAndGet((long) built.pages * sb.pageSize());
+        bytesDevice.addAndGet((long) built.pages * sb.pageSize());
+        manifest.add(built);
+        // The new segment is published BEFORE the entries leave the shards,
+        // so a concurrent reader sees the entry in both places rather than
+        // in neither. Removing first opens a window in which a committed
+        // key is invisible - a wrong answer, and one that only appears
+        // under a durability mode that lets a reader run during the flush.
+        republishLevels();
+        // ponytail: one skip-list `remove` per entry, which is O(n log n) for
+        // the whole drain and about a fifth of a flush's cost. Draining by
+        // swapping in a fresh shard would be O(1), and is not done because a
+        // writer holds no lock on this path: an entry inserted between the swap
+        // and the re-insertion of the survivors would be lost. If this ever
+        // matters, the fix is to give the memtable a version and swap under it,
+        // not to remove faster.
+        //
+        // The counters are batched: 40 000 atomic read-modify-writes to record
+        // what two additions can.
+        for (int i = 0; i < keys.size(); i++) {
+            int si = taken.get(i)[0];
+            int removed = 0;
+            for (byte[] k : keys.get(i)) {
+                if (shards[si].remove(k) != null) {
+                    removed++;
+                }
+            }
+            shardEntries[si].addAndGet(-removed);
+            residentEntries.addAndGet(-removed);
+        }
+        pendingRangeDeletes.removeIf(rd -> rd.seq() <= target);
+        flushes.incrementAndGet();
+        return true;
     }
 
     // ==================================================================
@@ -1200,6 +1433,15 @@ public final class Engine implements AutoCloseable {
         return visibleSeq;
     }
 
+    /**
+     * Sentinel for "the clock has not been read yet" — see
+     * {@link #lookup(int, byte[], long, long)}. Expiry is evaluated at read
+     * time (§9), but the great majority of entries have no expiry at all, and
+     * calling {@code System.currentTimeMillis()} on every point read to compare
+     * against a field that is usually absent is a clock read per read.
+     */
+    public static final long CLOCK_ON_DEMAND = Long.MIN_VALUE;
+
     public byte[] get(int treeId, byte[] cke) {
         // `readHorizon`, not `visibleSeq`: an `os`-durability batch is
         // acknowledged when `commitBatch` returns, and §7 says acknowledged
@@ -1207,7 +1449,7 @@ public final class Engine implements AutoCloseable {
         // behind a completed batch whenever another writer holds a lower range
         // in flight. `isPublished` is what keeps that from exposing a
         // half-published batch.
-        return get(treeId, cke, readHorizon(), options.clock.getAsLong());
+        return get(treeId, cke, readHorizon(), CLOCK_ON_DEMAND);
     }
 
     /** The resolved entry, or null when the key is absent, deleted or expired at {@code now}. */
@@ -1231,7 +1473,7 @@ public final class Engine implements AutoCloseable {
      * early deletes nothing. That is what it did.
      */
     public boolean containsKey(int treeId, byte[] cke) {
-        return lookup(treeId, cke, readHorizon(), options.clock.getAsLong()) != null;
+        return lookup(treeId, cke, readHorizon(), CLOCK_ON_DEMAND) != null;
     }
 
     /**
@@ -1261,7 +1503,8 @@ public final class Engine implements AutoCloseable {
         if (op == BtreePage.Op.DELETE || op == BtreePage.Op.RANGE_DELETE) {
             return null;
         }
-        if (best.hasExpiry() && best.expiryMs() <= nowMs) {
+        if (best.hasExpiry()
+                && best.expiryMs() <= (nowMs == CLOCK_ON_DEMAND ? options.clock.getAsLong() : nowMs)) {
             // §9: expiry is evaluated at read time, so it is exact regardless of
             // when compaction runs.
             return null;
@@ -1308,7 +1551,12 @@ public final class Engine implements AutoCloseable {
         // Newest first. Usually the first entry is the answer; the loop only
         // runs on when a version is still in flight, which is rare and
         // transient.
-        for (Map.Entry<byte[], BtreePage.Leaf> m : shardFor(treeId, cke).tailMap(from, true).entrySet()) {
+        // `ceilingEntry` then `higherEntry`, not `tailMap(from, true).entrySet()`:
+        // the view, its entry set and its iterator are three allocations per
+        // point read, and the loop almost always stops on the first entry.
+        ConcurrentSkipListMap<byte[], BtreePage.Leaf> shard = shardFor(treeId, cke);
+        for (Map.Entry<byte[], BtreePage.Leaf> m = shard.ceilingEntry(from); m != null;
+                m = shard.higherEntry(m.getKey())) {
             if (!Ikey.hasUserKey(m.getKey(), uk)) {
                 break;
             }
@@ -1423,8 +1671,7 @@ public final class Engine implements AutoCloseable {
     }
 
     static boolean coversUserKey(SegmentMeta m, byte[] uk) {
-        return BtreePage.memcmp(m.minKey, Ikey.seekCeiling(uk)) <= 0
-                && BtreePage.memcmp(Ikey.seekFloor(uk), m.maxKey) <= 0;
+        return Ikey.covers(m.minKey, m.maxKey, uk);
     }
 
     private long greatestRangeDelete(int treeId, byte[] cke, long snapshotSeq) {
@@ -1674,7 +1921,8 @@ public final class Engine implements AutoCloseable {
                 if (op == BtreePage.Op.DELETE || op == BtreePage.Op.RANGE_DELETE) {
                     continue;
                 }
-                if (best.hasExpiry() && best.expiryMs() <= nowMs) {
+                if (best.hasExpiry()
+                && best.expiryMs() <= (nowMs == CLOCK_ON_DEMAND ? options.clock.getAsLong() : nowMs)) {
                     continue;
                 }
                 window.add(new Row(treeId, cke, best));
@@ -1769,13 +2017,21 @@ public final class Engine implements AutoCloseable {
 
     private void compactorLoop() {
         while (!closing) {
-            java.util.concurrent.locks.LockSupport.parkNanos(5_000_000L);
             try {
                 maintain();
             } catch (RuntimeException e) {
                 committerFailure = e;
                 return;
             }
+            if (closing) {
+                return;
+            }
+            // Park **after** the round, not before it. Parking first meant a
+            // compactor woken by `applyBackpressure` — which unparks it and
+            // then sleeps, precisely because it wants compaction to happen —
+            // slept its own 5 ms before starting. The writer's stall and the
+            // compactor's park ran in series instead of in parallel.
+            java.util.concurrent.locks.LockSupport.parkNanos(5_000_000L);
         }
     }
 
@@ -1985,7 +2241,7 @@ public final class Engine implements AutoCloseable {
                 sawNewerVisible = true;
             }
             if (drop) {
-                liveBytes.addAndGet(-(Ikey.ckeOf(ik).length + cell.value().length));
+                liveBytes.add(-(Ikey.ckeOf(ik).length + cell.value().length));
                 continue;
             }
             if (!newUserKey && !bottommost) {
@@ -2008,7 +2264,7 @@ public final class Engine implements AutoCloseable {
                 if (src.tier == VlogSegment.TIER_HOT) {
                     VlogSegment.Record rec = vlog.read(p);
                     VlogPointer moved = vlog.appendCold(rec.treeId(), rec.key(), rec.value());
-                    bytesValue.addAndGet(p.len());
+                    bytesValue.add(p.len());
                     bytesDevice.addAndGet(p.len());
                     out = new BtreePage.Leaf(ik, BtreePage.Kind.VLOG, cell.expiryMs(),
                             cell.hasExpiry(), moved.encode(), 0);
@@ -2570,29 +2826,25 @@ public final class Engine implements AutoCloseable {
         // committer rewrites it does not merely give a stale count - it loses
         // entries, and the manifest is what the read path prunes with.
         LevelState state = levels;
-        int[] perLevel = new int[Math.max(2, sb.levelCount + 1)];
-        for (Segment seg : state.segments()) {
-            int l = seg.meta().level;
-            if (l < perLevel.length) {
-                perLevel[l]++;
-            }
-        }
-        double x = overshoot(perLevel[0], Math.max(1, sb.l0Trigger), Math.max(1, sb.l0Trigger) * 4);
+        double x = overshoot(state.at(0), Math.max(1, sb.l0Trigger), Math.max(1, sb.l0Trigger) * 4);
         if (x > worst) {
             worst = x;
             cause = "l0_segments";
         }
-        for (int l = 1; l < Math.min(lastLevel(), perLevel.length); l++) {
-            x = overshoot(perLevel[l], Math.max(1, sb.tierWidth), Math.max(1, sb.tierWidth) * 2);
+        for (int l = 1; l < lastLevel(); l++) {
+            x = overshoot(state.at(l), Math.max(1, sb.tierWidth), Math.max(1, sb.tierWidth) * 2);
             if (x > worst) {
                 worst = x;
                 cause = "tier_width@L" + l;
             }
         }
-        int resident = 0;
-        for (ConcurrentSkipListMap<byte[], BtreePage.Leaf> s : shards) {
-            resident += s.size();
-        }
+        // A counter, not `ConcurrentSkipListMap.size()`. That method is
+        // documented O(n) — it walks the list — and this ran on **every**
+        // commit, over every shard: a single-document write counted the whole
+        // memtable, up to `memtable_entries * shards` node traversals, to
+        // decide whether to stall for zero milliseconds. It was the write
+        // path's largest single cost.
+        int resident = (int) Math.min(Integer.MAX_VALUE, residentEntries.get());
         int budget = options.memtableEntries * shards.length;
         x = overshoot(resident, budget, budget * 2);
         if (x > worst) {
@@ -2696,7 +2948,7 @@ public final class Engine implements AutoCloseable {
     }
 
     public long bytesWrittenLogical() {
-        return bytesLogical.get();
+        return bytesLogical.sum();
     }
 
     public long bytesWrittenDevice() {
@@ -2704,7 +2956,7 @@ public final class Engine implements AutoCloseable {
     }
 
     public long bytesWrittenValue() {
-        return bytesValue.get();
+        return bytesValue.sum();
     }
 
     public long bytesWrittenKeyIndex() {
@@ -2728,7 +2980,7 @@ public final class Engine implements AutoCloseable {
     }
 
     public long liveBytes() {
-        return liveBytes.get();
+        return liveBytes.sum();
     }
 
     /**
@@ -3015,6 +3267,10 @@ public final class Engine implements AutoCloseable {
             for (var shard : shards) {
                 shard.clear();
             }
+            for (var counter : shardEntries) {
+                counter.set(0);
+            }
+            residentEntries.set(0);
             pendingRangeDeletes.clear();
             c.asSnapshot(sb.checkpointRoot).applyTo(sb);
             reloadTrees();

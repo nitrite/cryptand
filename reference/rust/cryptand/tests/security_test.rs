@@ -78,7 +78,11 @@ fn editing_the_superblock_is_reported_as_tampering_not_corruption() {
 #[test]
 fn a_flipped_ciphertext_byte_fails_its_tag_not_merely_its_checksum() {
     let (t, mut e) = encrypted("tamper-page");
-    e.put(T, &Value::NitriteId(1), &vec![5u8; 900]).unwrap();
+    // Above `vlog_min`, so the value is a value-log record and the tag under
+    // test is the record's. Sized off the superblock rather than off a literal
+    // — the cut-off is a quarter page now (`12-profiles.md` §2.5).
+    let big = vec![5u8; e.sb.vlog_min as usize + 512];
+    e.put(T, &Value::NitriteId(1), &big).unwrap();
     e.close(true).unwrap();
 
     let seg = {
@@ -115,8 +119,10 @@ fn no_nonce_is_ever_issued_twice_across_repeated_crashes() {
         e.sb.set_feature(feature::CIPHER, true);
         e.keys = Some(KeyRing::from_master(master, e.sb.database_uuid, 0));
         e.commit(Durability::Sync).unwrap();
+        // Above `vlog_min` — see the note in `operations_test`.
+        let big = vec![1u8; e.sb.vlog_min as usize + 512];
         for i in 0..40i64 {
-            e.put(T, &Value::NitriteId(i), &vec![1u8; 700]).unwrap();
+            e.put(T, &Value::NitriteId(i), &big).unwrap();
         }
         e.flush().unwrap();
         e.commit(Durability::Sync).unwrap();
@@ -129,8 +135,9 @@ fn no_nonce_is_ever_issued_twice_across_repeated_crashes() {
     for round in 1..4i64 {
         let mut e = Engine::open(&t.path, Some(&raw_key)).unwrap();
         floors.push(e.sb.next_nonce);
+        let big = vec![2u8; e.sb.vlog_min as usize + 512];
         for i in 0..40i64 {
-            e.put(T, &Value::NitriteId(round * 1000 + i), &vec![2u8; 700]).unwrap();
+            e.put(T, &Value::NitriteId(round * 1000 + i), &big).unwrap();
         }
         e.flush().unwrap();
         e.commit(Durability::Sync).unwrap();

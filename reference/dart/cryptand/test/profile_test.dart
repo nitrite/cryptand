@@ -25,8 +25,10 @@ void main() {
       expect(Profile.desktop.pageSize, 8192);
       expect(Profile.server.pageSize, 16384);
 
-      expect(Profile.mobile.vlogMin, 1024);
-      expect(Profile.desktop.vlogMin, 256);
+      // Section 2.5: a quarter page in every profile.
+      for (final p in Profile.values) {
+        expect(p.vlogMin, p.pageSize ~/ 4, reason: p.name);
+      }
 
       expect(Profile.mobile.overlapBound, 1);
       expect(Profile.desktop.overlapBound, 2);

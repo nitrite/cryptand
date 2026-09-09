@@ -1998,3 +1998,201 @@ The remaining distance to Rust is widest on `DELETE`, where Rust's is a bare
 memtable tombstone at a p50 below a microsecond, and on `CREATE`/`UPDATE`, where
 the JVM's encode-and-allocate path is doing genuine work the counters agree on:
 `pages/op` is 0.015 against 0.004 for update and 0.020 against 0.006 for delete.
+
+
+---
+
+# The create p99.9, and a comparison — defects 101–102
+
+## Why Java's create p99.9 was ~100x its p50
+
+Not a stall in the engine's code paths: **it is `10-transactions.md` §6's
+backpressure doing exactly what the chapter says**, and the interesting part is
+what triggered it. Instrumenting every create slower than 200 µs:
+
+```
+SLOW create i=2730 us=1349  stalls=5 flushes=32 backpressureMs=1  cause=l0_segments
+SLOW create i=2731 us=12793 stalls=6 flushes=32 backpressureMs=11 cause=l0_segments
+```
+
+Always in pairs, always `cause=l0_segments`, always with the delay stepping 1 →
+11 ms as §6's quadratic curve climbs.
+
+**The cause is the flush granularity.** `flushShards` emits one L0 segment *per
+memtable shard* — eight on `desktop` — against an `l0_trigger` of **4**. So a
+single full flush overshoots §6's soft L0 bound by 2x before any compaction can
+react, and the writer is then charged the delay for it. The two profile
+constants are in tension with each other as long as a flush is shard-granular.
+
+Rust does not have this: its `flush` drains every shard into **one** sorted L0
+segment. Sharding exists so writers do not contend (§2.2); it is not a
+partitioning of the data, and nothing downstream wants it preserved.
+
+### The fix works, and it is not shipped
+
+Merging the shards into one L0 segment measured, at 20 000 documents:
+
+| | before | after |
+|---|---|---|
+| `mixed_ops_per_s` | 73 817 | **130 754** |
+| `create_ops_per_s` | 29 937 | 36 442 |
+| `create_us_p999` | 1 284 | **831** |
+
+It also breaks the mandatory round-trip gate of `11-conformance.md` §6, in
+**2 runs out of 8**:
+
+```
+CorruptionException: segment head magic is 0300190003000100, expected CRY_SEG
+FAIL java could not reopen after its own mutation
+```
+
+`0300190003000100` is a B+tree leaf header — cell count 3, free start 6400,
+prefix 3, `FLAG_IS_LEAF`. A segment's head page holds a tree page, which means
+two structures were handed the same extent. Bisecting one file at a time against
+a baseline measured at 8/8 put it on this change and nothing else.
+
+**So it is reverted.** A 1.8x throughput win that corrupts a file a quarter of
+the time is not a win, and the gate is mandatory for a reason. What the
+experiment established stands and is worth writing down: the p99.9 is
+`l0_segments` backpressure, its cause is shard-granular flushing, and merging is
+the right shape — it needs the extent allocation on that path understood first.
+
+## Defect 101 — an integer overflow let a hostile length reach the allocator
+
+Found by the structure-aware fuzzer, one run in six:
+
+```
+fuzz: 600 mutants, 335 refused, 35 reported, 229 benign, 1 UNTYPED
+java.lang.OutOfMemoryError: Requested array size exceeds VM limit
+    at java.util.Arrays.copyOfRange
+    at org.dizitart.cryptand.util.ByteReader.bytes
+    at org.dizitart.cryptand.container.BtreePage.key
+```
+
+`ByteReader.need` checked `pos + n > limit` in **int** arithmetic. A length near
+`Integer.MAX_VALUE` — which is one varint in a hostile file — overflows the
+addition to a negative number, the bound passes, and the allocation throws
+`OutOfMemoryError`. Untyped, which `14-security.md` §9.1 forbids outright: a
+hostile file must produce "a typed corruption error rather than an allocation
+failure".
+
+`(long) pos + n` fixes it at the one place every decoder in the implementation
+funnels through. Six consecutive fuzz runs: 0 UNTYPED.
+
+## Defect 102 — a mandatory test's fixture had no precondition
+
+`MandatoryTest.containment` damages a page and requires keys outside the damaged
+range to still be served. Containment is **per segment**, so the property is only
+observable when more than one segment exists — and this fixture's segmentation
+came entirely, and silently, from one-segment-per-shard flushing. Change the
+flush and the fixture collapses to a single segment holding every key, where
+damaging its root takes out everything and the test fails for a reason that has
+nothing to do with §4.
+
+The Rust version of the same test carries the precondition explicitly — "the
+fixture needs more than one segment" — and Java's now does too, with periodic
+flushes that put three L0 segments in place deliberately rather than by
+accident. A fixture that degenerates silently measures nothing.
+
+---
+
+# How Java Cryptand compares to MVStore and RocksDB
+
+`reference/java/src/test/java/org/dizitart/cryptand/bench/CompareBench.java`
+runs the same CRUD-under-load shape against MVStore — the engine Nitrite ships
+on today — and RocksDB. All three are handed the **same already-encoded CVE
+bytes** under the same 8-byte key, so encoding is not the variable.
+
+At 20 000 documents, medians of nine runs. Every engine runs the whole matrix
+twice on its own fresh database and the first pass is discarded: 5 000
+operations on a cold JVM measure the interpreter, and they measure it hardest
+for whichever engine has the longest code path.
+
+| engine | create | read | update | delete | mixed | on disk |
+|---|---|---|---|---|---|---|
+| **cryptand** | 723 922 | 1 349 892 | **894 528** | **1 790 323** | 951 690 | 44 MB |
+| **mvstore** | 1 207 420 | 1 945 273 | 417 169 | 1 541 465 | 1 143 039 | 33 MB |
+| **rocksdb** | 295 666 | 824 068 | 220 202 | 324 769 | 363 359 | 20 MB |
+
+**Cryptand is faster than RocksDB on every operation — 1.6× to 5.5× — and
+faster than MVStore on update and delete. MVStore is still ahead on create,
+read and mixed.** Both halves of that are the honest headline.
+
+Where it stood before the work below, on the same benchmark and the same
+machine — 49 775 create, 139 094 read, 26 987 update, 36 147 delete, ~153 000
+mixed, 137 MB on disk — the gap was 5–9× to MVStore and 2–5× to RocksDB. What
+closed it was not tuning. It was six defects, each of which had an
+implementation doing work the format does not ask for:
+
+1. **`vlog_min` at 256 on `desktop` and `server`**, which put this format's own
+   639-byte reference document in the value log: a `pwrite` per write, a second
+   fetch per read, and a 64 MiB value-log extent preallocated to hold what fits
+   in the tree. `12-profiles.md` §2.5 now puts it at a quarter page in every
+   profile. Worth 2.5× on create and 2× on read on its own, and it is most of
+   the `on disk` column.
+2. **The memtable was flushed on every commit**, because step D's "any memtable
+   shard *over its budget*" had no budget test. A workload committing one
+   document at a time got one L0 segment per document: 525 flushes and 42
+   compactions for 20 000 mixed operations, 119 MB to device for 3.2 MB of
+   documents, and 648 ms of an 866 ms wall clock spent stalled in backpressure
+   that the flushing itself created. `10-transactions.md` §2.1.1 now states the
+   gate.
+3. **A flush emitted one L0 segment per memtable shard** — 8 against an
+   `l0_trigger` of 4, so every flush cycle overshot the trigger by 2× on its own
+   and the next writer was stalled 11 ms waiting for a compaction the flush had
+   just made necessary. Merging the shards, which are disjoint and each already
+   sorted, makes it one run. Delete went from 191 000/s to 1 288 000/s and mixed
+   from 312 000 to 749 000.
+4. **`applyBackpressure` counted the memtable on every commit** by calling
+   `ConcurrentSkipListMap.size()` on every shard — a documented O(n) walk, up to
+   32 768 node traversals, to decide whether to stall for zero milliseconds. It
+   was the write path's largest single cost. It also recounted the manifest's
+   per-level histogram, which is an immutable snapshot.
+5. **The page cache copied and re-parsed every page of every descent.** A point
+   read visits a page per level, reads a header and runs a binary search, and
+   never writes — and paid an 8 KiB `clone` and a re-parse per level for the
+   privilege. `Segment.Cursor.seek` was the top frame of the read profile by a
+   factor of three. Sharing an immutable parsed page was worth 2.7×.
+6. **A freshly built segment was thrown out of the cache and read back.**
+   Writing an extent invalidates the pages it covers, correctly; but a flush or
+   a compaction has every page of its output in memory and then paid a `pread`
+   per page on first touch. `page_reads_per_lookup` was **0.34 on a dataset that
+   fits the cache several times over**. Admitting the built pages took it to
+   **0.00** and reads from 889 000/s to 1 240 000/s.
+
+Plus, in the same pass: an O(k²) trial-encode in the internal-page build (the
+leaf path had already been fixed and the sibling loop had not), a `ByteWriter`
+and a `toBytes()` per cell in every page written, a copy of every distinct user
+key kept alive to build a Bloom filter that only wants their hashes, a boxed
+`Map.merge` per entry to count a tree span that is almost always one run, two
+lock acquisitions and nine allocations per single-document commit, a compactor
+that parked 5 ms *before* each round so backpressure's wake-up and the
+compactor's nap ran in series, and a bare `pread` per value-log record read that
+bypassed the page cache entirely.
+
+`13-operations.md` §6.1 and §2.1.1 of `10-transactions.md` carry the two that
+are general enough to be worth a reader's attention.
+
+**What the remaining gap is, and why it does not close.** MVStore's numbers are
+an in-memory B-tree's. It keeps the map resident and writes at commit: a `put`
+does not reach the device, there is no value separation, no per-read checksum
+verification, no manifest and no GC. Cryptand's create is 81 % **flush** — 20 000
+single-document commits take 4.4 ms and building the 13 MB L0 segment they
+produce takes 15 ms, of which 3.6 ms is the write and the CRC-32C that cannot be
+avoided. Its read is a descent through a file-backed B+tree with a checksum
+already verified and a leaf cell copied out. Those three rows are where holding
+everything in the heap shows, and no amount of tuning turns one engine into the
+other.
+
+**The `on disk` column, once the most misleading row here, now reads
+straight.** It was 137 MB, almost all of it value-log segments preallocated at
+`vlog_segment_bytes` to hold documents that now stay inline. At 44 MB against 33
+and 20 it is comparable data, not reserved space.
+
+**A caveat on the comparison itself.** Cryptand is a document database with a
+manifest, segment filters, liveness statistics and a value-log GC live during
+these numbers, page-level CRC-32C verified on every read, optional
+authenticated encryption, and a file three other language runtimes can open.
+MVStore and RocksDB are key-value stores. This table says Cryptand is in the
+same league on the workload it is designed for; it does not say the three do the
+same amount of work, and they do not.

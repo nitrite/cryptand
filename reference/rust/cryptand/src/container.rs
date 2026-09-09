@@ -331,7 +331,7 @@ impl Default for Superblock {
             l0_trigger: 4,
             tier_width: 4,
             memtable_shards: 8,
-            vlog_min: 256,
+            vlog_min: 2048,
             blob_threshold: 262144,
             vlog_segment_bytes: 64 << 20,
             vlog_space_target_pct: 150,

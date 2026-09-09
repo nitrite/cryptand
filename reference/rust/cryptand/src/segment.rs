@@ -692,7 +692,9 @@ pub struct SegmentBuilder {
     tree_span: std::collections::BTreeMap<u32, u64>,
     /// Distinct **user** keys, for the filter: all versions of a key share one
     /// entry, so `entry_count` — which counts versions — is the wrong number.
-    user_keys: Vec<Vec<u8>>,
+    /// `cfh64` of each distinct user key, for the filter — not the keys.
+    /// See `BlockedBloom::build_from_hashes`.
+    user_key_hashes: Vec<u64>,
 }
 
 impl SegmentBuilder {
@@ -739,7 +741,7 @@ impl SegmentBuilder {
             min_expiry: 0,
             flags: 0,
             tree_span: Default::default(),
-            user_keys: Vec::new(),
+            user_key_hashes: Vec::new(),
         })
     }
 
@@ -770,8 +772,19 @@ impl SegmentBuilder {
         }
         if self.filter_bits_per_key > 0 {
             let u = user_part(&k);
-            if self.user_keys.last().map(|l| l.as_slice()) != Some(u) {
-                self.user_keys.push(u.to_vec());
+            let h = crate::hash::cfh64(u);
+            // The keys arrive in order, so equal user keys are adjacent and the
+            // last hash is the only one worth comparing against.
+            //
+            // De-duplicating on the hash rather than on the bytes is exact for
+            // this purpose, not an approximation: the filter's bits are a
+            // function of the hash alone, so two adjacent keys that collide in
+            // 64 bits would set identical bits and skipping the second changes
+            // nothing a probe can observe. What it affects is
+            // `distinct_keys`, which sizes the filter — one short, on a 64-bit
+            // collision between neighbours.
+            if self.user_key_hashes.last() != Some(&h) {
+                self.user_key_hashes.push(h);
             }
         }
         self.prev_key = Some(k.clone());
@@ -946,13 +959,13 @@ impl SegmentBuilder {
     }
 
     fn emit_filter(&mut self) -> Result<u64> {
-        if self.filter_bits_per_key == 0 || self.user_keys.is_empty() {
+        if self.filter_bits_per_key == 0 || self.user_key_hashes.is_empty() {
             return Ok(0);
         }
-        let f = BlockedBloom::build(
-            &self.user_keys,
+        let f = BlockedBloom::build_from_hashes(
+            &self.user_key_hashes,
             self.filter_bits_per_key as u32,
-            self.user_keys.len() as u64,
+            self.user_key_hashes.len() as u64,
         );
         let payload = f.encode_payload();
         let first = self.pages.len() as u64 + 1;

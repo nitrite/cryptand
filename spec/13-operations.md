@@ -247,9 +247,46 @@ its page path, until phase 9 — which is why this paragraph exists.
 | | |
 |---|---|
 | `page_cache_hit_rate` | |
+| `page_reads_per_lookup` | pages fetched **through the pager** per point read. Wall time varies with the machine; this does not, and it is what catches the two cache mistakes below |
 | `segments_probed_per_lookup` (p50/p99) | validates the bounded read tail |
 | `filter_false_positive_rate` | validates §2.4's bit allocation |
 | `value_reads_per_scanned_row` | validates readahead and clustering. **Measured 0.100 when clustering is working and 1.038 when it is not** (`reference/dart/cryptand/bench/p8_aged_scan.dart`); an earlier draft estimated 0.13 and 1.0 |
+
+### 6.1 What a page cache is for, and two ways to have one that does not work
+
+**Non-normative, and measured.** A page cache is required by
+`12-profiles.md` §1's budget row, but holding the bytes is not the same as
+serving them, and two implementations of this format have had a cache that
+looked healthy on `page_cache_hit_rate` and did no good at all.
+
+**A hit that copies is barely a hit.** A B+tree descent visits one page per
+level and only reads. Handing each level a private copy of an 8 KiB payload and
+re-parsing its framing costs, per point read, three page-sized allocations,
+three memcpys and three parses — for bytes that no caller writes to. Measured on
+the CRUD matrix, sharing an immutable parsed page instead of copying a payload
+was worth **2.7× on point reads**, and made the cursor's `seek` — previously the
+top frame of the read profile by a factor of three — unremarkable. An
+implementation SHOULD cache B+tree pages **parsed and shared**, and it MUST then
+hold them read-only: every accessor copies out, none writes in.
+
+**A page written a moment ago should not be read back.** Writing a segment
+extent invalidates every page id it covers, which is necessary — extents are
+freed, reallocated and rewritten, and a stale cached page is a wrong answer. But
+a freshly built segment is about to be *read*: a flush or a compaction has every
+page of it in memory, discards all of it, and then pays a fetch per page on
+first touch. The reference implementation measured **0.34 page reads per point
+lookup on a dataset that fits its cache several times over** — every miss a
+first touch of a page its own builder had just written. Admitting the built
+pages is not a warm-up heuristic; it is declining to throw away what is already
+in hand. It took `page_reads_per_lookup` to **0.00** and point reads from
+889 000/s to 1 240 000/s.
+
+The value log is the exception in the other direction: an **open** segment's
+pages are still being filled by other writers through `04-segments.md` §6.2's
+reserve-then-`pwrite`, so a reader that caches one holds a page with a hole in
+it where an in-flight reservation has not landed. Only a **sealed** value-log
+segment may be cached. Sealing is what makes an extent immutable, and immutable
+is what a cache requires.
 
 **Structure**
 

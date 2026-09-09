@@ -63,6 +63,23 @@
       to read the shared conformance vectors, which are JSON.
     -->
     <dependencies>
+        <!--
+          Comparison-benchmark only, and `test` scope so neither reaches the
+          published artifact. `reference/bench/README.md` explains what the
+          comparison does and does not claim.
+        -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2-mvstore</artifactId>
+            <version>2.3.232</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.rocksdb</groupId>
+            <artifactId>rocksdbjni</artifactId>
+            <version>9.10.0</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

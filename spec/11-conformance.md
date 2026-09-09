@@ -312,6 +312,15 @@ Rules:
   **0.3**. It MUST also assert `locality_debt` is within `locality_debt_pct`
   at the end, because that is the bound the other two numbers follow from.
 
+  **The fixture MUST set `vlog_min` below its own documents.** Every profile
+  now puts `vlog_min` at a quarter page (`12-profiles.md` §2.5), so a
+  document-shaped value is inline, and none of the four mechanisms this test
+  exists to enforce engages for an inline value. A fixture that inherited
+  separation from the old `desktop` constant of 256 keeps passing when the
+  constant moves — with `value_reads_per_scanned_row` at 0.000, zero live
+  value-log runs and a ratio of exactly 1.0. It measures nothing, and it says
+  so only to someone who reads the counters printed beside the assertion.
+
   This is the test that enforces **four** MUSTs whose violation is invisible to
   every other check and shows up months later as "the database got slow":
   clustered promotion (`04-segments.md` §6.3), cold-tier collection (§6.8),

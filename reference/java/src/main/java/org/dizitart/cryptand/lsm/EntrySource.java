@@ -64,6 +64,42 @@ public interface EntrySource {
         }
     }
 
+    /**
+     * A source over two parallel lists already in internal-key order — what a
+     * memtable shard yields when it is drained in its own iteration order.
+     */
+    final class OfLists implements EntrySource {
+        private final List<byte[]> keys;
+        private final List<BtreePage.Leaf> cells;
+        private int i;
+
+        public OfLists(List<byte[]> keys, List<BtreePage.Leaf> cells) {
+            this.keys = keys;
+            this.cells = cells;
+        }
+
+        @Override
+        public boolean isValid() {
+            return i < keys.size();
+        }
+
+        @Override
+        public byte[] key() {
+            return keys.get(i);
+        }
+
+        @Override
+        public BtreePage.Leaf entry() {
+            return cells.get(i);
+        }
+
+        @Override
+        public boolean next() {
+            i++;
+            return isValid();
+        }
+    }
+
     /** A source over an already-sorted in-memory map, iterated backwards. */
     final class OfMapReverse implements EntrySource {
         private final Iterator<Map.Entry<byte[], BtreePage.Leaf>> it;

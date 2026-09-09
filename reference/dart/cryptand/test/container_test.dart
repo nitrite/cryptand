@@ -215,7 +215,8 @@ void main() {
       expect(Profile.mobile.l0Trigger, 2);
       expect(Profile.tablet.vlogMin, 1024);
       expect(Profile.desktop.pageSize, 8192);
-      expect(Profile.desktop.vlogMin, 256);
+      expect(Profile.desktop.vlogMin, 2048);
+      expect(Profile.server.vlogMin, 4096);
       expect(Profile.desktop.fanout, 8);
       expect(Profile.desktop.filterBitsUpper, 16);
       expect(Profile.desktop.filterBitsLast, 10);
@@ -250,7 +251,7 @@ void main() {
     expect(back.pageSize, 16384);
     expect(back.commitId, 12345);
     expect(back.profile, Profile.server);
-    expect(back.vlogMin, 256);
+    expect(back.vlogMin, 4096);
     expect(back.fanout, 10);
     expect(back.overlapBound, 3);
     expect(back.levelCount, 4);

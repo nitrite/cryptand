@@ -142,8 +142,18 @@ public final class PageHeader {
      * {@code crc32c}, not from any page checksum.
      */
     public void writeInto(byte[] page, int checksumEnd) {
-        if (page.length < BYTES) {
-            throw new InvalidArgumentException("page is " + page.length + " bytes, header needs " + BYTES);
+        writeInto(page, 0, page.length, checksumEnd);
+    }
+
+    /**
+     * As {@link #writeInto(byte[], int)}, for a page that lives at
+     * {@code base} inside a larger buffer — a segment extent assembled in one
+     * array and written with one I/O. {@code checksumEnd} is relative to the
+     * page, not to the buffer.
+     */
+    public void writeInto(byte[] buf, int base, int pageLen, int checksumEnd) {
+        if (pageLen < BYTES) {
+            throw new InvalidArgumentException("page is " + pageLen + " bytes, header needs " + BYTES);
         }
         ByteWriter w = new ByteWriter(BYTES);
         w.u32(0); // checksum, filled in below
@@ -156,13 +166,13 @@ public final class PageHeader {
         if (h.length != BYTES) {
             throw new IllegalStateException("page header is " + h.length + " bytes, expected " + BYTES);
         }
-        System.arraycopy(h, 0, page, 0, BYTES);
+        System.arraycopy(h, 0, buf, base, BYTES);
 
-        checksum = Crc32c.of(page, 4, checksumEnd - 4);
-        page[0] = (byte) checksum;
-        page[1] = (byte) (checksum >>> 8);
-        page[2] = (byte) (checksum >>> 16);
-        page[3] = (byte) (checksum >>> 24);
+        checksum = Crc32c.of(buf, base + 4, checksumEnd - 4);
+        buf[base] = (byte) checksum;
+        buf[base + 1] = (byte) (checksum >>> 8);
+        buf[base + 2] = (byte) (checksum >>> 16);
+        buf[base + 3] = (byte) (checksum >>> 24);
     }
 
     /** The 40 header bytes on their own, with {@link #checksum} written as given. */

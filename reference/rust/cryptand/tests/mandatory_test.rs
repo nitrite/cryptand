@@ -154,6 +154,13 @@ fn aged_scan_stays_within_1_5x_and_0_3_value_reads_per_row() {
     // locality-debt bound (§6.9), and value readahead (§8.1).
     let (_t, mut e) = engine("agedscan", Profile::Desktop);
     e.memtable_entry_limit = 400;
+    // `11-conformance.md` §6: the fixture MUST set `vlog_min` below its own
+    // documents. Every profile now puts it at a quarter page
+    // (`12-profiles.md` §2.5), so a 600-byte value is **inline** and none of
+    // the four mechanisms under test engages at all. The literal 600 used to
+    // clear `desktop`'s old 256 by accident; when the default moved, this test
+    // kept passing with `v/row 0.000` and a ratio of 1.0.
+    e.sb.vlog_min = 256;
     let n = 2_000i64;
     let value = vec![3u8; 600]; // above vlog_min, so every value separates
     for i in 0..n {

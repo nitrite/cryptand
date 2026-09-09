@@ -94,7 +94,7 @@ public final class VectorIndex {
         return metric;
     }
 
-    public int size() {
+    public synchronized int size() {
         return slotToDoc.size();
     }
 
@@ -126,7 +126,24 @@ public final class VectorIndex {
     // ==================================================================
 
     /** Indexes a document's vector field, replacing any slot it already owns. */
-    public void put(long nitriteId, Value.Doc document) {
+
+    // ==================================================================
+    // Concurrency — the commit hook runs on the committer thread
+    // ==================================================================
+    //
+    // `Engine.publishSuperblock` runs this index's `commit()` from the
+    // committer while the application thread is still calling `put` and
+    // `remove` on it. The state underneath — a pair of maps here, an
+    // `ArrayList` of entries in the spatial index — is not thread-safe, so the two must
+    // not overlap: a repack that iterates the entry list while the application
+    // grows it loses entries outright. Measured at 458 of 500 points found.
+    //
+    // One monitor over the mutators, the commit and the queries is the whole
+    // fix. None of these is on a hot path — an index update is per document,
+    // not per operation — and the committer holds `structure` around the hook,
+    // so this monitor is always taken after it and never before.
+
+    public synchronized void put(long nitriteId, Value.Doc document) {
         float[] vector = vectorOf(document);
         if (vector == null) {
             remove(nitriteId);
@@ -159,7 +176,7 @@ public final class VectorIndex {
      * delete correct <em>immediately</em> even though the graph is repaired
      * later.
      */
-    public void remove(long nitriteId) {
+    public synchronized void remove(long nitriteId) {
         Long slot = docToSlot.remove(nitriteId);
         if (slot == null) {
             return;
@@ -195,7 +212,7 @@ public final class VectorIndex {
      * Rebuilds adjacency and republishes the roots. Called on the commit path,
      * so the graph, the maps and the document write land under one superblock.
      */
-    public void commit() {
+    public synchronized void commit() {
         rebuildAdjacency();
         long root = adjacency.commit();
         region.liveCount = slotToDoc.size();
@@ -292,7 +309,7 @@ public final class VectorIndex {
         return out;
     }
 
-    public List<Long> neighbours(int level, long slot) {
+    public synchronized List<Long> neighbours(int level, long slot) {
         byte[] raw = adjacency.get(adjacencyKey(level, slot));
         return raw == null ? List.of() : decodeAdjacency(((Value.Bytes) Cve.decode(raw)).value());
     }
@@ -309,7 +326,7 @@ public final class VectorIndex {
      * returned, and a slot with no live document is never returned — which is
      * what makes a delete correct immediately.
      */
-    public List<Hit> search(float[] query, int k, java.util.function.LongPredicate filter) {
+    public synchronized List<Hit> search(float[] query, int k, java.util.function.LongPredicate filter) {
         if (query.length != dim) {
             throw new InvalidArgumentException("query has " + query.length
                     + " dimensions, index " + name + " declares " + dim);
@@ -396,7 +413,7 @@ public final class VectorIndex {
      * implementation encountering a graph it cannot trust MUST be able to
      * rebuild rather than fail.
      */
-    public void rebuild() {
+    public synchronized void rebuild() {
         slotToDoc.clear();
         docToSlot.clear();
         nextSlot = 1;

@@ -186,7 +186,7 @@ final class LevelPolicy {
 final class Engine {
   Engine({
     this.pageSize = 4096,
-    this.vlogMin = 256,
+    this.vlogMin = 2048,
     this.memtableEntries = 20000,
     this.policy = const LocalityPolicy(),
     this.levels = LevelPolicy.desktop,

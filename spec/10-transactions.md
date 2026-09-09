@@ -64,14 +64,48 @@ committer (one, background):
   B. flush        flush the open value-log segments' tails -- a durability
                   barrier over the bytes appended so far, NOT a seal
   C. barrier      one fdatasync covering every write since the last commit
-  D. flush        any memtable shard over its budget → bulk-build an L0
-                  segment (04 §2.3), append it, and edit the manifest tree
+  D. flush        any memtable shard over its budget → bulk-build ONE L0
+                  segment (04 §2.3) from all of them, append it, and edit the
+                  manifest tree
   E. barrier      fdatasync
   F. superblock   write the inactive slot with commit_id+1,
                   visible_seq = the highest fully durable seq,
                   next_seq, and the new roots
   G. barrier      fdatasync; wake every writer waiting at or below visible_seq
 ```
+
+### 2.1.1 Step D is gated, and it produces one segment
+
+**Normative.** Two requirements, and both were learned by writing an
+implementation that met neither.
+
+**A memtable shard is flushed when it is over its budget, not when a commit
+happens.** The committer runs on every commit; the flush does not. An
+implementation that builds a segment out of whatever is resident whenever the
+committer wakes turns a memtable into a write-through buffer: one L0 segment per
+committed batch, so a workload committing one document at a time gets one
+segment per document. The reference implementation measured **525 flushes and 42
+compactions for 20 000 mixed operations of which 5 000 were writes — 119 MB to
+device for 3.2 MB of documents, and 648 ms of its 866 ms wall clock spent
+stalled in backpressure that its own flushing had created.** The budget is the
+whole point of the structure; a memtable emptied on every commit is not a
+memtable.
+
+**One flush produces one L0 segment, whatever `memtable_shards` is.** The shards
+partition the key space by hash, so their contents are disjoint and each is
+already in internal-key order: merging them is a bounded heap over
+`memtable_shards` sources and the output is a single sorted run. Emitting one
+segment per shard instead puts `memtable_shards` runs into L0 at once — on
+`desktop` that is 8 against an `l0_trigger` of 4, so **a single flush cycle
+overshoots the trigger by 2× on its own** and the next write is stalled waiting
+for a compaction the flush just made necessary. `l0_trigger` counts runs, and
+these two profile constants are not independent: the one that gives is this one.
+
+The consequence for durability is stated where it belongs, in §7 and §8: a value
+below `vlog_min` lives nowhere but the memtable until step D runs, so a mode
+that acknowledges only after the write is on the device MUST force the flush
+rather than wait for the budget. `none` and `os` acknowledge in the writer,
+before the committer has run at all, and §7's table says what that means.
 
 **Step B flushes; it does not seal.** An earlier draft called it "seal/flush",
 and the two words name different things. Sealing is `04-segments.md` §6.2's
@@ -364,6 +398,25 @@ written against a particular language.
 `os` and `none` never risk structural corruption; they risk losing recent
 batches. That property comes from append-only and copy-on-write, and is worth
 stating to applications because it is not true of Hive's append-only file.
+
+**What "recent batches" means here, exactly.** This format has no write-ahead
+log (§2.1), so a value's first durable home depends on its size:
+
+- a value **at or above `vlog_min`** is written to the value log during step 3,
+  on the writer's own thread, before the batch is sequenced — so it is in the
+  file the moment the batch is acknowledged;
+- a value **below `vlog_min`** is inline, and inline means *in the memtable*
+  until step D builds it into an L0 segment.
+
+`sync` and `full` acknowledge only after the barrier of steps E–G, so both are
+durable in the sense their row claims. `none` and `os` acknowledge in the writer
+and therefore acknowledge before either has necessarily reached the file. The
+window is bounded by the memtable budget, and an implementation MUST NOT close
+it by flushing on every commit — §2.1.1 measures what that costs. An
+implementation SHOULD say plainly that under `none` and `os` a process crash can
+lose up to one memtable of inline values, because §12-profiles.md now puts
+`vlog_min` at a quarter page in every profile and a document-shaped value is
+therefore inline in the ordinary case.
 
 ## 8. Reclamation and long readers
 

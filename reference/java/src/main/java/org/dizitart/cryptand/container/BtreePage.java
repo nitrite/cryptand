@@ -163,6 +163,12 @@ public final class BtreePage {
                 subtreeEntries, prefix, ptrOffset);
     }
 
+    /** The {@code is_leaf} flag straight out of a payload, without parsing it. */
+    public static boolean isLeafPayload(byte[] payload) {
+        int flags = (payload[6] & 0xFF) | ((payload[7] & 0xFF) << 8);
+        return (flags & FLAG_IS_LEAF) != 0;
+    }
+
     public int cellCount() {
         return cellCount;
     }
@@ -372,88 +378,154 @@ public final class BtreePage {
      * a sorted stream and internal trees are rebuilt by copy-on-write.
      */
     public static byte[] encodeLeaves(List<Leaf> cells, int payloadLen, long subtreeEntries) {
-        List<byte[]> bodies = new ArrayList<>(cells.size());
+        byte[] prefix = commonPrefixOfKeys(cells);
+        int n = cells.size();
+        int total = 0;
+        for (Leaf c : cells) {
+            total += leafCellBytes(c, prefix.length) - 2;
+        }
+        byte[] out = startPage(n, prefix, payloadLen, true, subtreeEntries, total);
+        if (out == null) {
+            return null;
+        }
+        int top = payloadLen;
+        for (int i = 0; i < n; i++) {
+            Leaf c = cells.get(i);
+            top -= leafCellBytes(c, prefix.length) - 2;
+            int p = top;
+            byte[] key = c.key();
+            int suffixLen = key.length - prefix.length;
+            p = putUvar(out, p, suffixLen);
+            System.arraycopy(key, prefix.length, out, p, suffixLen);
+            p += suffixLen;
+            out[p++] = (byte) c.kindFlags();
+            if (c.hasExpiry()) {
+                p = putU64(out, p, c.expiryMs());
+            }
+            switch (c.kind()) {
+                case Kind.INLINE -> {
+                    p = putUvar(out, p, c.value().length);
+                    System.arraycopy(c.value(), 0, out, p, c.value().length);
+                }
+                case Kind.OVERFLOW -> {
+                    p = putUvar(out, p, c.value().length);
+                    System.arraycopy(c.value(), 0, out, p, c.value().length);
+                    p += c.value().length;
+                    putU64(out, p, c.overflowPage());
+                }
+                case Kind.VLOG, Kind.BLOB -> System.arraycopy(c.value(), 0, out, p, 16);
+                default -> {
+                }
+            }
+            putPointer(out, prefix.length, i, top);
+        }
+        return out;
+    }
+
+    public static byte[] encodeInternals(List<Internal> cells, int payloadLen) {
+        byte[] prefix = commonPrefixOfSeparators(cells);
+        int n = cells.size();
+        int total = 0;
+        long entries = 0;
+        for (Internal c : cells) {
+            total += internalCellBytes(c, prefix.length) - 2;
+            entries += c.childSubtreeEntries();
+        }
+        byte[] out = startPage(n, prefix, payloadLen, false, entries, total);
+        if (out == null) {
+            return null;
+        }
+        int top = payloadLen;
+        for (int i = 0; i < n; i++) {
+            Internal c = cells.get(i);
+            top -= internalCellBytes(c, prefix.length) - 2;
+            int p = top;
+            byte[] sep = c.separator();
+            int suffixLen = sep.length - prefix.length;
+            p = putUvar(out, p, suffixLen);
+            System.arraycopy(sep, prefix.length, out, p, suffixLen);
+            p += suffixLen;
+            p = putU64(out, p, c.childPage());
+            putU64(out, p, c.childSubtreeEntries());
+            putPointer(out, prefix.length, i, top);
+        }
+        return out;
+    }
+
+    /**
+     * The page header and prefix, or null when the cells do not fit.
+     *
+     * <p>Cells are written <strong>straight into this array</strong> by the two
+     * encoders above. They used to build a {@code ByteWriter} per cell and call
+     * {@code toBytes()} on it — two allocations and two copies of every cell in
+     * every page a flush or a compaction wrote — hand the list to a packer, and
+     * have the packer copy each body a third time into the page. A cell's size
+     * is already known exactly ({@code leafCellBytes} is what the fit test uses),
+     * so its offset is known before it is written and there is nothing to
+     * assemble it in.
+     */
+    private static byte[] startPage(int n, byte[] prefix, int payloadLen, boolean isLeaf,
+                                    long subtreeEntries, int bodyBytes) {
+        int freeStart = HEADER + prefix.length + 2 * n;
+        if (freeStart + bodyBytes > payloadLen) {
+            return null;
+        }
+        byte[] out = new byte[payloadLen];
+        putU16(out, 0, n);
+        putU16(out, 2, freeStart);
+        putU16(out, 4, prefix.length);
+        putU16(out, 6, isLeaf ? FLAG_IS_LEAF : 0);
+        putU64(out, 8, subtreeEntries);
+        System.arraycopy(prefix, 0, out, HEADER, prefix.length);
+        return out;
+    }
+
+    private static void putPointer(byte[] out, int prefixLen, int i, int offset) {
+        putU16(out, HEADER + prefixLen + 2 * i, offset);
+    }
+
+    private static void putU16(byte[] out, int p, int v) {
+        out[p] = (byte) v;
+        out[p + 1] = (byte) (v >>> 8);
+    }
+
+    private static int putU64(byte[] out, int p, long v) {
+        for (int i = 0; i < 8; i++) {
+            out[p + i] = (byte) (v >>> (8 * i));
+        }
+        return p + 8;
+    }
+
+    private static int putUvar(byte[] out, int p, long v) {
+        while (Long.compareUnsigned(v, 0x80L) >= 0) {
+            out[p++] = (byte) ((v & 0x7F) | 0x80);
+            v >>>= 7;
+        }
+        out[p++] = (byte) v;
+        return p;
+    }
+
+    /** {@link #commonPrefix} over leaf keys, without materialising a key list. */
+    private static byte[] commonPrefixOfKeys(List<Leaf> cells) {
+        if (cells.isEmpty()) {
+            return new byte[0];
+        }
         List<byte[]> keys = new ArrayList<>(cells.size());
         for (Leaf c : cells) {
             keys.add(c.key());
         }
-        byte[] prefix = commonPrefix(keys);
-        for (Leaf c : cells) {
-            ByteWriter w = new ByteWriter(32);
-            int suffixLen = c.key().length - prefix.length;
-            w.uvar(suffixLen).bytes(c.key(), prefix.length, suffixLen);
-            w.u8(c.kindFlags());
-            if (c.hasExpiry()) {
-                w.u64(c.expiryMs());
-            }
-            switch (c.kind()) {
-                case Kind.INLINE -> w.uvar(c.value().length).bytes(c.value());
-                case Kind.OVERFLOW -> {
-                    w.uvar(c.value().length).bytes(c.value());
-                    w.u64(c.overflowPage());
-                }
-                case Kind.VLOG, Kind.BLOB -> {
-                    // No `value_len`: the only legal value would be 16, and a
-                    // length field with one legal value is not information, it
-                    // is a second place for two implementations to disagree.
-                    w.bytes(c.value());
-                }
-                default -> {
-                }
-            }
-            bodies.add(w.toBytes());
-        }
-        return pack(bodies, prefix, payloadLen, true, subtreeEntries);
+        return commonPrefix(keys);
     }
 
-    public static byte[] encodeInternals(List<Internal> cells, int payloadLen) {
-        List<byte[]> bodies = new ArrayList<>(cells.size());
+    private static byte[] commonPrefixOfSeparators(List<Internal> cells) {
+        if (cells.isEmpty()) {
+            return new byte[0];
+        }
         List<byte[]> keys = new ArrayList<>(cells.size());
-        long entries = 0;
         for (Internal c : cells) {
             keys.add(c.separator());
-            entries += c.childSubtreeEntries();
         }
-        byte[] prefix = commonPrefix(keys);
-        for (Internal c : cells) {
-            ByteWriter w = new ByteWriter(32);
-            int suffixLen = c.separator().length - prefix.length;
-            w.uvar(suffixLen).bytes(c.separator(), prefix.length, suffixLen);
-            w.u64(c.childPage()).u64(c.childSubtreeEntries());
-            bodies.add(w.toBytes());
-        }
-        return pack(bodies, prefix, payloadLen, false, entries);
-    }
-
-    private static byte[] pack(List<byte[]> bodies, byte[] prefix, int payloadLen,
-                               boolean isLeaf, long subtreeEntries) {
-        int n = bodies.size();
-        int total = 0;
-        for (byte[] b : bodies) {
-            total += b.length;
-        }
-        int freeStart = HEADER + prefix.length + 2 * n;
-        if (freeStart + total > payloadLen) {
-            return null;
-        }
-        byte[] out = new byte[payloadLen];
-        ByteWriter w = new ByteWriter(freeStart);
-        w.u16(n).u16(freeStart).u16(prefix.length).u16(isLeaf ? FLAG_IS_LEAF : 0);
-        w.u64(subtreeEntries);
-        w.bytes(prefix);
-        byte[] head = w.toBytes();
-        System.arraycopy(head, 0, out, 0, head.length);
-
-        int top = payloadLen;
-        for (int i = 0; i < n; i++) {
-            byte[] body = bodies.get(i);
-            top -= body.length;
-            System.arraycopy(body, 0, out, top, body.length);
-            int p = HEADER + prefix.length + 2 * i;
-            out[p] = (byte) top;
-            out[p + 1] = (byte) (top >>> 8);
-        }
-        return out;
+        return commonPrefix(keys);
     }
 
     /** Bytes a leaf cell occupies, its 2-byte pointer included, at a given prefix length. */

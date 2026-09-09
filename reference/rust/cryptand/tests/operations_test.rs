@@ -234,8 +234,13 @@ fn a_lost_manifest_is_rebuilt_from_the_segment_headers() {
 #[test]
 fn a_lost_value_log_stats_entry_is_rebuilt_by_scanning_the_records() {
     let (_t, mut e) = engine("repair-vlog", Profile::Desktop);
+    // Sized off `vlog_min` rather than off a literal: the cut-off moved to a
+    // quarter page (`12-profiles.md` §2.5) and a 700-byte value that used to
+    // separate now stays inline, so this stopped exercising the value log at
+    // all rather than failing.
+    let big = vec![1u8; e.sb.vlog_min as usize + 512];
     for i in 0..50i64 {
-        e.put(T, &Value::NitriteId(i), &vec![1u8; 700]).unwrap();
+        e.put(T, &Value::NitriteId(i), &big).unwrap();
     }
     e.flush().unwrap();
     e.commit(Durability::Sync).unwrap();
@@ -251,7 +256,7 @@ fn a_lost_value_log_stats_entry_is_rebuilt_by_scanning_the_records() {
         assert!(e.vlog_stats[&id].sealed);
     }
     for i in 0..50i64 {
-        assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap().unwrap(), vec![1u8; 700]);
+        assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap().unwrap(), big);
     }
 }
 

@@ -193,8 +193,13 @@ enum Profile {
   custom(0, 4096, 1024, 2, 4, 2, 1, 2 << 20, 4 << 20, 120, 20, 128, 12, 10),
   mobile(1, 4096, 1024, 2, 4, 2, 1, 2 << 20, 4 << 20, 120, 20, 128, 12, 10),
   tablet(2, 4096, 1024, 4, 6, 3, 2, 8 << 20, 16 << 20, 130, 20, 256, 14, 10),
-  desktop(3, 8192, 256, 4, 8, 4, 2, 32 << 20, 64 << 20, 150, 20, 256, 16, 10),
-  server(4, 16384, 256, 8, 10, 6, 3, 128 << 20, 256 << 20, 150, 25, 1024, 16, 10);
+  // `12-profiles.md` section 2.5 — vlog_min is a quarter page in every
+  // profile. desktop and server separated at 256, which put the format's own
+  // 639-byte reference document in the value log: a pwrite per write, a second
+  // fetch per read, and a vlog_segment_bytes extent preallocated to hold what
+  // fits in the tree.
+  desktop(3, 8192, 2048, 4, 8, 4, 2, 32 << 20, 64 << 20, 150, 20, 256, 16, 10),
+  server(4, 16384, 4096, 8, 10, 6, 3, 128 << 20, 256 << 20, 150, 25, 1024, 16, 10);
 
   const Profile(
     this.code,
@@ -310,7 +315,15 @@ final class Superblock {
   })  : databaseUuid = databaseUuid ?? Uint8List(16),
         sbMac = sbMac ?? Uint8List(32),
         keyslots = keyslots ?? Uint8List(Sb.keyslotSize * Sb.keyslotCount),
-        vlogMin = vlogMin ?? profile.vlogMin,
+        // Clamped to the cap `00-conventions.md` section 8 sets, because the
+        // profile's page size and this superblock's need not agree: a caller
+        // may name an explicit page_size and leave the profile at its default.
+        // Every profile now sets vlog_min to a quarter of *its own* page size
+        // (`12-profiles.md` section 2.5), so an unclamped default from a
+        // larger-paged profile is above the cap rather than merely unusual.
+        vlogMin = vlogMin ?? (profile.vlogMin < pageSize ~/ 4
+            ? profile.vlogMin
+            : pageSize ~/ 4),
         blobThreshold = blobThreshold ?? profile.blobThreshold,
         vlogSegmentBytes = vlogSegmentBytes ?? profile.vlogSegmentBytes,
         vlogSpaceTargetPct = vlogSpaceTargetPct ?? profile.vlogSpaceTargetPct,

@@ -163,14 +163,33 @@ public final class Segment {
      */
     public final class Cursor {
 
-        private final List<Long> pages = new ArrayList<>();
-        private final List<Integer> cells = new ArrayList<>();
+        // A primitive stack, not `List<Long>`/`List<Integer>`. A point read
+        // opens a cursor, and the boxed pair meant two lists, their backing
+        // arrays and a `Long` and an `Integer` per level, all garbage the
+        // moment the read returned. Depth is bounded by the tree's height;
+        // 16 levels of a B+tree over 8 KiB pages is far past any real file, and
+        // the stack grows if one ever gets there.
+        private long[] pages = new long[16];
+        private int[] cells = new int[16];
+        private int depth;
         private BtreePage leafPage;
         private boolean valid;
 
+        private void push(long page, int cell) {
+            if (depth == pages.length) {
+                pages = java.util.Arrays.copyOf(pages, depth * 2);
+                cells = java.util.Arrays.copyOf(cells, depth * 2);
+            }
+            pages[depth] = page;
+            cells[depth] = cell;
+            depth++;
+        }
+
         private BtreePage page(long absolutePage) {
-            byte[] payload = pager.readPage(absolutePage);
-            return BtreePage.parse(payload, 0, payload.length);
+            // Shared and parsed once — see `Pager.readTreePage`. A segment is
+            // written once and never edited, so the page a descent reads is the
+            // page that was built.
+            return pager.readTreePage(absolutePage);
         }
 
         public boolean isValid() {
@@ -178,21 +197,18 @@ public final class Segment {
         }
 
         public void seekFirst() {
-            pages.clear();
-            cells.clear();
+            depth = 0;
             descendFrom(absolute(meta.rootPage), true);
         }
 
         public void seekLast() {
-            pages.clear();
-            cells.clear();
+            depth = 0;
             descendFrom(absolute(meta.rootPage), false);
         }
 
         /** Positions on the first entry with an internal key {@code >= target}. */
         public void seek(byte[] target) {
-            pages.clear();
-            cells.clear();
+            depth = 0;
             long p = absolute(meta.rootPage);
             while (true) {
                 BtreePage b = page(p);
@@ -202,8 +218,7 @@ public final class Segment {
                 }
                 if (b.isLeaf()) {
                     int i = b.lowerBound(target);
-                    pages.add(p);
-                    cells.add(i);
+                    push(p, i);
                     leafPage = b;
                     if (i >= b.cellCount()) {
                         valid = true;
@@ -216,20 +231,19 @@ public final class Segment {
                     return;
                 }
                 int i = b.childIndexFor(target);
-                pages.add(p);
-                cells.add(i);
+                push(p, i);
                 p = absolute(b.internal(i).childPage());
             }
         }
 
         public byte[] key() {
             require();
-            return leafPage.key(cells.get(cells.size() - 1));
+            return leafPage.key(cells[depth - 1]);
         }
 
         public BtreePage.Leaf entry() {
             require();
-            return leafPage.leaf(cells.get(cells.size() - 1));
+            return leafPage.leaf(cells[depth - 1]);
         }
 
         private void require() {
@@ -242,28 +256,24 @@ public final class Segment {
             if (!valid) {
                 return false;
             }
-            int last = cells.size() - 1;
-            cells.set(last, cells.get(last) + 1);
+            cells[depth - 1]++;
             return advance();
         }
 
         /** Repairs the stack after the leaf index ran past the end of its page. */
         private boolean advance() {
-            int last = cells.size() - 1;
-            if (cells.get(last) < leafPage.cellCount()) {
+            if (cells[depth - 1] < leafPage.cellCount()) {
                 return true;
             }
-            int depth = last - 1;
-            while (depth >= 0) {
-                BtreePage b = page(pages.get(depth));
-                int i = cells.get(depth) + 1;
+            for (int d = depth - 2; d >= 0; d--) {
+                BtreePage b = page(pages[d]);
+                int i = cells[d] + 1;
                 if (i < b.cellCount()) {
-                    cells.set(depth, i);
-                    truncateTo(depth);
+                    cells[d] = i;
+                    depth = d + 1;
                     descendFrom(absolute(b.internal(i).childPage()), true);
                     return valid;
                 }
-                depth--;
             }
             valid = false;
             return false;
@@ -273,32 +283,22 @@ public final class Segment {
             if (!valid) {
                 return false;
             }
-            int last = cells.size() - 1;
-            if (cells.get(last) > 0) {
-                cells.set(last, cells.get(last) - 1);
+            if (cells[depth - 1] > 0) {
+                cells[depth - 1]--;
                 return true;
             }
-            int depth = last - 1;
-            while (depth >= 0) {
-                BtreePage b = page(pages.get(depth));
-                int i = cells.get(depth) - 1;
+            for (int d = depth - 2; d >= 0; d--) {
+                BtreePage b = page(pages[d]);
+                int i = cells[d] - 1;
                 if (i >= 0) {
-                    cells.set(depth, i);
-                    truncateTo(depth);
+                    cells[d] = i;
+                    depth = d + 1;
                     descendFrom(absolute(b.internal(i).childPage()), false);
                     return valid;
                 }
-                depth--;
             }
             valid = false;
             return false;
-        }
-
-        private void truncateTo(int depth) {
-            while (pages.size() > depth + 1) {
-                pages.remove(pages.size() - 1);
-                cells.remove(cells.size() - 1);
-            }
         }
 
         private void descendFrom(long p, boolean leftmost) {
@@ -309,8 +309,7 @@ public final class Segment {
                     return;
                 }
                 int i = leftmost ? 0 : b.cellCount() - 1;
-                pages.add(p);
-                cells.add(i);
+                push(p, i);
                 if (b.isLeaf()) {
                     leafPage = b;
                     valid = true;
@@ -331,14 +330,14 @@ public final class Segment {
             }
             long remaining = n;
             while (remaining > 0 && valid) {
-                int last = cells.size() - 1;
-                long within = leafPage.cellCount() - cells.get(last);
+                int last = depth - 1;
+                long within = leafPage.cellCount() - cells[last];
                 if (remaining < within) {
-                    cells.set(last, (int) (cells.get(last) + remaining));
+                    cells[last] = (int) (cells[last] + remaining);
                     return true;
                 }
                 remaining -= within;
-                cells.set(last, leafPage.cellCount());
+                cells[last] = leafPage.cellCount();
                 if (!advance()) {
                     return false;
                 }

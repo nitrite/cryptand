@@ -126,7 +126,8 @@ impl ProfileConstants {
                 memtable_bytes: 256 << 20,
                 memtable_entries: 200000,
                 memtable_shards: 32,
-                vlog_min: 256,
+                // `12-profiles.md` §2.5 — a quarter page, as in every profile.
+                vlog_min: 4096,
                 blob_threshold: 262144,
                 l0_trigger: 8,
                 fanout: 10,
@@ -157,7 +158,12 @@ impl ProfileConstants {
                 memtable_bytes: 32 << 20,
                 memtable_entries: 20000,
                 memtable_shards: 8,
-                vlog_min: 256,
+                // `12-profiles.md` §2.5 — a quarter page, as in every profile.
+                // This was 256, which put the format's own 639-byte reference
+                // document in the value log: a `pwrite` per write and a second
+                // fetch per read, plus a 64 MiB value-log extent preallocated to
+                // hold what fits in the tree.
+                vlog_min: 2048,
                 blob_threshold: 262144,
                 l0_trigger: 4,
                 fanout: 8,

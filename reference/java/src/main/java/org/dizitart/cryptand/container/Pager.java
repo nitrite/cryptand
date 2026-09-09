@@ -87,6 +87,42 @@ public final class Pager {
      */
     private final java.util.LinkedHashMap<Long, byte[]> payloads =
             new java.util.LinkedHashMap<>(64, 0.75f, true);
+    /** One parsed page in {@link #treeSlots}. Immutable, so publishing it publishes the page. */
+    private record Cached(long pageId, BtreePage page) {
+    }
+
+    /**
+     * Parsed B+tree pages — {@link #readTreePage} — in a
+     * <strong>direct-mapped</strong> cache: slot {@code pageId & treeMask},
+     * one entry per slot, replacement on collision.
+     *
+     * <p>Not an LRU, and deliberately. This is the read path's innermost loop:
+     * a point lookup descends three levels, so an LRU costs three monitor
+     * enters and three access-order restructures of a {@code LinkedHashMap}
+     * keyed by a boxed {@code Long} — {@code Long.equals} showed up in the read
+     * profile by name. A direct-mapped hit is one volatile array load and one
+     * {@code long} compare, with no lock at all, so readers never meet.
+     *
+     * <p>What it gives up is conflict misses: two hot pages that collide evict
+     * each other. A B+tree descent touches a root, an internal page and a leaf,
+     * and the array is sized from the profile's own budget, so collisions are
+     * rare and a miss costs a re-read that was already the uncached price.
+     *
+     * <p>ponytail: direct-mapped, and the upgrade path if a workload ever shows
+     * conflict thrash is 2-way set associativity — two slots per index and the
+     * older of the pair replaced — which does not change the accounting below.
+     */
+    private record Slots(java.util.concurrent.atomic.AtomicReferenceArray<Cached> a, int mask) {
+        Slots(int size) {
+            this(new java.util.concurrent.atomic.AtomicReferenceArray<>(size), size - 1);
+        }
+    }
+
+    /** Volatile and replaced whole, so a resize can never pair one array with another's mask. */
+    private volatile Slots treeSlots = new Slots(1024);
+    /** Occupied slots of {@link #treeSlots}, for {@link #enforceBudget}. */
+    private final java.util.concurrent.atomic.AtomicInteger treeResident =
+            new java.util.concurrent.atomic.AtomicInteger();
     private long pageCacheBytes = 64L * 1024 * 1024;
     private final java.util.concurrent.atomic.AtomicLong cacheHits =
             new java.util.concurrent.atomic.AtomicLong();
@@ -386,6 +422,143 @@ public final class Pager {
         }
     }
 
+    /**
+     * One B+tree page, <strong>parsed once and shared</strong>.
+     *
+     * <p>{@link #readPage} hands back a private copy because a caller owns what
+     * it is given. A B+tree descent does not want one: it visits a page per
+     * level, reads a header and runs a binary search, and never writes. Paying
+     * an 8 KiB {@code clone} and a re-parse per level made
+     * {@code Segment.Cursor.seek} the top frame of the read profile by a
+     * factor of three.
+     *
+     * <p>Sharing is safe here and only here, because {@link BtreePage} is a
+     * read-only view: every accessor copies out of the payload
+     * ({@code key}, {@code leaf}, {@code internal}, {@code prefix}) and none
+     * writes into it. The bytes stay valid because every path that changes a
+     * page on the device — {@link #writePage}, {@link #writeAt},
+     * {@link #freeExtent} — invalidates the page id here as well.
+     */
+    public BtreePage readTreePage(long pageId) {
+        Slots slots = treeSlots;
+        int slot = (int) (pageId & slots.mask());
+        Cached hit = slots.a().get(slot);
+        if (hit != null && hit.pageId() == pageId) {
+            cacheHits.incrementAndGet();
+            return hit.page();
+        }
+        cacheMisses.incrementAndGet();
+        pageReads.incrementAndGet();
+        byte[] page = new byte[pageSize];
+        file.readFully(offsetOf(pageId), page, 0, pageSize);
+        PageHeader h = PageHeader.verify(page, pageId);
+        byte[] payload = decodePayload(page, h, pageId);
+        BtreePage parsed = BtreePage.parse(payload, 0, payload.length);
+        if (pageId >= 2 && slots == treeSlots
+                && slots.a().getAndSet(slot, new Cached(pageId, parsed)) == null) {
+            treeResident.incrementAndGet();
+            synchronized (cache) {
+                enforceBudget();
+            }
+        }
+        return parsed;
+    }
+
+    /**
+     * Admits a B+tree page the caller has just written at {@code pageId}, so
+     * the next read of it does not have to fetch back bytes that were in memory
+     * a moment ago.
+     *
+     * <p>{@link #writeAt} invalidates every page an extent write covers, which
+     * is correct and necessary — an extent is freed, reallocated and rewritten,
+     * and a stale cached page is a wrong answer. But a freshly built segment is
+     * about to be read: a flush or a compaction hands the read path a segment
+     * whose every page it just had, discards all of it, and then pays a
+     * {@code pread} per page on first touch. Measured on the CRUD matrix, that
+     * was <strong>0.34 page reads per point lookup</strong> on a dataset that
+     * fits the cache several times over — the misses were all first touches of
+     * pages the builder had just written.
+     *
+     * <p>Admitting the payload the builder already holds is not a cache warm-up
+     * heuristic; it is declining to throw away what it has.
+     */
+    public void admitTreePage(long pageId, byte[] payload) {
+        if (pageId < 2) {
+            return;
+        }
+        Slots slots = treeSlots;
+        int slot = (int) (pageId & slots.mask());
+        if (slots.a().getAndSet(slot, new Cached(pageId, BtreePage.parse(payload, 0, payload.length)))
+                == null) {
+            treeResident.incrementAndGet();
+            synchronized (cache) {
+                enforceBudget();
+            }
+        }
+    }
+
+    /** Drops a parsed page, if the slot it maps to is holding it. */
+    private void invalidateTree(long pageId) {
+        Slots slots = treeSlots;
+        int slot = (int) (pageId & slots.mask());
+        Cached held = slots.a().get(slot);
+        if (held != null && held.pageId() == pageId && slots.a().compareAndSet(slot, held, null)) {
+            treeResident.decrementAndGet();
+        }
+    }
+
+    /**
+     * Copies {@code len} bytes starting at {@code offset} bytes into the file
+     * out of the page cache, reading only the pages the range actually spans.
+     *
+     * <p>This is what a value-log record read wants. {@link Vlog} read its
+     * records with a bare {@code readFully} on the {@code PageFile}: one
+     * {@code pread} per document fetched, with the page cache — sitting right
+     * there, holding the very page the record is in — bypassed entirely. A
+     * value log is append-only and its records cluster by write order, so a
+     * point read of a recently written document almost always lands in a page
+     * some earlier read already brought in.
+     *
+     * <p>Extent bytes carry no page header of their own ({@code 04-segments.md}
+     * §5): a value-log segment is a raw extent, so the unit cached here is the
+     * raw page, the same one {@link #readRaw} serves, and no checksum is
+     * implied by this call. The record's own checksum is still verified by the
+     * caller, which is where {@code 04-segments.md} §5.1 puts it.
+     */
+    public void readExtentInto(long offset, byte[] dst, int dstOff, int len) {
+        int copied = 0;
+        while (copied < len) {
+            long abs = offset + copied;
+            long pageId = abs / pageSize;
+            int within = (int) (abs - pageId * pageSize);
+            int n = Math.min(len - copied, pageSize - within);
+            byte[] page;
+            synchronized (cache) {
+                page = cache.get(pageId);
+            }
+            if (page != null) {
+                cacheHits.incrementAndGet();
+                System.arraycopy(page, within, dst, dstOff + copied, n);
+            } else if (pageId * (long) pageSize + pageSize > file.size()) {
+                // The last page of a growing extent is not there yet. A
+                // value-log segment is preallocated logically but the file ends
+                // at the last byte actually written, so the page holding the
+                // newest record can be short. Read exactly what was asked for
+                // and cache nothing: the page is still being filled.
+                pageReads.incrementAndGet();
+                file.readFully(abs, dst, dstOff + copied, n);
+            } else {
+                cacheMisses.incrementAndGet();
+                pageReads.incrementAndGet();
+                page = new byte[pageSize];
+                file.readFully(pageId * (long) pageSize, page, 0, pageSize);
+                admit(pageId, page);
+                System.arraycopy(page, within, dst, dstOff + copied, n);
+            }
+            copied += n;
+        }
+    }
+
     /** The whole page as stored, checksum unverified. */
     public byte[] readRaw(long pageId) {
         if (pageId < 0) {
@@ -435,18 +608,24 @@ public final class Pager {
      * the decoration this budget stopped being.
      */
     private void enforceBudget() {
-        while (cache.size() + payloads.size() > 1
-                && (long) (cache.size() + payloads.size()) * pageSize > pageCacheBytes) {
+        while (resident() > 1 && (long) resident() * pageSize > pageCacheBytes) {
             java.util.LinkedHashMap<Long, byte[]> from =
                     payloads.size() >= cache.size() ? payloads : cache;
             java.util.Iterator<java.util.Map.Entry<Long, byte[]>> it = from.entrySet().iterator();
             if (!it.hasNext()) {
+                // Only parsed pages are left, and those are bounded by the slot
+                // array rather than evicted one at a time — `treeSlots` is
+                // sized so that a full array is inside the budget.
                 return;
             }
             it.next();
             it.remove();
             cacheEvictions.incrementAndGet();
         }
+    }
+
+    private int resident() {
+        return cache.size() + payloads.size() + treeResident.get();
     }
 
     private void admit(long pageId, byte[] page) {
@@ -475,6 +654,7 @@ public final class Pager {
             cache.remove(pageId);
             payloads.remove(pageId);
         }
+        invalidateTree(pageId);
     }
 
     /**
@@ -500,6 +680,9 @@ public final class Pager {
                 payloads.remove(p);
             }
         }
+        for (long p = first; p <= last; p++) {
+            invalidateTree(p);
+        }
     }
 
     /** {@code 13-operations.md} §6's {@code page_cache_hit_rate}, as a count. */
@@ -518,7 +701,7 @@ public final class Pager {
     /** Bytes of page currently resident. */
     public long pageCacheResidentBytes() {
         synchronized (cache) {
-            return (long) (cache.size() + payloads.size()) * pageSize;
+            return (long) resident() * pageSize;
         }
     }
 
@@ -530,6 +713,15 @@ public final class Pager {
     /** Sets the budget from the profile. Evicts immediately if it shrank. */
     public void pageCacheBytes(long bytes) {
         this.pageCacheBytes = Math.max(bytes, (long) pageSize * 4);
+        // Half the budget's worth of slots for parsed pages, so a full slot
+        // array can never take the budget on its own and the byte[] caches
+        // always have room. Power of two, because the index is a mask.
+        int want = (int) Math.min(1 << 20, Math.max(64, pageCacheBytes / pageSize / 2));
+        int size = Integer.highestOneBit(want);
+        if (size != treeSlots.a().length()) {
+            treeSlots = new Slots(size);
+            treeResident.set(0);
+        }
         synchronized (cache) {
             enforceBudget();
         }
@@ -604,8 +796,42 @@ public final class Pager {
         }
     }
 
+    /**
+     * {@link #buildExtentPage}, written straight into {@code dst} at
+     * {@code dstOff} rather than into an array of its own.
+     *
+     * <p>A segment is assembled in one buffer and written with one I/O, so
+     * every page it holds was being allocated, filled, and then copied into
+     * that buffer: one {@code page_size} allocation and two {@code page_size}
+     * copies per page, or 13 MB allocated and 26 MB copied for a 13 MB flush,
+     * on top of the checksum that has to run anyway.
+     */
+    public void buildExtentPageInto(long pageId, PageHeader h, byte[] payload,
+            byte[] dst, int dstOff) {
+        int saved = pageCodec;
+        pageCodec = Superblock.Codec.NONE;
+        try {
+            byte[] body = prepareBody(pageId, h, payload);
+            System.arraycopy(body, 0, dst, dstOff + PageHeader.BYTES, body.length);
+            java.util.Arrays.fill(dst, dstOff + PageHeader.BYTES + body.length,
+                    dstOff + pageSize, (byte) 0);
+            h.writeInto(dst, dstOff, pageSize, pageSize);
+        } finally {
+            pageCodec = saved;
+        }
+    }
+
     /** The page bytes, exactly as they will be stored. */
     public byte[] buildPage(long pageId, PageHeader h, byte[] payload) {
+        byte[] body = prepareBody(pageId, h, payload);
+        byte[] page = new byte[pageSize];
+        System.arraycopy(body, 0, page, PageHeader.BYTES, body.length);
+        h.writeInto(page);
+        return page;
+    }
+
+    /** Settles every header field and returns the bytes to store after it. */
+    private byte[] prepareBody(long pageId, PageHeader h, byte[] payload) {
         if (payload.length > payloadSize()) {
             throw new InvalidArgumentException("payload is " + payload.length
                     + " bytes, a " + pageSize + "-byte page holds " + payloadSize());
@@ -641,10 +867,7 @@ public final class Pager {
             }
             body = crypto.encryptPage(body, h, pageId);
         }
-        byte[] page = new byte[pageSize];
-        System.arraycopy(body, 0, page, PageHeader.BYTES, body.length);
-        h.writeInto(page);
-        return page;
+        return body;
     }
 
     /**

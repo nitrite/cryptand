@@ -18,11 +18,19 @@ import org.dizitart.cryptand.crypto.Argon2id;
  * profile byte is metadata for tooling and for a writer picking defaults. That
  * is what makes a phone-written and a server-written database the same format.
  *
- * <p>The defining choice is {@code vlogMin}. On {@code MOBILE} it sits at its
- * ceiling — a quarter page, 1024 bytes at 4 KiB — so documents stay inline and a
- * point read costs <em>one</em> I/O rather than two. Write amplification is a
- * server problem; a 400 µs random read on every document fetch is a phone
- * problem.
+ * <p>The defining choice is {@code vlogMin}, and <strong>every profile now sits
+ * at its ceiling</strong> — a quarter page, so 1024 bytes at 4 KiB and 2048 at
+ * 8 KiB. Documents stay inline and a point read costs <em>one</em> I/O rather
+ * than two.
+ *
+ * <p>{@code DESKTOP} and {@code SERVER} used to separate at 256 bytes, which put
+ * {@code design/performance-model.md} §1's own 639-byte document in the value
+ * log: every write of one cost a {@code pwrite} of its own, every read of one
+ * cost a second fetch, and a 64 MiB value-log segment was preallocated to hold
+ * what fits in the tree. Measured on the CRUD matrix at 20 000 of them, moving
+ * the cut-off above the document was worth <strong>2.5x on create and 2x on
+ * read</strong>. Write amplification is what separation buys, and it is worth
+ * buying for attachments; it is not worth two I/Os per document fetch.
  */
 public enum Profile {
 
@@ -35,10 +43,10 @@ public enum Profile {
     TABLET(2, 4096, 2, 1024, 131072, 4, 6, 3, 2, 8 * 1024 * 1024, 16 * 1024 * 1024,
             14, 10, 130, 20, 256, 8, 16 * 1024 * 1024),
 
-    DESKTOP(3, 8192, 8, 256, 262144, 4, 8, 4, 2, 32 * 1024 * 1024, 64 * 1024 * 1024,
+    DESKTOP(3, 8192, 8, 2048, 262144, 4, 8, 4, 2, 32 * 1024 * 1024, 64 * 1024 * 1024,
             16, 10, 150, 20, 256, 25, 64 * 1024 * 1024),
 
-    SERVER(4, 16384, 32, 256, 262144, 8, 10, 6, 3, 128 * 1024 * 1024, 256 * 1024 * 1024,
+    SERVER(4, 16384, 32, 4096, 262144, 8, 10, 6, 3, 128 * 1024 * 1024, 256 * 1024 * 1024,
             16, 10, 150, 25, 1024, 100, 512 * 1024 * 1024);
 
     private final int id;

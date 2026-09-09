@@ -81,7 +81,7 @@ public final class SpatialIndex {
         return srid;
     }
 
-    public int size() {
+    public synchronized int size() {
         return tree.size();
     }
 
@@ -89,8 +89,25 @@ public final class SpatialIndex {
     // maintenance
     // ==================================================================
 
+
+    // ==================================================================
+    // Concurrency — the commit hook runs on the committer thread
+    // ==================================================================
+    //
+    // `Engine.publishSuperblock` runs this index's `commit()` from the
+    // committer while the application thread is still calling `put` and
+    // `remove` on it. The state underneath — an `ArrayList` of entries here, a
+    // pair of maps in the vector index — is not thread-safe, so the two must
+    // not overlap: a repack that iterates the entry list while the application
+    // grows it loses entries outright. Measured at 458 of 500 points found.
+    //
+    // One monitor over the mutators, the commit and the queries is the whole
+    // fix. None of these is on a hot path — an index update is per document,
+    // not per operation — and the committer holds `structure` around the hook,
+    // so this monitor is always taken after it and never before.
+
     /** Indexes a document's geometry field, or does nothing when it has none. */
-    public void put(long nitriteId, Value.Doc document, Integer declaredSrid) {
+    public synchronized void put(long nitriteId, Value.Doc document, Integer declaredSrid) {
         if (declaredSrid != null && srid != null && !declaredSrid.equals(srid)) {
             throw new InvalidArgumentException("geometry declares SRID " + declaredSrid
                     + " but index " + name + " works in SRID " + srid
@@ -108,12 +125,12 @@ public final class SpatialIndex {
         }
     }
 
-    public void remove(long nitriteId) {
+    public synchronized void remove(long nitriteId) {
         tree.remove(nitriteId);
     }
 
     /** Repacks and republishes the root. Called by the engine's commit path. */
-    public void commit() {
+    public synchronized void commit() {
         long root = tree.commit();
         if (descriptor.root() == null || descriptor.root() != root) {
             Map<String, Value> fields = new LinkedHashMap<>(descriptor.document().fields());
@@ -128,22 +145,22 @@ public final class SpatialIndex {
     // queries, §4 — box first, then the exact predicate
     // ==================================================================
 
-    public List<Long> intersects(byte[] queryWkb) {
+    public synchronized List<Long> intersects(byte[] queryWkb) {
         return exact(tree.candidatesIntersecting(Wkb.envelope(queryWkb, dimensions)),
                 g -> Geometry.intersects(g, queryWkb));
     }
 
-    public List<Long> within(byte[] queryWkb) {
+    public synchronized List<Long> within(byte[] queryWkb) {
         return exact(tree.candidatesIntersecting(Wkb.envelope(queryWkb, dimensions)),
                 g -> Geometry.within(g, queryWkb));
     }
 
-    public List<Long> contains(byte[] queryWkb) {
+    public synchronized List<Long> contains(byte[] queryWkb) {
         return exact(tree.candidatesIntersecting(Wkb.envelope(queryWkb, dimensions)),
                 g -> Geometry.contains(g, queryWkb));
     }
 
-    public List<Long> near(double x, double y, double radius) {
+    public synchronized List<Long> near(double x, double y, double radius) {
         double[] min = new double[dimensions];
         double[] max = new double[dimensions];
         min[0] = x;
