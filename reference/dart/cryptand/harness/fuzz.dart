@@ -32,9 +32,9 @@ library;
 
 import 'dart:typed_data';
 
-import 'container.dart';
-import 'crc32c.dart';
-import 'errors.dart';
+import 'package:cryptand/src/container.dart';
+import 'package:cryptand/src/crc32c.dart';
+import 'package:cryptand/src/errors.dart';
 
 /// What one mutant did to the reader.
 enum FuzzOutcome {

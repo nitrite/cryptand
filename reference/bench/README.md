@@ -27,7 +27,7 @@ reference/bench/run_all.sh
 or one at a time:
 
 ```bash
-cd reference/rust        && cargo run --release --bin ops_bench
+cd reference/rust        && cargo run --release --features harness --bin ops_bench
 cd reference/dart/cryptand && dart run bench/ops.dart
 cd reference/java        && mvn -q -B test-compile -DskipTests && java -cp target/classes:target/test-classes org.dizitart.cryptand.bench.OpsBench
 ```
@@ -147,7 +147,7 @@ project's own history of flaky timing guards.
 ## A companion, for a cost this suite is the wrong shape to see
 
 `reference/rust/cryptand/benches/filter_probe.rs`
-(`cargo run --release --bin filter_probe`) measures one thing: what a
+(`cargo run --release --features harness --bin filter_probe`) measures one thing: what a
 `04-segments.md` §2.4 filter probe costs, across filter sizes.
 
 It exists because this suite could not see defect 76. Rust decoded the entire
@@ -171,7 +171,7 @@ implementation do per second", which is a different and equally real question.
 `org.dizitart.cryptand.bench.CrudBench`, run the same way as the suite above:
 
 ```bash
-cd reference/rust          && cargo run --release --bin crud_bench
+cd reference/rust          && cargo run --release --features harness --bin crud_bench
 cd reference/dart/cryptand && dart run bench/crud.dart
 cd reference/java          && mvn -q -B compile exec:java -Dexec.mainClass=org.dizitart.cryptand.bench.CrudBench -Dexec.classpathScope=compile
 ```

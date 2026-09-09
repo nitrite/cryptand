@@ -209,13 +209,21 @@ final class Transaction {
     required this.isolation,
     required int Function(String key) writtenSeqOf,
     required void Function(Transaction txn) onCommit,
+    void Function() onFinish = _noop,
   })  : _writtenSeqOf = writtenSeqOf,
-        _onCommit = onCommit;
+        _onCommit = onCommit,
+        _onFinish = onFinish;
+
+  static void _noop() {}
 
   final Snapshot snapshot;
   final Isolation isolation;
   final int Function(String key) _writtenSeqOf;
   final void Function(Transaction txn) _onCommit;
+
+  /// Run once, when the transaction commits or aborts. The engine uses it to
+  /// stop recording per-key write sequences once no transaction can read them.
+  final void Function() _onFinish;
 
   final List<TxnWrite> writes = [];
   final Set<String> _readSet = {};
@@ -313,7 +321,7 @@ final class Transaction {
     if (_done) throw const InvalidArgumentException('transaction is finished');
     validate();
     _onCommit(this);
-    _done = true;
+    _finish();
   }
 
   /// §3: "Value-log records written by a transaction that then aborts are
@@ -321,6 +329,13 @@ final class Transaction {
   /// Nothing is written before [commit] here, so an abort is a discard.
   void abort() {
     writes.clear();
-    _done = true;
+    _finish();
+  }
+
+  void _finish() {
+    if (!_done) {
+      _done = true;
+      _onFinish();
+    }
   }
 }

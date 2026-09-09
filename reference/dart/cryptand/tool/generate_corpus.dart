@@ -32,6 +32,8 @@ import 'dart:typed_data';
 
 import 'package:cryptand/cryptand.dart';
 
+import '../harness/fuzz.dart';
+
 const String collectionName = 'orders';
 const String nameDictName = 'orders\$names';
 const String indexName = 'idx:orders:country:non_unique';

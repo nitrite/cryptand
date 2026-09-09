@@ -215,6 +215,18 @@ pub struct Engine {
     pub next_seq: u64,
     live_snapshots: Vec<Snapshot>,
     written_at: HashMap<Vec<u8>, u64>,
+    /// Transactions that have begun and not yet committed or rolled back.
+    ///
+    /// [`Self::written_at`] exists for one caller — §3's conflict detection,
+    /// which asks whether a key was written after a transaction's snapshot. A
+    /// write made while no transaction is open cannot conflict with one that
+    /// begins later, because that transaction's snapshot is taken after the
+    /// write and the test is `seq > snapshot.seq`. So the map only has to be
+    /// maintained while a transaction is live, and every other write is spared
+    /// a `Vec` allocation and a hash insert. The Dart implementation carries
+    /// the same counter, where the saving is larger because its map key is a
+    /// hex string.
+    live_transactions: usize,
     pub events: Vec<StoreEvent>,
     pub durability_achieved: Durability,
     pub counters: Counters,
@@ -363,6 +375,7 @@ impl Engine {
             next_seq: 1,
             live_snapshots: Vec::new(),
             written_at: HashMap::new(),
+            live_transactions: 0,
             events: Vec::new(),
             durability_achieved: Durability::None,
             counters: Counters::default(),
@@ -554,6 +567,7 @@ impl Engine {
             next_seq: sb.next_seq,
             live_snapshots: Vec::new(),
             written_at: HashMap::new(),
+            live_transactions: 0,
             events: Vec::new(),
             durability_achieved: Durability::from_code(sb.durability_achieved),
             counters: Counters::default(),
@@ -841,8 +855,17 @@ impl Engine {
     // §2 — sequencing and the write path
     // ---------------------------------------------------------------
 
-    fn shard_of(&self, key: &[u8]) -> usize {
-        let h = crate::hash::cfh64(key);
+    /// §2 step 5: "insert into memtable shard **h(key) % shards**".
+    ///
+    /// `key` is the **user** key — `u32be(tree_id) || CKE(key)` — and not the
+    /// internal key. The difference is not cosmetic: hashing the internal key
+    /// includes `seq`, which scatters the versions of one key across every
+    /// shard, and a point read then has to probe all of them because any of
+    /// them might hold the newest version. `store.rs` already routed by
+    /// `user_part(&ik)`; this one did not, so a `desktop` read paid eight
+    /// `BTreeMap` seeks and eight bound allocations where one would do.
+    fn shard_of(&self, user_key: &[u8]) -> usize {
+        let h = crate::hash::cfh64(user_key);
         (h % self.memtable.len() as u64) as usize
     }
 
@@ -948,7 +971,6 @@ impl Engine {
 
     fn insert_mem(&mut self, ik: Vec<u8>, e: MemEntry) {
         self.memtable_bytes += ik.len() + e.value.len() + 16;
-        let user = user_part(&ik).to_vec();
         let parsed = parse_internal_key(&ik).ok();
         let seq = parsed.as_ref().map(|p| p.seq).unwrap_or(0);
         // Every memtable write funnels through here, so counting range deletes
@@ -959,8 +981,10 @@ impl Engine {
         if parsed.as_ref().map(|p| p.op) == Some(op::RANGE_DELETE) {
             self.memtable_range_deletes += 1;
         }
-        self.written_at.insert(user, seq);
-        let s = self.shard_of(&ik);
+        if self.live_transactions > 0 {
+            self.written_at.insert(user_part(&ik).to_vec(), seq);
+        }
+        let s = self.shard_of(user_part(&ik));
         self.memtable[s].insert(ik, e);
     }
 
@@ -1563,8 +1587,13 @@ impl Engine {
 
     fn memtable_lookup(&self, prefix: &[u8], ceiling: Option<u64>) -> Option<SegRecord> {
         let mut best: Option<SegRecord> = None;
-        for shard in &self.memtable {
-            for (ik, e) in shard.range(prefix.to_vec()..) {
+        // One shard, not all of them — see `shard_of`. The bound is built once
+        // rather than once per shard, which was an allocation per shard per
+        // point read.
+        let from = prefix.to_vec();
+        {
+            let shard = &self.memtable[self.shard_of(prefix)];
+            for (ik, e) in shard.range(from..) {
                 if !ik.starts_with(prefix) || ik.len() != prefix.len() + 9 {
                     break;
                 }
@@ -2655,6 +2684,19 @@ impl Engine {
 
     /// `10-transactions.md` §3 — conflict detection compares a transaction's
     /// written key set against keys written by batches sequenced in between.
+    /// Called by `Transaction::begin`; see [`Self::live_transactions`].
+    pub fn transaction_began(&mut self) {
+        self.live_transactions += 1;
+    }
+
+    /// Called when a transaction commits or rolls back.
+    pub fn transaction_finished(&mut self) {
+        self.live_transactions = self.live_transactions.saturating_sub(1);
+        if self.live_transactions == 0 {
+            self.written_at.clear();
+        }
+    }
+
     pub fn conflicts(&self, keys: &[Vec<u8>], start_seq: u64) -> bool {
         keys.iter().any(|k| matches!(self.written_at.get(k), Some(&s) if s > start_seq))
     }

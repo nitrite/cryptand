@@ -44,6 +44,9 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn begin(engine: &mut Engine, isolation: Isolation) -> Transaction {
+        // From here until this transaction finishes, every write records its
+        // seq — see `Engine::live_transactions`.
+        engine.transaction_began();
         Transaction {
             isolation,
             snapshot: engine.snapshot(),
@@ -105,9 +108,13 @@ impl Transaction {
     }
 
     pub fn rollback(&mut self, engine: &mut Engine) {
+        if self.committed {
+            return;
+        }
         self.writes.clear();
         engine.release(&self.snapshot);
         self.committed = true;
+        engine.transaction_finished();
     }
 
     pub fn write_set(&self) -> Result<Vec<Vec<u8>>> {
@@ -127,6 +134,7 @@ impl Transaction {
         if self.isolation == Isolation::ReadOnly {
             engine.release(&self.snapshot);
             self.committed = true;
+            engine.transaction_finished();
             return Ok(engine.sb.commit_id);
         }
         let mut checked = self.write_set()?;
@@ -136,6 +144,7 @@ impl Transaction {
         if engine.conflicts(&checked, self.snapshot.seq) {
             engine.release(&self.snapshot);
             self.committed = true;
+            engine.transaction_finished();
             return Err(Error::Conflict(
                 "a batch sequenced after this transaction started wrote one of its keys".into(),
             ));
@@ -159,6 +168,9 @@ impl Transaction {
         let id = engine.commit(durability)?;
         engine.release(&self.snapshot);
         self.committed = true;
+        // After the writes, not before: this transaction's own writes have to
+        // be recorded for any *other* live transaction to conflict against.
+        engine.transaction_finished();
         Ok(id)
     }
 }

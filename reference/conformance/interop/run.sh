@@ -18,7 +18,9 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 RUST="$rust/target/release/interop"
-JAVA_CP="$java/target/classes"
+# `target/test-classes` too: the interop harness is test-scope, so that it does
+# not ship in the published jar. See `reference/bench/README.md`.
+JAVA_CP="$java/target/classes:$java/target/test-classes"
 fail=0
 step=0
 
@@ -127,11 +129,16 @@ round_trip() {
 }
 
 say "building"
-(cd "$rust" && cargo build --release -p cryptand -q) || { echo "cargo build failed"; exit 1; }
+# `--features harness`: the interop tool is gated off by default so that it is
+# not a binary of the published crate. See `cryptand/Cargo.toml`.
+(cd "$rust" && cargo build --release -p cryptand -q --features harness --bin interop) || { echo "cargo build failed"; exit 1; }
 [[ -x "$RUST" ]] || { echo "missing $RUST"; exit 1; }
 ok "rust: built"
-(cd "$java" && mvn -q -o -DskipTests compile) || { echo "maven build failed"; exit 1; }
-[[ -d "$JAVA_CP" ]] || { echo "missing $JAVA_CP"; exit 1; }
+(cd "$java" && mvn -q -o -DskipTests test-compile) || { echo "maven build failed"; exit 1; }
+# `JAVA_CP` is now two entries, so check them rather than the string.
+for d in ${JAVA_CP//:/ }; do
+  [[ -d "$d" ]] || { echo "missing $d"; exit 1; }
+done
 ok "java: built"
 
 round_trip rust dart

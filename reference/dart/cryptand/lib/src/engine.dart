@@ -349,6 +349,22 @@ final class Engine {
   /// it bounded by the oldest live reader rather than by history.
   final Map<String, int> _writtenAt = {};
 
+  /// Transactions that have begun and not yet committed or aborted.
+  ///
+  /// [_writtenAt] exists for one caller — `10-transactions.md` §3's conflict
+  /// detection, which asks whether a key was written after a transaction's
+  /// snapshot. A write made while no transaction is open cannot conflict with
+  /// one that begins later, because that transaction's snapshot is taken after
+  /// the write and the conflict test is `seq > snapshot.seq`. So the map only
+  /// has to be maintained while a transaction is live.
+  ///
+  /// Recording it unconditionally was not a small cost: the key is
+  /// [Transaction.keyOf], which builds a **hex string** — a `StringBuffer`, a
+  /// `toRadixString(16)` and a `padLeft` per byte of the key — on every single
+  /// write. Measured on the cross-language CRUD matrix, that was most of a
+  /// 3.5 µs `put` against a 0.6 µs one.
+  int _liveTransactions = 0;
+
   /// §9. Events are appended after durability, never before.
   final List<StoreEvent> events = [];
 
@@ -810,6 +826,9 @@ final class Engine {
       ..bytes(endCke);
     if (_memtable[ik] == null) _memtableRangeDeletes++;
     _memtable[ik] = _Pending(ik, ValueKind.inline, w.takeBytes());
+    if (_liveTransactions > 0) {
+      _writtenAt[Transaction.keyOf(treeId, startCke)] = seq;
+    }
     _feed(treeId, seq, 'range_delete', startCke, start);
     if (_memtable.length >= memtableEntries) flush();
   }
@@ -859,6 +878,9 @@ final class Engine {
   /// makes an abort leave no trace.
   Transaction begin({Isolation isolation = Isolation.snapshot, int nowMs = 0}) {
     final s = snapshot(nowMs: nowMs);
+    // From here until this transaction finishes, every write records its seq —
+    // see [_liveTransactions].
+    _liveTransactions++;
     return Transaction(
       snapshot: s,
       isolation: isolation,
@@ -876,6 +898,10 @@ final class Engine {
         }
         release(s);
         commit();
+      },
+      onFinish: () {
+        _liveTransactions--;
+        if (_liveTransactions == 0) _writtenAt.clear();
       },
     );
   }
@@ -904,7 +930,9 @@ final class Engine {
       stored = encodedValue;
     }
     _memtable[ik] = _Pending(ik, kind, stored, expiryMs: expiryMs);
-    _writtenAt[Transaction.keyOf(treeId, cke)] = seq;
+    if (_liveTransactions > 0) {
+      _writtenAt[Transaction.keyOf(treeId, cke)] = seq;
+    }
     _feed(treeId, seq, op == Op.delete ? 'delete' : 'put', cke, key);
     if (_memtable.length >= memtableEntries) flush();
   }
@@ -1015,11 +1043,14 @@ final class Engine {
   /// Turns the memtable into an L0 segment, §2.3, and publishes it.
   void flush() {
     if (_memtable.isEmpty) return;
-    // Already in `compareKeys` order: the memtable is a SplayTreeMap.
-    final keys = _memtable.keys.toList();
+    // Already in `compareKeys` order: the memtable is a SplayTreeMap. Iterate
+    // its **values**, not its keys — this took the keys and then looked each
+    // one up again, which is an O(log n) splay per entry with a byte-array
+    // comparator, to re-find a value the iteration was already standing on.
+    // Measured on the cross-language CRUD matrix, the flushes inside a 20 000
+    // document create cost 52 ms of its 64 ms.
     final b = _builder(level: 0);
-    for (final k in keys) {
-      final p = _memtable[k]!;
+    for (final p in _memtable.values) {
       b.add(SegEntry(p.internalKey, p.valueKind, p.value,
           expiryMs: p.expiryMs));
     }
@@ -1142,39 +1173,53 @@ final class Engine {
   /// §5.2, and it is what keeps a `put` inside `spec/12-profiles.md` §4's
   /// foreground stall budget. Work left over is picked up by the next call;
   /// nothing is published until a job finishes, so stopping is free.
+  /// The most bytes any single [maybeCompact] call has merged.
+  ///
+  /// This is what `04-segments.md` §5.2's step bound actually constrains, and
+  /// it is a counter rather than a stopwatch. `12-profiles.md` §4's budget is
+  /// stated in milliseconds, so the *positive* test has to be timed — but its
+  /// **control**, which shows that removing the bound breaks it, must not be:
+  /// a control that trips only because the engine is slow stops tripping the
+  /// moment the engine gets faster, and then silently proves nothing. This one
+  /// did, when CRC-32C stopped being a byte-at-a-time table.
+  int maxCompactionSpendBytes = 0;
+
   void maybeCompact({int? budgetBytes}) {
     var spent = 0;
-
-    // Finish what is already in flight before starting anything new.
-    final pending = _job;
-    if (pending != null) {
-      final before = pending.bytesMerged;
-      final done = stepCompaction(pending,
-          budgetBytes: budgetBytes == null ? null : budgetBytes - spent);
-      spent += pending.bytesMerged - before;
-      if (!done) return;
-      finishCompaction(pending);
-      _job = null;
-      if (budgetBytes != null && spent >= budgetBytes) return;
-    }
-
-    var guard = 0;
-    while (guard++ < 1000) {
-      final next = _pickCompaction();
-      if (next == null) return;
-      final job = beginCompaction(next.$1, next.$2);
-      if (job == null) return;
-      final done =
-          stepCompaction(job, budgetBytes: budgetBytes == null ? null : budgetBytes - spent);
-      spent += job.bytesMerged;
-      if (!done) {
-        _job = job; // resume on the next call
-        return;
+    try {
+      // Finish what is already in flight before starting anything new.
+      final pending = _job;
+      if (pending != null) {
+        final before = pending.bytesMerged;
+        final done = stepCompaction(pending,
+            budgetBytes: budgetBytes == null ? null : budgetBytes - spent);
+        spent += pending.bytesMerged - before;
+        if (!done) return;
+        finishCompaction(pending);
+        _job = null;
+        if (budgetBytes != null && spent >= budgetBytes) return;
       }
-      finishCompaction(job);
-      if (budgetBytes != null && spent >= budgetBytes) return;
+
+      var guard = 0;
+      while (guard++ < 1000) {
+        final next = _pickCompaction();
+        if (next == null) return;
+        final job = beginCompaction(next.$1, next.$2);
+        if (job == null) return;
+        final done = stepCompaction(job,
+            budgetBytes: budgetBytes == null ? null : budgetBytes - spent);
+        spent += job.bytesMerged;
+        if (!done) {
+          _job = job; // resume on the next call
+          return;
+        }
+        finishCompaction(job);
+        if (budgetBytes != null && spent >= budgetBytes) return;
+      }
+      throw StateError('compaction did not converge');
+    } finally {
+      if (spent > maxCompactionSpendBytes) maxCompactionSpendBytes = spent;
     }
-    throw StateError('compaction did not converge');
   }
 
   /// The next compaction the level policy wants, or null when every bound

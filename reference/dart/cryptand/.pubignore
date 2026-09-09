@@ -1,0 +1,11 @@
+# Harness, not library. `spec/14-security.md` §9.3's fuzzer, the cross-language
+# benchmarks, the conformance-corpus generator and the test suite are all part
+# of how this package is *developed and verified*, not of what it *is* — so they
+# stay out of the published archive, as their equivalents stay out of the Java
+# jar and behind a non-default feature in the Rust crate.
+bench/
+harness/
+test/
+tool/
+coverage/
+REPORT.md

@@ -25,7 +25,9 @@ trap 'rm -rf "$work"' EXIT
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 say "building"
-(cd "$ref/rust" && cargo build --release --quiet --bin xlang_crud_bench) || exit 1
+# `--features harness`: gated off by default, so the benchmarks are not
+# binaries of the published crate. See `cryptand/Cargo.toml`.
+(cd "$ref/rust" && cargo build --release --quiet --features harness --bin xlang_crud_bench) || exit 1
 # `test-compile`: the benchmarks are test-scope so they do not ship in the jar.
 (cd "$ref/java" && mvn -q -B test-compile -DskipTests) || exit 1
 

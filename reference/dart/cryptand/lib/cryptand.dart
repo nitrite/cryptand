@@ -71,17 +71,6 @@ export 'src/engine.dart'
         LocalityPolicy,
         ScanResult,
         percentile;
-export 'src/fuzz.dart'
-    show
-        FuzzFinding,
-        FuzzOutcome,
-        FuzzReport,
-        FuzzRng,
-        FuzzTarget,
-        fuzzImage,
-        fuzzTargets,
-        mutate,
-        repairChecksum;
 export 'src/verify.dart'
     show EngineVerify, Finding, FindingClass, VerifyReport;
 export 'src/txn.dart'

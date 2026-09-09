@@ -11,6 +11,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cryptand/cryptand.dart';
+
+import '../harness/fuzz.dart';
 import 'package:test/test.dart';
 
 const int t = 16;

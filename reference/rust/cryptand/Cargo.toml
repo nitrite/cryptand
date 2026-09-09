@@ -26,6 +26,26 @@ lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
 [dev-dependencies]
 serde_json = "1"
 
+# **Harness, not library.** The benchmarks and the interop conformance tool are
+# part of how this crate is developed and verified, not of what it is, and a
+# `[[bin]]` in a published crate is an installable binary. Gating them on a
+# feature that is not in `default` means `cargo build`, `cargo install` and the
+# docs.rs build produce exactly one binary — `cryptand`, the format's own CLI —
+# and never these.
+#
+#   cargo run --release --features harness --bin ops_bench
+#
+# The sources stay in the `.crate` archive, because a `.crate` is a source
+# distribution and a declared target's file has to exist for the publish
+# verification build to load the manifest at all; what `required-features`
+# removes is the thing that matters, which is the compiled binary.
+#
+# The Java jar keeps its equivalents out by putting them under `src/test`, and
+# the Dart package by keeping them out of `lib/` and out of the archive.
+[features]
+default = []
+harness = []
+
 [[bin]]
 name = "cryptand"
 path = "src/bin/cryptand.rs"
@@ -33,43 +53,54 @@ path = "src/bin/cryptand.rs"
 [[bin]]
 name = "ops_bench"
 path = "benches/ops.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "p1_height"
 path = "benches/p1_height.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "p3_engine_write_scale"
 path = "benches/p3_write_scale.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "p8_aged_scan"
 path = "benches/p8_aged_scan.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "p10_read_tail"
 path = "benches/p10_read_tail.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "p11_encryption"
 path = "benches/p11_encryption.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "filter_fpr"
 path = "benches/filter_fpr.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "interop"
-path = "src/bin/interop.rs"
+path = "harness/interop.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "filter_probe"
 path = "benches/filter_probe.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "crud_bench"
 path = "benches/crud.rs"
+required-features = ["harness"]
 
 [[bin]]
 name = "xlang_crud_bench"
 path = "benches/xlang_crud.rs"
+required-features = ["harness"]

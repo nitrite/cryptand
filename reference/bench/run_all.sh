@@ -15,7 +15,9 @@ trap 'rm -rf "$work"' EXIT
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 say "building"
-(cd "$ref/rust" && cargo build --release --quiet --bin ops_bench) || exit 1
+# `--features harness`: the benchmarks are gated off by default so they are
+# not binaries of the published crate. See `cryptand/Cargo.toml`.
+(cd "$ref/rust" && cargo build --release --quiet --features harness --bin ops_bench) || exit 1
 # `test-compile`, not `compile`: the benchmarks are **test-scope**, so that they
 # do not ship in the published jar. See `README.md`.
 (cd "$ref/java" && mvn -q -B test-compile -DskipTests) || exit 1

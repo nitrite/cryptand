@@ -112,6 +112,23 @@ void main() {
       // resumable job that yields after compaction_step_bytes.
       //
       // Measured: worst 3.10 ms, p99.9 2.46 ms, 0 of 4000 over an 8 ms budget.
+      //
+      // **The hard gate is the counter; the milliseconds are a bound with
+      // headroom, not an equality.** `design/performance-model.md` section 8:
+      // "performance assertions go on plan shape or a store counter; wall time
+      // is recorded and charted, not gated." This test used to fail the moment
+      // *any* sample crossed 8 ms, which is a promise about the scheduler
+      // rather than about the engine: run under `dart test -j 4`, with three
+      // other isolates competing for cores, a `put` gets descheduled and lands
+      // at 13 ms about one run in eight. That is not the engine blocking; the
+      // same test alone passes every time.
+      //
+      // So: the decomposition is asserted on `maxCompactionSpendBytes`, which
+      // is what section 5.2 actually constrains and what a busy machine cannot
+      // change, and the wall clock is asserted at the 99th percentile, which a
+      // handful of descheduled samples cannot flip. The worst sample is
+      // printed, so a real regression is still visible in the log rather than
+      // silently tolerated.
       warmUp();
       final e = Engine(memtableEntries: 200, vlogMin: 1024)
         ..setProfile(Profile.mobile)
@@ -122,29 +139,77 @@ void main() {
         e.timedForeground('put', () => e.put(tree, CNitriteId(i), doc(dict, i)));
       }
 
-      final violations = e.stallViolations;
-      expect(violations, isEmpty,
-          reason: violations.isEmpty
-              ? ''
-              : 'worst: ${violations.map((v) => "${v.operation} "
-                  "${v.ms.toStringAsFixed(1)}ms").take(3).join(", ")}');
+      // The mechanism, deterministically.
+      expect(e.maxCompactionSpendBytes,
+          lessThan(Profile.mobile.compactionStepBytes * 2),
+          reason: 'a foreground compaction merged far past '
+              'compaction_step_bytes: ${e.maxCompactionSpendBytes} against '
+              '${Profile.mobile.compactionStepBytes}');
+
+      // The budget, at a percentile the scheduler cannot flip.
+      final ms = [for (final s in e.stallSamples) s.ms]..sort();
+      final p99 = ms[((ms.length - 1) * 0.99).round()];
+      final worst = ms.last;
+      printOnFailure('foreground put: p99 ${p99.toStringAsFixed(2)} ms, '
+          'worst ${worst.toStringAsFixed(2)} ms, '
+          '${e.stallViolations.length} of ${ms.length} over 8 ms');
+      expect(p99, lessThan(e.profile.maxForegroundStallMs),
+          reason: 'the p99 foreground put is outside the stall budget: '
+              '${p99.toStringAsFixed(2)} ms against '
+              '${e.profile.maxForegroundStallMs} ms');
     });
 
     test('the step budget is what bounds it — unbounded breaks it again', () {
-      // The control. Without it this test would pass on any machine fast
-      // enough and prove nothing about the decomposition. Measured on the same
-      // workload: 256 KiB steps give a 2.93 ms worst and 0 violations;
-      // unbounded gives 10.03 ms and 1.
+      // The control. Without it the test above would pass on any machine fast
+      // enough and prove nothing about the decomposition.
+      //
+      // **It asserts on a counter, not a stopwatch, and that is the point.**
+      // It used to assert `stallViolations` is non-empty — that removing the
+      // bound pushes some `put` past 8 ms — and it did, at a measured 10.03 ms
+      // against a budget of 8. That is a 25 % margin, so the control was really
+      // asserting that the engine is slow: when CRC-32C stopped being a
+      // byte-at-a-time table the unbounded cascade came in under 8 ms and the
+      // control began failing about half the time, on a *faster* engine that
+      // was more correct, not less.
+      //
+      // What section 5.2 actually says is that a step merges at most
+      // `compaction_step_bytes`, and that is exactly what
+      // `maxCompactionSpendBytes` records. Bounded, it cannot exceed the
+      // budget; unbounded, the cascade runs to completion on the caller and it
+      // does. No wall clock, and nothing that a faster machine or a faster
+      // implementation can silently turn off.
       warmUp();
-      final e = Engine(memtableEntries: 200, vlogMin: 1024)
+      const bound = 256 << 10;
+
+      final bounded = Engine(memtableEntries: 200, vlogMin: 1024)
+        ..setProfile(Profile.mobile)
+        ..compactionStepBytes = bound;
+      for (var i = 0; i < 4000; i++) {
+        bounded.put(tree, CNitriteId(i), doc(dict, i));
+      }
+
+      final unbounded = Engine(memtableEntries: 200, vlogMin: 1024)
         ..setProfile(Profile.mobile)
         ..compactionStepBytes = 1 << 30; // effectively unbounded
       for (var i = 0; i < 4000; i++) {
-        e.timedForeground('put', () => e.put(tree, CNitriteId(i), doc(dict, i)));
+        unbounded.put(tree, CNitriteId(i), doc(dict, i));
       }
-      expect(e.stallViolations, isNotEmpty,
-          reason: 'with no step bound the cascade runs on the caller, which is '
-              'the behaviour section 5.2 exists to forbid');
+
+      // The budget is checked after an entry is merged, not before, so a step
+      // can end one entry past it — section 5.2's own wording: a compaction
+      // *starts* inside the bound and a merge that began there may finish
+      // outside it. Measured here: bounded 262 400 against a 262 144 budget,
+      // one 256-byte entry over; unbounded 1 312 000, five times the budget,
+      // because the whole cascade runs on the caller. The two are separated by
+      // a factor of five, so the threshold does not have to be delicate.
+      expect(bounded.maxCompactionSpendBytes, lessThan(bound * 2),
+          reason: 'a bounded step merged far past compaction_step_bytes: '
+              '${bounded.maxCompactionSpendBytes} against $bound');
+      expect(unbounded.maxCompactionSpendBytes, greaterThan(bound * 2),
+          reason: 'with no step bound the cascade runs to completion on the '
+              'caller, which is the behaviour section 5.2 exists to forbid — '
+              'and it did not (${unbounded.maxCompactionSpendBytes} against '
+              '$bound), so this control proves nothing');
     });
 
     test('a part-done compaction publishes nothing', () {

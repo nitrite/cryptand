@@ -248,7 +248,7 @@ the block array out of it **a second time** — to read one bit.
 was a divergence, not a design.
 
 `14-security.md` §12 costs a probe as "exactly one 64-byte block". Measured with
-the new `benches/filter_probe.rs` (`cargo run --release --bin filter_probe`),
+the new `benches/filter_probe.rs` (`cargo run --release --features harness --bin filter_probe`),
 200 000 probes per row:
 
 | keys | filter bytes | per probe | cached | ratio |
@@ -2110,13 +2110,15 @@ for whichever engine has the longest code path.
 
 | engine | create | read | update | delete | mixed | on disk |
 |---|---|---|---|---|---|---|
-| **cryptand** | 723 922 | 1 349 892 | **894 528** | **1 790 323** | 951 690 | 44 MB |
-| **mvstore** | 1 207 420 | 1 945 273 | 417 169 | 1 541 465 | 1 143 039 | 33 MB |
-| **rocksdb** | 295 666 | 824 068 | 220 202 | 324 769 | 363 359 | 20 MB |
+| **cryptand** | 703 890 | 1 360 699 | **877 745** | **1 869 042** | 922 082 | 44 MB |
+| **mvstore** | 1 131 771 | 1 709 572 | 423 218 | 1 670 263 | 1 127 571 | 33 MB |
+| **rocksdb** | 294 631 | 840 371 | 215 414 | 323 897 | 359 394 | 20 MB |
 
-**Cryptand is faster than RocksDB on every operation — 1.6× to 5.5× — and
+**Cryptand is faster than RocksDB on every operation — 1.6× to 5.8× — and
 faster than MVStore on update and delete. MVStore is still ahead on create,
 read and mixed.** Both halves of that are the honest headline.
+`reference/bench/RESULTS.md` carries the same table with the reproduction
+command and the caveats, and the cross-language one beside it.
 
 Where it stood before the work below, on the same benchmark and the same
 machine — 49 775 create, 139 094 read, 26 987 update, 36 147 delete, ~153 000
