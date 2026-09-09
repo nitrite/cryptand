@@ -16,14 +16,16 @@ say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 say "building"
 (cd "$ref/rust" && cargo build --release --quiet --bin ops_bench) || exit 1
-(cd "$ref/java" && mvn -q -B compile) || exit 1
+# `test-compile`, not `compile`: the benchmarks are **test-scope**, so that they
+# do not ship in the published jar. See `README.md`.
+(cd "$ref/java" && mvn -q -B test-compile -DskipTests) || exit 1
 
 for impl in rust dart java; do
   say "$impl, $n documents"
   case "$impl" in
     rust) "$ref/rust/target/release/ops_bench" "$n" ;;
     dart) (cd "$ref/dart/cryptand" && dart run bench/ops.dart "$n") ;;
-    java) java -cp "$ref/java/target/classes" \
+    java) java -cp "$ref/java/target/classes:$ref/java/target/test-classes" \
             org.dizitart.cryptand.bench.OpsBench "$n" ;;
   esac | tee "$work/$impl.txt"
 done

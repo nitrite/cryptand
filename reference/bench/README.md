@@ -12,6 +12,12 @@ in the same shape, in all three languages, and prints the same rows — so the
 numbers can be put next to each other without an argument about what was
 measured.
 
+## Results
+
+Measured numbers, with what they do and do not support, are in
+[`RESULTS.md`](RESULTS.md): Java Cryptand against file-backed MVStore and
+RocksDB, and the three implementations against each other.
+
 ## Running it
 
 ```bash
@@ -23,7 +29,7 @@ or one at a time:
 ```bash
 cd reference/rust        && cargo run --release --bin ops_bench
 cd reference/dart/cryptand && dart run bench/ops.dart
-cd reference/java        && mvn -q -B compile exec:java -Dexec.mainClass=org.dizitart.cryptand.bench.OpsBench -Dexec.classpathScope=compile
+cd reference/java        && mvn -q -B test-compile -DskipTests && java -cp target/classes:target/test-classes org.dizitart.cryptand.bench.OpsBench
 ```
 
 Every one takes an optional document count (default 20 000) as its first
@@ -74,6 +80,15 @@ timed loop; the engine path is handed already-encoded bytes, because it exists
 to put Cryptand next to MVStore and RocksDB and those two are key-value stores.
 Reading Rust's `create_ops_per_s` against Java's `create` compares a document
 insert with a keyed byte write, and the ratio is a measure of the fixture.
+
+**The one cross-language comparison that is supported** is
+`run_xlang_crud.sh` / `xlang_crud.{rs,dart}` / `XlangCrudBench.java`, which
+exists precisely because none of the above is. It drives the engine in all
+three, hoists the value encoding out of the loop and keeps the key encoding
+inside it, and holds the pseudo-random sequence identical bit for bit. Even
+there the **storage model differs** — file-backed, file-backed with resident
+segments, and an in-memory page space — so it prints that as a row. See
+[`RESULTS.md`](RESULTS.md).
 
 **Nothing here is comparable between implementations except `codec_saving`**,
 which is a ratio of one implementation's own two runs and which all three

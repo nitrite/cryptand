@@ -69,3 +69,7 @@ path = "benches/filter_probe.rs"
 [[bin]]
 name = "crud_bench"
 path = "benches/crud.rs"
+
+[[bin]]
+name = "xlang_crud_bench"
+path = "benches/xlang_crud.rs"

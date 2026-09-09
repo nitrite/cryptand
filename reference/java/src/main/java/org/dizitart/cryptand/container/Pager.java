@@ -511,7 +511,7 @@ public final class Pager {
      * Copies {@code len} bytes starting at {@code offset} bytes into the file
      * out of the page cache, reading only the pages the range actually spans.
      *
-     * <p>This is what a value-log record read wants. {@link Vlog} read its
+     * <p>This is what a value-log record read wants. {@code Vlog} read its
      * records with a bare {@code readFully} on the {@code PageFile}: one
      * {@code pread} per document fetched, with the page cache — sitting right
      * there, holding the very page the record is in — bypassed entirely. A

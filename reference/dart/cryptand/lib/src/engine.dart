@@ -431,6 +431,21 @@ final class Engine {
   /// here makes the lookup O(log n), makes `_memtable[k]` work by content, and
   /// makes the two sorts below redundant, because `keys` is already in
   /// `compareKeys` order.
+  /// Range deletes resident in [_memtable].
+  ///
+  /// `_rangeDeleteSeq` runs on **every point read**, and its memtable half was
+  /// a full iteration of every key in the memtable — `hasAnyRangeDeletes`
+  /// walked the whole map to return `false`, which is the overwhelmingly common
+  /// answer. Measured on the cross-language CRUD matrix, that was **479 ms of a
+  /// 521 ms mixed-phase read cost**: 14 015 reads against a memtable averaging
+  /// 1 137 entries, so reads ran 15x slower whenever writes were interleaved
+  /// and full speed whenever they were not. A count at the one point every
+  /// memtable write funnels through makes the scan skippable.
+  ///
+  /// The Rust implementation carries the same counter for the same reason. This
+  /// one did not.
+  int _memtableRangeDeletes = 0;
+
   final SplayTreeMap<Uint8List, _Pending> _memtable =
       SplayTreeMap<Uint8List, _Pending>(compareKeys);
 
@@ -793,6 +808,7 @@ final class Engine {
     final w = ByteWriter(endCke.length + 4)
       ..uvar(endCke.length)
       ..bytes(endCke);
+    if (_memtable[ik] == null) _memtableRangeDeletes++;
     _memtable[ik] = _Pending(ik, ValueKind.inline, w.takeBytes());
     _feed(treeId, seq, 'range_delete', startCke, start);
     if (_memtable.length >= memtableEntries) flush();
@@ -1009,6 +1025,7 @@ final class Engine {
     }
     _publish(b, level: 0, group: 0);
     _memtable.clear();
+    _memtableRangeDeletes = 0;
     // §2 steps D and F: once a memtable's records are in a segment the
     // manifest names, they are published, and `visible_seq` is "the highest
     // fully durable seq". With one writer and no separate committer thread
@@ -1584,19 +1601,21 @@ final class Engine {
         }
       }
     }
-    for (final e in _memtable.entries) {
-      final k = e.key;
-      if (k[k.length - 1] != Op.rangeDelete) continue;
-      final p = parseInternalKey(k);
-      final r = ByteReader(e.value.value);
-      final end = r.bytesCopy(r.uvar());
-      final rd = RangeDelete(
-        treeId: p.treeId,
-        start: userKeyPrefix(p.treeId, Uint8List.fromList(p.cke)),
-        end: userKeyPrefix(p.treeId, end),
-        seq: p.seq,
-      );
-      if (rd.covers(prefix)) out.add(rd);
+    if (_memtableRangeDeletes > 0) {
+      for (final e in _memtable.entries) {
+        final k = e.key;
+        if (k[k.length - 1] != Op.rangeDelete) continue;
+        final p = parseInternalKey(k);
+        final r = ByteReader(e.value.value);
+        final end = r.bytesCopy(r.uvar());
+        final rd = RangeDelete(
+          treeId: p.treeId,
+          start: userKeyPrefix(p.treeId, Uint8List.fromList(p.cke)),
+          end: userKeyPrefix(p.treeId, end),
+          seq: p.seq,
+        );
+        if (rd.covers(prefix)) out.add(rd);
+      }
     }
     return out;
   }
@@ -1613,10 +1632,8 @@ final class Engine {
         if (r.hasRangeDeletes) return true;
       }
     }
-    for (final k in _memtable.keys) {
-      if (k[k.length - 1] == Op.rangeDelete) return true;
-    }
-    return false;
+    // A counter, not a scan of the memtable — see [_memtableRangeDeletes].
+    return _memtableRangeDeletes > 0;
   }
 
   /// The greatest range-delete seq covering [prefix] at or below [ceiling],
@@ -1652,19 +1669,21 @@ final class Engine {
         }
       }
     }
-    for (final e in _memtable.entries) {
-      final k = e.key;
-      if (k[k.length - 1] != Op.rangeDelete) continue;
-      final p = parseInternalKey(k);
-      if (p.treeId != treeId) continue;
-      final r = ByteReader(e.value.value);
-      final end = r.bytesCopy(r.uvar());
-      out.add(RangeDelete(
-        treeId: p.treeId,
-        start: userKeyPrefix(p.treeId, Uint8List.fromList(p.cke)),
-        end: userKeyPrefix(p.treeId, end),
-        seq: p.seq,
-      ));
+    if (_memtableRangeDeletes > 0) {
+      for (final e in _memtable.entries) {
+        final k = e.key;
+        if (k[k.length - 1] != Op.rangeDelete) continue;
+        final p = parseInternalKey(k);
+        if (p.treeId != treeId) continue;
+        final r = ByteReader(e.value.value);
+        final end = r.bytesCopy(r.uvar());
+        out.add(RangeDelete(
+          treeId: p.treeId,
+          start: userKeyPrefix(p.treeId, Uint8List.fromList(p.cke)),
+          end: userKeyPrefix(p.treeId, end),
+          seq: p.seq,
+        ));
+      }
     }
     return out;
   }

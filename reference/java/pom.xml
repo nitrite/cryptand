@@ -104,10 +104,12 @@
             <!--
               Coverage. Bound to the default phases so `mvn test` writes
               target/site/jacoco/jacoco.xml and `mvn verify` fails the build if
-              the ratchet below is not met. The interop/bench entry points are
-              excluded: they are driven by reference/conformance/interop/run.sh
-              and by hand, not by the suite, so counting them measures the
-              harness rather than the engine.
+              the ratchet below is not met. The interop entry point is
+              excluded: it is driven by reference/conformance/interop/run.sh
+              and not by the suite, so counting it measures the harness rather
+              than the engine. The benchmarks need no exclusion any more: they
+              are test-scope, so jacoco never sees them and neither does the
+              published jar.
             -->
             <plugin>
                 <groupId>org.jacoco</groupId>
@@ -116,7 +118,6 @@
                 <configuration>
                     <excludes>
                         <exclude>org/dizitart/cryptand/tool/Interop*</exclude>
-                        <exclude>org/dizitart/cryptand/bench/**</exclude>
                         <exclude>org/dizitart/cryptand/text/UnicodeTables*</exclude>
                     </excludes>
                 </configuration>
