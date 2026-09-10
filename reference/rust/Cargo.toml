@@ -1,6 +1,18 @@
 [workspace]
 resolver = "2"
 members = ["cryptand", "cryptand-conformance", "cryptand-write"]
+# Built explicitly (`-p cryptand-compare`), never by a bare `cargo build`: it
+# pulls in three competing engines that have nothing to do with the format.
+exclude = ["cryptand-compare"]
 
+# `lto` and `codegen-units = 1`: cross-crate inlining, and the one thing the
+# point-read profile could not be fixed without -- without it, `memcmp`,
+# `memcpy` and the small leaf functions of the segment walk are called through
+# a stub on every comparison. `debug` is kept because every benchmark in
+# `reference/bench` is profiled against this profile and a stripped one cannot
+# be read.
 [profile.release]
 debug = true
+lto = "fat"
+codegen-units = 1
+panic = "unwind"

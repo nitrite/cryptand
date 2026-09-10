@@ -20,7 +20,17 @@ pub fn put_ivar(out: &mut Vec<u8>, v: i64) {
 }
 
 /// Returns the value and the number of bytes consumed.
+#[inline]
 pub fn get_uvar(b: &[u8]) -> Result<(u64, usize)> {
+    // Nearly every uvar a reader decodes is one byte: cell suffix lengths, cell
+    // counts, name-dictionary indices. The general loop below carries a bounds
+    // check, a `min(10)` and a non-canonical test per iteration, and it was the
+    // single hottest leaf on the point-read profile.
+    if let Some(&first) = b.first() {
+        if first < 0x80 {
+            return Ok((first as u64, 1));
+        }
+    }
     let mut v: u64 = 0;
     let mut shift = 0u32;
     for i in 0..b.len().min(10) {

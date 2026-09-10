@@ -1,6 +1,99 @@
 //! `02-value-encoding.md` §8 — equality and comparison, defined once for all
 //! SDKs. This is the *logical* order; `cke` is the byte order that refines it.
 
+/// Lexicographic byte order, compared eight bytes at a time and **inlined**.
+///
+/// `<[u8] as Ord>` lowers to a call to `memcmp`, through a lazy-binding stub.
+/// The keys this format compares are short -- an internal key is
+/// `u32be(tree_id) || CKE(key) || u64be(~seq) || u8 op`, around 27 bytes for a
+/// `NitriteId` -- and the call and its stub cost more than the comparison. On
+/// the write profile `memcmp` was **39.5 %** of a `put`, from the memtable's
+/// `BTreeMap` ordering its keys.
+///
+/// A big-endian `u64` comparison is exactly lexicographic byte comparison over
+/// those eight bytes, so this is the same order `<[u8] as Ord>` gives, and
+/// [`MemKey`]'s `Ord` and `Borrow` agree because both go through here.
+#[inline]
+pub fn cmp_bytes(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + 8 <= n {
+        let x = u64::from_be_bytes(a[i..i + 8].try_into().unwrap());
+        let y = u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
+        if x != y {
+            return x.cmp(&y);
+        }
+        i += 8;
+    }
+    while i < n {
+        if a[i] != b[i] {
+            return a[i].cmp(&b[i]);
+        }
+        i += 1;
+    }
+    a.len().cmp(&b.len())
+}
+
+/// The memtable's owned key, ordered by [`cmp_bytes`].
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct MemKey(pub Vec<u8>);
+
+/// The borrowed form of [`MemKey`], so a range query needs no owned bound.
+#[repr(transparent)]
+#[derive(PartialEq, Eq, Debug)]
+pub struct MemSlice([u8]);
+
+impl MemSlice {
+    #[inline]
+    pub fn new(b: &[u8]) -> &MemSlice {
+        // `repr(transparent)` over `[u8]`: the same layout, the same lifetime,
+        // a different `Ord`.
+        unsafe { &*(b as *const [u8] as *const MemSlice) }
+    }
+}
+
+impl Ord for MemSlice {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        cmp_bytes(&self.0, &other.0)
+    }
+}
+impl PartialOrd for MemSlice {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MemKey {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        cmp_bytes(&self.0, &other.0)
+    }
+}
+impl PartialOrd for MemKey {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::borrow::Borrow<MemSlice> for MemKey {
+    #[inline]
+    fn borrow(&self) -> &MemSlice {
+        MemSlice::new(&self.0)
+    }
+}
+
+impl std::ops::Deref for MemKey {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+
 use crate::error::{invalid, Result};
 use crate::value::{NumType, Value};
 use std::cmp::Ordering;

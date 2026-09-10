@@ -1,0 +1,21 @@
+# **A separate crate on purpose.** `fjall`, `redb` and `sled` are dependencies
+# of the comparison, not of the format, and putting them in `cryptand` would put
+# them in the published package's dependency tree. This member is excluded from
+# a default workspace build for the same reason the benchmarks are behind a
+# feature: `cargo build` in `reference/rust` must produce the `cryptand` CLI and
+# nothing else.
+[package]
+name = "cryptand-compare"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cryptand = { path = "../cryptand" }
+fjall = "3.1"
+redb = "4.2"
+sled = "0.34"
+
+[[bin]]
+name = "compare_bench"
+path = "src/main.rs"

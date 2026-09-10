@@ -2198,3 +2198,184 @@ authenticated encryption, and a file three other language runtimes can open.
 MVStore and RocksDB are key-value stores. This table says Cryptand is in the
 same league on the workload it is designed for; it does not say the three do the
 same amount of work, and they do not.
+
+---
+
+# Part 5 — the performance round, by profile
+
+Everything in Parts 1–4 was found by reading a chapter against three
+implementations. This part was found a different way: by **sampling profiles**
+of a point read and of a write, in all three languages, against the engines a
+person choosing a database in each of those languages would actually weigh
+Cryptand against. The comparison suite that makes that possible did not exist
+before this round; `reference/bench/run_compare.sh` and
+`reference/bench/RESULTS.md` are its output, and the numbers live there.
+
+What is here is the part a table cannot say: **what was wrong, which
+instrument saw it, and which of the three had it.**
+
+## The headline: the three had the same four defects
+
+They were written independently, in three languages, by people reading the same
+chapter — and the point-read profile of each showed the same four things. That
+is the finding, and it is a stronger statement than any one of them:
+
+1. **The page prefix was re-compared on every probe of every binary search.**
+   `04-segments.md` §2.2 gives every key in a node the same leading bytes.
+   Whether the search key matches them is a property of the *node*; when it does
+   not match, it decides the comparison for every cell on the page at once. All
+   three implementations asked it once per probe — about fifteen times per point
+   read, on the long half of the key. It was 28 % of the Rust read profile and
+   33 % of the Java one (`ArraysSupport.mismatch`).
+
+2. **The suffix-length varint had no one-byte path.** Every cell a conforming
+   writer produces has a key suffix under 128 bytes, so its length is one byte;
+   all three ran the general LEB128 loop, with its ten-byte bound, its overflow
+   test and its canonicality test, per probe. 14 % of the Rust profile, 22 % of
+   the Java one.
+
+3. **A cell was decoded several times to answer one question.** Rust's segment
+   lookup asked `key_len`, `key_starts_with`, `key_tail9` and `payload_offset`
+   separately, each re-reading the cell pointer and re-decoding the length —
+   four decodes of the same cell. Java built a `ByteReader` object per probe.
+   Dart built a `ByteReader` **and** a `Uint8List` view per probe, and then
+   materialised the whole internal key twice for every candidate segment: once
+   to test its prefix and once inside the record it returned.
+
+4. **`SegmentRef::covers` allocated a buffer.** It built `successor(prefix)` to
+   answer a question that is `min_key.starts_with(prefix) || min_key < prefix`,
+   once per candidate segment per point read. Rust and Dart both did it; Java
+   compared in place already.
+
+None of the four is a format problem. Each is a reader doing more work than the
+bytes on disk require, and each is the kind of thing a conformance suite cannot
+see, because the answers are identical either way.
+
+## The counters that were not counters
+
+Two of these are the shape this project has met before — *being a counter is not
+the same as being useful* — and both were in Rust.
+
+**`Segment::node_accesses` and `Segment::page_reads` were two relaxed atomic
+read-modify-writes on every node access — about eight per point read — and
+nothing anywhere read either of them.** Not a test, not a benchmark, not the
+CLI. The counter `13-operations.md` §6 actually requires is
+`page_reads_per_lookup`, defined there as "pages fetched **through the
+pager**", and that is `Pager::page_reads`, a plain field, which is what every
+benchmark and test in the tree uses. The two deleted ones counted node accesses
+*inside an already-resident extent* — a different quantity, and one
+`reference/bench/README.md` already warns is not comparable between
+implementations. They were 7 % of a read.
+
+**`Counters::segments_probed` was a `Vec<u32>` with one entry appended per point
+read and never truncated.** An engine serving a million reads a second grew by
+4 MB/s and never gave it back; reporting the p50 and p99 that `§6` asks for
+cloned the whole history and sorted it. This is a memory leak in a long-running
+process, not merely a slow metric, and no test could see it because every test
+reads the percentile once and exits. It is a bucket histogram now — probes per
+lookup is bounded by the number of live segments — reporting the same
+nearest-rank percentile in constant space.
+
+## Where a word-sized read was done a byte at a time — again
+
+`Cfh64.hash` in Java read its eight-byte words with an eight-iteration
+shift-and-or loop, in the hash that every filter probe runs. 8.8 % of the read
+profile. It is one unaligned little-endian load through
+`MethodHandles.byteArrayViewVarHandle` now, and the conformance corpus is what
+proves the value is unchanged.
+
+This is the **third** time this project has found that exact shape in a hot
+primitive: Rust's CRC-32C was a bit-at-a-time loop, Dart's was a byte table, and
+now Java's format hash. The lesson is not about any of them individually. It is
+that a function whose *output* is checked by a conformance vector has no
+instrument at all pointing at its *cost*, and these three were each caught only
+when something else made them the top frame.
+
+## The memtable comparator, in Rust
+
+The Rust memtable is a `BTreeMap<Vec<u8>, MemEntry>`, and `<Vec<u8> as Ord>`
+lowers to a `memcmp` call reached through a lazy-binding stub. On internal keys
+of about twenty-seven bytes the call and the stub cost more than the comparison:
+**`memcmp` was 39.5 % of a `put`.** `compare::MemKey` and `compare::MemSlice`
+give the same order through an inlined eight-bytes-at-a-time comparison, and the
+mixed row moved 13 % on that change alone.
+
+The same substitution in Java was **measured and rejected**:
+`Arrays.compareUnsigned(byte[], byte[])` is fully intrinsified and came out
+level with the hand-written form (1.22 M against 1.25 M creates/s, inside the
+run-to-run spread). Java keeps the JDK intrinsic for whole arrays and the
+hand-written comparison only for the ranged form the binary search needs, where
+it measured a clear 6 %. Both sites say so in a comment, because "unify these"
+is the obvious next edit and it would be wrong.
+
+## The allocations a point read no longer makes
+
+Rust's read path allocated four times per lookup: the CKE, the user prefix built
+by copying it, the internal key materialised out of the leaf, and the value
+copied out of the page. It now allocates **none** of them in the common case:
+
+- `cke::encode_into` writes the CKE straight into a buffer that already holds
+  the tree id, and that buffer is owned by the engine and reused;
+- `Segment::lookup_ref` reads the cell in place and returns a `RecordRef` whose
+  `value` is a byte *range* in the extent;
+- `Engine::get_ref` returns a `ValueRef` that borrows the resident segment
+  extent, keeping it alive through the `Arc` the page cache already holds.
+
+`malloc` went from 20 % of the read profile to 0.5 %. `Engine::get` is now a
+thin wrapper that copies at the very end, so there is one implementation of §4's
+resolution and not two that can disagree.
+
+`ValueRef` is also what makes the Rust comparison table honest: redb, fjall and
+sled all return a handle rather than a copy, and timing Cryptand's `get` against
+them would have been timing a whole-document `memcpy` none of them was asked to
+do.
+
+## Two things deliberately not done
+
+**The Java flush still drains its memtable one skip-list `remove` at a time.**
+That is `O(n log n)` and **10.6 % of the create profile** — the `ponytail:`
+comment at the site named the ceiling before this round and now names the
+number. Swapping in a fresh shard would be `O(1)`. It is not done because a
+writer holds no lock on that path: an entry inserted between the swap and the
+re-insertion of the survivors would be lost, it is the one path in the engine
+where a lost write is silent, and the tests here would pass either way. Ten per
+cent is not worth that. The fix, if it is taken, is to version the memtable and
+have the single write site re-publish when it observes a swap.
+
+**A branchless binary search in the Rust node was tried and reverted.** It
+measured 2.68 M reads/s against 3.0 M. The conditional select it exists to buy
+cannot be reached, because `compare_suffix` is fallible and the `?` on every
+probe is a branch the CPU has to predict anyway; the extra probe the branchless
+form needs to establish its invariant is then pure cost. Both search functions
+carry that measurement in a comment.
+
+## The format did not change, and that is a result
+
+The brief for this round allowed the spec to change if performance required it.
+It did not. Every defect above is a reader or a writer doing more work than the
+bytes on disk require, and the page layout was not asking for any of it.
+
+The one format change that had looked promising — repacking a leaf page so its
+keys are contiguous, to cut the cache lines a binary search touches — was ruled
+out by measurement rather than by reluctance. Cryptand's Rust read stands at
+0.85× redb's at **2 000** documents, where the whole database fits in L2, and at
+0.85× at **20 000**, where it does not. A constant ratio across an order of
+magnitude of working-set size is not a memory-locality problem, so buying
+locality would have bought nothing.
+
+`13-operations.md` §6's metric contract is unchanged: the same metrics, the same
+definitions, the same values. And the proof that none of this reached the format
+is the interop gate — twelve rounds, four directions, encrypted included, same
+digests before and after.
+
+## Where the three now stand
+
+`reference/bench/RESULTS.md` carries the tables. The short version, and the one
+sentence worth keeping:
+
+> Against every comparator in all three languages, **every row Cryptand loses is
+> the read row, and every engine that wins it does so by not being an LSM** —
+> redb is a copy-on-write B-tree over an mmap, MVStore is an in-heap B-tree,
+> PalDB is an immutable perfect-hash file that cannot take a write, and a Hive
+> `Box` is a `HashMap`. The update, delete and mixed rows Cryptand wins are the
+> same trade seen from the other side.

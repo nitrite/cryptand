@@ -270,11 +270,20 @@ public final class BtreePage {
      * {@code memcmp} order — no host comparator is consulted anywhere.
      */
     public int lowerBound(byte[] target) {
+        int pc = prefixCompare(target);
+        if (pc > 0) {
+            // Every key on the page sorts after `target`.
+            return 0;
+        }
+        if (pc < 0) {
+            // Every key sorts before it.
+            return cellCount;
+        }
         int lo = 0;
         int hi = cellCount;
         while (lo < hi) {
             int mid = (lo + hi) >>> 1;
-            if (compareCellKey(mid, target) < 0) {
+            if (compareSuffix(mid, target) < 0) {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -302,8 +311,24 @@ public final class BtreePage {
      * of the payload.
      */
     private int compareCellKey(int i, byte[] target) {
+        int pc = prefixCompare(target);
+        return pc != 0 ? pc : compareSuffix(i, target);
+    }
+
+    /**
+     * How <strong>every</strong> key on this page compares to {@code target} on
+     * the shared prefix alone, or 0 when the prefix matches and only the
+     * suffixes can decide.
+     *
+     * <p>The prefix is the same for every cell, so this answer does not belong
+     * inside a binary search — and it was inside both of them, re-comparing the
+     * same bytes on each of the ~15 probes a point read makes.
+     * {@code ArraysSupport.mismatch} was <strong>33 %</strong> of the read
+     * profile, and most of it was this.
+     */
+    private int prefixCompare(byte[] target) {
         int n = Math.min(prefix.length, target.length);
-        int c = Arrays.compareUnsigned(prefix, 0, n, target, 0, n);
+        int c = cmpBytes(prefix, 0, n, target, 0, n);
         if (c != 0) {
             return c;
         }
@@ -312,13 +337,37 @@ public final class BtreePage {
             // page sorts after it.
             return 1;
         }
+        return 0;
+    }
+
+    /**
+     * Cell {@code i}'s key against {@code target}, given that
+     * {@link #prefixCompare} has already returned 0 for it.
+     *
+     * <p>The suffix length is read straight out of the payload rather than
+     * through a {@link ByteReader}: a reader was allocated on every probe of
+     * every binary search, and a suffix under 128 bytes -- which is every cell
+     * this format produces -- is a single byte. The general path is still there
+     * for anything longer, and both paths run the same attacker-controlled
+     * length check below.
+     */
+    private int compareSuffix(int i, byte[] target) {
         int off = cellOffset(i);
         if (off < ptrOffset + 2 * cellCount || off > payloadLen) {
             throw new CorruptionException("btree cell pointer " + off + " is outside the cell area");
         }
-        ByteReader r = new ByteReader(payload, base + off, payloadLen - off);
-        long rawSuffixLen = r.uvar();
-        int suffixAt = base + off + r.consumed();
+        long rawSuffixLen;
+        int suffixAt;
+        int at = base + off;
+        int b0 = payload[at] & 0xFF;
+        if (b0 < 0x80) {
+            rawSuffixLen = b0;
+            suffixAt = at + 1;
+        } else {
+            ByteReader r = new ByteReader(payload, at, payloadLen - off);
+            rawSuffixLen = r.uvar();
+            suffixAt = at + r.consumed();
+        }
         // **The length is attacker-controlled and must be checked before it is
         // used in arithmetic**, not after. `key(i)` got this for free from
         // `ByteReader.bytes`, which refuses a length it cannot satisfy; the
@@ -336,12 +385,48 @@ public final class BtreePage {
         int suffixLen = (int) rawSuffixLen;
         int rest = target.length - prefix.length;
         int m = Math.min(suffixLen, rest);
-        c = Arrays.compareUnsigned(payload, suffixAt, suffixAt + m,
-                target, prefix.length, prefix.length + m);
+        int c = cmpBytes(payload, suffixAt, m, target, prefix.length, m);
         if (c != 0) {
             return c;
         }
         return Integer.compare(suffixLen, rest);
+    }
+
+    /** Unaligned big-endian 64-bit reads over a `byte[]`. */
+    private static final java.lang.invoke.VarHandle BE64 =
+            java.lang.invoke.MethodHandles.byteArrayViewVarHandle(
+                    long[].class, java.nio.ByteOrder.BIG_ENDIAN);
+
+    /**
+     * {@code memcmp} over two windows, eight bytes at a time.
+     *
+     * <p>A big-endian {@code long} comparison is exactly lexicographic byte
+     * comparison over those eight bytes, so this is the order
+     * {@link Arrays#compareUnsigned} gives. It replaces that call in the two
+     * binary searches because the windows here are around twenty bytes, and at
+     * that length the intrinsic's range checks and length dispatch cost more
+     * than the comparison: {@code ArraysSupport.mismatch} was 31 % of the read
+     * profile after the prefix had already been hoisted out of the search.
+     */
+    static int cmpBytes(byte[] a, int aOff, int aLen, byte[] b, int bOff, int bLen) {
+        int n = Math.min(aLen, bLen);
+        int i = 0;
+        while (i + 8 <= n) {
+            long x = (long) BE64.get(a, aOff + i);
+            long y = (long) BE64.get(b, bOff + i);
+            if (x != y) {
+                return Long.compareUnsigned(x, y);
+            }
+            i += 8;
+        }
+        while (i < n) {
+            int c = (a[aOff + i] & 0xFF) - (b[bOff + i] & 0xFF);
+            if (c != 0) {
+                return c;
+            }
+            i++;
+        }
+        return Integer.compare(aLen, bLen);
     }
 
     /**
@@ -350,6 +435,15 @@ public final class BtreePage {
      * one whose separator is {@code <= target}.
      */
     public int childIndexFor(byte[] target) {
+        int pc = prefixCompare(target);
+        if (pc > 0) {
+            // Every separator sorts after `target`: the leftmost child.
+            return 0;
+        }
+        if (pc < 0) {
+            // Every separator sorts before it: the rightmost.
+            return Math.max(0, cellCount - 1);
+        }
         int lo = 0;
         int hi = cellCount;
         while (lo < hi) {
@@ -358,7 +452,7 @@ public final class BtreePage {
             // key, so the same in-place comparison applies — and this probe was
             // the more expensive of the two, allocating the suffix, the joined
             // separator and an `Internal` record per step.
-            if (compareCellKey(mid, target) <= 0) {
+            if (compareSuffix(mid, target) <= 0) {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -550,13 +644,21 @@ public final class BtreePage {
         return 2 + varLen(suffixLen) + suffixLen + 16;
     }
 
+    /**
+     * The encoded length of a uvar, without encoding it.
+     *
+     * <p>Closed form rather than a shift loop: this is called about eight times
+     * per cell across the builder's fit test and the two passes of
+     * {@link #encodeLeaves}, and it was 8 % of the write profile.
+     * {@code numberOfLeadingZeros} is a single instruction, and {@code | 1}
+     * makes zero take the one-byte answer the loop gave it.
+     */
     private static int varLen(long v) {
-        int n = 1;
-        while (Long.compareUnsigned(v, 0x80L) >= 0) {
-            v >>>= 7;
-            n++;
+        if (v < 0) {
+            // Above 2^63 unsigned: the ten-byte form.
+            return 10;
         }
-        return n;
+        return (63 - Long.numberOfLeadingZeros(v | 1)) / 7 + 1;
     }
 
     // ==================================================================
@@ -625,6 +727,20 @@ public final class BtreePage {
     }
 
     /** Unsigned lexicographic byte comparison — the only order this format has. */
+    /**
+     * Byte order over two whole arrays.
+     *
+     * <p>This is the memtable's comparator and the merge heap's, so it runs
+     * {@code O(log n)} times per memtable write, per memtable removal and per
+     * merged entry of every flush -- together about 44 % of the create profile.
+     * <p>{@link Arrays#compareUnsigned} and not {@link #cmpBytes}, and that is
+     * a **measured** choice rather than an oversight: the two-argument form is
+     * fully intrinsified and came out level with the hand-written comparison
+     * here (1.22 M against 1.25 M creates/s, inside the run-to-run spread).
+     * {@code cmpBytes} is kept for the two binary searches, where the
+     * six-argument ranged form is what the JDK offers and where it measured a
+     * clear 6 % on reads. Do not "unify" these without re-measuring both.
+     */
     public static int memcmp(byte[] a, byte[] b) {
         return Arrays.compareUnsigned(a, b);
     }

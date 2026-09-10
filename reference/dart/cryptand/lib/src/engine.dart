@@ -655,6 +655,7 @@ final class Engine {
     abandonCompaction();
     manifest.tree.root = c.manifestRoot;
     _levelCache.clear();
+    _invalidateCandidateOrder();
     visibleSeq = c.seq;
     commitId = commitBefore + 1; // a restore is itself a commit
 
@@ -1118,6 +1119,7 @@ final class Engine {
     extents[seg.header.segmentId] = seg;
     manifest.add(SegmentRef.of(seg, level: level, group: group));
     _levelCache.remove(level);
+    _invalidateCandidateOrder();
     return seg;
   }
 
@@ -1125,6 +1127,7 @@ final class Engine {
     manifest.remove(ref);
     extents.remove(ref.segmentId);
     _levelCache.remove(ref.level);
+    _invalidateCandidateOrder();
   }
 
   // -------------------------------------------------------------------------
@@ -1160,9 +1163,55 @@ final class Engine {
 
   final Map<int, List<SegmentRef>> _levelCache = {};
 
+  /// §4's candidate order, flattened across levels and already sorted, valid
+  /// for as long as [_levelCache] is.
+  ///
+  /// The order does not depend on the key -- only the `covers` test and the
+  /// filter probe do -- so it is built once per manifest change instead of
+  /// once per point read. [candidatesFor] used to allocate a filtered list and
+  /// **sort it** for every level on every `get`.
+  List<SegmentRef>? _candidateOrder;
+
+  /// Whether any live segment carries a `RANGE_DELETE`, on the same validity.
+  bool _anyRefRangeDeletes = false;
+
+  void _invalidateCandidateOrder() {
+    _candidateOrder = null;
+  }
+
+  List<SegmentRef> _candidateRefs() {
+    final cached = _candidateOrder;
+    if (cached != null) return cached;
+    final out = <SegmentRef>[];
+    for (var l = 0; l <= lastLevel; l++) {
+      final refs = [
+        for (final r in refsAt(l))
+          if (!quarantined.containsKey(r.segmentId)) r
+      ];
+      // **Level discipline, and the ordering §4 does not spell out.** §4 names
+      // "L0 newest-flush-first, then strictly increasing level", which predates
+      // §3.1's range-partition groups: a *tiered* level holds up to
+      // `overlap_bound` runs and a key may sit in more than one of them, so the
+      // proof needs an order inside a level too. `segment_id` supplies it at no
+      // cost -- `spec/00-conventions.md` §7 makes it globally unique and never
+      // reused, allocated from the superblock's `next_segment_id`, so a higher
+      // id was created later, and a later run at a level was compacted from
+      // later data. Descending `segment_id` within a level is therefore
+      // newest-first, and `max_seq` -- which §4 explicitly disqualifies for
+      // picking a winner -- is not needed for the ordering either.
+      refs.sort((a, b) => b.segmentId.compareTo(a.segmentId));
+      out.addAll(refs);
+    }
+    _anyRefRangeDeletes = out.any((r) => r.hasRangeDeletes);
+    return _candidateOrder = out;
+  }
+
   /// Drops the in-memory manifest mirror. Repair rewrites tree 6 underneath
   /// the engine, so the mirror has to be told.
-  void clearLevelCache() => _levelCache.clear();
+  void clearLevelCache() {
+    _levelCache.clear();
+    _invalidateCandidateOrder();
+  }
 
   /// Group ids in use at [level].
   Set<int> groupsAt(int level) => {for (final r in refsAt(level)) r.group};
@@ -1473,6 +1522,7 @@ final class Engine {
       manifest.add(SegmentRef.of(s, level: job.target, group: job.group));
     }
     _levelCache.remove(job.target);
+    _invalidateCandidateOrder();
 
     if (job.levelled) pinnedBySnapshots = job.pinned;
     if (job.recluster) coldCollections++;
@@ -1672,13 +1722,13 @@ final class Engine {
   /// assumption — with no range deletes anywhere, the read and scan paths skip
   /// the whole mechanism on one boolean instead of walking the manifest.
   bool get hasAnyRangeDeletes {
-    for (var l = 0; l <= lastLevel; l++) {
-      for (final r in refsAt(l)) {
-        if (r.hasRangeDeletes) return true;
-      }
-    }
-    // A counter, not a scan of the memtable — see [_memtableRangeDeletes].
-    return _memtableRangeDeletes > 0;
+    // A counter, not a scan of the memtable — see [_memtableRangeDeletes] —
+    // and for the segments, the flag [_candidateRefs] computes on the walk it
+    // already does. This runs on **every point read**, and walking every level
+    // of the manifest to answer it was the un-cached half of that walk.
+    if (_memtableRangeDeletes > 0) return true;
+    _candidateRefs();
+    return _anyRefRangeDeletes;
   }
 
   /// The greatest range-delete seq covering [prefix] at or below [ceiling],
@@ -1735,40 +1785,17 @@ final class Engine {
 
   List<Segment> candidatesFor(Uint8List userKeyPrefix) {
     final out = <Segment>[];
-
-    void consider(List<SegmentRef> refs) {
-      refs = [
-        for (final r in refs)
-          if (!quarantined.containsKey(r.segmentId)) r
-      ];
-      // **Level discipline, and the ordering §4 does not spell out.** §4 names
-      // "L0 newest-flush-first, then strictly increasing level", which predates
-      // §3.1's range-partition groups: a *tiered* level holds up to
-      // `overlap_bound` runs and a key may sit in more than one of them, so the
-      // proof needs an order inside a level too. `segment_id` supplies it at no
-      // cost — `spec/00-conventions.md` §7 makes it globally unique and never
-      // reused, allocated from the superblock's `next_segment_id`, so a higher
-      // id was created later, and a later run at a level was compacted from
-      // later data. Descending `segment_id` within a level is therefore
-      // newest-first, and `max_seq` — which §4 explicitly disqualifies for
-      // picking a winner — is not needed for the ordering either.
-      refs.sort((a, b) => b.segmentId.compareTo(a.segmentId));
-      for (final ref in refs) {
-        if (!ref.covers(userKeyPrefix)) continue;
-        final seg = extents[ref.segmentId]!;
-        final f = seg.filter;
-        // §4: a segment that may hold a covering range delete MUST NOT be
-        // pruned by its filter, which contains point keys only.
-        if (f != null && !ref.hasRangeDeletes && !f.mayContain(userKeyPrefix)) {
-          continue;
-        }
-        if (f != null) filterAdmitted++;
-        out.add(seg);
+    for (final ref in _candidateRefs()) {
+      if (!ref.covers(userKeyPrefix)) continue;
+      final seg = extents[ref.segmentId]!;
+      final f = seg.filter;
+      // §4: a segment that may hold a covering range delete MUST NOT be
+      // pruned by its filter, which contains point keys only.
+      if (f != null && !ref.hasRangeDeletes && !f.mayContain(userKeyPrefix)) {
+        continue;
       }
-    }
-
-    for (var l = 0; l <= lastLevel; l++) {
-      consider(refsAt(l));
+      if (f != null) filterAdmitted++;
+      out.add(seg);
     }
     return out;
   }
@@ -1835,6 +1862,10 @@ final class Engine {
     // Every internal key for this user key is `prefix || u64 ~seq || u8 op`, so
     // they form one contiguous run in the ordered memtable. Seek to the start
     // of that run and stop at its end, rather than walking every pending write.
+    // Nothing buffered: no bound to build and no tree to walk. After a flush
+    // this is every read until the next write, and the allocation plus two
+    // splay-tree descents below were paid to discover it.
+    if (_memtable.isEmpty) return null;
     final lo = Uint8List(prefix.length + 9)..setRange(0, prefix.length, prefix);
     SegRecord? best;
     Uint8List? k = _memtable.containsKey(lo) ? lo : _memtable.firstKeyAfter(lo);
@@ -1865,13 +1896,13 @@ final class Engine {
   SegRecord? _seekIn(Segment s, Uint8List prefix, int? ceiling) {
     final c = s.cursor()..seekCeiling(prefix);
     while (c.isValid) {
-      final k = c.key();
-      if (k.length < prefix.length) return null;
-      for (var i = 0; i < prefix.length; i++) {
-        if (k[i] != prefix[i]) return null;
-      }
-      final rec = c.record();
-      if (ceiling == null || rec.seq <= ceiling) return rec;
+      // Tested **in place**. This built the whole internal key to compare its
+      // head against `prefix`, and then built it a second time inside
+      // `record()` for the entry it returned -- two allocations and four copies
+      // per candidate segment per point read, on a path where the answer is
+      // usually decided by the first few bytes.
+      if (!c.keyIsVersionOf(prefix)) return null;
+      if (ceiling == null || c.seq() <= ceiling) return c.record();
       c.next(); // a version newer than the snapshot; keep walking down
     }
     return null;

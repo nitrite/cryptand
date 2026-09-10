@@ -104,3 +104,13 @@ required-features = ["harness"]
 name = "xlang_crud_bench"
 path = "benches/xlang_crud.rs"
 required-features = ["harness"]
+
+# A single-phase loop -- read, update or mixed -- long enough for a sampling
+# profiler to see one operation instead of five. This is what produced the
+# figures in `reference/HARDENING.md` Part 5, and it is how to reproduce them.
+#
+#   samply record ./target/release/readprof 20000 10 read
+[[bin]]
+name = "readprof"
+path = "benches/readprof.rs"
+required-features = ["harness"]

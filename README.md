@@ -125,8 +125,36 @@ specifies the bytes.
 
 ## Can it beat MVStore, RocksDB, Hive and Fjall?
 
-`design/performance-model.md` does the arithmetic. The headline predictions,
-all of them predictions and none of them measured:
+**Measured, in all three languages:
+[`reference/bench/RESULTS.md`](reference/bench/RESULTS.md).** Four tables, each
+with a chart — Rust against `fjall`, `redb` and `sled`; Java against MVStore,
+RocksDB and PalDB; Dart against Hive; and the three implementations against each
+other. Run them with [`reference/bench/run_compare.sh`](reference/bench/run_compare.sh)
+and [`reference/bench/run_xlang_crud.sh`](reference/bench/run_xlang_crud.sh).
+
+The short answer, at 20 000 documents on one machine:
+
+| | leads | loses |
+|---|---|---|
+| **rust** vs fjall, redb, sled | create, update, delete | read, mixed (to redb) |
+| **java** vs MVStore, RocksDB, PalDB | update, delete, mixed — and **every** row against RocksDB | create (MVStore), read (MVStore, PalDB) |
+| **dart** vs Hive | create, update, delete, mixed | read |
+| **rust** vs java vs dart | rust leads four rows, java leads update, dart is third throughout | — |
+
+**Every row Cryptand loses is the read row, and every engine that wins it does
+so by not being an LSM**: redb is a copy-on-write B-tree over an mmap, MVStore is
+an in-heap B-tree, PalDB is an immutable perfect-hash file that cannot take a
+write at all, and a Hive `Box` is a `HashMap`. The update, delete and mixed rows
+Cryptand wins are the same trade seen from the other side. `RESULTS.md` §4 shows
+why the remaining read gap is compute per probe rather than cache locality — and
+therefore why the one format change that looked promising was **ruled out by
+measurement**, not attempted.
+
+### The predictions this replaces
+
+`design/performance-model.md` does the arithmetic. These were written before any
+of the above was measured, and are kept because a prediction that is never
+checked against a number is worth nothing:
 
 | | claim |
 |---|---|

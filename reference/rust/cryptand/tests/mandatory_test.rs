@@ -132,8 +132,8 @@ fn read_tail_p99_is_at_most_2_and_p99_9_at_most_3() {
         let id = rng.below(n as u64) as i64;
         e.get(T, &Value::NitriteId(id)).unwrap();
     }
-    let p99 = percentile(&e.counters.segments_probed, 0.99);
-    let p999 = percentile(&e.counters.segments_probed, 0.999);
+    let p99 = e.counters.segments_probed.percentile(0.99);
+    let p999 = e.counters.segments_probed.percentile(0.999);
     // "An implementation MUST also report which read path it used -- with §4's
     // early exit or without -- because the bound holds for the first and not
     // the second."

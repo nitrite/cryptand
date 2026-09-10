@@ -96,9 +96,26 @@ final class SegmentRef {
   /// the manifest entry, not on the segment.
   bool covers(Uint8List userKeyPrefix) {
     if (compareKeys(userKeyPrefix, maxKey) > 0) return false;
-    final sup = Keys.successor(userKeyPrefix);
-    if (sup != null && compareKeys(sup, minKey) <= 0) return false;
-    return true;
+    // `minKey < successor(prefix)`, without building the successor.
+    //
+    // `successor(k)` is the least byte string greater than every string with
+    // prefix `k`, so `minKey < successor(k)` holds exactly when `minKey`
+    // carries the prefix or sorts below it -- and when `k` is all-`0xFF` and
+    // has no successor, no `minKey` can fail both tests, which is the `null`
+    // branch this replaces. `Keys.successor` allocated a `Uint8List` here,
+    // once per candidate segment per point read.
+    final n = userKeyPrefix.length;
+    if (minKey.length >= n) {
+      var same = true;
+      for (var i = 0; i < n; i++) {
+        if (minKey[i] != userKeyPrefix[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return true;
+    }
+    return compareKeys(minKey, userKeyPrefix) < 0;
   }
 
   /// The manifest key, §3.2.

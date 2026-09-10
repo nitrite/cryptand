@@ -15,6 +15,10 @@ import org.h2.mvstore.MVStore;
 import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 
+import com.linkedin.paldb.api.PalDB;
+import com.linkedin.paldb.api.PalDBConfigBuilder;
+import com.linkedin.paldb.api.StoreRW;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -135,13 +139,39 @@ public final class CompareBench {
         return seed;
     }
 
-    private static long percentile(List<Long> xs, double p) {
-        if (xs.isEmpty()) {
-            return 0;
+    /**
+     * A fixed-capacity latency recorder over a primitive array.
+     *
+     * <p>This was a {@code List<Long>}, which boxed a {@code Long} and
+     * sometimes grew an array <em>inside the timed loop</em>, once per
+     * operation. At the rates this table reports -- a read is around 450 ns --
+     * that was tens of nanoseconds of harness in every sample, and it
+     * compressed the very differences the table exists to show. It penalised
+     * whichever engine was fastest, which is the wrong direction for a
+     * benchmark to be wrong in.
+     */
+    private static final class Lat {
+        private final long[] xs;
+        private int n;
+
+        Lat(int capacity) {
+            this.xs = new long[capacity];
         }
-        List<Long> s = new ArrayList<>(xs);
-        Collections.sort(s);
-        return s.get((int) Math.round((s.size() - 1) * p));
+
+        void add(long micros) {
+            if (n < xs.length) {
+                xs[n++] = micros;
+            }
+        }
+
+        long percentile(double p) {
+            if (n == 0) {
+                return 0;
+            }
+            long[] s = java.util.Arrays.copyOf(xs, n);
+            java.util.Arrays.sort(s);
+            return s[(int) Math.round((s.length - 1) * p)];
+        }
     }
 
     private static long us(long nanos) {
@@ -154,13 +184,13 @@ public final class CompareBench {
      */
     private static boolean measuring = true;
 
-    private static void row(String engine, String op, long ops, double secs, List<Long> lat) {
+    private static void row(String engine, String op, long ops, double secs, Lat lat) {
         if (!measuring) {
             return;
         }
         System.out.printf("%-10s %-8s %10.0f %8d %8d %10d%n",
                 engine, op, ops / Math.max(secs, 1e-9),
-                percentile(lat, 0.50), percentile(lat, 0.99), percentile(lat, 0.999));
+                lat.percentile(0.50), lat.percentile(0.99), lat.percentile(0.999));
     }
 
     /** Every engine gets the same encoded bytes, so encoding is not the variable. */
@@ -176,7 +206,7 @@ public final class CompareBench {
         int n = args.length > 0 ? Integer.parseInt(args[0]) : 20_000;
         int mixedOps = args.length > 1 ? Integer.parseInt(args[1]) : 20_000;
 
-        System.out.println("# cryptand vs mvstore vs rocksdb -- CRUD under load");
+        System.out.println("# cryptand vs mvstore vs rocksdb vs paldb -- CRUD under load");
         System.out.println("# documents=" + n + " mixed_ops=" + mixedOps
                 + " durability=os-equivalent  (see the class javadoc: this is a sanity check,");
         System.out.println("#  not a ranking -- the three do not do the same amount of work)");
@@ -197,6 +227,7 @@ public final class CompareBench {
             cryptand(n, mixedOps, v0, v1);
             mvstore(n, mixedOps, v0, v1);
             rocksdb(n, mixedOps, v0, v1);
+            paldb(n, mixedOps, v0, v1);
         }
 
         System.out.println("# done");
@@ -211,7 +242,7 @@ public final class CompareBench {
         o.durability = Superblock.Durability.OS;
         int tree = 16;
         try (Engine e = Engine.create(path, o)) {
-            List<Long> lat = new ArrayList<>(n);
+            Lat lat = new Lat(n);
             long t0 = System.nanoTime();
             for (int i = 0; i < n; i++) {
                 long t = System.nanoTime();
@@ -228,7 +259,7 @@ public final class CompareBench {
                 e.get(tree, keyOf((int) Math.floorMod(seed, n)));
             }
             int reads = Math.min(5000, n);
-            lat = new ArrayList<>(reads);
+            lat = new Lat(reads);
             t0 = System.nanoTime();
             for (int i = 0; i < reads; i++) {
                 seed = next(seed);
@@ -239,7 +270,7 @@ public final class CompareBench {
             row("cryptand", "read", reads, (System.nanoTime() - t0) / 1e9, lat);
 
             int updates = Math.min(5000, n);
-            lat = new ArrayList<>(updates);
+            lat = new Lat(updates);
             t0 = System.nanoTime();
             for (int k = 0; k < updates; k++) {
                 seed = next(seed);
@@ -252,7 +283,7 @@ public final class CompareBench {
             row("cryptand", "update", updates, (System.nanoTime() - t0) / 1e9, lat);
 
             int deletes = Math.min(5000, n);
-            lat = new ArrayList<>(deletes);
+            lat = new Lat(deletes);
             t0 = System.nanoTime();
             for (int k = 0; k < deletes; k++) {
                 long t = System.nanoTime();
@@ -262,7 +293,7 @@ public final class CompareBench {
             e.commitNow();
             row("cryptand", "delete", deletes, (System.nanoTime() - t0) / 1e9, lat);
 
-            List<Long> mix = new ArrayList<>(mixedOps);
+            Lat mix = new Lat(mixedOps);
             t0 = System.nanoTime();
             for (int k = 0; k < mixedOps; k++) {
                 seed = next(seed);
@@ -305,7 +336,7 @@ public final class CompareBench {
                         store.getAutoCommitDelay());
             }
             MVMap<byte[], byte[]> map = store.openMap("orders");
-            List<Long> lat = new ArrayList<>(n);
+            Lat lat = new Lat(n);
             long t0 = System.nanoTime();
             for (int i = 0; i < n; i++) {
                 long t = System.nanoTime();
@@ -321,7 +352,7 @@ public final class CompareBench {
                 map.get(keyOf((int) Math.floorMod(seed, n)));
             }
             int reads = Math.min(5000, n);
-            lat = new ArrayList<>(reads);
+            lat = new Lat(reads);
             t0 = System.nanoTime();
             for (int i = 0; i < reads; i++) {
                 seed = next(seed);
@@ -332,7 +363,7 @@ public final class CompareBench {
             row("mvstore", "read", reads, (System.nanoTime() - t0) / 1e9, lat);
 
             int updates = Math.min(5000, n);
-            lat = new ArrayList<>(updates);
+            lat = new Lat(updates);
             t0 = System.nanoTime();
             for (int k = 0; k < updates; k++) {
                 seed = next(seed);
@@ -345,7 +376,7 @@ public final class CompareBench {
             row("mvstore", "update", updates, (System.nanoTime() - t0) / 1e9, lat);
 
             int deletes = Math.min(5000, n);
-            lat = new ArrayList<>(deletes);
+            lat = new Lat(deletes);
             t0 = System.nanoTime();
             for (int k = 0; k < deletes; k++) {
                 long t = System.nanoTime();
@@ -355,7 +386,7 @@ public final class CompareBench {
             store.commit();
             row("mvstore", "delete", deletes, (System.nanoTime() - t0) / 1e9, lat);
 
-            List<Long> mix = new ArrayList<>(mixedOps);
+            Lat mix = new Lat(mixedOps);
             t0 = System.nanoTime();
             for (int k = 0; k < mixedOps; k++) {
                 seed = next(seed);
@@ -388,7 +419,7 @@ public final class CompareBench {
         Path dir = Files.createTempDirectory("cmp-rocks-");
         try (Options opts = new Options().setCreateIfMissing(true);
              RocksDB db = RocksDB.open(opts, dir.toString())) {
-            List<Long> lat = new ArrayList<>(n);
+            Lat lat = new Lat(n);
             long t0 = System.nanoTime();
             for (int i = 0; i < n; i++) {
                 long t = System.nanoTime();
@@ -403,7 +434,7 @@ public final class CompareBench {
                 db.get(keyOf((int) Math.floorMod(seed, n)));
             }
             int reads = Math.min(5000, n);
-            lat = new ArrayList<>(reads);
+            lat = new Lat(reads);
             t0 = System.nanoTime();
             for (int i = 0; i < reads; i++) {
                 seed = next(seed);
@@ -414,7 +445,7 @@ public final class CompareBench {
             row("rocksdb", "read", reads, (System.nanoTime() - t0) / 1e9, lat);
 
             int updates = Math.min(5000, n);
-            lat = new ArrayList<>(updates);
+            lat = new Lat(updates);
             t0 = System.nanoTime();
             for (int k = 0; k < updates; k++) {
                 seed = next(seed);
@@ -426,7 +457,7 @@ public final class CompareBench {
             row("rocksdb", "update", updates, (System.nanoTime() - t0) / 1e9, lat);
 
             int deletes = Math.min(5000, n);
-            lat = new ArrayList<>(deletes);
+            lat = new Lat(deletes);
             t0 = System.nanoTime();
             for (int k = 0; k < deletes; k++) {
                 long t = System.nanoTime();
@@ -435,7 +466,7 @@ public final class CompareBench {
             }
             row("rocksdb", "delete", deletes, (System.nanoTime() - t0) / 1e9, lat);
 
-            List<Long> mix = new ArrayList<>(mixedOps);
+            Lat mix = new Lat(mixedOps);
             t0 = System.nanoTime();
             for (int k = 0; k < mixedOps; k++) {
                 seed = next(seed);
@@ -455,6 +486,114 @@ public final class CompareBench {
             row("rocksdb", "mixed", mixedOps, (System.nanoTime() - t0) / 1e9, mix);
         }
         size("rocksdb", dir);
+        deleteTree(dir);
+    }
+
+    /**
+     * PalDB, through the read-write handle of the {@code net.soundvibe} fork.
+     *
+     * <p><strong>PalDB is a write-once store.</strong> That is its design and
+     * the reason it is fast to read: the original LinkedIn library builds an
+     * immutable file with a perfect-hash index and then only serves it. The
+     * fork used here adds {@code StoreRW}, a write buffer in front of that
+     * immutable file which is compacted into a new one on {@code flush}, and
+     * that is what makes an update and a delete row possible at all. Read those
+     * two rows as <em>the fork's write buffer</em>, not as PalDB: the store
+     * PalDB is famous for cannot do either.
+     *
+     * <p>Keys are the {@code long} snowflake id rather than its eight
+     * big-endian bytes, which is the same key. PalDB dispatches on the key's
+     * own {@code hashCode}/{@code equals}, and a {@code byte[]} in Java has
+     * neither by value, so a byte-array key would have collided on identity.
+     * PalDB serialises a {@code Long} as eight bytes, so no engine here is
+     * given a shorter key than another.
+     *
+     * <p>The barrier is one {@code flush} per phase, matching the single
+     * {@code commitNow}, {@code store.commit} and RocksDB write-buffer barrier
+     * the other three get.
+     */
+    private static void paldb(int n, int mixedOps, byte[][] v0, byte[][] v1) throws Exception {
+        Path dir = Files.createTempDirectory("cmp-paldb-");
+        Path file = dir.resolve("db.paldb");
+        var cfg = PalDBConfigBuilder.<Long, byte[]>create()
+                .withEnableWriteAutoFlush(false)
+                .build();
+        StoreRW<Long, byte[]> db = PalDB.createRW(file.toFile(), cfg);
+        db.init().close();
+        try {
+            Lat lat = new Lat(n);
+            long t0 = System.nanoTime();
+            for (int i = 0; i < n; i++) {
+                long t = System.nanoTime();
+                db.put(snowflake(i), v0[i]);
+                lat.add(us(System.nanoTime() - t));
+            }
+            db.flush();
+            row("paldb", "create", n, (System.nanoTime() - t0) / 1e9, lat);
+
+            long seed = 0x51EDC0DEL;
+            for (int i = 0; i < 2000; i++) {
+                seed = next(seed);
+                db.get(snowflake((int) Math.floorMod(seed, n)));
+            }
+            int reads = Math.min(5000, n);
+            lat = new Lat(reads);
+            t0 = System.nanoTime();
+            for (int i = 0; i < reads; i++) {
+                seed = next(seed);
+                long t = System.nanoTime();
+                db.get(snowflake((int) Math.floorMod(seed, n)));
+                lat.add(us(System.nanoTime() - t));
+            }
+            row("paldb", "read", reads, (System.nanoTime() - t0) / 1e9, lat);
+
+            int updates = Math.min(5000, n);
+            lat = new Lat(updates);
+            t0 = System.nanoTime();
+            for (int k = 0; k < updates; k++) {
+                seed = next(seed);
+                int i = (int) Math.floorMod(seed, n);
+                long t = System.nanoTime();
+                db.put(snowflake(i), v1[i]);
+                lat.add(us(System.nanoTime() - t));
+            }
+            db.flush();
+            row("paldb", "update", updates, (System.nanoTime() - t0) / 1e9, lat);
+
+            int deletes = Math.min(5000, n);
+            lat = new Lat(deletes);
+            t0 = System.nanoTime();
+            for (int k = 0; k < deletes; k++) {
+                long t = System.nanoTime();
+                db.remove(snowflake(k % n));
+                lat.add(us(System.nanoTime() - t));
+            }
+            db.flush();
+            row("paldb", "delete", deletes, (System.nanoTime() - t0) / 1e9, lat);
+
+            Lat mix = new Lat(mixedOps);
+            t0 = System.nanoTime();
+            for (int k = 0; k < mixedOps; k++) {
+                seed = next(seed);
+                int roll = (int) Math.floorMod(seed, 100);
+                seed = next(seed);
+                int i = (int) Math.floorMod(seed, n);
+                long t = System.nanoTime();
+                if (roll < 70) {
+                    db.get(snowflake(i));
+                } else if (roll < 95) {
+                    db.put(snowflake(i), v1[i]);
+                } else {
+                    db.remove(snowflake(i));
+                }
+                mix.add(us(System.nanoTime() - t));
+            }
+            db.flush();
+            row("paldb", "mixed", mixedOps, (System.nanoTime() - t0) / 1e9, mix);
+        } finally {
+            db.close();
+        }
+        size("paldb", dir);
         deleteTree(dir);
     }
 

@@ -71,12 +71,14 @@ impl SegmentRef {
         if user_key_prefix > &self.max_key[..] {
             return false;
         }
-        if let Some(sup) = cke::successor(user_key_prefix) {
-            if sup[..] <= self.min_key[..] {
-                return false;
-            }
-        }
-        true
+        // `min_key < successor(prefix)` without building the successor.
+        // `successor(k)` is the least byte string greater than every string
+        // with prefix `k`, so `min_key < successor(k)` holds exactly when
+        // `min_key` carries the prefix or sorts below it -- and when `k` is
+        // all-`0xFF` and has no successor, no `min_key` can fail both tests,
+        // which is the `None` branch this replaces. `cke::successor` allocated
+        // a `Vec` here, once per candidate segment per point read.
+        self.min_key.starts_with(user_key_prefix) || self.min_key[..] < *user_key_prefix
     }
 
     pub fn key(&self) -> Vec<u8> {

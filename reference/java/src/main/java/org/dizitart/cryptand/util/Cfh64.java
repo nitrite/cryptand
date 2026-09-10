@@ -37,6 +37,11 @@ public final class Cfh64 {
     private static final long M1 = 0xBF58476D1CE4E5B9L;
     private static final long M2 = 0x94D049BB133111EBL;
 
+    /** Unaligned little-endian 64-bit reads over a `byte[]`. */
+    private static final java.lang.invoke.VarHandle LE64 =
+            java.lang.invoke.MethodHandles.byteArrayViewVarHandle(
+                    long[].class, java.nio.ByteOrder.LITTLE_ENDIAN);
+
     public static long hash(byte[] key) {
         return hash(key, 0, key.length);
     }
@@ -45,11 +50,13 @@ public final class Cfh64 {
         long h = P1 ^ (length * P2);
         int i = 0;
         while (length - i >= 8) {
-            // Little-endian, as everywhere outside CKE.
-            long w = 0;
-            for (int b = 7; b >= 0; b--) {
-                w = (w << 8) | (key[offset + i + b] & 0xFFL);
-            }
+            // Little-endian, as everywhere outside CKE. Read as one unaligned
+            // load: the eight-shift loop this replaces produces the identical
+            // value and was 9 % of the point-read profile, because every filter
+            // probe hashes its key. `byteArrayViewVarHandle` is the public,
+            // intrinsified way to do it -- the same shape as the byte-at-a-time
+            // CRC-32C this project already found once.
+            long w = (long) LE64.get(key, offset + i);
             h ^= w * P2;
             h = Long.rotateLeft(h, 31) * P1;
             i += 8;

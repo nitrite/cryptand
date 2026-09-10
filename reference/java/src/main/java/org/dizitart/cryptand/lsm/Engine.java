@@ -1397,12 +1397,17 @@ public final class Engine implements AutoCloseable {
         // under a durability mode that lets a reader run during the flush.
         republishLevels();
         // ponytail: one skip-list `remove` per entry, which is O(n log n) for
-        // the whole drain and about a fifth of a flush's cost. Draining by
-        // swapping in a fresh shard would be O(1), and is not done because a
+        // the whole drain. **Measured**: `ConcurrentSkipListMap.doRemove` is
+        // 10.6 % of the create profile (JFR, 20 000 documents, `desktop`), so
+        // the ceiling this comment named is now a number. Draining by swapping
+        // in a fresh shard would be O(1), and is still not done because a
         // writer holds no lock on this path: an entry inserted between the swap
-        // and the re-insertion of the survivors would be lost. If this ever
-        // matters, the fix is to give the memtable a version and swap under it,
-        // not to remove faster.
+        // and the re-insertion of the survivors would be lost. The fix is to
+        // give the memtable a version and have the single write site at
+        // `shards[sh].put` re-publish when it observes a swap -- not to remove
+        // faster. It is left undone deliberately: it is a change to the one
+        // path where a lost write is silent, and the tests here would pass
+        // either way.
         //
         // The counters are batched: 40 000 atomic read-modify-writes to record
         // what two additions can.
@@ -1554,9 +1559,13 @@ public final class Engine implements AutoCloseable {
         // `ceilingEntry` then `higherEntry`, not `tailMap(from, true).entrySet()`:
         // the view, its entry set and its iterator are three allocations per
         // point read, and the loop almost always stops on the first entry.
+        // `isEmpty` first. A `ConcurrentSkipListMap` still walks its index
+        // levels to answer `ceilingEntry` on an empty map, and after a flush
+        // every shard is empty until the next write: this was 8 % of the
+        // point-read profile, spent proving there was nothing there.
         ConcurrentSkipListMap<byte[], BtreePage.Leaf> shard = shardFor(treeId, cke);
-        for (Map.Entry<byte[], BtreePage.Leaf> m = shard.ceilingEntry(from); m != null;
-                m = shard.higherEntry(m.getKey())) {
+        for (Map.Entry<byte[], BtreePage.Leaf> m = shard.isEmpty() ? null : shard.ceilingEntry(from);
+                m != null; m = shard.higherEntry(m.getKey())) {
             if (!Ikey.hasUserKey(m.getKey(), uk)) {
                 break;
             }

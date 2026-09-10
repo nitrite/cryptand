@@ -62,9 +62,8 @@ fn measure(n: i64, shape: &Shape) -> (f64, u64, u64, u64) {
         let id = rng.below(n as u64) as i64;
         e.get(16, &Value::NitriteId(id)).unwrap();
     }
-    let s: Vec<u64> = e.counters.segments_probed.iter().map(|&x| x as u64).collect();
-    let mean = s.iter().sum::<u64>() as f64 / s.len() as f64;
-    (mean, percentile(&s, 0.99), percentile(&s, 0.999), *s.iter().max().unwrap())
+    let h = &e.counters.segments_probed;
+    (h.mean(), h.percentile(0.99) as u64, h.percentile(0.999) as u64, h.max() as u64)
 }
 
 fn main() {

@@ -44,6 +44,78 @@ pub fn percentile(samples: &[u32], p: f64) -> u32 {
     s[i]
 }
 
+/// A count per observed value, for a quantity that is small and bounded.
+///
+/// `segments_probed_per_lookup` (`13-operations.md` §6) was kept as one `u32`
+/// **per point read**, in a `Vec` that was appended to and never truncated: a
+/// process serving a million reads a second grew the engine by 4 MB/s and
+/// never gave it back, and reporting the percentile cloned and sorted the whole
+/// history. Probes per lookup is bounded by the number of live segments, so a
+/// bucket per observed value answers the same question in constant space and
+/// reports it in a walk over the buckets.
+///
+/// The percentile is the same nearest-rank definition as [`percentile`] above
+/// -- the element at `round((n - 1) * p)` of the sorted sample sequence -- so
+/// the metric's value is unchanged.
+#[derive(Clone, Debug, Default)]
+pub struct SmallHistogram {
+    buckets: Vec<u64>,
+    count: u64,
+}
+
+impl SmallHistogram {
+    pub fn record(&mut self, v: u32) {
+        let i = v as usize;
+        if i >= self.buckets.len() {
+            self.buckets.resize(i + 1, 0);
+        }
+        self.buckets[i] += 1;
+        self.count += 1;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn len(&self) -> u64 {
+        self.count
+    }
+
+    pub fn clear(&mut self) {
+        self.buckets.clear();
+        self.count = 0;
+    }
+
+    /// The mean, without materialising the samples.
+    pub fn mean(&self) -> f64 {
+        if self.count == 0 {
+            return 0.0;
+        }
+        let sum: u64 = self.buckets.iter().enumerate().map(|(v, &n)| v as u64 * n).sum();
+        sum as f64 / self.count as f64
+    }
+
+    /// The largest value recorded, or 0 when nothing has been.
+    pub fn max(&self) -> u32 {
+        self.buckets.iter().rposition(|&n| n > 0).unwrap_or(0) as u32
+    }
+
+    pub fn percentile(&self, p: f64) -> u32 {
+        if self.count == 0 {
+            return 0;
+        }
+        let target = (((self.count - 1) as f64) * p).round() as u64;
+        let mut seen = 0u64;
+        for (v, &n) in self.buckets.iter().enumerate() {
+            seen += n;
+            if seen > target {
+                return v as u32;
+            }
+        }
+        (self.buckets.len().saturating_sub(1)) as u32
+    }
+}
+
 pub trait Metrics {
     fn metrics(&mut self) -> Result<BTreeMap<String, Metric>>;
 }
@@ -163,11 +235,11 @@ impl Metrics for Engine {
         let _ = probes;
         m.insert(
             "segments_probed_per_lookup_p50".into(),
-            Metric::Count(percentile(&c.segments_probed, 0.50) as u64),
+            Metric::Count(c.segments_probed.percentile(0.50) as u64),
         );
         m.insert(
             "segments_probed_per_lookup_p99".into(),
-            Metric::Count(percentile(&c.segments_probed, 0.99) as u64),
+            Metric::Count(c.segments_probed.percentile(0.99) as u64),
         );
         m.insert(
             "filter_false_positive_rate".into(),

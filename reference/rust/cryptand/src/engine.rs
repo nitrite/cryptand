@@ -40,6 +40,93 @@ pub struct MemEntry {
     pub expiry_ms: Option<u64>,
 }
 
+/// A `BuildHasher` for the engine's `u64`-keyed maps.
+///
+/// `segments` and `quarantined` are keyed on a segment id and
+/// probed on **every candidate of every point read**; the default hasher is
+/// SipHash-1-3, which is a keyed cryptographic hash chosen to make
+/// user-supplied keys safe against collision attacks. A segment id is issued
+/// by this engine, not supplied by anyone, so that protection buys nothing
+/// here. The multiply-and-shift below is the standard 64-bit finaliser: it
+/// spreads sequential ids across both the bucket index and hashbrown's control
+/// byte, which plain identity hashing would not.
+#[derive(Clone, Copy, Default)]
+pub struct IdHasher(u64);
+
+impl std::hash::Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        let mut h = (self.0 ^ v).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        h ^= h >> 32;
+        self.0 = h;
+    }
+}
+
+type IdBuild = std::hash::BuildHasherDefault<IdHasher>;
+type IdMap<V> = HashMap<u64, V, IdBuild>;
+
+/// A value read **without copying it out of the engine**.
+///
+/// A segment's extent is resident and held in an `Arc`, so an inline value can
+/// be handed back as a borrow of it: the `Arc` keeps the extent alive for
+/// exactly as long as the caller holds the value. This is what
+/// [`Engine::get_ref`] returns, and it is the difference between a point read
+/// that allocates and copies a whole document and one that does neither.
+///
+/// `Owned` is the honest fallback for the two cases with nothing stable to
+/// borrow: a hit in the memtable, whose entry the engine may mutate, and a
+/// value resolved out of the value log, which is read into a fresh buffer.
+pub enum ValueRef {
+    Segment(Arc<Segment>, std::ops::Range<usize>),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for ValueRef {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            ValueRef::Segment(s, r) => &s.extent[r.clone()],
+            ValueRef::Owned(v) => v,
+        }
+    }
+}
+
+impl AsRef<[u8]> for ValueRef {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl ValueRef {
+    pub fn into_vec(self) -> Vec<u8> {
+        match self {
+            ValueRef::Owned(v) => v,
+            other => other.to_vec(),
+        }
+    }
+}
+
+/// Where a point read's winning version came from, kept unresolved until §4's
+/// range-delete, tombstone and expiry tests have all passed. A version that
+/// loses to a newer one is discarded without its value ever being touched.
+enum ReadSource {
+    Mem(SegRecord),
+    Seg(Arc<Segment>, crate::segment::RecordRef),
+}
+
+struct ReadWinner {
+    seq: u64,
+    op: u8,
+    src: ReadSource,
+}
+
 /// `10-transactions.md` §1 — a sequence number plus **all nine** superblock
 /// roots. A snapshot that omits one is not a consistent view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -125,7 +212,7 @@ pub struct Counters {
     pub page_cache_misses: u64,
     /// Segments dropped to stay inside `12-profiles.md` §1's budget.
     pub page_cache_evictions: u64,
-    pub segments_probed: Vec<u32>,
+    pub segments_probed: crate::metrics::SmallHistogram,
     pub filter_probes: u64,
     pub filter_false_positives: u64,
     pub value_reads: u64,
@@ -156,7 +243,7 @@ pub struct Engine {
     pub changefeed: CowTree,
 
     /// §2 step 5's shards: writers to different shards never meet.
-    memtable: Vec<BTreeMap<Vec<u8>, MemEntry>>,
+    memtable: Vec<BTreeMap<crate::compare::MemKey, MemEntry>>,
     memtable_bytes: usize,
     pub memtable_entry_limit: usize,
 
@@ -179,9 +266,8 @@ pub struct Engine {
     /// [`Engine::admit`]. It used to be unbounded, which made the budget row a
     /// decoration: at 150 000 documents on `mobile` it held 70 MB against a
     /// stated 4 MiB, and grew linearly with the data touched.
-    segments: HashMap<u64, Arc<Segment>>,
+    segments: IdMap<Arc<Segment>>,
     /// Last-use ticks for the eviction order, parallel to `segments`.
-    segment_lru: HashMap<u64, u64>,
     lru_clock: u64,
     /// Decoded tree 6 by level, valid for `manifest_cache_epoch`.
     /// When set, this handle may not write, and it performed no write when it
@@ -192,10 +278,24 @@ pub struct Engine {
     manifest_cache: HashMap<u8, Vec<SegmentRef>>,
     /// The whole of tree 6, for `all_refs`, on the same epoch.
     manifest_all_cache: Option<Vec<SegmentRef>>,
+    /// §4's candidate order, flattened across levels and already sorted, on the
+    /// same epoch. A point read used to rebuild and re-sort this per level per
+    /// lookup: `last_level() + 1` vector clones and sorts to answer one `get`.
+    /// An `Arc` so the read path can take it while still holding `&mut self`
+    /// for `segment()`.
+    manifest_candidates: Option<Arc<Vec<SegmentRef>>>,
+    /// Whether **any** segment in the manifest carries a range delete, on the
+    /// same epoch. `range_delete_seq` runs on every point read; when this is
+    /// false and the memtable counter is zero there is provably nothing to
+    /// find, and the whole-manifest walk it would otherwise do is skipped.
+    manifest_any_range_deletes: bool,
     manifest_cache_epoch: (u64, u64),
+    /// Reused by every point read to build `u32be(tree_id) || CKE(key)`, so a
+    /// steady stream of reads allocates nothing for the key.
+    key_scratch: Vec<u8>,
     /// `13-operations.md` §4 — segments a checksum failure has taken out of
     /// service, and the key range each covered.
-    pub quarantined: HashMap<u64, SegmentRef>,
+    pub quarantined: IdMap<SegmentRef>,
 
     /// Value-log segments: open ones by heat class, and every one's stats.
     pub vlog_open: BTreeMap<u8, u64>,
@@ -356,15 +456,17 @@ impl Engine {
             early_exit: true,
             filters: true,
             auto_collect: true,
-            segments: HashMap::new(),
-            segment_lru: HashMap::new(),
+            segments: IdMap::default(),
             lru_clock: 0,
             read_only: false,
             memtable_range_deletes: 0,
             manifest_cache: HashMap::new(),
             manifest_all_cache: None,
+            manifest_candidates: None,
+            manifest_any_range_deletes: false,
             manifest_cache_epoch: (u64::MAX, u64::MAX),
-            quarantined: HashMap::new(),
+            key_scratch: Vec::with_capacity(64),
+            quarantined: IdMap::default(),
             vlog_open: BTreeMap::new(),
             vlog_cold_open: None,
             vlog_stats: BTreeMap::new(),
@@ -548,15 +650,17 @@ impl Engine {
             early_exit: true,
             filters: true,
             auto_collect: true,
-            segments: HashMap::new(),
-            segment_lru: HashMap::new(),
+            segments: IdMap::default(),
             lru_clock: 0,
             read_only,
             memtable_range_deletes: 0,
             manifest_cache: HashMap::new(),
             manifest_all_cache: None,
+            manifest_candidates: None,
+            manifest_any_range_deletes: false,
             manifest_cache_epoch: (u64::MAX, u64::MAX),
-            quarantined: HashMap::new(),
+            key_scratch: Vec::with_capacity(64),
+            quarantined: IdMap::default(),
             vlog_open: BTreeMap::new(),
             vlog_cold_open: None,
             vlog_stats: BTreeMap::new(),
@@ -935,16 +1039,27 @@ impl Engine {
         if self.read_only {
             return invalid("this handle was opened read-only and may not write");
         }
-        let cke_key = cke::encode(key)?;
-        crate::limits::check_key_len(&cke_key, self.pager.page_size)?;
+        // The internal key is built once, in place: `u32be(tree_id) ||
+        // CKE(key) || u64be(~seq) || u8 op`. Encoding the CKE into its own
+        // vector and copying it into a second one charged an allocation and a
+        // free to every write.
+        let mut ik = Vec::with_capacity(4 + 24 + 9);
+        ik.extend_from_slice(&tree.to_be_bytes());
+        cke::encode_into(key, &mut ik)?;
+        let cke_len = ik.len() - 4;
+        crate::limits::check_key_len(&ik[4..], self.pager.page_size)?;
         let seq = self.allocate_seq(1);
-        let ik = internal_key(tree, &cke_key, seq, op_code);
-        self.counters.bytes_written_logical += (cke_key.len() + value.len()) as u64;
+        ik.extend_from_slice(&(seq ^ u64::MAX).to_be_bytes());
+        ik.push(op_code);
+        // Borrowed out of `ik`, so the separate copy is gone from here too.
+        // `append_value` and `feed` both take it by reference.
+        let cke_key = &ik[4..4 + cke_len];
+        self.counters.bytes_written_logical += (cke_len + value.len()) as u64;
 
         let entry = if op_code == op::DELETE {
             MemEntry { value_kind: value_kind::EMPTY, value: Vec::new(), expiry_ms }
         } else if vlog::separate(value.len(), self.sb.vlog_min, self.inline_values(tree)) {
-            let p = self.append_value(tree, &cke_key, value, Heat::First)?;
+            let p = self.append_value(tree, cke_key, value, Heat::First)?;
             MemEntry { value_kind: value_kind::VLOG, value: p.encode().to_vec(), expiry_ms }
         } else {
             MemEntry { value_kind: value_kind::INLINE, value: value.to_vec(), expiry_ms }
@@ -952,9 +1067,19 @@ impl Engine {
         if expiry_ms.is_some() {
             self.sb.set_feature(feature::TTL, true);
         }
+        // `insert_mem` takes `ik` by value and `feed` needs the CKE inside it,
+        // so the CKE is copied out first -- but only when this tree actually
+        // has a change feed, which is the condition `feed` itself opens with.
+        let feed_key = if self.changefeed_trees.contains(&tree) {
+            Some(cke_key.to_vec())
+        } else {
+            None
+        };
         self.insert_mem(ik, entry);
         let feed_op = if op_code == op::DELETE { "delete" } else { "insert" };
-        self.feed(tree, seq, feed_op, &cke_key)?;
+        if let Some(k) = feed_key {
+            self.feed(tree, seq, feed_op, &k)?;
+        }
         Ok(seq)
     }
 
@@ -985,7 +1110,7 @@ impl Engine {
             self.written_at.insert(user_part(&ik).to_vec(), seq);
         }
         let s = self.shard_of(user_part(&ik));
-        self.memtable[s].insert(ik, e);
+        self.memtable[s].insert(crate::compare::MemKey(ik), e);
     }
 
     fn memtable_len(&self) -> usize {
@@ -1290,9 +1415,9 @@ impl Engine {
         }
         let mut all: Vec<(Vec<u8>, MemEntry)> = Vec::with_capacity(self.memtable_len());
         for shard in &mut self.memtable {
-            all.extend(std::mem::take(shard).into_iter());
+            all.extend(std::mem::take(shard).into_iter().map(|(k, v)| (k.0, v)));
         }
-        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all.sort_by(|a, b| crate::compare::cmp_bytes(&a.0, &b.0));
         self.memtable_bytes = 0;
         self.memtable_range_deletes = 0;
 
@@ -1348,10 +1473,16 @@ impl Engine {
         self.segments.len()
     }
 
-    /// Records a use of `id` for the eviction order in [`Self::admit`].
-    fn touch(&mut self, id: u64) {
+    /// Records a use of `seg` for the eviction order in [`Self::admit`].
+    ///
+    /// The stamp is stored **on the segment**, not in a map beside the cache.
+    /// This runs on every segment fetch of every point read, and a hash plus a
+    /// map insert to record a number the segment could hold itself was one of
+    /// the last per-read costs left over a plain B-tree lookup.
+    #[inline]
+    fn touch(&mut self, seg: &Segment) {
         self.lru_clock += 1;
-        self.segment_lru.insert(id, self.lru_clock);
+        seg.last_used.store(self.lru_clock, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Caches `seg` and evicts until the resident set is inside
@@ -1373,19 +1504,18 @@ impl Engine {
     /// documents on `mobile`). If a profile ever holds thousands, replace the
     /// scan with an intrusive LRU list; the accounting above does not change.
     fn admit(&mut self, id: u64, seg: Arc<Segment>) {
+        self.touch(&seg);
         self.segments.insert(id, seg);
-        self.touch(id);
         let budget = self.profile.page_cache_bytes;
         while self.segments.len() > 1 && self.page_cache_resident_bytes() > budget {
             let victim = self
                 .segments
-                .keys()
-                .filter(|k| **k != id)
-                .min_by_key(|k| self.segment_lru.get(k).copied().unwrap_or(0))
-                .copied();
+                .iter()
+                .filter(|(k, _)| **k != id)
+                .min_by_key(|(_, s)| s.last_used.load(std::sync::atomic::Ordering::Relaxed))
+                .map(|(k, _)| *k);
             let Some(v) = victim else { break };
             self.segments.remove(&v);
-            self.segment_lru.remove(&v);
             self.counters.page_cache_evictions += 1;
         }
     }
@@ -1394,7 +1524,7 @@ impl Engine {
         if let Some(s) = self.segments.get(&r.segment_id) {
             let s = s.clone();
             self.counters.page_cache_hits += 1;
-            self.touch(r.segment_id);
+            self.touch(&s);
             return Ok(s);
         }
         self.counters.page_cache_misses += 1;
@@ -1428,6 +1558,13 @@ impl Engine {
         (self.manifest.epoch(), self.manifest.root())
     }
 
+    fn invalidate_manifest_cache(&mut self, epoch: (u64, u64)) {
+        self.manifest_cache.clear();
+        self.manifest_all_cache = None;
+        self.manifest_candidates = None;
+        self.manifest_cache_epoch = epoch;
+    }
+
     pub fn refs_at(&mut self, level: u8) -> Result<Vec<SegmentRef>> {
         // Tree 6 is read on **every point read, once per level**, and it is
         // written only when a segment is published or retired. Before this
@@ -1440,9 +1577,7 @@ impl Engine {
         // so it cannot serve a stale level.
         let epoch = self.manifest_stamp();
         if self.manifest_cache_epoch != epoch {
-            self.manifest_cache.clear();
-            self.manifest_all_cache = None;
-            self.manifest_cache_epoch = epoch;
+            self.invalidate_manifest_cache(epoch);
         }
         if let Some(hit) = self.manifest_cache.get(&level) {
             return Ok(hit.clone());
@@ -1471,9 +1606,7 @@ impl Engine {
         // number of segments.
         let epoch = self.manifest_stamp();
         if self.manifest_cache_epoch != epoch {
-            self.manifest_cache.clear();
-            self.manifest_all_cache = None;
-            self.manifest_cache_epoch = epoch;
+            self.invalidate_manifest_cache(epoch);
         }
         if let Some(hit) = &self.manifest_all_cache {
             return Ok(hit.clone());
@@ -1495,36 +1628,109 @@ impl Engine {
     /// because `segment_id` is globally unique and never reused. (`max_seq`
     /// cannot serve: §4 disqualifies it as a per-segment aggregate.)
     pub fn candidates_for(&mut self, user_key_prefix: &[u8]) -> Result<Vec<SegmentRef>> {
+        let order = self.candidate_order()?;
+        Ok(order.iter().filter(|r| r.covers(user_key_prefix)).cloned().collect())
+    }
+
+    /// Every segment in §4's candidate order, whatever the key. The order does
+    /// not depend on the key -- only the `covers` filter does -- so it is built
+    /// once per manifest epoch and the read path filters the shared slice.
+    ///
+    /// `manifest_any_range_deletes` is computed on the same walk, because it is
+    /// the same question asked of the same entries.
+    fn candidate_order(&mut self) -> Result<Arc<Vec<SegmentRef>>> {
+        let epoch = self.manifest_stamp();
+        if self.manifest_cache_epoch != epoch {
+            self.invalidate_manifest_cache(epoch);
+        }
+        if let Some(hit) = &self.manifest_candidates {
+            return Ok(hit.clone());
+        }
         let mut out = Vec::new();
         for level in 0..=self.policy.last_level() {
             let mut refs = self.refs_at(level)?;
             refs.sort_by(|a, b| b.segment_id.cmp(&a.segment_id));
-            for r in refs {
-                if r.covers(user_key_prefix) {
-                    out.push(r);
-                }
-            }
+            out.append(&mut refs);
         }
-        Ok(out)
+        self.manifest_any_range_deletes = out.iter().any(|r| r.has_range_deletes);
+        let arc = Arc::new(out);
+        self.manifest_candidates = Some(arc.clone());
+        Ok(arc)
     }
 
     pub fn get(&mut self, tree: u32, key: &Value) -> Result<Option<Vec<u8>>> {
-        self.get_at(tree, key, None)
+        Ok(self.get_ref_at(tree, key, None)?.map(ValueRef::into_vec))
+    }
+
+    /// [`Engine::get`] handing back a **borrow** of the segment the value lives
+    /// in rather than a copy of it.
+    ///
+    /// The value is valid for as long as the returned [`ValueRef`] is held; the
+    /// `Arc` inside it keeps the segment extent alive even if the page cache
+    /// evicts the segment in the meantime. A caller that only reads the bytes
+    /// -- decoding a document, comparing, writing them out -- should use this;
+    /// `get` exists for callers that want to own them.
+    ///
+    /// This is the read path. `get` is a thin wrapper that copies at the end,
+    /// so there is one implementation and not two that can disagree.
+    pub fn get_ref(&mut self, tree: u32, key: &Value) -> Result<Option<ValueRef>> {
+        self.get_ref_at(tree, key, None)
     }
 
     pub fn get_at(&mut self, tree: u32, key: &Value, at: Option<&Snapshot>) -> Result<Option<Vec<u8>>> {
-        let cke_key = cke::encode(key)?;
-        let prefix = user_prefix(tree, &cke_key);
+        Ok(self.get_ref_at(tree, key, at)?.map(ValueRef::into_vec))
+    }
+
+    /// §4's read resolution, resolving to a [`ValueRef`].
+    ///
+    /// The key prefix is built in a buffer the engine keeps and hands back, so
+    /// a steady stream of reads allocates nothing for it; the winning record is
+    /// carried as `(seq, op, source)` rather than as a materialised
+    /// `SegRecord`, so a version that loses to a newer one costs no copy at
+    /// all.
+    pub fn get_ref_at(
+        &mut self,
+        tree: u32,
+        key: &Value,
+        at: Option<&Snapshot>,
+    ) -> Result<Option<ValueRef>> {
+        let mut prefix = std::mem::take(&mut self.key_scratch);
+        prefix.clear();
+        prefix.extend_from_slice(&tree.to_be_bytes());
+        let r = match cke::encode_into(key, &mut prefix) {
+            Ok(()) => self.resolve_read(tree, &prefix, at),
+            Err(e) => Err(e),
+        };
+        self.key_scratch = prefix;
+        r
+    }
+
+    fn resolve_read(
+        &mut self,
+        tree: u32,
+        prefix: &[u8],
+        at: Option<&Snapshot>,
+    ) -> Result<Option<ValueRef>> {
         let ceiling = at.map(|s| s.seq);
         let mut probes = 0u32;
 
         // The memtable holds every write since the last flush; a point read
         // that skipped it would not see them.
-        let mut best: Option<SegRecord> = self.memtable_lookup(&prefix, ceiling);
+        let mut best: Option<ReadWinner> = self
+            .memtable_lookup(prefix, ceiling)
+            .map(|rec| ReadWinner { seq: rec.seq(), op: rec.op(), src: ReadSource::Mem(rec) });
 
-        let cands = self.candidates_for(&prefix)?;
-        for r in &cands {
-            if self.quarantined.contains_key(&r.segment_id) {
+        // The shared, already-ordered candidate list; `covers` is the only part
+        // of the selection that depends on the key, so it is applied here
+        // rather than into a per-read vector.
+        let cands = self.candidate_order()?;
+        for r in cands.iter() {
+            if !r.covers(prefix) {
+                continue;
+            }
+            // `is_empty` first: quarantine is the exceptional state, and the
+            // hash lookup ran on every candidate of every point read to say so.
+            if !self.quarantined.is_empty() && self.quarantined.contains_key(&r.segment_id) {
                 return Err(Error::Unavailable(format!(
                     "segment {} is quarantined and covers this key",
                     r.segment_id
@@ -1533,19 +1739,22 @@ impl Engine {
             let seg = self.segment(r)?;
             if self.filters && !r.has_range_deletes {
                 self.counters.filter_probes += 1;
-                if !seg.may_contain(&prefix) {
+                if !seg.may_contain(prefix) {
                     continue;
                 }
             }
             probes += 1;
-            if let Some(rec) = seg.lookup(&prefix, ceiling)? {
-                let newer = best.as_ref().map_or(true, |b| rec.seq() > b.seq());
-                if newer {
-                    best = Some(rec);
+            if let Some(rec) = seg.lookup_ref(prefix, ceiling)? {
+                if best.as_ref().map_or(true, |b| rec.seq > b.seq) {
+                    // `seg` is **moved** into the winner: it is not needed
+                    // again in this iteration, and cloning the `Arc` here cost
+                    // a second atomic increment-and-decrement pair per
+                    // candidate on every point read.
+                    best = Some(ReadWinner { seq: rec.seq, op: rec.op, src: ReadSource::Seg(seg, rec) });
                 }
                 // §4: an implementation MAY stop early only when it can prove
                 // no unexamined candidate can hold a newer version of *this*
-                // key. Level discipline is that proof, and `candidates_for`
+                // key. Level discipline is that proof, and `candidate_order`
                 // emits candidates in exactly that order.
                 if self.early_exit {
                     break;
@@ -1554,19 +1763,37 @@ impl Engine {
                 self.counters.filter_false_positives += 1;
             }
         }
-        self.counters.segments_probed.push(probes);
+        self.counters.segments_probed.record(probes);
 
         // §4: a segment that may hold a covering RANGE_DELETE MUST NOT be
         // pruned by its filter, because the filter holds point keys only.
-        let rd = self.range_delete_seq(tree, &prefix, ceiling)?;
+        let rd = self.range_delete_seq(tree, prefix, ceiling)?;
         let Some(best) = best else { return Ok(None) };
-        if rd > best.seq() {
+        if rd > best.seq {
             return Ok(None);
         }
-        if best.op() == op::DELETE || self.expired(&best) {
+        if best.op == op::DELETE {
             return Ok(None);
         }
-        self.resolve_value(&best).map(Some)
+        // §9: expiry is evaluated at read time, so it is exact regardless of
+        // when compaction runs; a backwards clock jump resurrects entries.
+        let expiry = match &best.src {
+            ReadSource::Mem(r) => r.expiry_ms,
+            ReadSource::Seg(_, r) => r.expiry_ms,
+        };
+        if matches!(expiry, Some(x) if x <= self.now_ms) {
+            return Ok(None);
+        }
+        match best.src {
+            ReadSource::Mem(rec) => self.take_value(rec).map(|v| Some(ValueRef::Owned(v))),
+            ReadSource::Seg(seg, rec) => {
+                if rec.value_kind == value_kind::VLOG {
+                    let p = VlogPointer::parse(&seg.extent[rec.value.clone()])?;
+                    return self.read_vlog(&p).map(|v| Some(ValueRef::Owned(v)));
+                }
+                Ok(Some(ValueRef::Segment(seg, rec.value)))
+            }
+        }
     }
 
     fn expired(&self, rec: &SegRecord) -> bool {
@@ -1585,41 +1812,62 @@ impl Engine {
         }
     }
 
+    /// `resolve_value` for a record the caller owns and is finished with. An
+    /// inlined value is **moved** out rather than copied: the borrowing form
+    /// charged a whole-document `memcpy` and allocation to every point read
+    /// that resolved to an inline value, which on the `desktop` profile is
+    /// every read of a document below `vlog_min`.
+    pub fn take_value(&mut self, rec: SegRecord) -> Result<Vec<u8>> {
+        match rec.value_kind {
+            value_kind::VLOG => {
+                let p = VlogPointer::parse(&rec.value)?;
+                self.read_vlog(&p)
+            }
+            _ => Ok(rec.value),
+        }
+    }
+
     fn memtable_lookup(&self, prefix: &[u8], ceiling: Option<u64>) -> Option<SegRecord> {
-        let mut best: Option<SegRecord> = None;
-        // One shard, not all of them — see `shard_of`. The bound is built once
-        // rather than once per shard, which was an allocation per shard per
-        // point read.
-        let from = prefix.to_vec();
-        {
-            let shard = &self.memtable[self.shard_of(prefix)];
-            for (ik, e) in shard.range(from..) {
-                if !ik.starts_with(prefix) || ik.len() != prefix.len() + 9 {
-                    break;
-                }
-                let Ok(parsed) = parse_internal_key(ik) else { continue };
-                // As in `Segment::lookup`: a RANGE_DELETE shares the internal
-                // key shape of a point key and is resolved separately.
-                if parsed.op == op::RANGE_DELETE {
+        // One shard, not all of them — see `shard_of`. The range is taken over
+        // the borrowed prefix: `Vec<u8>: Borrow<[u8]>`, so no bound is built at
+        // all, where this used to allocate one per point read.
+        //
+        // The winner is tracked as a **borrow** and copied out once. Cloning
+        // the internal key and the value on every candidate charged a document
+        // copy per superseded version, which is what a read of a
+        // recently-updated key hits.
+        let mut best: Option<(&crate::compare::MemKey, &MemEntry, u64)> = None;
+        let shard = &self.memtable[self.shard_of(prefix)];
+        let bounds = (
+            std::ops::Bound::Included(crate::compare::MemSlice::new(prefix)),
+            std::ops::Bound::Unbounded,
+        );
+        for (ik, e) in shard.range::<crate::compare::MemSlice, _>(bounds) {
+            if !ik.starts_with(prefix) || ik.len() != prefix.len() + 9 {
+                break;
+            }
+            let Ok(parsed) = parse_internal_key(ik) else { continue };
+            // As in `Segment::lookup`: a RANGE_DELETE shares the internal
+            // key shape of a point key and is resolved separately.
+            if parsed.op == op::RANGE_DELETE {
+                continue;
+            }
+            let seq = parsed.seq;
+            if let Some(c) = ceiling {
+                if seq > c {
                     continue;
                 }
-                let seq = parsed.seq;
-                if let Some(c) = ceiling {
-                    if seq > c {
-                        continue;
-                    }
-                }
-                if best.as_ref().map_or(true, |b| seq > b.seq()) {
-                    best = Some(SegRecord {
-                        internal_key: ik.clone(),
-                        value_kind: e.value_kind,
-                        value: e.value.clone(),
-                        expiry_ms: e.expiry_ms,
-                    });
-                }
+            }
+            if best.map_or(true, |(_, _, b)| seq > b) {
+                best = Some((ik, e, seq));
             }
         }
-        best
+        best.map(|(ik, e, _)| SegRecord {
+            internal_key: ik.0.clone(),
+            value_kind: e.value_kind,
+            value: e.value.clone(),
+            expiry_ms: e.expiry_ms,
+        })
     }
 
     /// Every range delete over `tree`, hoisted once per scan rather than per
@@ -1661,6 +1909,22 @@ impl Engine {
     }
 
     fn range_delete_seq(&mut self, tree: u32, prefix: &[u8], ceiling: Option<u64>) -> Result<u64> {
+        // Provably nothing to find: the memtable counter is maintained at the
+        // one point every memtable write passes through, and
+        // `manifest_any_range_deletes` is computed from the manifest entries on
+        // the epoch this read is already using. Without this, every point read
+        // on a database that has never seen a range delete walked the whole
+        // manifest and allocated a vector to report that fact.
+        if self.memtable_range_deletes == 0 {
+            // `candidate_order` is what computes the flag, and it is only
+            // called here for readers that have not already gone through it.
+            if self.manifest_candidates.is_none() {
+                self.candidate_order()?;
+            }
+            if !self.manifest_any_range_deletes {
+                return Ok(0);
+            }
+        }
         let mut best = 0u64;
         for rd in self.range_deletes_for(tree)? {
             if !rd.covers(prefix) {
@@ -1769,7 +2033,11 @@ impl Engine {
             // The memtable is ordered by internal key, so the range is a
             // sub-map rather than a filtered walk.
             let from = lower_uk.clone().unwrap_or_else(|| tree.to_be_bytes().to_vec());
-            for (ik, e) in shard.range(from..) {
+            let bounds = (
+                std::ops::Bound::Included(crate::compare::MemSlice::new(&from)),
+                std::ops::Bound::Unbounded,
+            );
+            for (ik, e) in shard.range::<crate::compare::MemSlice, _>(bounds) {
                 if !in_range(&ik[..ik.len().saturating_sub(9)]) {
                     // Past the upper bound, or into another tree: both mean
                     // there is nothing further to find in this shard.
@@ -1790,7 +2058,7 @@ impl Engine {
                 consider(
                     &mut best,
                     SegRecord {
-                        internal_key: ik.clone(),
+                        internal_key: ik.0.clone(),
                         value_kind: e.value_kind,
                         value: e.value.clone(),
                         expiry_ms: e.expiry_ms,
@@ -2222,7 +2490,6 @@ impl Engine {
         for r in &job.inputs {
             self.pager.free_extent(r.start_page, r.pages, self.sb.commit_id);
             self.segments.remove(&r.segment_id);
-            self.segment_lru.remove(&r.segment_id);
         }
         self.events.push(StoreEvent::Compacted {
             from: job.inputs[0].level,
@@ -2716,7 +2983,6 @@ impl Engine {
             if r.segment_id == segment_id {
                 self.quarantined.insert(segment_id, r.clone());
                 self.segments.remove(&segment_id);
-                self.segment_lru.remove(&segment_id);
                 return Ok(Some(r));
             }
         }

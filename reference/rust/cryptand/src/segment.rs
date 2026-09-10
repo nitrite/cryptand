@@ -271,7 +271,11 @@ pub struct Node<'a> {
     pub is_leaf: bool,
     pub subtree_entries: u64,
     base: usize,
-    ptr_base: usize,
+    /// The `2 * cell_count` bytes of cell pointers, sliced once in
+    /// [`Node::parse`] where their extent is already checked, so a probe reads
+    /// one out of a slice whose length it cannot exceed rather than
+    /// re-deriving and re-checking the offset.
+    ptrs: &'a [u8],
 }
 
 impl<'a> Node<'a> {
@@ -288,6 +292,10 @@ impl<'a> Node<'a> {
         if 16 + prefix_len + cell_count * 2 > page.len() - base {
             return corrupt(format!("page {page_index}: cell pointers overrun the payload"));
         }
+        let ptr_base = base + 16 + prefix_len;
+        let Some(ptrs) = page.get(ptr_base..ptr_base + cell_count * 2) else {
+            return corrupt(format!("page {page_index}: cell pointers overrun the payload"));
+        };
         Ok(Node {
             page,
             page_index,
@@ -297,34 +305,61 @@ impl<'a> Node<'a> {
             is_leaf: flags & NODE_IS_LEAF != 0,
             subtree_entries,
             base,
-            ptr_base: base + 16 + prefix_len,
+            ptrs,
         })
     }
 
+    #[inline]
     pub fn prefix(&self) -> &[u8] {
         &self.page[self.base + 16..self.base + 16 + self.prefix_len]
     }
 
+    #[inline]
     fn cell_offset(&self, i: usize) -> Result<usize> {
-        if i >= self.cell_count {
+        let Some(p) = self.ptrs.get(i * 2..i * 2 + 2) else {
             return corrupt(format!("page {}: cell {i} out of range", self.page_index));
-        }
-        let off = u16le(self.page, self.ptr_base + i * 2) as usize;
-        if self.base + off >= self.page.len() {
+        };
+        let off = self.base + u16::from_le_bytes([p[0], p[1]]) as usize;
+        if off >= self.page.len() {
             return corrupt(format!("page {}: cell {i} points past the page", self.page_index));
         }
-        Ok(self.base + off)
+        Ok(off)
     }
 
-    fn suffix_at(&self, i: usize) -> Result<(&[u8], usize)> {
+    /// The key suffix of cell `i`, and where the cell's payload begins.
+    ///
+    /// This runs once per probe of every binary search of every descent -- a
+    /// point read at 20 000 documents makes about twenty calls -- and after the
+    /// rest of the read path was fixed it was **38 %** of the profile. Two
+    /// things make it cheap: the suffix length is a uvar and a suffix under 128
+    /// bytes encodes in one byte, which is every cell in practice, so that byte
+    /// is read directly; and the bounds are one `get` on a range rather than a
+    /// chain of separate checks. Corruption is still refused -- a hostile page
+    /// declares both the cell offset and the suffix length -- with the same
+    /// two limits the general path enforces.
+    #[inline]
+    fn suffix_at(&self, i: usize) -> Result<(&'a [u8], usize)> {
         let at = self.cell_offset(i)?;
-        let (len, n) = get_uvar(&self.page[at..])?;
+        let page = self.page;
+        let Some(&b0) = page.get(at) else {
+            return corrupt(format!("page {}: cell {i} points past the page", self.page_index));
+        };
+        let (len, n) = if b0 < 0x80 {
+            (b0 as usize, 1usize)
+        } else {
+            let (l, n) = get_uvar(&page[at..])?;
+            (l as usize, n)
+        };
         let start = at + n;
-        let end = start
-            .checked_add(len as usize)
-            .filter(|e| *e <= self.page.len())
-            .ok_or_else(|| crate::error::Error::Corrupt(format!("page {}: cell {i} suffix runs past the page", self.page_index)))?;
-        Ok((&self.page[start..end], end))
+        let Some((sfx, end)) =
+            start.checked_add(len).and_then(|e| page.get(start..e).map(|sl| (sl, e)))
+        else {
+            return corrupt(format!(
+                "page {}: cell {i} suffix runs past the page",
+                self.page_index
+            ));
+        };
+        Ok((sfx, end))
     }
 
     pub fn key_at(&self, i: usize) -> Result<Vec<u8>> {
@@ -336,27 +371,50 @@ impl<'a> Node<'a> {
     }
 
     /// Compares the search key against cell `i` without materializing the key.
-    pub fn compare_cell(&self, i: usize, target: &[u8]) -> Result<std::cmp::Ordering> {
-        let (suffix, _) = self.suffix_at(i)?;
+    /// How the whole node compares to `target` on its shared prefix alone.
+    ///
+    /// Every key in a node begins with the same `prefix_len` bytes (§2.2), so
+    /// this answer is the same for every cell and does not belong inside the
+    /// binary search. `Ok(rest)` means the prefix matched and the search
+    /// continues on `rest`, the part of `target` after it; `Err(ord)` means the
+    /// prefix already decides it and **every** cell compares that way.
+    ///
+    /// Factoring this out is what makes a probe cheap: the prefix is the long
+    /// half of an internal key (`u32be(tree_id) || CKE(key)` shares a lot
+    /// between neighbours) and it was re-compared byte for byte on each of the
+    /// ~20 probes a descent costs.
+    #[inline]
+    fn prefix_split<'t>(&self, target: &'t [u8]) -> std::result::Result<&'t [u8], std::cmp::Ordering> {
         let prefix = self.prefix();
         let n = prefix.len().min(target.len());
         for j in 0..n {
             if prefix[j] != target[j] {
-                return Ok(prefix[j].cmp(&target[j]));
+                // The cell key is greater exactly when the prefix is.
+                return Err(prefix[j].cmp(&target[j]));
             }
         }
         if target.len() < prefix.len() {
-            return Ok(std::cmp::Ordering::Greater);
+            return Err(std::cmp::Ordering::Greater);
         }
-        for (j, &s) in suffix.iter().enumerate() {
-            if prefix.len() + j >= target.len() {
-                return Ok(std::cmp::Ordering::Greater);
-            }
-            if s != target[prefix.len() + j] {
-                return Ok(s.cmp(&target[prefix.len() + j]));
-            }
+        Ok(&target[prefix.len()..])
+    }
+
+    /// Cell `i`'s key against `rest`, the tail of a target whose prefix has
+    /// already been matched by [`Node::prefix_split`].
+    #[inline]
+    fn compare_suffix(&self, i: usize, rest: &[u8]) -> Result<std::cmp::Ordering> {
+        let (suffix, _) = self.suffix_at(i)?;
+        // `crate::compare::cmp_bytes`, not `<[u8] as Ord>`: the latter calls
+        // `memcmp` through a stub, and this is the inner loop of the binary
+        // search of every node of every descent. It was 31 % of a point read.
+        Ok(crate::compare::cmp_bytes(suffix, rest))
+    }
+
+    pub fn compare_cell(&self, i: usize, target: &[u8]) -> Result<std::cmp::Ordering> {
+        match self.prefix_split(target) {
+            Err(ord) => Ok(ord),
+            Ok(rest) => self.compare_suffix(i, rest),
         }
-        Ok((prefix.len() + suffix.len()).cmp(&target.len()))
     }
 
     /// The bytes after the key of cell `i` — the cell's payload.
@@ -372,6 +430,106 @@ impl<'a> Node<'a> {
             return corrupt("internal cell shorter than its 16-byte child pointer");
         }
         Ok((u64le(p, 0), u64le(p, 8)))
+    }
+
+    /// The full length of cell `i`'s key, without building it.
+    #[inline]
+    pub fn key_len(&self, i: usize) -> Result<usize> {
+        let (suffix, _) = self.suffix_at(i)?;
+        Ok(self.prefix_len + suffix.len())
+    }
+
+    /// Whether cell `i`'s key begins with `p`, without building it.
+    /// Cell `i`'s key suffix and the offset its payload starts at, in one
+    /// decode. Every in-place reader of a cell goes through this.
+    #[inline]
+    pub fn cell_suffix(&self, i: usize) -> Result<(&'a [u8], usize)> {
+        self.suffix_at(i)
+    }
+
+    /// Whether `page_prefix || suffix` begins with `p`.
+    #[inline]
+    pub fn key_has_prefix(page_prefix: &[u8], suffix: &[u8], p: &[u8]) -> bool {
+        let n = page_prefix.len().min(p.len());
+        if crate::compare::cmp_bytes(&page_prefix[..n], &p[..n]) != std::cmp::Ordering::Equal {
+            return false;
+        }
+        if p.len() <= page_prefix.len() {
+            return true;
+        }
+        let rest = &p[page_prefix.len()..];
+        suffix.len() >= rest.len()
+            && crate::compare::cmp_bytes(&suffix[..rest.len()], rest) == std::cmp::Ordering::Equal
+    }
+
+    /// The last nine bytes of `page_prefix || suffix` -- `u64be(~seq) || u8 op`
+    /// (§1) -- copied to the stack. The nine may straddle the two.
+    #[inline]
+    pub fn key_tail9_of(page_prefix: &[u8], suffix: &[u8]) -> Result<[u8; 9]> {
+        let total = page_prefix.len() + suffix.len();
+        if total < 9 {
+            return corrupt("segment cell key is shorter than 9 bytes");
+        }
+        let start = total - 9;
+        if start >= page_prefix.len() {
+            let at = start - page_prefix.len();
+            return Ok(suffix[at..at + 9].try_into().unwrap());
+        }
+        let mut out = [0u8; 9];
+        for (k, slot) in out.iter_mut().enumerate() {
+            let at = start + k;
+            *slot = if at < page_prefix.len() {
+                page_prefix[at]
+            } else {
+                suffix[at - page_prefix.len()]
+            };
+        }
+        Ok(out)
+    }
+
+    #[inline]
+    pub fn key_starts_with(&self, i: usize, p: &[u8]) -> Result<bool> {
+        // Compared in place for the same reason as `compare_suffix`.
+        let prefix = self.prefix();
+        let n = prefix.len().min(p.len());
+        if crate::compare::cmp_bytes(&prefix[..n], &p[..n]) != std::cmp::Ordering::Equal {
+            return Ok(false);
+        }
+        if p.len() <= prefix.len() {
+            return Ok(true);
+        }
+        let (suffix, _) = self.suffix_at(i)?;
+        let rest = &p[prefix.len()..];
+        if suffix.len() < rest.len() {
+            return Ok(false);
+        }
+        Ok(crate::compare::cmp_bytes(&suffix[..rest.len()], rest) == std::cmp::Ordering::Equal)
+    }
+
+    /// The last nine bytes of cell `i`'s key -- `u64be(~seq) || u8 op` (§1) --
+    /// copied to the stack rather than materialising the whole key. The nine
+    /// may straddle the page prefix and the cell suffix, so both are consulted.
+    pub fn key_tail9(&self, i: usize) -> Result<[u8; 9]> {
+        let (suffix, _) = self.suffix_at(i)?;
+        let total = self.prefix_len + suffix.len();
+        if total < 9 {
+            return corrupt(format!("page {}: cell {i} key is shorter than 9 bytes", self.page_index));
+        }
+        let mut out = [0u8; 9];
+        let start = total - 9;
+        let prefix = self.prefix();
+        for (k, slot) in out.iter_mut().enumerate() {
+            let at = start + k;
+            *slot = if at < self.prefix_len { prefix[at] } else { suffix[at - self.prefix_len] };
+        }
+        Ok(out)
+    }
+
+    /// Where cell `i`'s payload starts, as an offset into this node's page.
+    #[inline]
+    pub fn payload_offset(&self, i: usize) -> Result<usize> {
+        let (_, end) = self.suffix_at(i)?;
+        Ok(end)
     }
 
     pub fn record_at(&self, i: usize) -> Result<SegRecord> {
@@ -391,11 +549,24 @@ impl<'a> Node<'a> {
 
     /// Index of the last cell whose key is <= `target`, or `None`.
     pub fn floor_index(&self, target: &[u8]) -> Result<Option<usize>> {
+        let rest = match self.prefix_split(target) {
+            // Every key in the node is greater than `target`: no floor.
+            Err(std::cmp::Ordering::Greater) => return Ok(None),
+            // Every key is less: the floor is the last cell.
+            Err(_) => return Ok(self.cell_count.checked_sub(1)),
+            Ok(rest) => rest,
+        };
+        // Measured, and reverted: the branchless `base`/`len` form of this
+        // search is **slower** here, at 2.68 M reads/s against 3.0 M. The
+        // conditional select it is supposed to buy cannot be reached, because
+        // `compare_suffix` is fallible and the `?` on every probe is a branch
+        // the CPU has to predict anyway; the extra probe the branchless form
+        // needs to establish its invariant is then pure cost.
         let (mut lo, mut hi) = (0isize, self.cell_count as isize - 1);
         let mut ans = None;
         while lo <= hi {
             let mid = ((lo + hi) / 2) as usize;
-            if self.compare_cell(mid, target)? != std::cmp::Ordering::Greater {
+            if self.compare_suffix(mid, rest)? != std::cmp::Ordering::Greater {
                 ans = Some(mid);
                 lo = mid as isize + 1;
             } else {
@@ -407,11 +578,19 @@ impl<'a> Node<'a> {
 
     /// Index of the first cell whose key is >= `target`, or `cell_count`.
     pub fn ceiling_index(&self, target: &[u8]) -> Result<usize> {
+        let rest = match self.prefix_split(target) {
+            // Every key is greater than `target`: the first cell is the ceiling.
+            Err(std::cmp::Ordering::Greater) => return Ok(0),
+            // Every key is less: there is none, which is `cell_count`.
+            Err(_) => return Ok(self.cell_count),
+            Ok(rest) => rest,
+        };
+        // See `floor_index`: the branchless form was measured and is slower.
         let (mut lo, mut hi) = (0isize, self.cell_count as isize - 1);
         let mut ans = self.cell_count;
         while lo <= hi {
             let mid = ((lo + hi) / 2) as usize;
-            if self.compare_cell(mid, target)? != std::cmp::Ordering::Less {
+            if self.compare_suffix(mid, rest)? != std::cmp::Ordering::Less {
                 ans = mid;
                 hi = mid as isize - 1;
             } else {
@@ -420,6 +599,70 @@ impl<'a> Node<'a> {
         }
         Ok(ans)
     }
+}
+
+/// [`decode_cell_payload`] returning **where** the value is rather than a copy
+/// of it: a byte range relative to `p`.
+///
+/// A point read that only needs to hand the value back can borrow it out of the
+/// segment extent, which is already resident. Copying it charged a whole
+/// document's `malloc` and `memcpy` to every read.
+pub fn decode_cell_payload_ref(
+    p: &[u8],
+    op_byte: u8,
+) -> Result<(u8, Option<u64>, std::ops::Range<usize>)> {
+    if p.is_empty() {
+        return corrupt("leaf cell has no kind_flags byte");
+    }
+    let kind_flags = p[0];
+    let value_kind = kind_flags & 0x0F;
+    if value_kind > value_kind::MAX {
+        return corrupt(format!("value_kind {value_kind} is not 0..4"));
+    }
+    if kind_flags & 0xE0 != 0 {
+        return corrupt("reserved kind_flags bits are set");
+    }
+    let mut at = 1usize;
+    let expiry = if kind_flags & HAS_EXPIRY != 0 {
+        if p.len() < at + 8 {
+            return corrupt("truncated expiry_ms");
+        }
+        let v = u64le(p, at);
+        at += 8;
+        Some(v)
+    } else {
+        None
+    };
+    if value_kind == value_kind::EMPTY || op_byte == op::DELETE {
+        return Ok((value_kind, expiry, 0..0));
+    }
+    if value_kind::is_pointer(value_kind) {
+        if p.len() < at + POINTER_BYTES {
+            return corrupt("truncated 16-byte pointer");
+        }
+        return Ok((value_kind, expiry, at..at + POINTER_BYTES));
+    }
+    let (len, n) = get_uvar(&p[at..])?;
+    let start = at + n;
+    let end = start
+        .checked_add(len as usize)
+        .filter(|e| *e <= p.len())
+        .ok_or_else(|| crate::error::Error::Corrupt("value_len runs past the cell".into()))?;
+    Ok((value_kind, expiry, start..end))
+}
+
+/// A record found in a segment, described **in place**: every field is read out
+/// of the extent and `value` is a byte range within it, so resolving a point
+/// read copies nothing.
+#[derive(Clone, Debug)]
+pub struct RecordRef {
+    pub seq: u64,
+    pub op: u8,
+    pub value_kind: u8,
+    pub expiry_ms: Option<u64>,
+    /// The value's range in the **segment extent** (not in the page), empty for
+    /// a delete or an `EMPTY` value.
+    pub value: std::ops::Range<usize>,
 }
 
 /// §2.2's leaf cell payload, after the key.
@@ -1065,8 +1308,6 @@ pub struct Segment {
     pub extent: Vec<u8>,
     pub page_size: usize,
     pub header: SegmentHeader,
-    pub node_accesses: std::sync::atomic::AtomicU64,
-    pub page_reads: std::sync::atomic::AtomicU64,
     /// The parsed `04-segments.md` §2.4 filter, decoded at most once per open
     /// segment. See [`Segment::may_contain`] for why it is not decoded per
     /// probe. `OnceLock` rather than `OnceCell` because a `Segment` is held in
@@ -1075,6 +1316,13 @@ pub struct Segment {
     /// How many times the filter payload has actually been decoded. A counter,
     /// so the caching above is provable rather than merely faster.
     pub filter_parses: std::sync::atomic::AtomicU64,
+    /// When this segment was last used, on the engine's LRU clock.
+    ///
+    /// It lives here rather than in a `HashMap<segment_id, clock>` beside the
+    /// cache because it is written on **every** segment fetch of every point
+    /// read: a relaxed store into the segment the fetch just returned costs a
+    /// single instruction, where the map cost a hash and an insert.
+    pub last_used: std::sync::atomic::AtomicU64,
 }
 
 impl Segment {
@@ -1091,10 +1339,9 @@ impl Segment {
             extent,
             page_size,
             header,
-            node_accesses: std::sync::atomic::AtomicU64::new(0),
-            page_reads: std::sync::atomic::AtomicU64::new(0),
             filter_cache: std::sync::OnceLock::new(),
             filter_parses: std::sync::atomic::AtomicU64::new(0),
+            last_used: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1103,11 +1350,17 @@ impl Segment {
     }
 
     pub fn node(&self, page_index: u64) -> Result<Node<'_>> {
-        self.node_accesses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // No counters here. `Segment::node_accesses` and `Segment::page_reads`
+        // were two relaxed atomic read-modify-writes on every node access --
+        // about eight per point read -- and **nothing anywhere read either of
+        // them**. The counter `13-operations.md` §6 requires is
+        // `Pager::page_reads`, which counts pages fetched through the pager and
+        // is what every benchmark and test here uses; these two counted node
+        // accesses inside an already-resident extent, which
+        // `reference/bench/README.md` explicitly says is a different quantity.
         if page_index < 1 || page_index >= self.page_count() {
             return corrupt(format!("page index {page_index} outside the extent"));
         }
-        self.page_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let at = page_index as usize * self.page_size;
         Node::parse(&self.extent[at..at + self.page_size], page_index)
     }
@@ -1212,11 +1465,19 @@ impl Segment {
     /// Newest-first order inside a key falls out of §1's inverted seq, so this
     /// is a seek and a short forward walk.
     pub fn lookup(&self, user_key_prefix: &[u8], ceiling: Option<u64>) -> Result<Option<SegRecord>> {
-        let mut target = user_key_prefix.to_vec();
-        if let Some(c) = ceiling {
-            target.extend_from_slice(&(c ^ u64::MAX).to_be_bytes());
-            target.push(0);
-        }
+        // Borrowed when there is no ceiling, which is every read that is not
+        // taken at a snapshot -- the common case, and one allocation per
+        // candidate segment per point read.
+        let target: std::borrow::Cow<'_, [u8]> = match ceiling {
+            None => std::borrow::Cow::Borrowed(user_key_prefix),
+            Some(c) => {
+                let mut t = Vec::with_capacity(user_key_prefix.len() + 9);
+                t.extend_from_slice(user_key_prefix);
+                t.extend_from_slice(&(c ^ u64::MAX).to_be_bytes());
+                t.push(0);
+                std::borrow::Cow::Owned(t)
+            }
+        };
         let mut cur = self.seek(&target)?;
         while let Some(rec) = cur.record()? {
             if rec.internal_key.len() != user_key_prefix.len() + 9
@@ -1232,6 +1493,68 @@ impl Segment {
             if rec.op() != op::RANGE_DELETE && (ceiling.is_none() || rec.seq() <= ceiling.unwrap())
             {
                 return Ok(Some(rec));
+            }
+            cur.next()?;
+        }
+        Ok(None)
+    }
+
+    /// [`Segment::lookup`] without copying anything out of the extent.
+    ///
+    /// Same resolution, same `RANGE_DELETE` rule, same ceiling: only the result
+    /// shape differs. `lookup` materialises the internal key and the value on
+    /// every call, which on the `desktop` profile is two allocations and a
+    /// whole-document `memcpy` per point read.
+    pub fn lookup_ref(
+        &self,
+        user_key_prefix: &[u8],
+        ceiling: Option<u64>,
+    ) -> Result<Option<RecordRef>> {
+        let target: std::borrow::Cow<'_, [u8]> = match ceiling {
+            None => std::borrow::Cow::Borrowed(user_key_prefix),
+            Some(c) => {
+                let mut t = Vec::with_capacity(user_key_prefix.len() + 9);
+                t.extend_from_slice(user_key_prefix);
+                t.extend_from_slice(&(c ^ u64::MAX).to_be_bytes());
+                t.push(0);
+                std::borrow::Cow::Owned(t)
+            }
+        };
+        let mut cur = self.seek(&target)?;
+        while let Some((page, idx)) = cur.position() {
+            let node = self.node(page)?;
+            if idx >= node.cell_count {
+                return Ok(None);
+            }
+            // One `suffix_at` for the whole cell. `key_len`,
+            // `key_starts_with`, `key_tail9` and `payload_offset` each derive
+            // the cell's suffix, so asking them separately decoded the same
+            // cell pointer and the same length uvar four times per lookup.
+            let (suffix, poff) = node.cell_suffix(idx)?;
+            let page_prefix = node.prefix();
+            let key_len = page_prefix.len() + suffix.len();
+            if key_len != user_key_prefix.len() + 9
+                || !Node::key_has_prefix(page_prefix, suffix, user_key_prefix)
+            {
+                return Ok(None);
+            }
+            let tail = Node::key_tail9_of(page_prefix, suffix)?;
+            let seq = u64::from_be_bytes(tail[..8].try_into().unwrap()) ^ u64::MAX;
+            let op = tail[8];
+            // As in `lookup`: a RANGE_DELETE has a point key's shape but is not
+            // one, and is resolved by §4's `rd_sources` walk instead.
+            if op != op::RANGE_DELETE && ceiling.map_or(true, |c| seq <= c) {
+                let (value_kind, expiry_ms, rel) =
+                    decode_cell_payload_ref(&node.page[poff..], op)?;
+                // Page-relative to extent-relative.
+                let base = page as usize * self.page_size + poff;
+                return Ok(Some(RecordRef {
+                    seq,
+                    op,
+                    value_kind,
+                    expiry_ms,
+                    value: base + rel.start..base + rel.end,
+                }));
             }
             cur.next()?;
         }
@@ -1299,13 +1622,79 @@ impl Segment {
 /// path stack of `(page_id, cell_index)` from the root.
 pub struct SegmentCursor<'a> {
     seg: &'a Segment,
-    path: Vec<(u64, usize)>,
+    path: Path,
     valid: bool,
+}
+
+/// The cursor's root-to-leaf stack, held **inline**.
+///
+/// A `Vec` here allocated and freed once per point read, for a stack that is
+/// the tree's height deep -- three levels at 20 000 documents, and
+/// `design/performance-model.md` P1 bounds it at well under sixteen for any
+/// database this format can hold. `spill` is the honest fallback rather than a
+/// panic: nothing in the format *forbids* a taller tree, so a taller one is
+/// slower here and still correct.
+#[derive(Default)]
+struct Path {
+    inline: [(u64, usize); 16],
+    len: usize,
+    spill: Vec<(u64, usize)>,
+}
+
+impl Path {
+    #[inline]
+    fn clear(&mut self) {
+        self.len = 0;
+        self.spill.clear();
+    }
+
+    #[inline]
+    fn push(&mut self, v: (u64, usize)) {
+        if self.len < self.inline.len() {
+            self.inline[self.len] = v;
+        } else {
+            self.spill.push(v);
+        }
+        self.len += 1;
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<(u64, usize)> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        if self.len < self.inline.len() {
+            Some(self.inline[self.len])
+        } else {
+            self.spill.pop()
+        }
+    }
+
+    #[inline]
+    fn last(&self) -> Option<&(u64, usize)> {
+        let i = self.len.checked_sub(1)?;
+        if i < self.inline.len() {
+            self.inline.get(i)
+        } else {
+            self.spill.last()
+        }
+    }
+
+    #[inline]
+    fn last_mut(&mut self) -> Option<&mut (u64, usize)> {
+        let i = self.len.checked_sub(1)?;
+        if i < self.inline.len() {
+            self.inline.get_mut(i)
+        } else {
+            self.spill.last_mut()
+        }
+    }
 }
 
 impl<'a> SegmentCursor<'a> {
     pub fn new(seg: &'a Segment) -> SegmentCursor<'a> {
-        SegmentCursor { seg, path: Vec::new(), valid: false }
+        SegmentCursor { seg, path: Path::default(), valid: false }
     }
 
     pub fn seek_first(&mut self) -> Result<()> {
@@ -1374,6 +1763,15 @@ impl<'a> SegmentCursor<'a> {
 
     pub fn valid(&self) -> bool {
         self.valid
+    }
+
+    /// `(page, cell)` the cursor stands on, for callers that read the cell in
+    /// place rather than through [`SegmentCursor::record`].
+    pub fn position(&self) -> Option<(u64, usize)> {
+        if !self.valid {
+            return None;
+        }
+        self.path.last().copied()
     }
 
     pub fn record(&self) -> Result<Option<SegRecord>> {

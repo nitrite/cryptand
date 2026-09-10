@@ -1,0 +1,20 @@
+# **A separate package on purpose.** `hive` is a dependency of the comparison,
+# not of the format. The published `cryptand` package has no runtime
+# dependencies at all and this is what keeps it that way -- the same reason the
+# Rust comparison lives in `cryptand-compare` outside the workspace and the Java
+# one is `test` scope.
+name: cryptand_compare
+description: Cryptand against Hive, on the same workload as the other two comparison tables.
+version: 0.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  cryptand:
+    path: ../cryptand
+  hive: ^2.2.3
+
+dev_dependencies:
+  lints: ^5.0.0

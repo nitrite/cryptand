@@ -221,7 +221,29 @@ public interface EntrySource {
      */
     final class Merge {
 
-        private record Head(byte[] key, int source) {
+        /**
+         * Mutable on purpose: {@link Merge#next()} takes the head out of the
+         * heap, re-points it at its source's next key and puts it back. As a
+         * record it was **one allocation per merged entry** -- 20 000 per flush
+         * of a 20 000-document memtable, and the same again for every entry of
+         * every compaction.
+         */
+        private static final class Head {
+            private byte[] key;
+            private final int source;
+
+            Head(byte[] key, int source) {
+                this.key = key;
+                this.source = source;
+            }
+
+            byte[] key() {
+                return key;
+            }
+
+            int source() {
+                return source;
+            }
         }
 
         private final List<EntrySource> sources;
@@ -263,7 +285,11 @@ public interface EntrySource {
             Head h = heap.poll();
             EntrySource s = sources.get(h.source());
             if (s.next()) {
-                heap.add(new Head(s.key(), h.source()));
+                // `h` is out of the heap here, so re-pointing it cannot disturb
+                // the heap's ordering; it goes back in through `add` and is
+                // sifted into place like any other element.
+                h.key = s.key();
+                heap.add(h);
             }
         }
     }

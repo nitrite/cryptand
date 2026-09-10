@@ -80,6 +80,17 @@
             <version>9.10.0</version>
             <scope>test</scope>
         </dependency>
+        <!--
+          PalDB: the read-optimised end of the comparison. It is a write-once
+          store by design; `net.soundvibe`'s fork is the maintained one and is
+          what supplies the read-write handle the update and delete rows need.
+        -->
+        <dependency>
+            <groupId>net.soundvibe</groupId>
+            <artifactId>paldb</artifactId>
+            <version>2.1.3</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

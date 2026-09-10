@@ -15,16 +15,65 @@ measured.
 ## Results
 
 Measured numbers, with what they do and do not support, are in
-[`RESULTS.md`](RESULTS.md): Java Cryptand against file-backed MVStore and
-RocksDB, and the three implementations against each other.
+[`RESULTS.md`](RESULTS.md).
+
+## The comparison suite, and what it is for
+
+`run_compare.sh` answers a different question from everything else here: **how
+does each implementation stand against the engines a person choosing a database
+in that language would actually weigh it against.**
+
+| language | comparators | why those |
+|---|---|---|
+| rust | `fjall`, `redb`, `sled` | the three embedded stores a Rust project reaches for. `fjall` is the closest in shape — an LSM with key–value separation; `redb` is a copy-on-write B-tree over an mmap; `sled` is the one everyone has heard of |
+| java | MVStore, RocksDB, PalDB | MVStore is the engine Nitrite ships on today and RocksDB is the LSM everyone benchmarks against — `design/performance-model.md` §9 names both. PalDB is the read-optimised extreme: an immutable perfect-hash file |
+| dart | Hive | the embedded store a Dart or Flutter project actually uses |
+
+Four rules make the columns mean the same thing, and they are the same rules
+the rest of this directory follows:
+
+- **The same bytes.** Every engine is handed the same already-encoded CVE
+  document under the same key, built before the clock starts, so neither the
+  encoding nor the key layout is the variable.
+- **The same phase shape**, in the same order, from the same pseudo-random
+  sequence as `run_xlang_crud.sh`.
+- **One durability barrier per phase.** This is the part that has to be stated
+  rather than assumed. Cryptand buffers a phase's writes in its memtable and
+  makes them durable at the end; fjall persists at `PersistMode::Buffer`; redb
+  takes one write transaction for the phase at `Durability::None`; sled and Hive
+  `flush()`; MVStore commits; RocksDB's write buffer is its barrier. All of them
+  pay one barrier per phase and none pays one per operation. A per-operation
+  barrier would measure `fsync` in every engine and nothing else.
+- **A read returns a handle, in all of them.** redb's `get` returns a guard over
+  its mapped page, fjall's and sled's return reference-counted slices of their
+  block caches, MVStore returns the stored object, and Hive returns the value
+  out of its in-memory box — **none of them copies**. Cryptand's `get` returns
+  an owned `Vec<u8>`, so the Rust table calls `get_ref`, which is the same
+  resolution returning a borrow of the resident segment extent. Calling `get`
+  there would be timing a whole-document `memcpy` that no other engine is being
+  asked to do.
+
+**Every comparator is kept out of the published artifact.** The Rust one is a
+crate excluded from the workspace, the Java ones are `test` scope, and the Dart
+one is a separate package. `cargo build`, `mvn package` and `dart pub publish`
+produce exactly what they produced before.
+
+What the table cannot do is make the engines equal. Cryptand maintains a
+manifest, per-segment filters, liveness statistics and a value-log GC, verifies
+a CRC-32C per page, and writes a file three other language runtimes can open;
+redb has no background compaction at all, MVStore and Hive keep their data in
+memory, and PalDB cannot accept a write without being rebuilt. `RESULTS.md` §4
+sets out which side of that trade each row lands on.
 
 ## Running it
 
 ```bash
-reference/bench/run_all.sh
+reference/bench/run_all.sh          # this suite, below
+reference/bench/run_xlang_crud.sh   # the three implementations against each other
+reference/bench/run_compare.sh      # each implementation against its own field
 ```
 
-or one at a time:
+The suite below, one at a time:
 
 ```bash
 cd reference/rust        && cargo run --release --features harness --bin ops_bench

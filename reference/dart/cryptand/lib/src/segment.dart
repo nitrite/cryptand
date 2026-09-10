@@ -773,25 +773,147 @@ final class Node {
     return out;
   }
 
+  /// How **every** key on this page compares to [target] on the shared prefix
+  /// alone, or 0 when the prefix matches and only the suffixes can decide.
+  ///
+  /// Every key in a node begins with the same `prefixLen` bytes (§2.2), so this
+  /// answer does not depend on the cell and does not belong inside a binary
+  /// search. It was inside both of them, re-compared on each of the ~20 probes
+  /// a point read makes.
+  int prefixCompare(Uint8List target) {
+    final n = prefixLen < target.length ? prefixLen : target.length;
+    final at = _base + 16;
+    for (var j = 0; j < n; j++) {
+      final d = page[at + j] - target[j];
+      if (d != 0) return d < 0 ? -1 : 1;
+    }
+    // The target ran out inside the shared prefix: every key sorts after it.
+    if (target.length < prefixLen) return 1;
+    return 0;
+  }
+
+  /// Cell [i]'s key against [target], given that [prefixCompare] returned 0.
+  ///
+  /// The suffix is compared **straight out of the page**: this used to build a
+  /// [ByteReader] and a `Uint8List` view per probe, two allocations for a
+  /// comparison of about twenty bytes.
+  int compareSuffix(int i, Uint8List target) {
+    // `_cellOffset` inlined: it is two bounds tests and a `getUint16`, and at
+    // one call per probe of every binary search it was 8 % of the read profile
+    // on its own.
+    if (i < 0 || i >= cellCount) {
+      throw CorruptionException('page $pageIndex: cell $i out of range');
+    }
+    final off = _base + _bd.getUint16(_ptrBase + i * 2, Endian.little);
+    if (off >= page.length) {
+      throw CorruptionException('page $pageIndex: cell $i points past the page');
+    }
+    // Fast path: a suffix under 128 bytes has a one-byte length, which is
+    // every cell this format produces.
+    final b0 = page[off];
+    int suffixLen;
+    int at;
+    if (b0 < 0x80) {
+      suffixLen = b0;
+      at = off + 1;
+    } else {
+      final r = ByteReader(page, off, page.length);
+      suffixLen = r.uvar();
+      at = r.position;
+    }
+    if (at + suffixLen > page.length) {
+      throw CorruptionException(
+          'page $pageIndex: cell $i suffix runs past the page');
+    }
+    final rest = target.length - prefixLen;
+    final m = suffixLen < rest ? suffixLen : rest;
+    for (var j = 0; j < m; j++) {
+      final d = page[at + j] - target[prefixLen + j];
+      if (d != 0) return d < 0 ? -1 : 1;
+    }
+    return suffixLen == rest ? 0 : (suffixLen < rest ? -1 : 1);
+  }
+
+  /// The length of cell [i]'s key, without building it.
+  int keyLen(int i) {
+    final off = _cellOffset(i);
+    final b0 = page[off];
+    if (b0 < 0x80) return prefixLen + b0;
+    final r = ByteReader(page, off, page.length);
+    return prefixLen + r.uvar();
+  }
+
+  /// Whether cell [i]'s key begins with [p], without building it.
+  ///
+  /// A point read tests this once per candidate segment, and it used to do it
+  /// by materializing the whole key -- an allocation and two copies -- and then
+  /// materializing it a second time inside [recordAt] for the record it
+  /// returned.
+  bool keyHasPrefix(int i, Uint8List p) {
+    final n = prefixLen < p.length ? prefixLen : p.length;
+    final at = _base + 16;
+    for (var j = 0; j < n; j++) {
+      if (page[at + j] != p[j]) return false;
+    }
+    if (p.length <= prefixLen) return true;
+    final off = _cellOffset(i);
+    final b0 = page[off];
+    int suffixLen;
+    int sat;
+    if (b0 < 0x80) {
+      suffixLen = b0;
+      sat = off + 1;
+    } else {
+      final r = ByteReader(page, off, page.length);
+      suffixLen = r.uvar();
+      sat = r.position;
+    }
+    final rest = p.length - prefixLen;
+    if (suffixLen < rest) return false;
+    if (sat + rest > page.length) {
+      throw CorruptionException(
+          'page $pageIndex: cell $i suffix runs past the page');
+    }
+    for (var j = 0; j < rest; j++) {
+      if (page[sat + j] != p[prefixLen + j]) return false;
+    }
+    return true;
+  }
+
+  /// The `seq` in cell [i]'s key -- the eight bytes before the trailing `op`
+  /// (§1), stored inverted -- read in place.
+  int seqAt(int i) {
+    final off = _cellOffset(i);
+    final b0 = page[off];
+    int suffixLen;
+    int sat;
+    if (b0 < 0x80) {
+      suffixLen = b0;
+      sat = off + 1;
+    } else {
+      final r = ByteReader(page, off, page.length);
+      suffixLen = r.uvar();
+      sat = r.position;
+    }
+    final total = prefixLen + suffixLen;
+    if (total < 9) {
+      throw CorruptionException(
+          'page $pageIndex: cell $i key is shorter than 9 bytes');
+    }
+    var inv = 0;
+    final start = total - 9;
+    for (var j = 0; j < 8; j++) {
+      final at = start + j;
+      final b = at < prefixLen ? page[_base + 16 + at] : page[sat + at - prefixLen];
+      inv = (inv << 8) | b;
+    }
+    return ~inv;
+  }
+
   /// Compares the search key against cell [i] without materializing the key.
   int compareCell(int i, Uint8List target) {
-    final r = ByteReader(page, _cellOffset(i), page.length);
-    final suffixLen = r.uvar();
-    final suffix = r.bytesView(suffixLen);
-    final n = prefixLen < target.length ? prefixLen : target.length;
-    for (var j = 0; j < n; j++) {
-      final d = page[_base + 16 + j] - target[j];
-      if (d != 0) return d < 0 ? -1 : 1;
-    }
-    if (target.length < prefixLen) return 1; // key is longer than the target
-    for (var j = 0; j < suffixLen; j++) {
-      if (prefixLen + j >= target.length) return 1;
-      final d = suffix[j] - target[prefixLen + j];
-      if (d != 0) return d < 0 ? -1 : 1;
-    }
-    return (prefixLen + suffixLen) == target.length
-        ? 0
-        : ((prefixLen + suffixLen) < target.length ? -1 : 1);
+    final pc = prefixCompare(target);
+    return pc != 0 ? pc : compareSuffix(i, target);
   }
 
   /// A reader positioned at the start of cell [i]'s payload.
@@ -844,10 +966,15 @@ final class Node {
 
   /// Index of the last cell whose key is <= [target], or -1.
   int floorIndex(Uint8List target) {
+    final pc = prefixCompare(target);
+    // Every key on the page sorts after `target`: there is no floor.
+    if (pc > 0) return -1;
+    // Every key sorts before it: the floor is the last cell.
+    if (pc < 0) return cellCount - 1;
     var lo = 0, hi = cellCount - 1, ans = -1;
     while (lo <= hi) {
       final mid = (lo + hi) >> 1;
-      if (compareCell(mid, target) <= 0) {
+      if (compareSuffix(mid, target) <= 0) {
         ans = mid;
         lo = mid + 1;
       } else {
@@ -859,10 +986,15 @@ final class Node {
 
   /// Index of the first cell whose key is >= [target], or [cellCount].
   int ceilingIndex(Uint8List target) {
+    final pc = prefixCompare(target);
+    // Every key sorts after `target`: the first cell is the ceiling.
+    if (pc > 0) return 0;
+    // Every key sorts before it: there is none.
+    if (pc < 0) return cellCount;
     var lo = 0, hi = cellCount - 1, ans = cellCount;
     while (lo <= hi) {
       final mid = (lo + hi) >> 1;
-      if (compareCell(mid, target) >= 0) {
+      if (compareSuffix(mid, target) >= 0) {
         ans = mid;
         hi = mid - 1;
       } else {
@@ -1371,5 +1503,21 @@ final class SegmentCursor {
   SegRecord record() {
     if (!_valid) throw StateError('cursor is not positioned');
     return _leaf.recordAt(_index);
+  }
+
+  /// Whether the current entry's key is exactly `prefix || u64be(~seq) || op`
+  /// -- one version of the user key [prefix] -- without building the key.
+  bool keyIsVersionOf(Uint8List prefix) {
+    if (!_valid) return false;
+    final n = _leaf;
+    final i = _index;
+    if (i >= n.cellCount) return false;
+    return n.keyLen(i) == prefix.length + 9 && n.keyHasPrefix(i, prefix);
+  }
+
+  /// The current entry's `seq`, read in place.
+  int seq() {
+    if (!_valid) throw StateError('cursor is not positioned');
+    return _leaf.seqAt(_index);
   }
 }

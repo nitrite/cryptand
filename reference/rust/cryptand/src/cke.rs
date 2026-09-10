@@ -154,7 +154,22 @@ fn put_u64_flipped(out: &mut Vec<u8>, v: i64) {
 }
 
 pub fn encode(v: &Value) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
+    // Sized for the fixed-width cases -- id, uuid, temporal, number -- which
+    // are what a point read encodes. `Vec::new()` reallocated on the first
+    // push, once per key encoded.
+    let mut out = Vec::with_capacity(24);
+    encode_into(v, &mut out)?;
+    Ok(out)
+}
+
+/// [`encode`] appending to a caller's buffer.
+///
+/// The hot paths build an internal key (`u32be(tree_id) || CKE(key) ||
+/// u64be(~seq) || u8 op`) or a user prefix (`u32be(tree_id) || CKE(key)`), and
+/// with `encode` they built the CKE into its own `Vec` and then copied it into
+/// a second one. On the write profile the surrounding `malloc`/`free` pair was
+/// a fifth of a `put`; this makes both a single allocation.
+pub fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<()> {
     match v {
         Value::Null => out.push(NULL),
         Value::Bool(b) => {
@@ -180,7 +195,7 @@ pub fn encode(v: &Value) -> Result<Vec<u8>> {
         }
         Value::NitriteId(id) => {
             out.push(NITRITE_ID);
-            put_u64_flipped(&mut out, *id);
+            put_u64_flipped(out, *id);
         }
         Value::Uuid(b) => {
             out.push(UUID);
@@ -190,16 +205,16 @@ pub fn encode(v: &Value) -> Result<Vec<u8>> {
             let (s, n) = instant_of(*ms);
             out.push(TEMPORAL);
             out.push(0x01);
-            put_u64_flipped(&mut out, s);
+            put_u64_flipped(out, s);
             out.extend_from_slice(&n.to_be_bytes());
         }
-        Value::Zoned(ms, _) => return encode(&Value::Timestamp(*ms)),
+        Value::Zoned(ms, _) => return encode_into(&Value::Timestamp(*ms), out),
         Value::TimestampNs(s, n) => {
             // §5: nanos normalized to 0..999_999_999.
             let (s, n) = (s + (*n / 1_000_000_000) as i64, n % 1_000_000_000);
             out.push(TEMPORAL);
             out.push(0x01);
-            put_u64_flipped(&mut out, s);
+            put_u64_flipped(out, s);
             out.extend_from_slice(&n.to_be_bytes());
         }
         Value::Date(d) => {
@@ -215,14 +230,14 @@ pub fn encode(v: &Value) -> Result<Vec<u8>> {
         Value::Duration(s, n) => {
             out.push(TEMPORAL);
             out.push(0x05);
-            put_u64_flipped(&mut out, *s);
+            put_u64_flipped(out, *s);
             out.extend_from_slice(&n.to_be_bytes());
         }
         Value::Array(items) => {
             out.push(ARRAY);
             for it in items {
                 out.push(ELEM_CONTINUE);
-                out.extend_from_slice(&encode(it)?);
+                encode_into(it, out)?;
             }
             out.push(ELEM_END);
         }
@@ -233,7 +248,7 @@ pub fn encode(v: &Value) -> Result<Vec<u8>> {
             return corrupt(format!("{} has no CKE encoding", type_name(other)));
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 fn type_name(v: &Value) -> &'static str {

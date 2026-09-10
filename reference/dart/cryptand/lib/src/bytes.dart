@@ -286,6 +286,12 @@ final class ByteReader {
   ///  * a non-canonical encoding — a continuation byte followed by a final
   ///    byte that contributes nothing.
   int uvar() {
+    // Nearly every uvar in a page is one byte -- a cell suffix length, a cell
+    // count, a name-dictionary index -- and the general loop below carries a
+    // length test, an overflow test and a canonicality test per iteration.
+    if (_pos < end && data[_pos] < 0x80) {
+      return data[_pos++];
+    }
     var result = 0;
     var shift = 0;
     var count = 0;

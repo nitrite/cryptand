@@ -168,6 +168,13 @@ public final class ByteReader {
      * files that mean the same thing.
      */
     public long uvar() {
+        // Nearly every uvar in a page is one byte -- a cell suffix length, a
+        // cell count, a name-dictionary index. The general loop below carries a
+        // bounds check, an overflow test and a canonicality test per iteration,
+        // and it was 22 % of the point-read profile.
+        if (pos < limit() && (buf[pos] & 0x80) == 0) {
+            return buf[pos++] & 0xFFL;
+        }
         long v = 0;
         int shift = 0;
         for (int i = 0; i < Limits.MAX_UVAR_BYTES; i++) {
