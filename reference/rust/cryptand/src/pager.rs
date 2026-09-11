@@ -225,13 +225,21 @@ impl Pager {
         if pages == 0 {
             return invalid("an extent of zero pages");
         }
+        // The list is keyed by `(commit_id, start_page)`, so the reclaimable
+        // extents are exactly a prefix of it; and nothing beats an exact fit,
+        // so the first one ends the search. Same choice as a full scan -- a
+        // tie keeps the first found -- without walking every unreclaimable
+        // extent on each single-page allocation of every tree edit.
         let mut best: Option<((u64, u64), u32)> = None;
-        for (&k, &n) in self.free.iter() {
-            if k.0 > self.min_retained_commit || n < pages {
+        for (&k, &n) in self.free.range(..=(self.min_retained_commit, u64::MAX)) {
+            if n < pages {
                 continue;
             }
             if best.map_or(true, |(_, bn)| n < bn) {
                 best = Some((k, n));
+                if n == pages {
+                    break;
+                }
             }
         }
         if let Some((k, n)) = best {
@@ -242,6 +250,11 @@ impl Pager {
             }
             return Ok(k.1);
         }
+        self.alloc_fresh(pages)
+    }
+
+    /// An extent at the end of the file, never out of the free list.
+    pub fn alloc_fresh(&mut self, pages: u32) -> Result<u64> {
         let start = self.page_count;
         self.grow(pages as u64)?;
         Ok(start)

@@ -219,21 +219,35 @@ pub fn encode_node_page(
     let count = keys.len();
     let prefix_len = page_prefix(keys);
 
-    // Cells grow downward from the payload end; cell_ptr[] grows up.
+    // Cells grow downward from the payload end; cell_ptr[] grows up. Each cell
+    // is written straight into the page: assembling it in its own `Vec` first
+    // was an allocation and a second copy per cell of every page every flush
+    // and compaction emits.
+    let free_start = 16 + prefix_len + 2 * count;
     let mut cell_top = payload_size;
-    let mut ptrs = vec![0usize; count];
     for i in (0..count).rev() {
         let suffix = &keys[i][prefix_len..];
-        let mut cell = Vec::with_capacity(2 + suffix.len() + payloads[i].len());
-        put_uvar(&mut cell, suffix.len() as u64);
-        cell.extend_from_slice(suffix);
-        cell.extend_from_slice(&payloads[i]);
-        cell_top -= cell.len();
-        ptrs[i] = cell_top;
-        page[base + cell_top..base + cell_top + cell.len()].copy_from_slice(&cell);
+        let p = &payloads[i];
+        let len = uvar_len(suffix.len() as u64) + suffix.len() + p.len();
+        cell_top = match cell_top.checked_sub(len) {
+            Some(t) if t >= free_start => t,
+            _ => return invalid(format!("page overflow: header+pointers {free_start}, cells past {cell_top}")),
+        };
+        let mut at = base + cell_top;
+        let mut v = suffix.len() as u64;
+        while v >= 0x80 {
+            page[at] = (v as u8) | 0x80;
+            v >>= 7;
+            at += 1;
+        }
+        page[at] = v as u8;
+        at += 1;
+        page[at..at + suffix.len()].copy_from_slice(suffix);
+        page[at + suffix.len()..at + suffix.len() + p.len()].copy_from_slice(p);
+        let ptr = base + 16 + prefix_len + i * 2;
+        page[ptr..ptr + 2].copy_from_slice(&(cell_top as u16).to_le_bytes());
     }
 
-    let free_start = 16 + prefix_len + 2 * count;
     if free_start > cell_top {
         return invalid(format!("page overflow: header+pointers {free_start}, cells at {cell_top}"));
     }
@@ -245,10 +259,6 @@ pub fn encode_node_page(
     page[base + 8..base + 16].copy_from_slice(&subtree_entries.to_le_bytes());
     if prefix_len > 0 {
         page[base + 16..base + 16 + prefix_len].copy_from_slice(&keys[0][..prefix_len]);
-    }
-    for (i, &p) in ptrs.iter().enumerate() {
-        let at = base + 16 + prefix_len + i * 2;
-        page[at..at + 2].copy_from_slice(&(p as u16).to_le_bytes());
     }
     PageHeader {
         page_type: if is_leaf { page_type::BTREE_LEAF } else { page_type::BTREE_INTERNAL },
@@ -1323,6 +1333,47 @@ pub struct Segment {
     /// read: a relaxed store into the segment the fetch just returned costs a
     /// single instruction, where the map cost a hash and an insert.
     pub last_used: std::sync::atomic::AtomicU64,
+    /// The in-memory point index, built once the segment has served enough
+    /// point lookups to pay for it. See [`Segment::lookup_ref_hashed`].
+    point_index: std::sync::OnceLock<Option<PointIndex>>,
+    /// Point lookups served before the index existed; what decides when to
+    /// build it.
+    point_lookups: std::sync::atomic::AtomicU64,
+}
+
+/// A hash table from user key to the **first** cell of that key in the
+/// segment -- its newest version, by §1's inverted seq.
+///
+/// This is not part of the format. A segment is immutable, so a table built
+/// from its cells can never go stale, and it turns a point read's B+tree
+/// descent -- about sixteen binary-search probes across three pages at 20 000
+/// documents, and 78 % of a read after every other cost was removed -- into
+/// one hash, usually one slot, and one cell comparison.
+///
+/// Each slot is `page << 32 | cell << 16 | tag`, `0` when empty (page 0 is the
+/// segment header and never a leaf). `tag` is sixteen more bits of the hash, so
+/// a colliding slot almost never costs a cell comparison. Linear probing at a
+/// load factor of at most one half.
+struct PointIndex {
+    slots: Vec<u64>,
+    mask: usize,
+}
+
+impl PointIndex {
+    #[inline]
+    fn tag(hash: u64) -> u64 {
+        hash >> 48
+    }
+}
+
+enum CellMatch {
+    /// The cell is this key's answer.
+    Hit(RecordRef),
+    /// The cell is this key but not its answer -- a `RANGE_DELETE`, or newer
+    /// than the snapshot. The answer, if any, is further on.
+    Skip,
+    /// The cell is not this key.
+    Other,
 }
 
 impl Segment {
@@ -1342,6 +1393,8 @@ impl Segment {
             filter_cache: std::sync::OnceLock::new(),
             filter_parses: std::sync::atomic::AtomicU64::new(0),
             last_used: std::sync::atomic::AtomicU64::new(0),
+            point_index: std::sync::OnceLock::new(),
+            point_lookups: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1447,8 +1500,13 @@ impl Segment {
     /// always a sound answer for a Bloom filter, and the behaviour this method
     /// already had.
     pub fn may_contain(&self, user_key_prefix: &[u8]) -> bool {
+        self.may_contain_hash(crate::hash::cfh64(user_key_prefix))
+    }
+
+    /// [`Segment::may_contain`] given the key's `cfh64`.
+    pub fn may_contain_hash(&self, hash: u64) -> bool {
         match self.filter_cache.get_or_init(|| self.filter().ok().flatten()) {
-            Some(f) => f.may_contain(user_key_prefix),
+            Some(f) => f.may_contain_hash(hash),
             None => true,
         }
     }
@@ -1526,39 +1584,169 @@ impl Segment {
             if idx >= node.cell_count {
                 return Ok(None);
             }
-            // One `suffix_at` for the whole cell. `key_len`,
-            // `key_starts_with`, `key_tail9` and `payload_offset` each derive
-            // the cell's suffix, so asking them separately decoded the same
-            // cell pointer and the same length uvar four times per lookup.
-            let (suffix, poff) = node.cell_suffix(idx)?;
-            let page_prefix = node.prefix();
-            let key_len = page_prefix.len() + suffix.len();
-            if key_len != user_key_prefix.len() + 9
-                || !Node::key_has_prefix(page_prefix, suffix, user_key_prefix)
-            {
-                return Ok(None);
+            match self.match_cell(&node, idx, user_key_prefix, ceiling)? {
+                CellMatch::Hit(r) => return Ok(Some(r)),
+                CellMatch::Other => return Ok(None),
+                CellMatch::Skip => cur.next()?,
             }
-            let tail = Node::key_tail9_of(page_prefix, suffix)?;
-            let seq = u64::from_be_bytes(tail[..8].try_into().unwrap()) ^ u64::MAX;
-            let op = tail[8];
-            // As in `lookup`: a RANGE_DELETE has a point key's shape but is not
-            // one, and is resolved by §4's `rd_sources` walk instead.
-            if op != op::RANGE_DELETE && ceiling.map_or(true, |c| seq <= c) {
-                let (value_kind, expiry_ms, rel) =
-                    decode_cell_payload_ref(&node.page[poff..], op)?;
-                // Page-relative to extent-relative.
-                let base = page as usize * self.page_size + poff;
-                return Ok(Some(RecordRef {
-                    seq,
-                    op,
-                    value_kind,
-                    expiry_ms,
-                    value: base + rel.start..base + rel.end,
-                }));
-            }
-            cur.next()?;
         }
         Ok(None)
+    }
+
+    /// Cell `idx` of `node` against the lookup of `user_key_prefix` at
+    /// `ceiling`.
+    #[inline]
+    fn match_cell(
+        &self,
+        node: &Node<'_>,
+        idx: usize,
+        user_key_prefix: &[u8],
+        ceiling: Option<u64>,
+    ) -> Result<CellMatch> {
+        // One `suffix_at` for the whole cell. `key_len`,
+        // `key_starts_with`, `key_tail9` and `payload_offset` each derive
+        // the cell's suffix, so asking them separately decoded the same
+        // cell pointer and the same length uvar four times per lookup.
+        let (suffix, poff) = node.cell_suffix(idx)?;
+        let page_prefix = node.prefix();
+        let key_len = page_prefix.len() + suffix.len();
+        if key_len != user_key_prefix.len() + 9
+            || !Node::key_has_prefix(page_prefix, suffix, user_key_prefix)
+        {
+            return Ok(CellMatch::Other);
+        }
+        let tail = Node::key_tail9_of(page_prefix, suffix)?;
+        let seq = u64::from_be_bytes(tail[..8].try_into().unwrap()) ^ u64::MAX;
+        let op = tail[8];
+        // As in `lookup`: a RANGE_DELETE has a point key's shape but is not
+        // one, and is resolved by §4's `rd_sources` walk instead.
+        if op == op::RANGE_DELETE || ceiling.is_some_and(|c| seq > c) {
+            return Ok(CellMatch::Skip);
+        }
+        let (value_kind, expiry_ms, rel) = decode_cell_payload_ref(&node.page[poff..], op)?;
+        // Page-relative to extent-relative.
+        let base = node.page_index as usize * self.page_size + poff;
+        Ok(CellMatch::Hit(RecordRef { seq, op, value_kind, expiry_ms, value: base + rel.start..base + rel.end }))
+    }
+
+    /// [`Segment::lookup_ref`] for a key whose `cfh64` the caller already has,
+    /// answered from the [`PointIndex`] once the segment has one.
+    ///
+    /// The index maps a user key to its first cell, so it answers outright
+    /// whenever that cell is the answer -- a read with no snapshot, of a key
+    /// whose newest version here is not a `RANGE_DELETE`, which is nearly all
+    /// of them. Every other case, and every lookup before the index exists,
+    /// takes the ordered walk, which is the definition.
+    pub fn lookup_ref_hashed(
+        &self,
+        user_key_prefix: &[u8],
+        hash: u64,
+        ceiling: Option<u64>,
+    ) -> Result<Option<RecordRef>> {
+        let Some(ix) = self.point_index() else {
+            return self.lookup_ref(user_key_prefix, ceiling);
+        };
+        let tag = PointIndex::tag(hash);
+        let mut i = hash as usize & ix.mask;
+        loop {
+            let s = ix.slots[i];
+            if s == 0 {
+                // Every user key in the segment is in the table, so an empty
+                // slot is a definite miss.
+                return Ok(None);
+            }
+            if s & 0xFFFF == tag {
+                let node = self.node(s >> 32)?;
+                let idx = (s >> 16 & 0xFFFF) as usize;
+                if idx >= node.cell_count {
+                    return corrupt("point index names a cell past its page");
+                }
+                match self.match_cell(&node, idx, user_key_prefix, ceiling)? {
+                    CellMatch::Hit(r) => return Ok(Some(r)),
+                    CellMatch::Skip => return self.lookup_ref(user_key_prefix, ceiling),
+                    CellMatch::Other => {}
+                }
+            }
+            i = (i + 1) & ix.mask;
+        }
+    }
+
+    /// The index, once it exists; `None` until then, and for a segment it
+    /// could not be built for.
+    ///
+    /// Building costs one pass over every cell, so it is deferred until the
+    /// segment has served one lookup per 32 entries -- by then the descents
+    /// already paid for cost about what the build does, and a segment read a
+    /// handful of times, or a first read after opening a large database, never
+    /// pays for a table it will not use.
+    /// Whether the point index has been built, so a test can prove it read
+    /// through one.
+    pub fn point_indexed(&self) -> bool {
+        matches!(self.point_index.get(), Some(Some(_)))
+    }
+
+    fn point_index(&self) -> Option<&PointIndex> {
+        if let Some(ix) = self.point_index.get() {
+            return ix.as_ref();
+        }
+        let seen = self.point_lookups.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if seen < (self.header.entry_count / 32).max(8) {
+            return None;
+        }
+        // A segment that fails to index is read by the ordered walk, which is
+        // what reports its corruption.
+        self.point_index.get_or_init(|| self.build_point_index().ok().flatten()).as_ref()
+    }
+
+    fn build_point_index(&self) -> Result<Option<PointIndex>> {
+        let mut entries: Vec<(u64, u64)> = Vec::new();
+        let mut key: Vec<u8> = Vec::new();
+        let mut prev_user: Vec<u8> = Vec::new();
+        let mut first = true;
+        // Leaves in key order, so a key's first cell is met before its others.
+        let mut stack: Vec<(u64, u32)> = vec![(self.header.root_page, 0)];
+        while let Some((page, depth)) = stack.pop() {
+            if depth > 64 {
+                return corrupt("segment tree is deeper than 64 levels");
+            }
+            let node = self.node(page)?;
+            if !node.is_leaf {
+                for i in (0..node.cell_count).rev() {
+                    stack.push((node.child_at(i)?.0, depth + 1));
+                }
+                continue;
+            }
+            let Ok(page32) = u32::try_from(page) else { return Ok(None) };
+            for i in 0..node.cell_count {
+                let (suffix, _) = node.cell_suffix(i)?;
+                key.clear();
+                key.extend_from_slice(node.prefix());
+                key.extend_from_slice(suffix);
+                let Some(user_len) = key.len().checked_sub(9) else {
+                    return corrupt("segment cell key is shorter than 9 bytes");
+                };
+                let user = &key[..user_len];
+                if !first && user == prev_user.as_slice() {
+                    continue;
+                }
+                first = false;
+                prev_user.clear();
+                prev_user.extend_from_slice(user);
+                let h = crate::hash::cfh64(user);
+                entries.push((h, (page32 as u64) << 32 | (i as u64) << 16 | PointIndex::tag(h)));
+            }
+        }
+        let cap = (entries.len() * 2).next_power_of_two().max(16);
+        let mut slots = vec![0u64; cap];
+        let mask = cap - 1;
+        for (h, s) in entries {
+            let mut i = h as usize & mask;
+            while slots[i] != 0 {
+                i = (i + 1) & mask;
+            }
+            slots[i] = s;
+        }
+        Ok(Some(PointIndex { slots, mask }))
     }
 
     /// Every entry, in internal-key order. Used by compaction and by scans.

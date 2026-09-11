@@ -8,6 +8,7 @@ import org.dizitart.cryptand.container.Pager;
 import org.dizitart.cryptand.key.Ikey;
 import org.dizitart.cryptand.util.ByteReader;
 import org.dizitart.cryptand.util.ByteWriter;
+import org.dizitart.cryptand.util.Cfh64;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -113,6 +114,135 @@ public final class Segment {
     public boolean mayContain(byte[] userKey) {
         BlockedBloom f = filter();
         return f == null || f.mayContain(userKey);
+    }
+
+    /** {@link #mayContain} given the user key's {@code cfh64}. */
+    public boolean mayContainHash(long hash) {
+        BlockedBloom f = filter();
+        return f == null || f.mayContainHash(hash);
+    }
+
+    /**
+     * What {@link #pointLookup} returns when it cannot answer and the ordered
+     * seek must. Compared by identity.
+     */
+    public static final BtreePage.Leaf UNINDEXED = new BtreePage.Leaf(new byte[0], 0, 0, false, new byte[0], 0);
+
+    /** An index that could not be built; the segment is read by the ordered seek. */
+    private static final long[] NO_INDEX = new long[0];
+
+    /**
+     * A hash table from user key to that key's <strong>first</strong> cell --
+     * its newest version, by §1's inverted seq. Not part of the format: a
+     * segment is immutable, so a table built from its cells cannot go stale.
+     * It turns a point read's B+tree descent, about fifteen binary-search
+     * probes over three pages, into one hash, usually one slot and one
+     * in-place cell comparison.
+     *
+     * <p>Each slot is {@code relative_page << 32 | cell << 16 | tag}, zero when
+     * empty (page 0 is the segment header, never a leaf); {@code tag} is
+     * sixteen more bits of the hash. Linear probing at a load factor of at
+     * most one half. {@code volatile} so a table built by one reader is seen
+     * whole by the others; two readers racing to build it build it twice.
+     */
+    private volatile long[] pointIndex;
+
+    /** Lookups served before the index existed. Racy on purpose: it only decides when to build. */
+    private int pointLookups;
+
+    /**
+     * The entry the ordered seek to {@code seekAt(userKey, snapshotSeq)} would
+     * land on, when that entry is {@code userKey}'s; {@code null} when the
+     * segment holds no entry for {@code userKey} at all; {@link #UNINDEXED}
+     * when only the seek can say.
+     *
+     * <p>The key's first cell is the seek's answer exactly when its seq is at
+     * or below the snapshot, which for a read at the current horizon is
+     * always. Until the segment has served one lookup per 32 entries there is
+     * no index: building it is one pass over every cell, and by then the
+     * descents already paid for cost about as much.
+     */
+    public BtreePage.Leaf pointLookup(byte[] userKey, long hash, long snapshotSeq) {
+        long[] ix = pointIndex;
+        if (ix == null) {
+            if (++pointLookups < Math.max(8, meta.entryCount / 32)) {
+                return UNINDEXED;
+            }
+            ix = buildPointIndex();
+            pointIndex = ix;
+        }
+        if (ix.length == 0) {
+            return UNINDEXED;
+        }
+        int mask = ix.length - 1;
+        long tag = hash >>> 48;
+        for (int i = (int) hash & mask; ; i = (i + 1) & mask) {
+            long s = ix[i];
+            if (s == 0) {
+                // Every user key in the segment is in the table.
+                return null;
+            }
+            if ((s & 0xFFFF) != tag) {
+                continue;
+            }
+            BtreePage b = pager.readTreePage(absolute(s >>> 32));
+            int cell = (int) (s >>> 16) & 0xFFFF;
+            if (!b.isLeaf() || cell >= b.cellCount()) {
+                throw new CorruptionException("point index names cell " + cell + " of a page that does not hold it",
+                        startPage, null);
+            }
+            long seq = b.seqIfUserKey(cell, userKey);
+            if (seq != BtreePage.NOT_THIS_KEY) {
+                return seq <= snapshotSeq ? b.leaf(cell) : UNINDEXED;
+            }
+        }
+    }
+
+    private long[] buildPointIndex() {
+        long[] found = new long[64];
+        int n = 0;
+        byte[] prev = null;
+        try {
+            Cursor c = cursor();
+            c.seekFirst();
+            while (c.isValid()) {
+                byte[] uk = Ikey.userKeyOf(c.key());
+                if (prev == null || !java.util.Arrays.equals(prev, uk)) {
+                    prev = uk;
+                    long h = Cfh64.hash(uk);
+                    if (n + 2 > found.length) {
+                        found = java.util.Arrays.copyOf(found, found.length * 2);
+                    }
+                    found[n++] = h;
+                    found[n++] = (c.page() - startPage) << 32 | (long) c.cell() << 16 | (h >>> 48);
+                }
+                if (!c.next()) {
+                    break;
+                }
+            }
+        } catch (CorruptionException e) {
+            // Left to the ordered seek, which reports it for the key that
+            // actually lands on the damage and takes the range out of service
+            // by name -- not for every read of the segment.
+            return NO_INDEX;
+        }
+        int cap = Integer.highestOneBit(Math.max(16, n)) << 1;
+        long[] slots = new long[cap];
+        int mask = cap - 1;
+        for (int k = 0; k < n; k += 2) {
+            int i = (int) found[k] & mask;
+            while (slots[i] != 0) {
+                i = (i + 1) & mask;
+            }
+            slots[i] = found[k + 1];
+        }
+        return slots;
+    }
+
+    /** Whether the point index has been built, so a test can prove it read through one. */
+    public boolean pointIndexed() {
+        long[] ix = pointIndex;
+        return ix != null && ix.length > 0;
     }
 
     public Cursor cursor() {
@@ -239,6 +369,18 @@ public final class Segment {
         public byte[] key() {
             require();
             return leafPage.key(cells[depth - 1]);
+        }
+
+        /** The absolute page the cursor stands on. */
+        long page() {
+            require();
+            return pages[depth - 1];
+        }
+
+        /** The cell the cursor stands on, within {@link #page()}. */
+        int cell() {
+            require();
+            return cells[depth - 1];
         }
 
         public BtreePage.Leaf entry() {

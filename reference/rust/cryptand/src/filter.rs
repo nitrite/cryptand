@@ -65,10 +65,6 @@ impl BlockedBloom {
         f
     }
 
-    fn locate(&self, key: &[u8]) -> (usize, u32, u32) {
-        self.locate_hash(cfh64(key))
-    }
-
     fn locate_hash(&self, hash: u64) -> (usize, u32, u32) {
         let h1 = (hash & 0xFFFF_FFFF) as u32;
         let h2 = ((hash >> 32) as u32) | 1; // forced odd, so the probes spread
@@ -90,7 +86,14 @@ impl BlockedBloom {
     }
 
     pub fn may_contain(&self, key: &[u8]) -> bool {
-        let (block, h1, h2) = self.locate(key);
+        self.may_contain_hash(cfh64(key))
+    }
+
+    /// [`BlockedBloom::may_contain`] for a key whose `cfh64` the caller
+    /// already has: the point read hashes the key once for this and for the
+    /// segment's point index.
+    pub fn may_contain_hash(&self, hash: u64) -> bool {
+        let (block, h1, h2) = self.locate_hash(hash);
         (0..self.probes).all(|i| {
             let bit = h1.wrapping_add(i.wrapping_mul(h2)) % BLOCK_BITS as u32;
             let byte = block * BLOCK_BYTES + (bit / 8) as usize;

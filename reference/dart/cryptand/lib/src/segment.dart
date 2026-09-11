@@ -707,7 +707,20 @@ final class SegRecord {
   final int? expiryMs;
 
   int get op => internalKey[internalKey.length - 1];
-  int get seq => parseInternalKey(internalKey).seq;
+
+  /// Read straight out of the key: [parseInternalKey] built a record and a
+  /// view to hand back one field, and a point read asks for it per candidate.
+  int get seq {
+    final ik = internalKey;
+    if (ik.length < 13) {
+      throw const CorruptionException('internal key shorter than 13 bytes');
+    }
+    var inv = 0;
+    for (var i = ik.length - 9; i < ik.length - 1; i++) {
+      inv = (inv << 8) | ik[i];
+    }
+    return inv ^ _u64Mask;
+  }
 }
 
 /// A parsed B+tree page inside a segment.
@@ -936,11 +949,111 @@ final class Node {
     return (r.u64(), r.u64());
   }
 
+  /// Whether cell [i]'s key is exactly `prefix || u64be(~seq) || op` -- one
+  /// version of the user key [prefix] -- in one pass over the cell, where
+  /// [keyLen] and [keyHasPrefix] each decoded the pointer and the length.
+  bool isVersionOf(int i, Uint8List prefix) {
+    final off = _cellOffset(i);
+    final b0 = page[off];
+    if (b0 >= 0x80) return keyLen(i) == prefix.length + 9 && keyHasPrefix(i, prefix);
+    if (prefixLen + b0 != prefix.length + 9) return false;
+    final n = prefixLen < prefix.length ? prefixLen : prefix.length;
+    final at = _base + 16;
+    for (var j = 0; j < n; j++) {
+      if (page[at + j] != prefix[j]) return false;
+    }
+    final sat = off + 1;
+    if (sat + b0 > page.length) {
+      throw CorruptionException('page $pageIndex: cell $i suffix runs past the page');
+    }
+    for (var j = prefixLen; j < prefix.length; j++) {
+      if (page[sat + j - prefixLen] != prefix[j]) return false;
+    }
+    return true;
+  }
+
+  /// [recordAt] of cell [i] when its key is a version of [prefix] -- as
+  /// [isVersionOf] decides -- and null otherwise, in one pass over the cell.
+  ///
+  /// The point read's hot path. The two calls it replaces decoded the cell
+  /// pointer twice and built a [ByteReader], whose `ByteData` view is an
+  /// allocation, per read. Encodings off the common path -- a suffix or value
+  /// length of three or more uvar bytes -- are left to those two, which
+  /// validate them.
+  SegRecord? recordIfVersionOf(int i, Uint8List prefix) {
+    final off = _cellOffset(i);
+    final suffixLen = page[off];
+    if (suffixLen >= 0x80) return isVersionOf(i, prefix) ? recordAt(i) : null;
+    final keyLen = prefixLen + suffixLen;
+    if (keyLen != prefix.length + 9) return null;
+    final sat = off + 1;
+    var p = sat + suffixLen;
+    if (p >= page.length) {
+      throw CorruptionException('page $pageIndex: cell $i suffix runs past the page');
+    }
+    final n = prefixLen < prefix.length ? prefixLen : prefix.length;
+    final pat = _base + 16;
+    for (var j = 0; j < n; j++) {
+      if (page[pat + j] != prefix[j]) return null;
+    }
+    for (var j = prefixLen; j < prefix.length; j++) {
+      if (page[sat + j - prefixLen] != prefix[j]) return null;
+    }
+    final key = Uint8List(keyLen);
+    if (prefixLen > 0) key.setRange(0, prefixLen, page, pat);
+    key.setRange(prefixLen, keyLen, page, sat);
+
+    final kindFlags = page[p++];
+    final valueKind = kindFlags & 0x0F;
+    if (valueKind > ValueKind.max || kindFlags & 0xE0 != 0) return recordAt(i);
+    int? expiry;
+    if (kindFlags & kHasExpiry != 0) {
+      if (p + 8 > page.length) return recordAt(i);
+      expiry = _bd.getUint64(p, Endian.little);
+      p += 8;
+    }
+    var value = Uint8List(0);
+    if (valueKind != ValueKind.empty && key[keyLen - 1] != Op.delete) {
+      int len;
+      if (ValueKind.isPointer(valueKind)) {
+        len = kPointerBytes;
+      } else {
+        if (p + 2 > page.length) return recordAt(i);
+        final b0 = page[p];
+        if (b0 < 0x80) {
+          len = b0;
+          p += 1;
+        } else {
+          final b1 = page[p + 1];
+          // Two bytes, canonical (a zero final byte is not); anything else
+          // goes the general way.
+          if (b1 >= 0x80 || b1 == 0) return recordAt(i);
+          len = (b0 & 0x7F) | (b1 << 7);
+          p += 2;
+        }
+      }
+      if (p + len > page.length) return recordAt(i);
+      value = Uint8List.sublistView(page, p, p + len);
+    }
+    return SegRecord(key, valueKind, value, expiry);
+  }
+
   SegRecord recordAt(int i) {
-    final key = keyAt(i);
     final r = ByteReader(page, _cellOffset(i), page.length);
     final suffixLen = r.uvar();
-    r.position = r.position + suffixLen;
+    if (suffixLen > page.length) {
+      throw CorruptionException('page $pageIndex: cell $i suffix too long');
+    }
+    // The key is built from the page directly: [keyAt] decoded the same
+    // pointer and length again, through a second reader and a view.
+    final at = r.position;
+    if (at + suffixLen > page.length) {
+      throw CorruptionException('page $pageIndex: cell $i suffix runs past the page');
+    }
+    final key = Uint8List(prefixLen + suffixLen);
+    if (prefixLen > 0) key.setRange(0, prefixLen, page, _base + 16);
+    key.setRange(prefixLen, key.length, page, at);
+    r.position = at + suffixLen;
 
     final kindFlags = r.u8();
     final valueKind = kindFlags & 0x0F;
@@ -1111,23 +1224,27 @@ final class Segment {
   /// at all -- the pessimistic bound.
   bool cacheEnabled = true;
 
-  final Map<int, Node> _cache = {};
+  /// Parsed nodes by page index. A list rather than a map: every point read
+  /// and every descent step looks a node up here, and the page index is
+  /// already a dense array index.
+  late final List<Node?> _cache = List<Node?>.filled(pageCount, null);
 
   void resetCounters() {
     nodeAccesses = 0;
     pageReads = 0;
   }
 
-  void clearCache() => _cache.clear();
+  void clearCache() => _cache.fillRange(0, _cache.length, null);
 
   Node node(int pageIndex) {
     nodeAccesses++;
+    // `_cache.length` is `pageCount`, without its division.
+    if (pageIndex < 1 || pageIndex >= _cache.length) {
+      throw CorruptionException('page index $pageIndex outside the extent');
+    }
     if (cacheEnabled) {
       final cached = _cache[pageIndex];
       if (cached != null) return cached;
-    }
-    if (pageIndex < 1 || pageIndex >= pageCount) {
-      throw CorruptionException('page index $pageIndex outside the extent');
     }
     pageReads++;
     final page = Uint8List.sublistView(
@@ -1325,6 +1442,107 @@ final class Segment {
   }
 
   SegmentCursor cursor() => SegmentCursor(this);
+
+  /// What [pointLookup] returns when it cannot answer and the ordered seek
+  /// must. Compared with `identical`.
+  static final SegRecord unindexed = SegRecord(Uint8List(0), 0, Uint8List(0), null);
+
+  /// A hash table from user key to that key's **first** cell -- its newest
+  /// version, by §1's inverted seq. Not part of the format: a segment is
+  /// immutable, so a table built from its cells cannot go stale. It turns a
+  /// point read's B+tree descent -- 60 % of a read, about fifteen binary-search
+  /// probes over three pages -- into one hash, usually one slot and one
+  /// in-place cell comparison.
+  ///
+  /// Each slot is `page << 32 | cell << 16 | tag`, zero when empty (page 0 is
+  /// the segment header, never a leaf); `tag` is sixteen more bits of the
+  /// hash. Linear probing at a load factor of at most one half. Empty when the
+  /// segment could not be indexed, which leaves it to the ordered seek.
+  Int64List? _pointIndex;
+
+  /// Lookups served before the index existed; what decides when to build it.
+  int _pointLookups = 0;
+
+  /// Whether the point index has been built, so a test can prove it read
+  /// through one.
+  bool get pointIndexed => (_pointIndex?.length ?? 0) > 0;
+
+  /// The entry the ordered seek for [prefix] at [ceiling] would return, when
+  /// the index can say; `null` when the segment holds no entry for [prefix]
+  /// at all; [unindexed] when only the seek can say.
+  ///
+  /// The key's first cell is the seek's answer exactly when its seq is at or
+  /// below the ceiling, which for a read with no snapshot is always. Until
+  /// the segment has served one lookup per 32 entries there is no index:
+  /// building it is one pass over every cell, and by then the descents
+  /// already paid for cost about as much.
+  SegRecord? pointLookup(Uint8List prefix, int hash, int? ceiling) {
+    var ix = _pointIndex;
+    if (ix == null) {
+      final threshold = header.entryCount ~/ 32;
+      if (++_pointLookups < (threshold < 8 ? 8 : threshold)) return unindexed;
+      ix = _pointIndex = _buildPointIndex();
+    }
+    if (ix.isEmpty) return unindexed;
+    final mask = ix.length - 1;
+    final tag = hash >>> 48;
+    for (var i = hash & mask;; i = (i + 1) & mask) {
+      final s = ix[i];
+      if (s == 0) return null; // every user key in the segment is in the table
+      if (s & 0xFFFF != tag) continue;
+      final n = node(s >>> 32);
+      final cell = (s >>> 16) & 0xFFFF;
+      if (!n.isLeaf || cell >= n.cellCount) {
+        throw CorruptionException(
+            'point index names cell $cell of page ${n.pageIndex}, which does not hold it');
+      }
+      final rec = n.recordIfVersionOf(cell, prefix);
+      if (rec == null) continue;
+      if (ceiling != null && rec.seq > ceiling) return unindexed;
+      return rec;
+    }
+  }
+
+  Int64List _buildPointIndex() {
+    final found = <int>[];
+    try {
+      Uint8List? prev;
+      final c = cursor()..seekFirst();
+      while (c.isValid) {
+        final k = c.key();
+        if (k.length < 9) {
+          throw CorruptionException('segment cell key is shorter than 9 bytes');
+        }
+        final user = Uint8List.sublistView(k, 0, k.length - 9);
+        if (prev == null || compareKeys(prev, user) != 0) {
+          prev = user;
+          final h = cfh64(user);
+          found
+            ..add(h)
+            ..add(c.leafPage << 32 | c.cellIndex << 16 | h >>> 48);
+        }
+        c.next();
+      }
+    } on CorruptionException {
+      // Left to the ordered seek, which reports it for the key that actually
+      // lands on the damage, not for every read of the segment.
+      return Int64List(0);
+    }
+    var cap = 16;
+    while (cap < found.length) {
+      cap <<= 1;
+    }
+    final slots = Int64List(cap);
+    final mask = cap - 1;
+    for (var k = 0; k < found.length; k += 2) {
+      var i = found[k] & mask;
+      while (slots[i] != 0) {
+        i = (i + 1) & mask;
+      }
+      slots[i] = found[k + 1];
+    }
+    return slots;
+  }
 }
 
 /// A cursor over one segment.
@@ -1352,6 +1570,10 @@ final class SegmentCursor {
 
   Node get _leaf => _path.last.$1;
   int get _index => _path.last.$2;
+
+  /// The page and cell the cursor stands on.
+  int get leafPage => _leaf.pageIndex;
+  int get cellIndex => _index;
 
   void _setLast(int i) => _path[_path.length - 1] = (_path.last.$1, i);
 

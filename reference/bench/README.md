@@ -49,9 +49,11 @@ the rest of this directory follows:
   block caches, MVStore returns the stored object, and Hive returns the value
   out of its in-memory box — **none of them copies**. Cryptand's `get` returns
   an owned `Vec<u8>`, so the Rust table calls `get_ref`, which is the same
-  resolution returning a borrow of the resident segment extent. Calling `get`
-  there would be timing a whole-document `memcpy` that no other engine is being
-  asked to do.
+  resolution returning a borrow of the resident segment extent; Dart's `get`
+  returns a fresh `Uint8List`, so the Dart table calls `getView`, the same
+  resolution returning an unmodifiable view. Calling `get` there would be timing
+  a whole-document `memcpy` that no other engine is being asked to do. (The
+  Dart table called `get` until 2026-09-11, against this rule.)
 
 **Every comparator is kept out of the published artifact.** The Rust one is a
 crate excluded from the workspace, the Java ones are `test` scope, and the Dart

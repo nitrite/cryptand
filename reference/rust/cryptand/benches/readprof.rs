@@ -1,4 +1,5 @@
-//! Temporary: a long read loop, for sampling the point-read path.
+//! Temporary: a long read loop, for sampling the point-read path, and the
+//! update row's phase loop (`updphase`).
 mod harness;
 use std::time::Instant;
 use cryptand::container::{Durability, Profile};
@@ -55,6 +56,45 @@ fn main() {
     }
     let phase = std::env::args().nth(3).unwrap_or_else(|| "read".into());
     let mut seed = 0x51ED_C0DEu64;
+    if phase == "updphase" {
+        // The comparison table's update row, repeated: 5 000 puts, one flush,
+        // one commit, on a freshly compacted database. The second argument is
+        // the number of phases here, not seconds. `CFF_FREE=1` prints the free
+        // list after each commit -- how the tree-1 feedback loop was found.
+        let v1: Vec<Vec<u8>> = (0..n).map(|i| cryptand::cve::encode(&doc(i, 1))).collect();
+        let (mut tp, mut tf, mut tc, mut phases) = (0f64, 0f64, 0f64, 0u64);
+        while phases < secs {
+            e.compact().unwrap();
+            let t = Instant::now();
+            for _ in 0..5000 {
+                seed = next(seed);
+                let i = below(seed, n);
+                e.put(TREE, &key(i), &v1[i]).unwrap();
+            }
+            tp += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            e.flush().unwrap();
+            tf += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            e.commit(Durability::Os).unwrap();
+            tc += t.elapsed().as_secs_f64();
+            phases += 1;
+            if std::env::var("CFF_FREE").is_ok() {
+                let fl = e.pager.free_list();
+                eprintln!("phase {phases} commit_ms={:.1} free_extents={} free_pages={} page_count={} min_retained={}",
+                    t.elapsed().as_secs_f64()*1e3, fl.len(), fl.iter().map(|x| x.pages as u64).sum::<u64>(), e.pager.page_count, e.pager.min_retained_commit);
+            }
+        }
+        let p = phases as f64;
+        println!(
+            "phases={phases} put_ms={:.3} flush_ms={:.3} commit_ms={:.3} ops_per_s={:.0}",
+            tp / p * 1e3,
+            tf / p * 1e3,
+            tc / p * 1e3,
+            5000.0 * p / (tp + tf + tc)
+        );
+        return;
+    }
     let t0 = Instant::now(); let mut count = 0u64;
     while t0.elapsed().as_secs() < secs {
         for _ in 0..10_000 {

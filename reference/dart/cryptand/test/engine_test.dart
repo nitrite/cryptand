@@ -378,6 +378,63 @@ void main() {
       expect(e.get(17, CNitriteId(snowflakeId(1))), docBytes(dict, 1));
     });
 
+    test('the point index answers exactly what the descent does', () {
+      // `Segment.pointLookup` is only built after a segment has served one
+      // lookup per 32 entries, so no small test ever reaches it. This one
+      // reads every key several times over segments holding superseded
+      // versions (pinned by a snapshot), tombstones, and a range delete whose
+      // start cell is the newest cell of a live key -- the three cases where
+      // a key's first cell is not its answer -- and checks every answer,
+      // current and at the snapshot, against a model.
+      const n = 1000;
+      final e = Engine(memtableEntries: 1 << 20);
+      Uint8List val(String s) => Uint8List.fromList(s.codeUnits);
+      CValue key(int i) => CNitriteId(i);
+      for (var i = 0; i < n; i++) {
+        e.put(17, key(i), val('a$i'));
+      }
+      // A flush is what advances `visible_seq`, so it has to precede the
+      // snapshot that pins these versions.
+      e.flush();
+      final snap = e.snapshot();
+      for (var i = 0; i < n; i += 2) {
+        e.put(17, key(i), val('b$i'));
+      }
+      for (var i = 0; i < n; i += 7) {
+        e.remove(17, key(i));
+      }
+      e.removeRange(17, key(100), key(120));
+      e.flush();
+      for (var i = 500; i < 600; i++) {
+        e.put(17, key(i), val('c$i'));
+      }
+      e.flush();
+      e.compact();
+
+      String? now(int i) {
+        if (i >= 500 && i < 600) return 'c$i';
+        if (i >= n || (i >= 100 && i < 120) || i % 7 == 0) return null;
+        return i.isEven ? 'b$i' : 'a$i';
+      }
+
+      String? str(Uint8List? v) => v == null ? null : String.fromCharCodes(v);
+      for (var pass = 0; pass < 3; pass++) {
+        for (var i = 0; i < n + 50; i++) {
+          expect(str(e.get(17, key(i))), now(i), reason: 'key $i, pass $pass');
+          expect(str(e.getView(17, key(i))), now(i), reason: 'view of key $i, pass $pass');
+          expect(str(e.get(17, key(i), at: snap)), i < n ? 'a$i' : null,
+              reason: 'key $i at the snapshot, pass $pass');
+        }
+      }
+      expect(e.extents, isNotEmpty);
+      for (final s in e.extents.values) {
+        expect(s.pointIndexed, isTrue,
+            reason: 'segment ${s.header.segmentId} was never read through its index');
+      }
+      // A view is a view: writing through it must not reach the segment.
+      expect(() => e.getView(17, key(1))![0] = 0, throwsUnsupportedError);
+    });
+
     test('remove writes a tombstone that hides the value', () {
       final dict = benchDict();
       final e = Engine(memtableEntries: 10);

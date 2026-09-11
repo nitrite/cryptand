@@ -1548,7 +1548,10 @@ public final class Engine implements AutoCloseable {
     private BtreePage.Leaf resolve(int treeId, byte[] cke, long snapshotSeq, boolean requirePublished) {
         lookups.incrementAndGet();
         byte[] uk = Ikey.userKey(treeId, cke);
-        byte[] from = Ikey.seekAt(uk, snapshotSeq);
+        // Built only for the two readers that seek: the memtable, and a segment
+        // its point index cannot answer. A read at the horizon of a flushed key
+        // needs neither.
+        byte[] from = null;
 
         BtreePage.Leaf best = null;
         long bestSeq = -1;
@@ -1563,8 +1566,16 @@ public final class Engine implements AutoCloseable {
         // levels to answer `ceilingEntry` on an empty map, and after a flush
         // every shard is empty until the next write: this was 8 % of the
         // point-read profile, spent proving there was nothing there.
-        ConcurrentSkipListMap<byte[], BtreePage.Leaf> shard = shardFor(treeId, cke);
-        for (Map.Entry<byte[], BtreePage.Leaf> m = shard.isEmpty() ? null : shard.ceilingEntry(from);
+        //
+        // `residentEntries` first, for the same reason and more so: choosing the
+        // shard hashes the key, 12 % of a point read once the segment side
+        // became a hash probe. It counts an entry after the entry is in its
+        // shard and before the batch is published, so zero proves there is no
+        // published entry to find; an in-flight one may be missed, which only
+        // a caller that does not require publication would notice.
+        ConcurrentSkipListMap<byte[], BtreePage.Leaf> shard =
+                requirePublished && residentEntries.get() == 0 ? null : shardFor(treeId, cke);
+        for (Map.Entry<byte[], BtreePage.Leaf> m = shard == null || shard.isEmpty() ? null : shard.ceilingEntry(from = Ikey.seekAt(uk, snapshotSeq));
                 m != null; m = shard.higherEntry(m.getKey())) {
             if (!Ikey.hasUserKey(m.getKey(), uk)) {
                 break;
@@ -1582,6 +1593,8 @@ public final class Engine implements AutoCloseable {
 
         LevelState state = levels;
         boolean stop = false;
+        // One hash for every candidate's filter and point index.
+        long hash = Cfh64.hash(uk);
         for (Segment seg : state.segments()) {
             // Range deletes are gathered BEFORE the key-range prune, not after.
             // A RANGE_DELETE entry is keyed by its interval's START, so the
@@ -1597,14 +1610,22 @@ public final class Engine implements AutoCloseable {
             if (!coversUserKey(seg.meta(), uk)) {
                 continue;
             }
-            if (stop || !seg.mayContain(uk)) {
+            if (stop || !seg.mayContainHash(hash)) {
                 continue;
             }
             segmentsProbed.incrementAndGet();
             filterProbes.incrementAndGet();
-            Segment.Cursor c = seg.cursor();
+            // The segment's point index answers when it can -- see
+            // `Segment.pointLookup` -- and the ordered seek otherwise. Both
+            // yield the entry at `from` when it is this key's, and nothing else.
+            BtreePage.Leaf hit;
+            Segment.Cursor c = null;
             try {
-                c.seek(from);
+                hit = seg.pointLookup(uk, hash, snapshotSeq);
+                if (hit == Segment.UNINDEXED) {
+                    c = seg.cursor();
+                    c.seek(from != null ? from : (from = Ikey.seekAt(uk, snapshotSeq)));
+                }
             } catch (CorruptionException e) {
                 // §4 of 13-operations: a single damaged page MUST NOT make the
                 // whole database unreadable. The segment's key range comes out
@@ -1615,21 +1636,23 @@ public final class Engine implements AutoCloseable {
                 throw new CorruptionException("key is inside an unavailable range: "
                         + rangeOf(seg) + " (" + e.getMessage() + ")");
             }
-            if (!c.isValid() || !Ikey.hasUserKey(c.key(), uk)) {
+            if (c != null) {
+                hit = c.isValid() && Ikey.hasUserKey(c.key(), uk) ? c.entry() : null;
+            }
+            if (hit == null) {
                 // The filter said maybe and the segment does not hold the key:
                 // a false positive, which is what §2.4's bit allocation is
                 // measured against.
                 filterFalsePositives.incrementAndGet();
-            }
-            if (c.isValid() && Ikey.hasUserKey(c.key(), uk)) {
-                long seq = Ikey.seqOf(c.key());
+            } else {
+                long seq = Ikey.seqOf(hit.key());
                 // Resolved by the winning entry's OWN seq, never by segment
                 // order: a segment's max_seq is an aggregate over every key it
                 // holds, so a segment at a lower level can carry a higher
                 // max_seq - from some unrelated key - than one above it.
                 if (seq > bestSeq) {
                     bestSeq = seq;
-                    best = c.entry();
+                    best = hit;
                 }
                 // The early exit, and its proof. `levels.segments()` is ordered
                 // L0 newest-flush-first then strictly increasing level, and

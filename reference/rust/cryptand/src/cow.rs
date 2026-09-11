@@ -123,6 +123,10 @@ impl CowTree {
 
     fn write(&mut self, pager: &mut Pager, n: &CowNode) -> Result<u64> {
         let id = pager.alloc_extent(1)?;
+        self.write_at(pager, id, n)
+    }
+
+    fn write_at(&mut self, pager: &mut Pager, id: u64, n: &CowNode) -> Result<u64> {
         let page = encode_node_page(
             pager.page_size,
             pager.payload_cap(),
@@ -381,6 +385,43 @@ impl CowTree {
         let node = CowNode { is_leaf: false, keys, payloads };
         self.root = self.write(pager, &node)?;
         Ok(())
+    }
+
+    /// Replaces the whole tree with `entries` -- sorted, distinct keys -- built
+    /// bottom-up with **file-extending allocations only**, and without reading
+    /// or freeing the old pages; the caller owns those.
+    ///
+    /// This is tree 1's commit path. Editing the free tree one `put` at a time
+    /// copies a root-to-leaf path per entry, and every copy frees pages that
+    /// the *next* commit has to record: measured, the free list roughly doubled
+    /// on every commit of a compact-and-update loop, 3 extents to 5 205 in
+    /// thirteen commits, and commit went from 0.1 ms to 606 ms. A rebuild
+    /// costs the tree's own page count per commit, whatever changed. Allocating
+    /// out of the list it is recording would make a page both free and in use,
+    /// which `01-container.md` §9 calls a double allocation.
+    pub fn rebuild_fresh(&mut self, pager: &mut Pager, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<()> {
+        if entries.is_empty() {
+            self.root = 0;
+            return Ok(());
+        }
+        let cap = pager.payload_cap() + crate::container::PAGE_HEADER_BYTES;
+        let (keys, payloads) = entries.into_iter().map(|(k, v)| (k, leaf_payload(&v))).unzip();
+        let mut level = self.split(cap, CowNode { is_leaf: true, keys, payloads })?;
+        loop {
+            let mut keys = Vec::with_capacity(level.len());
+            let mut payloads = Vec::with_capacity(level.len());
+            for n in &level {
+                let id = pager.alloc_fresh(1)?;
+                self.write_at(pager, id, n)?;
+                keys.push(n.keys[0].clone());
+                payloads.push(child_payload(id, n.subtree_entries()));
+            }
+            if level.len() == 1 {
+                self.root = child_of(&payloads[0])?.0;
+                return Ok(());
+            }
+            level = self.split(cap, CowNode { is_leaf: false, keys, payloads })?;
+        }
     }
 
     fn split(&self, page_size: usize, n: CowNode) -> Result<Vec<CowNode>> {

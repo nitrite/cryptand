@@ -265,6 +265,47 @@ public final class BtreePage {
     }
 
     /**
+     * The {@code seq} of cell {@code i} when its key is {@code userKey || u64be(~seq) || op},
+     * or {@link #NOT_THIS_KEY} when it is some other key -- read in place,
+     * without building the key.
+     */
+    /**
+     * {@link #seqIfUserKey}'s "no": a seq of 2^63, which is past any this
+     * engine assigns and which every signed seq comparison here already
+     * mishandles.
+     */
+    public static final long NOT_THIS_KEY = Long.MIN_VALUE;
+
+    public long seqIfUserKey(int i, byte[] userKey) {
+        int p = prefix.length;
+        int u = userKey.length;
+        int off = cellOffset(i);
+        if (off < ptrOffset + 2 * cellCount || off >= payloadLen) {
+            throw new CorruptionException("btree cell pointer " + off + " is outside the cell area");
+        }
+        int s = base + off + 1;
+        int suffixLen = payload[s - 1] & 0xFF;
+        if (suffixLen >= 0x80 || p + suffixLen != u + 9 || s + suffixLen > base + payloadLen) {
+            // Not this key's length -- a suffix of 128 bytes or more is not
+            // either, for any key of this shape -- and a corrupt length is left
+            // for the ordered read to report.
+            return NOT_THIS_KEY;
+        }
+        // The key is `prefix || suffix`; the user key and the nine-byte tail
+        // may each straddle the two.
+        for (int k = 0; k < u; k++) {
+            if ((k < p ? prefix[k] : payload[s + k - p]) != userKey[k]) {
+                return NOT_THIS_KEY;
+            }
+        }
+        long inv = 0;
+        for (int k = u; k < u + 8; k++) {
+            inv = (inv << 8) | ((k < p ? prefix[k] : payload[s + k - p]) & 0xFF);
+        }
+        return ~inv;
+    }
+
+    /**
      * Index of the first cell whose key is {@code >= target}, or
      * {@link #cellCount()} if there is none. Binary search over
      * {@code memcmp} order — no host comparator is consulted anywhere.

@@ -406,6 +406,57 @@ class EngineTest {
     }
 
     @Test
+    @DisplayName("the point index answers exactly what the descent does")
+    void pointIndexMatchesTheDescent(@TempDir Path dir) {
+        // `Segment.pointLookup` is only built after a segment has served one
+        // lookup per 32 entries, so no small test ever reaches it. This one
+        // reads every key several times over segments holding superseded
+        // versions (pinned by a snapshot), tombstones, and a range delete whose
+        // start cell is the newest cell of a live key -- the three cases where
+        // a key's first cell is not its answer -- and checks every answer,
+        // current and at the snapshot, against a model.
+        try (Engine e = Engine.create(dir.resolve("pi.cryptand"), options())) {
+            int n = 1000;
+            for (int i = 0; i < n; i++) {
+                e.batch().put(TREE, key(i), val("a" + i)).commit();
+            }
+            e.commitNow();
+            Snapshot snap = e.pin();
+            for (int i = 0; i < n; i += 2) {
+                e.batch().put(TREE, key(i), val("b" + i)).commit();
+            }
+            for (int i = 0; i < n; i += 7) {
+                e.batch().remove(TREE, key(i)).commit();
+            }
+            e.batch().removeRange(TREE, key(100), key(120)).commit();
+            for (int i = 500; i < 600; i++) {
+                e.batch().put(TREE, key(i), val("c" + i)).commit();
+            }
+            e.commitNow();
+            e.compact();
+            for (int pass = 0; pass < 3; pass++) {
+                for (int i = 0; i < n + 50; i++) {
+                    String now = i >= 500 && i < 600 ? "c" + i
+                            : i >= n || (i >= 100 && i < 120) || i % 7 == 0 ? null
+                            : i % 2 == 0 ? "b" + i : "a" + i;
+                    byte[] got = e.get(TREE, key(i));
+                    assertEquals(now, got == null ? null : new String(got, StandardCharsets.UTF_8),
+                            "key " + i + ", pass " + pass);
+                    byte[] then = e.get(TREE, key(i), snap.seq(), Engine.CLOCK_ON_DEMAND);
+                    assertEquals(i < n ? "a" + i : null,
+                            then == null ? null : new String(then, StandardCharsets.UTF_8),
+                            "key " + i + " at the snapshot, pass " + pass);
+                }
+            }
+            assertTrue(!e.segments().isEmpty());
+            for (Segment s : e.segments()) {
+                assertTrue(s.pointIndexed(), "segment " + s.meta().segmentId + " was never read through its index");
+            }
+            e.unpin(snap);
+        }
+    }
+
+    @Test
     @DisplayName("a levelled last level's segments do not overlap in user keys")
     void lastLevelIsDisjoint(@TempDir Path dir) {
         try (Engine e = Engine.create(dir.resolve("l.cryptand"), options())) {

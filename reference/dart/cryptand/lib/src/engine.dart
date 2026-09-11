@@ -21,6 +21,7 @@ import 'checkpoint.dart';
 import 'cke.dart';
 import 'cow.dart';
 import 'errors.dart';
+import 'filter.dart' show cfh64;
 import 'manifest.dart';
 import 'security.dart';
 import 'segment.dart';
@@ -1806,7 +1807,31 @@ final class Engine {
   /// candidate is examined and the winner is the entry with the greatest seq,
   /// never the first hit in segment order.
   Uint8List? get(int treeId, CValue key, {Snapshot? at}) {
-    final prefix = userKeyPrefix(treeId, encodeKey(key));
+    final rec = _winner(treeId, key, at);
+    return rec == null ? null : _resolve(rec);
+  }
+
+  /// [get] without the copy: an **unmodifiable view** of the value where it
+  /// already lives -- the segment extent or the memtable -- rather than a
+  /// fresh array. A value in the value log is read out either way.
+  ///
+  /// For a caller that only reads the bytes: decoding a document, comparing,
+  /// writing them somewhere. The view keeps what it points into alive, so a
+  /// caller that holds values for long should take [get]'s copy instead.
+  Uint8List? getView(int treeId, CValue key, {Snapshot? at}) {
+    final rec = _winner(treeId, key, at);
+    if (rec == null) return null;
+    return rec.valueKind == ValueKind.vlog ? _resolve(rec) : rec.value.asUnmodifiableView();
+  }
+
+  /// The record [get] resolves, or null when the key is absent, deleted or
+  /// expired.
+  SegRecord? _winner(int treeId, CValue key, Snapshot? at) {
+    // `userKeyPrefix(treeId, encodeKey(key))` in one buffer: that was two
+    // arrays and two copies per read to build thirteen bytes.
+    final w = _keyWriter..clear()..u32be(treeId);
+    writeKey(w, key);
+    final prefix = w.takeBytes();
     final ceiling = at?.seq;
 
     // The memtable holds records that are sequenced but not yet in a segment.
@@ -1817,13 +1842,13 @@ final class Engine {
     if (best != null && earlyExit) {
       // Nothing in a segment can be newer than an unflushed record.
       segmentsProbed.add(0);
-      return best.op == Op.delete ? null : _resolve(best);
+      return best.op == Op.delete ? null : best;
     }
 
     // §4 step 4: a read landing inside an unavailable range fails naming the
     // range, "never with a wrong or empty answer". The test is on the manifest
     // entry, so it costs no I/O and works even though the extent is unreadable.
-    for (final r in quarantined.values) {
+    for (final r in quarantined.isEmpty ? const <SegmentRef>[] : quarantined.values) {
       if (r.covers(prefix)) {
         throw UnavailableRangeException(
             'key falls inside the range of quarantined segment '
@@ -1834,17 +1859,32 @@ final class Engine {
       }
     }
 
-    final candidates = candidatesFor(prefix);
+    // [candidatesFor], walked in place: it built a list per read. Every
+    // candidate the filter admits is still counted after an early exit,
+    // exactly as that list counted them.
+    final hash = cfh64(prefix);
     var probed = 0;
-    for (final s in candidates) {
+    var stop = false;
+    for (final ref in _candidateRefs()) {
+      if (!ref.covers(prefix)) continue;
+      final s = extents[ref.segmentId]!;
+      final f = s.filter;
+      // §4: a segment that may hold a covering range delete MUST NOT be
+      // pruned by its filter, which contains point keys only.
+      if (f != null && !ref.hasRangeDeletes && !f.mayContainHash(hash)) {
+        continue;
+      }
+      if (f != null) filterAdmitted++;
+      if (stop) continue;
       probed++;
-      final rec = _seekIn(s, prefix, ceiling);
+      var rec = s.pointLookup(prefix, hash, ceiling);
+      if (identical(rec, Segment.unindexed)) rec = _seekIn(s, prefix, ceiling);
       if (rec == null) {
-        if (s.filter != null) filterFalsePositives++;
+        if (f != null) filterFalsePositives++;
         continue;
       }
       if (best == null || rec.seq > best.seq) best = rec;
-      if (earlyExit) break;
+      stop = earlyExit;
     }
     segmentsProbed.add(probed);
 
@@ -1855,8 +1895,11 @@ final class Engine {
     if (best.op == Op.delete || best.op == Op.rangeDelete) return null;
     // §9: an expired entry is invisible, "treated exactly as a DELETE".
     if (_isExpired(best, nowMs)) return null;
-    return _resolve(best);
+    return best;
   }
+
+  /// [get]'s key buffer, reused: `get` is not re-entered while it is building.
+  final ByteWriter _keyWriter = ByteWriter(32);
 
   SegRecord? _memtableLookup(Uint8List prefix, int? ceiling) {
     // Every internal key for this user key is `prefix || u64 ~seq || u8 op`, so

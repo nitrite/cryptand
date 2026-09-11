@@ -95,7 +95,7 @@ final class SegmentRef {
   /// §4.1's first mechanism, and the reason it costs no I/O: the test runs on
   /// the manifest entry, not on the segment.
   bool covers(Uint8List userKeyPrefix) {
-    if (compareKeys(userKeyPrefix, maxKey) > 0) return false;
+    if (_compare(userKeyPrefix, maxKey) > 0) return false;
     // `minKey < successor(prefix)`, without building the successor.
     //
     // `successor(k)` is the least byte string greater than every string with
@@ -104,18 +104,28 @@ final class SegmentRef {
     // has no successor, no `minKey` can fail both tests, which is the `null`
     // branch this replaces. `Keys.successor` allocated a `Uint8List` here,
     // once per candidate segment per point read.
-    final n = userKeyPrefix.length;
-    if (minKey.length >= n) {
-      var same = true;
-      for (var i = 0; i < n; i++) {
-        if (minKey[i] != userKeyPrefix[i]) {
-          same = false;
-          break;
-        }
-      }
-      if (same) return true;
+    //
+    // One pass: up to their first difference the two tests agree, and
+    // `minKey` that runs out first is either the prefix itself or below it.
+    final n = minKey.length < userKeyPrefix.length ? minKey.length : userKeyPrefix.length;
+    for (var i = 0; i < n; i++) {
+      final d = minKey[i] - userKeyPrefix[i];
+      if (d != 0) return d < 0;
     }
-    return compareKeys(minKey, userKeyPrefix) < 0;
+    return true;
+  }
+
+  /// [compareKeys] with its own call site. This runs once per candidate per
+  /// point read, and through the shared function -- which every caller in the
+  /// library reaches with every kind of byte list -- its element reads were
+  /// polymorphic: 10.7 % of a read, for two comparisons of thirteen bytes.
+  static int _compare(Uint8List a, Uint8List b) {
+    final n = a.length < b.length ? a.length : b.length;
+    for (var i = 0; i < n; i++) {
+      final d = a[i] - b[i];
+      if (d != 0) return d < 0 ? -1 : 1;
+    }
+    return a.length == b.length ? 0 : (a.length < b.length ? -1 : 1);
   }
 
   /// The manifest key, §3.2.

@@ -334,9 +334,8 @@ pub struct Engine {
     /// `(min seq, min commit_id)` over tree 8, cached; see
     /// [`Engine::refresh_checkpoint_floors`].
     checkpoint_floor: (Option<u64>, Option<u64>),
-    /// Free extents already written into tree 1, so a commit writes only what
-    /// is new.
-    persisted_free: HashSet<(u64, u64)>,
+    /// Tree 1's root and the list it records, as last written or loaded.
+    persisted_free: (u64, Vec<FreeExtent>),
     /// `11-conformance.md` §5 — trees whose `params.change_feed` is true.
     pub changefeed_trees: HashSet<u32>,
     job: Option<CompactionJob>,
@@ -483,7 +482,7 @@ impl Engine {
             counters: Counters::default(),
             keys: None,
             checkpoint_floor: (None, None),
-            persisted_free: HashSet::new(),
+            persisted_free: (0, Vec::new()),
             changefeed_trees: HashSet::new(),
             job: None,
             closed: false,
@@ -677,7 +676,7 @@ impl Engine {
             counters: Counters::default(),
             keys,
             checkpoint_floor: (None, None),
-            persisted_free: HashSet::new(),
+            persisted_free: (0, Vec::new()),
             changefeed_trees: HashSet::new(),
             job: None,
             closed: false,
@@ -816,8 +815,8 @@ impl Engine {
                 pages,
             });
         }
-        self.persisted_free = extents.iter().map(|e| (e.commit_id, e.start_page)).collect();
         self.pager.set_free_list(extents);
+        self.persisted_free = (self.freelist.root, self.pager.free_list());
         Ok(())
     }
 
@@ -1724,6 +1723,8 @@ impl Engine {
         // of the selection that depends on the key, so it is applied here
         // rather than into a per-read vector.
         let cands = self.candidate_order()?;
+        // One hash for every candidate's filter and point index.
+        let hash = crate::hash::cfh64(prefix);
         for r in cands.iter() {
             if !r.covers(prefix) {
                 continue;
@@ -1739,12 +1740,12 @@ impl Engine {
             let seg = self.segment(r)?;
             if self.filters && !r.has_range_deletes {
                 self.counters.filter_probes += 1;
-                if !seg.may_contain(prefix) {
+                if !seg.may_contain_hash(hash) {
                     continue;
                 }
             }
             probes += 1;
-            if let Some(rec) = seg.lookup_ref(prefix, ceiling)? {
+            if let Some(rec) = seg.lookup_ref_hashed(prefix, hash, ceiling)? {
                 if best.as_ref().map_or(true, |b| rec.seq > b.seq) {
                     // `seg` is **moved** into the winner: it is not needed
                     // again in this iteration, and cloning the `Arc` here cost
@@ -2841,17 +2842,27 @@ impl Engine {
 
     /// §6's free tree, written through the ordinary commit path.
     ///
-    /// **The free tree is the one tree whose own churn it cannot record in the
-    /// same commit**: writing an entry copies a root-to-leaf path, which
-    /// orphans pages, which are new entries, which orphan more pages. Recording
-    /// them lands in the pager's list and is persisted by the *next* commit —
-    /// a bounded one-commit lag, whose residue `01-container.md` §9 step 7
-    /// reports as a **leak** (repairable) rather than as corruption, and which
-    /// `13-operations.md` §3 reclaims.
+    /// **The free tree is the one tree whose own churn it cannot record by
+    /// editing itself**: writing an entry copies a root-to-leaf path, which
+    /// orphans pages, which are new entries, which orphan more pages. This used
+    /// to edit it one entry at a time and call the result "a bounded one-commit
+    /// lag". It was not bounded: each entry's path copy fed the next commit
+    /// several more, and a compact-and-update loop took the list from 3
+    /// extents to 5 205 in thirteen commits, the file from 3 789 pages to
+    /// 21 750, and a commit from 0.1 ms to 606 ms.
     ///
-    /// Only entries this commit has not already written are put, or re-putting
-    /// the whole list would copy a path per entry and the lag would grow
-    /// instead of shrinking.
+    /// So it is rebuilt whole, in the order the Java implementation already
+    /// used: release the tree's current pages into the list at this commit,
+    /// snapshot the list, then write the snapshot with file-extending
+    /// allocations only (see [`CowTree::rebuild_fresh`]). Its own churn is then
+    /// its page count per commit, whatever changed, and a commit where nothing
+    /// changed writes nothing.
+    ///
+    /// ponytail: the released pages are single-page extents only the other
+    /// copy-on-write trees can reuse, so a commit that changes the list grows
+    /// the file by tree 1's size (one page, typically) when they don't. Taking
+    /// tree 1's pages out of the list *before* snapshotting it, to a fixed
+    /// point, removes that; Java has the same ceiling.
     fn persist_freelist(&mut self) -> Result<()> {
         let mut freed: Vec<u64> = Vec::new();
         for t in [
@@ -2883,31 +2894,36 @@ impl Engine {
         // overwrites is gone. Found by the round-trip gate the moment the Dart
         // side started reading tree 1 at all — which is what a second
         // implementation is for.
-        let extents = self.pager.free_list();
-        let mut t = std::mem::replace(&mut self.freelist, CowTree::new(tree_id::FREE_SPACE, 0));
-        t.commit_id = self.sb.commit_id;
-        let key_of = |commit_id: u64, start_page: u64| {
-            cke::encode(&Value::Array(vec![
-                Value::Int { w: NumType::U64, neg: false, mag: commit_id as u128 },
-                Value::Int { w: NumType::U64, neg: false, mag: start_page as u128 },
-            ]))
-        };
-        let now: HashSet<(u64, u64)> = extents.iter().map(|e| (e.commit_id, e.start_page)).collect();
-        for gone in self.persisted_free.difference(&now).cloned().collect::<Vec<_>>() {
-            t.remove(&mut self.pager, &key_of(gone.0, gone.1)?)?;
+        //
+        // The root is compared too: a checkpoint restore points tree 1 at a
+        // tree that holds something else.
+        if self.freelist.root == self.persisted_free.0 && self.pager.free_list() == self.persisted_free.1 {
+            return Ok(());
         }
+        let mut old = Vec::new();
+        self.freelist.reachable(&mut self.pager, &mut old)?;
+        for p in old {
+            self.pager.free_extent(p, 1, self.sb.commit_id);
+        }
+        let extents = self.pager.free_list();
+        let mut entries = Vec::with_capacity(extents.len());
         for e in &extents {
-            if self.persisted_free.contains(&(e.commit_id, e.start_page)) {
-                continue;
-            }
+            let k = cke::encode(&Value::Array(vec![
+                Value::Int { w: NumType::U64, neg: false, mag: e.commit_id as u128 },
+                Value::Int { w: NumType::U64, neg: false, mag: e.start_page as u128 },
+            ]))?;
             let v = cve::encode(&Value::Doc(vec![(
                 "pages".into(),
                 Value::Int { w: NumType::U32, neg: false, mag: e.pages as u128 },
             )]));
-            t.put(&mut self.pager, &key_of(e.commit_id, e.start_page)?, &v)?;
+            entries.push((k, v));
         }
-        self.persisted_free = now;
-        self.freelist = t;
+        // CKE preserves the numeric order the list is kept in; sorted anyway,
+        // because the build requires it and the sort is the proof.
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        self.freelist.commit_id = self.sb.commit_id;
+        self.freelist.rebuild_fresh(&mut self.pager, entries)?;
+        self.persisted_free = (self.freelist.root, extents);
         Ok(())
     }
 

@@ -189,6 +189,65 @@ fn a_range_delete_still_in_the_memtable_hides_the_interval() {
 }
 
 #[test]
+fn the_point_index_answers_exactly_what_the_descent_does() {
+    // `Segment::lookup_ref_hashed` is only built after a segment has served
+    // one lookup per 32 entries, so no small test ever reaches it. This one
+    // reads every key several times over segments that hold superseded
+    // versions (pinned by a snapshot), tombstones, and a range delete whose
+    // start cell is the newest cell of a live key -- the three cases where a
+    // key's first cell is not its answer -- and checks every answer, current
+    // and at the snapshot, against a model.
+    let (_t, mut e) = engine("point-index", Profile::Desktop);
+    let n = 1000i64;
+    let key = |i: i64| Value::NitriteId(i);
+    for i in 0..n {
+        e.put(T, &key(i), format!("a{i}").as_bytes()).unwrap();
+    }
+    // A flush is what advances `visible_seq`, so it has to precede the
+    // snapshot that pins these versions.
+    e.flush().unwrap();
+    let snap = e.snapshot();
+    for i in (0..n).step_by(2) {
+        e.put(T, &key(i), format!("b{i}").as_bytes()).unwrap();
+    }
+    for i in (0..n).step_by(7) {
+        e.remove(T, &key(i)).unwrap();
+    }
+    e.remove_range(T, &key(100), &key(120)).unwrap();
+    e.flush().unwrap();
+    for i in 500..600 {
+        e.put(T, &key(i), format!("c{i}").as_bytes()).unwrap();
+    }
+    e.flush().unwrap();
+    // Merged, so the superseded versions share a segment with their
+    // successors, and a key's first cell there is often not its answer.
+    e.compact().unwrap();
+
+    let now = |i: i64| -> Option<String> {
+        if (500..600).contains(&i) {
+            return Some(format!("c{i}"));
+        }
+        if i >= n || (100..120).contains(&i) || i % 7 == 0 {
+            return None;
+        }
+        Some(if i % 2 == 0 { format!("b{i}") } else { format!("a{i}") })
+    };
+    let then = |i: i64| (i < n).then(|| format!("a{i}"));
+    let s = |v: Option<Vec<u8>>| v.map(|b| String::from_utf8(b).unwrap());
+    for pass in 0..3 {
+        for i in 0..n + 50 {
+            assert_eq!(s(e.get(T, &key(i)).unwrap()), now(i), "key {i}, pass {pass}");
+            assert_eq!(s(e.get_at(T, &key(i), Some(&snap)).unwrap()), then(i), "key {i} at the snapshot, pass {pass}");
+        }
+    }
+    let refs = e.all_refs().unwrap();
+    assert!(!refs.is_empty());
+    for r in &refs {
+        assert!(e.segment(r).unwrap().point_indexed(), "segment {} was never read through its index", r.segment_id);
+    }
+}
+
+#[test]
 fn ttl_is_evaluated_at_read_time_and_a_backwards_clock_resurrects() {
     // §9: "an implementation MUST treat a backwards clock jump as resurrecting
     // entries rather than as corruption."

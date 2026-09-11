@@ -421,11 +421,7 @@ void _wU32be(ByteWriter w, int v) {
     ..u8(v & 0xFF);
 }
 
-void _wU64be(ByteWriter w, int v) {
-  for (var s = 56; s >= 0; s -= 8) {
-    w.u8((v >>> s) & 0xFF);
-  }
-}
+void _wU64be(ByteWriter w, int v) => w.u64be(v);
 
 
 // ---------------------------------------------------------------------------
@@ -805,6 +801,19 @@ final class KeyRange {
 /// Unsigned lexicographic byte comparison. This is the *only* comparison the
 /// engine performs on keys; no host comparator is ever consulted.
 int compareKeys(List<int> a, List<int> b) {
+  // The typed loop, for the callers that pass byte arrays -- the point read's
+  // `SegmentRef.covers` among them. Through `List<int>` every element read is
+  // a polymorphic call, and covering one segment cost 11 % of a read.
+  if (a is Uint8List && b is Uint8List) return _compareBytes(a, b);
+  final n = a.length < b.length ? a.length : b.length;
+  for (var i = 0; i < n; i++) {
+    final d = a[i] - b[i];
+    if (d != 0) return d < 0 ? -1 : 1;
+  }
+  return a.length == b.length ? 0 : (a.length < b.length ? -1 : 1);
+}
+
+int _compareBytes(Uint8List a, Uint8List b) {
   final n = a.length < b.length ? a.length : b.length;
   for (var i = 0; i < n; i++) {
     final d = a[i] - b[i];

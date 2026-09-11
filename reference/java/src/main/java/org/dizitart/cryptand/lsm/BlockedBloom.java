@@ -147,7 +147,11 @@ public final class BlockedBloom {
      * the only direction in which this structure is allowed to be wrong.
      */
     public boolean mayContain(byte[] userKey) {
-        long hash = Cfh64.hash(userKey);
+        return mayContainHash(Cfh64.hash(userKey));
+    }
+
+    /** {@link #mayContain} for a key whose {@code cfh64} the caller already has. */
+    public boolean mayContainHash(long hash) {
         int base = blockOf(hash) * BLOCK_BYTES;
         int h1 = (int) hash;
         int h2 = (int) (hash >>> 32) | 1;

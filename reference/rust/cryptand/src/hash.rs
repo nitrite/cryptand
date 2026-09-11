@@ -20,10 +20,12 @@
 /// running over the 13.6 MB of pages the builder emitted — 109 million loop
 /// iterations for what is now a table lookup per byte, eight bytes at a time.
 ///
-/// Slicing-by-8 rather than an intrinsic: the crate has no runtime dependencies
-/// by design and `std::arch` would need per-architecture code and runtime
-/// feature detection for the same order of magnitude. The tables are `const`, so
-/// they cost no start-up time and no synchronisation.
+/// The tables are the portable path. On ARMv8 with `FEAT_CRC32` (every Apple
+/// Silicon and every current server ARM) and on x86-64 with SSE4.2, the
+/// instruction is used instead, through `std::arch` and runtime detection: the
+/// table was measured at **28 % of segment building** once the rest of the
+/// write path was fixed, because every emitted page is checksummed whole. The
+/// tables are `const`, so they cost no start-up time and no synchronisation.
 const fn crc_tables() -> [[u32; 256]; 8] {
     const POLY: u32 = 0x82F6_3B78; // reverse of 0x1EDC6F41
     let mut t = [[0u32; 256]; 8];
@@ -54,6 +56,51 @@ const fn crc_tables() -> [[u32; 256]; 8] {
 static CRC_T: [[u32; 256]; 8] = crc_tables();
 
 pub fn crc32c(data: &[u8]) -> u32 {
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("crc") {
+        // SAFETY: the feature the function is compiled for was just detected.
+        return unsafe { crc32c_arm(data) };
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("sse4.2") {
+        // SAFETY: as above.
+        return unsafe { crc32c_x86(data) };
+    }
+    crc32c_table(data)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "crc")]
+unsafe fn crc32c_arm(data: &[u8]) -> u32 {
+    use std::arch::aarch64::{__crc32cb, __crc32cd};
+    let mut crc = 0xFFFF_FFFFu32;
+    let mut words = data.chunks_exact(8);
+    for w in &mut words {
+        crc = __crc32cd(crc, u64::from_le_bytes(w.try_into().unwrap()));
+    }
+    for &b in words.remainder() {
+        crc = __crc32cb(crc, b);
+    }
+    !crc
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn crc32c_x86(data: &[u8]) -> u32 {
+    use std::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};
+    let mut crc = 0xFFFF_FFFFu64;
+    let mut words = data.chunks_exact(8);
+    for w in &mut words {
+        crc = _mm_crc32_u64(crc, u64::from_le_bytes(w.try_into().unwrap()));
+    }
+    let mut crc = crc as u32;
+    for &b in words.remainder() {
+        crc = _mm_crc32_u8(crc, b);
+    }
+    !crc
+}
+
+fn crc32c_table(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     let mut d = data;
     while d.len() >= 8 {
@@ -101,4 +148,22 @@ pub fn cfh64(key: &[u8]) -> u64 {
     h = (h ^ (h >> 30)).wrapping_mul(M1);
     h = (h ^ (h >> 27)).wrapping_mul(M2);
     h ^ (h >> 31)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_instruction_and_the_table_agree() {
+        // The standard CRC-32C check value.
+        assert_eq!(crc32c(b"123456789"), 0xE306_9283);
+        let data: Vec<u8> = (0..4200u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        for start in 0..9 {
+            for len in (0..80).chain([4096 - 4, 4096]) {
+                let d = &data[start..start + len];
+                assert_eq!(crc32c(d), crc32c_table(d), "offset {start}, length {len}");
+            }
+        }
+    }
 }

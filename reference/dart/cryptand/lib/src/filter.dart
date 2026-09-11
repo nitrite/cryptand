@@ -90,8 +90,11 @@ final class BlockedBloom {
     }
   }
 
-  bool mayContain(List<int> key) {
-    final h = _hash(key);
+  bool mayContain(List<int> key) => mayContainHash(_hash(key));
+
+  /// [mayContain] for a key whose hash the caller already has -- which must be
+  /// this filter's hash of it; a filter decoded from a segment uses [cfh64].
+  bool mayContainHash(int h) {
     final h1 = h & 0xFFFFFFFF;
     final h2 = ((h >>> 32) | 1) & 0xFFFFFFFF;
     final base = _blockOf(h1) * kBlockBytes;
@@ -186,7 +189,16 @@ final class BlockedBloom {
 /// keys the CRC pair collided 1868 times against 1863 predicted by the 2^32
 /// birthday bound, and CFH-64 collided zero times. Each such collision is a
 /// *guaranteed* false positive, and they grow as n^2 / 2^33.
-int cfh64(List<int> key) {
+int cfh64(List<int> key) =>
+    key is Uint8List ? _cfh64Bytes(key) : _cfh64(key);
+
+/// [cfh64] over a byte array, with its own call site: through `List<int>`
+/// every element read is a polymorphic call, and the point read hashes its
+/// key once per read.
+int _cfh64Bytes(Uint8List key) => _cfh64(key);
+
+@pragma('vm:prefer-inline')
+int _cfh64(List<int> key) {
   const p1 = 0x9E3779B185EBCA87;
   const p2 = -0x3D4D51C2D82B14B1; // 0xC2B2AE3D27D4EB4F as a signed 64-bit int
   const p3 = 0x165667B19E3779F9;

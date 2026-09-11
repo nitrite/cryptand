@@ -29,6 +29,9 @@ final class ByteWriter {
 
   int get length => _len;
 
+  /// Forgets what was written, keeping the buffer.
+  void clear() => _len = 0;
+
   void _ensure(int extra) {
     final need = _len + extra;
     if (need <= _buf.length) return;
@@ -62,6 +65,21 @@ final class ByteWriter {
   void u64(int v) {
     _ensure(8);
     _view.setUint64(_len, v, Endian.little);
+    _len += 8;
+  }
+
+  /// Big-endian, for the few places the format is: CKE and the tree id that
+  /// leads a user key.
+  void u32be(int v) {
+    _ensure(4);
+    _view.setUint32(_len, v, Endian.big);
+    _len += 4;
+  }
+
+  /// Big-endian raw 64-bit pattern.
+  void u64be(int v) {
+    _ensure(8);
+    _view.setUint64(_len, v, Endian.big);
     _len += 8;
   }
 
