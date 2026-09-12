@@ -141,7 +141,7 @@ xychart-beta
     title "Cryptand: Rust against Java against Dart"
     x-axis ["create", "read", "update", "delete", "mixed"]
     y-axis "thousand ops/s" 0 --> 4600
-    bar "rust" [1388, 4583, 1145, 3094, 1823]
+    line "rust" [1388, 4583, 1145, 3094, 1823]
     line "java" [639, 3421, 775, 1712, 1195]
     line "dart" [485, 1712, 372, 972, 465]
 ```
