@@ -345,6 +345,15 @@ public final class Pager {
             return;
         }
         pendingFree.add(new FreeExtent(commitId, startPage, pages));
+        // {@link #readTreePage} says this path invalidates, and it did not: a
+        // compacted-away segment stayed in the cache until LRU pressure found
+        // it, so after one full compaction the cache held 33 MB of which 14 MB
+        // was live. Nothing but a pinned snapshot reads a freed page, and the
+        // bytes stay on the device until `min_retained_commit` passes them, so
+        // that reader simply misses.
+        for (long p = startPage; p < startPage + pages; p++) {
+            invalidate(p);
+        }
     }
 
     /** Called by the committer once the superblock naming this commit is durable. */

@@ -10,7 +10,9 @@ the process, and on the JVM they measure the interpreter — hardest for whichev
 engine has the longest code path.
 
 Measured 2026-09-11. §6 is what changed since the 2026-09-10 round, whose
-numbers are kept beside these in §2.
+numbers are kept beside these in §2. §7 is the 2026-09-12 round, on file size
+and memory: the on-disk and file-bytes rows are from it, and it shows the
+throughput rows did not move.
 
 All harness code is **outside** the published artifacts: Java's benchmarks are
 `test` scope, Dart's are outside `lib/` and out of the archive, Rust's are behind
@@ -45,7 +47,7 @@ Median of 3.
 | update | **1 058 043** | 391 489 | 462 146 | 301 793 |
 | delete | **2 819 018** | 722 387 | 960 084 | 276 470 |
 | mixed | **1 685 571** | 868 387 | 1 511 007 | 770 624 |
-| on disk (MB) | **31.5** | 67.1 | 33.7 | 50.9 |
+| on disk (MB) | **27.6** | 67.1 | 33.7 | 50.9 |
 
 ```mermaid
 %%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#4C7EF3, #E0803C, #D64550, #2E9E75"}}}}%%
@@ -77,7 +79,7 @@ Operations per second. **Cryptand leads every row against all three**, by
 | update | **873 356** | 417 338 | 214 449 | 145 687 |
 | delete | **1 896 124** | 926 312 | 320 451 | 199 570 |
 | mixed | **1 170 932** | 841 277 | 354 993 | 640 066 |
-| on disk (MB) | 44.0 | 33.1 | **20.3** | 10.2 |
+| on disk (MB) | 27.6 | 33.1 | **20.3** | 10.2 |
 
 ```mermaid
 %%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#4C7EF3, #E0803C, #D64550, #2E9E75"}}}}%%
@@ -130,7 +132,7 @@ benchmark times inside the create phase.
 | update | **374 504** | 55 499 |
 | delete | **912 909** | 57 422 |
 | mixed | **450 857** | 179 330 |
-| on disk (MB) | 21.3 | **10.2** |
+| on disk (MB) | 21.2 | **10.2** |
 
 ```mermaid
 %%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#4C7EF3, #D64550"}}}}%%
@@ -179,7 +181,7 @@ Median of 3.
 | delete | **2 930 118** | 1 810 802 | 963 948 |
 | mixed | **1 693 098** | 1 313 226 | 449 418 |
 | persist (ms) | 0.0 | 0.2 | 11.8 |
-| file bytes | 31 457 280 | 43 982 848 | 21 217 280 |
+| file bytes | 27 574 272 | 27 615 232 | 21 102 592 |
 | storage model | file-backed, segments resident | file-backed | in-memory page space |
 
 ```mermaid
@@ -555,11 +557,207 @@ Steady-state `get` went 0.90 M → 2.7 M reads/s before the handle rule.
   the collector and the JIT settling after the compaction before it.
 - **Dart's `segmentsProbed` is still an unbounded list**, one entry per read,
   as Rust's was until §3.2. The tests read it as a list; changing its shape is
-  its own change.
+  its own change. (Done in §7.4.)
 
 ---
 
-## 7. Running it
+## 7. The 2026-09-12 round: file size and memory
+
+The brief: the same workload wrote a 31.5 MB file in Rust, 44.0 MB in Java
+and 21.3 MB in Dart. Find out why, align the three on file size and on RAM,
+and lose none of §1's standing.
+
+### 7.1 What the file-size row was measuring
+
+A page census of each implementation's final file (every page header,
+`page_count`, and the reachable set from the Rust verifier, which reads all
+three) settles the first question before any code is read:
+
+| | file | `page_count` | reachable | the rest |
+|---|---|---|---|---|
+| rust | 31 457 280 | 3 789 | 2 542 | 1 247 free, plus 51 preallocated pages past `page_count` |
+| java | 43 982 848 | 5 369 | 2 542 | 2 827 free |
+| dart | 21 217 280 | 2 590 | 2 555 | 14 **leaked**, the rest free |
+
+**The live data was already identical**: the same segments, within a page or
+two of the same size, in all three. Encoding, serialization and compression
+were never the variable (`page_codec` is 0 in all three, which
+`01-container.md` §7's measurement is why). Every byte of the difference was
+space the writer had freed and not reused, or never freed at all.
+
+### 7.2 Why, and what changed
+
+**Rust: `compact()` did not publish.** `01-container.md` §1 says a compaction
+publishes "with one small copy-on-write path plus one superblock", and
+`10-transactions.md` §5 frees the inputs "at the publishing `commit_id`". The
+engine merged and freed but wrote no superblock, so the inputs stayed named by
+the live one and nothing written before the caller's next commit could reuse
+them: the update phase's flush appended 425 pages next to 1 679 free ones.
+`compact()` now ends with a commit, at the durability the caller last asked
+for. Separately, `Pager::grow` preallocates in 64-page chunks (§6 allows it)
+and nothing trimmed the tail; `close()` now truncates to `page_count`.
+
+**Java: `compact()` wrote the data three times.** `13-operations.md` §5 defines
+`compact()` as "compaction to the last level". Java's pushed each level down
+one step instead, so L0 was rewritten into L1, then L2, then L3, each output
+allocated while its inputs were still named by the live superblock, and the
+freed runs split too finely for the next level's single extent. It is now one
+merge of every level above the last, as Rust's is (Dart merges each level
+straight into the last, which is also one copy). Measured by
+`EngineTest.compactWritesOnce`: 939 pages written for a 313-page result
+before, 313 after.
+
+**Dart: five leaks, one verifier gap, one harness mismatch.**
+
+- `DatabaseFile.save` edited tree 1 in place. Its own path copies freed pages
+  after the free list it records had been taken: the 14 leaked pages. It now
+  releases, snapshots and rebuilds from fresh pages (`CowTree.rebuildFresh`),
+  the order Rust and Java already commit in.
+- `save` rebuilt tree 7 from nothing and never freed the copy the file held,
+  so every open-and-save of a database with a value log leaked it.
+- `_retire` dropped a compacted segment without freeing its file extent, so
+  every segment compacted away after a reopen was a leak.
+- `ValueLog.reclaimEmpty` did the same for collected value-log segments.
+- Dart's own verifier walked four trees and not the catalog, tree 3, the
+  attributes or tree 7, so it reported leaks on files Rust and Java call
+  clean. That noise is how real leaks went unnoticed: the interop tool's
+  comment blamed "a property of the format". `Database` and `DatabaseFile` now
+  register those trees with the engine, and the verifier walks them.
+- `bench/xlang_crud.dart` and `cryptand-compare` built a `desktop` engine
+  without `vlogSegmentBytes`, so they ran 4 MiB value-log segments against
+  the other two's 64 MiB. Harmless for §2's inline documents; not the same
+  profile.
+
+`file_test.dart`'s "saving leaks no page" covers all four Dart leaks, and each
+fix was checked by removing it and watching the test fail.
+
+**Rust's verifier had one false positive of its own.** Opening a file whose
+writer left a value-log segment unsealed seals it (§2.1 step 8), which edits
+tree 7; the orphaned page is free at the next commit but was not counted, so a
+verify straight after open reported it as a leak. That is every file Dart
+saves. Pending frees now count.
+
+### 7.3 File size, after
+
+| | before | after | `page_count` | reachable |
+|---|---|---|---|---|
+| rust | 31 457 280 | **27 574 272** | 3 366 | 2 542 |
+| java | 43 982 848 | **27 615 232** | 3 371 | 2 542 |
+| dart | 21 217 280 | **21 102 592** | 2 576 | 2 555, and 0 leaked |
+
+§1's comparison tables move the same way: 31.5 → 27.6 MB (Rust), 44.0 → 27.6
+MB (Java), 21.3 → 21.2 MB (Dart).
+
+**Rust and Java now agree to five pages. Dart is smaller by one thing, and it
+is the storage model, not a defect.** A full compaction needs its output
+written while its input is still live, so a file-backed engine briefly holds
+the data twice. After it, 1 680 pages are free at the front of the file; the
+later phases reuse about 860 of them and the rest stay free, ready for the
+next writes. Dart's segments live in the heap and are placed only at `save`,
+so the intermediate copy never reaches its file. The spec's way to hand that
+space back is `shrink()`, "relocate live extents downward and truncate"
+(`13-operations.md` §5, a MUST). **Rust and Java both implement only the
+truncate half**, so free space in front of a live extent stays in the file.
+That gap is recorded here rather than closed: relocating live extents is
+real I/O and its own change.
+
+### 7.4 Memory
+
+Measured three ways, because no single one is honest in all three runtimes:
+Rust through a counting global allocator in the bench (heap above the
+fixtures), Java as live heap after a full GC and as the smallest `-Xmx` that
+completes, and all three as peak RSS of one engine per process on the
+comparison suite, minus a process that builds the fixtures and runs nothing.
+
+| | before | after |
+|---|---|---|
+| rust, heap peak inside `compact()` | 57.2 MB | 44.0 MB |
+| rust, heap at the end of the run | 21.7 MB | 21.7 MB (20.8 MB of it resident segments) |
+| rust, peak RSS above baseline | 84.0 MB | 70.6 MB |
+| java, heap retained after `compact()` | 33.6 MB (page cache 33.4) | 13.7 MB |
+| java, heap retained at the end of the run | 34.4 MB | 21.6 MB |
+| java, smallest `-Xmx` that completes (fixtures alone: 40) | 88 MB | 72 MB |
+| dart, resident segments at the end of the run | 20.9 MB | 20.9 MB |
+| dart, `segmentsProbed` | one entry per read, unbounded | constant |
+
+In steady state all three hold the same thing, the live segments: 20.8, 21.6
+and 20.9 MB.
+
+- **Rust's compaction held every entry twice.** `begin_compaction`
+  materialised the surviving entries, and `step_compaction` *cloned* each one
+  into the builder, so the job's copy lived until the job ended; every
+  internal key was also cloned once more just to sort by it. Entries are moved
+  now.
+- **Java's page cache kept what compaction freed.** `Pager.freeExtent` never
+  invalidated, although `readTreePage`'s documentation says it does, so the
+  cascade's intermediate copies stayed cached until LRU pressure found them.
+- **Dart's probe metric** is Rust's `SmallHistogram` now, reporting the same
+  nearest-rank percentile (a test checks it against the old list).
+
+Against the field, peak RSS above baseline: Rust Cryptand 70.6 MB against
+fjall 26.9, redb 34.2 and sled 72.2; Java needs 72 MB of heap where MVStore
+needs 48 and RocksDB and PalDB fit in 40 (both keep their data off the Java
+heap); Dart Cryptand about 80 MB against Hive's 100.
+
+### 7.5 Performance, before and after
+
+The untouched `HEAD` and this change, built side by side and run interleaved,
+five rounds each, medians. Every Rust and Dart row, and every Java row of the
+comparison suite, is between 0.94x and 1.19x of before, and each is inside
+the spread of its own baseline's five runs but one: Dart's update, 0.95x
+against a spread of 3.7 %, which on a re-run ranged from 297 000 to 391 000
+within a single build. The standing in §1 is unchanged: Cryptand still leads
+every row against fjall, redb, sled, Hive, RocksDB and PalDB, and every row but
+create against MVStore.
+
+The Java rows of `run_xlang_crud.sh` read 0.79x to 0.94x at first, which needed
+proving rather than asserting:
+
+- **MVStore, which this change does not touch, fell 4x on delete** in the same
+  JVM, straight after Cryptand. With the heap pinned (`-Xms2g -Xmx2g`) it came
+  back to 1.03x.
+- **Create fell as well**, and create runs before `compact()` on code both
+  builds share. The discarded first pass of the old build allocated three
+  compactions' worth of garbage and left G1 sized for it; the measured pass
+  inherited that.
+- **Under Epsilon GC (no collection at all), after four warm-up passes, create
+  is 1.00x, mixed 1.00x and delete 0.99x.** Split finer, the update phase's
+  puts measure 2.30 ms against 2.39 ms before and its flush 3.48 against
+  3.44 ms, and the read phase 4.69 against 4.86 ms, medians over five passes
+  per JVM. There is nothing left to attribute to the engine.
+
+### 7.6 Measured, and not done
+
+- **A single-buffer segment builder in Rust.** `build()` concatenates the
+  finished pages into a second full-size extent, which the counting allocator
+  sees as 13.7 MB held twice. One growing buffer removed that from the count
+  and *raised* peak RSS from 100 to 121 MB (large reallocations the macOS
+  allocator keeps); draining the pages into the extent changed nothing. The
+  builder is unchanged.
+- **Streaming Rust's compaction.** The job still materialises its surviving
+  entries (about 16 MB here) so a step can resume where it stopped. Java's
+  merge streams; porting that shape is the next Rust memory lever.
+- **A value-log workload** (the same run with one field padded to 2.6 KB, so
+  every document is separated) is not aligned, and each difference is a
+  policy rather than a leak: Rust 202.9 MB every run; Java 202.9 MB, or 270.0
+  MB when the background collector relocates the cold segment before `close`
+  (its liveness finishes at exactly 50 %, the candidate threshold, and the
+  relocation cannot fit the hole best-fit has nibbled); Dart 270.0 MB, because
+  its heat classifier sends updated keys to a second hot segment and never
+  seals the first, which ends fully dead and which `reclaimEmpty`, sealed
+  segments only, never drops.
+- **Rust's verifier reports "VLOG pointer names unknown value-log segment" on
+  Java's value-log files.** Java's collector frees a segment once no *current*
+  entry points into it; superseded entries below `min_retained_seq` still do,
+  harmlessly, and Java's `Verify` exempts them. Rust's checks every pointer.
+  The two verifiers disagree on the same file; it predates this round.
+- **`reference/.gitignore`'s `bin/` rule matches
+  `dart/cryptand-compare/bin/`**, so the Dart comparison bench has never been
+  in version control.
+
+---
+
+## 8. Running it
 
 ```bash
 reference/bench/run_compare.sh      # §1 — each implementation against its field

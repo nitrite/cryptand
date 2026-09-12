@@ -100,11 +100,11 @@ Shape run(int docs,
   return (
     docs: docs,
     probes: probes,
-    p50: percentile(s, 0.50),
-    p99: percentile(s, 0.99),
-    p999: percentile(s, 0.999),
-    max: s.reduce(max),
-    mean: s.reduce((a, b) => a + b) / s.length,
+    p50: s.percentile(0.50),
+    p99: s.percentile(0.99),
+    p999: s.percentile(0.999),
+    max: s.max,
+    mean: s.mean,
     levels: shape.toString().trim(),
     fpr: e.filterAdmitted == 0
         ? 0

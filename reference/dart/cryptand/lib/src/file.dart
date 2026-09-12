@@ -38,15 +38,6 @@ import 'segment.dart';
 import 'value.dart';
 import 'vlog.dart';
 
-/// Reads and writes a database file.
-String _hex(Uint8List b) {
-  final sb = StringBuffer();
-  for (final x in b) {
-    sb.write(x.toRadixString(16).padLeft(2, '0'));
-  }
-  return sb.toString();
-}
-
 /// The keyslot area a database was opened or created with, so a `save` that
 /// rewrites the superblock does not drop the credentials with it. Keyed on the
 /// engine rather than stored on it because keyslots are file-level state: an
@@ -116,7 +107,15 @@ abstract final class DatabaseFile {
     // 3. The value log: one extent each, and tree 7 for everything mutable
     //    about them (§6.7 — "This tree is the **authority** for everything
     //    mutable about a value-log segment").
+    //    Tree 7 is rebuilt whole, so the copy the file already holds is
+    //    released first; nothing freed it, and every open-and-save of a
+    //    database with a value log leaked its pages.
     final stats = CowTree(store, treeId: TreeId.vlogStats);
+    for (final p
+        in e.outerTrees['tree 7']?.reachablePages().toList() ?? const <int>[]) {
+      store.free(p);
+    }
+    e.outerTrees['tree 7'] = stats;
     for (final v in e.vlog.segments.values) {
       if (v.startPage == 0) {
         v.startPage = store.allocExtent(v.pageCount);
@@ -141,21 +140,26 @@ abstract final class DatabaseFile {
     //     implementation that wrote it cannot tell — it keeps its own list in
     //     memory. Another implementation then allocates a page tree 1 calls
     //     free, while the live superblock still names it.
+    //
+    //     And it is rebuilt, not edited, in the order the Rust and Java
+    //     engines commit it: release the tree's current pages into the list
+    //     at this commit, snapshot the list, then build the snapshot with
+    //     file-extending allocations only. Edited in place, every path copy
+    //     freed pages after the snapshot was taken, leaked on every save.
     final free = e.freelist;
-    final want = {
+    for (final p in free.reachablePages().toList()) {
+      store.free(p);
+    }
+    free.rebuildFresh([
       for (final x in store.freeExtents)
-        encodeKey(CArray([
-          CInt.of(NumType.u64, x.commitId),
-          CInt.of(NumType.u64, x.startPage),
-        ])): encodeValue(CDoc({'pages': CInt.of(NumType.u32, x.pages)}))
-    };
-    final wantKeys = {for (final k in want.keys) _hex(k)};
-    for (final (k, _) in free.scan().toList()) {
-      if (!wantKeys.contains(_hex(k))) free.remove(k);
-    }
-    for (final entry in want.entries) {
-      free.put(entry.key, entry.value);
-    }
+        (
+          encodeKey(CArray([
+            CInt.of(NumType.u64, x.commitId),
+            CInt.of(NumType.u64, x.startPage),
+          ])),
+          encodeValue(CDoc({'pages': CInt.of(NumType.u32, x.pages)}))
+        )
+    ]..sort((a, b) => compareKeys(a.$1, b.$1)));
 
     // 4. The superblock, last.
     final sb = Superblock(
@@ -576,6 +580,7 @@ abstract final class DatabaseFile {
 
     // Value-log segments, from tree 7.
     final stats = CowTree(store, treeId: TreeId.vlogStats, root: sb.vlogStatsRoot);
+    e.outerTrees['tree 7'] = stats;
     for (final (k, v) in stats.scan()) {
       final id = ((decodeKey(k) as CInt).magnitude).lo;
       final d = decodeValue(v) as CDoc;

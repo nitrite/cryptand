@@ -269,10 +269,11 @@ int cmdVerify(String path) {
   }
   // `isSound`, not `isClean`. `spec/01-container.md` §9 says "A leak is
   // repairable. A double-allocation is corruption", so a leak is wasted space
-  // in a sound file and not a reason to fail the round-trip gate — and a
-  // copy-on-write container leaks tree 1's own pages by one commit as a
-  // property of the format (`design/tradeoff-analysis.md` defect 55). Counting
-  // them failed the gate in all four directions on files that were correct.
+  // in a sound file and not a reason to fail the round-trip gate. Counting
+  // them once failed the gate in all four directions on files that were
+  // correct; `design/tradeoff-analysis.md` defect 55 blamed the format, but
+  // the leaks were writers editing tree 1 in place (fixed by rebuilding it,
+  // `CowTree.rebuildFresh`) and this verifier not walking every tree.
   return findings.isEmpty && structure.isSound && crypto.isEmpty ? 0 : 1;
 }
 

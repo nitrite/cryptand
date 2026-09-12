@@ -319,7 +319,7 @@ void main() {
       return e;
     }
 
-    List<int> probe(Engine e) {
+    SmallHistogram probe(Engine e) {
       e.resetCounters();
       final rnd = Random(3);
       for (var i = 0; i < 5000; i++) {
@@ -328,16 +328,34 @@ void main() {
       return e.segmentsProbed;
     }
 
+    test('the probe histogram reports what the sample list did', () {
+      // It replaced a list that grew by one entry per read; the metric's
+      // value must not have moved with it.
+      final rnd = Random(5);
+      for (final n in [1, 2, 7, 1000]) {
+        final samples = [for (var i = 0; i < n; i++) rnd.nextInt(6)];
+        final h = SmallHistogram();
+        samples.forEach(h.add);
+        for (final p in [0.0, 0.5, 0.99, 0.999, 1.0]) {
+          expect(h.percentile(p), percentile(samples, p), reason: 'n $n p $p');
+        }
+        expect(h.max, samples.reduce(max));
+        expect(h.mean, closeTo(samples.reduce((a, b) => a + b) / n, 1e-9));
+        expect(h.length, n);
+      }
+      expect(SmallHistogram().percentile(0.5), 0);
+    });
+
     test('segments_probed_per_lookup p99 <= 2 and p99.9 <= 3', () {
       final s = probe(aged());
-      expect(percentile(s, 0.99), lessThanOrEqualTo(2));
-      expect(percentile(s, 0.999), lessThanOrEqualTo(3));
+      expect(s.percentile(0.99), lessThanOrEqualTo(2));
+      expect(s.percentile(0.999), lessThanOrEqualTo(3));
     });
 
     test('every candidate stays inside the section 4.1 bound', () {
       final e = aged();
       final s = probe(e);
-      expect(s.reduce(max), lessThanOrEqualTo(e.levels.candidateBound));
+      expect(s.max, lessThanOrEqualTo(e.levels.candidateBound));
     });
 
     test('the reads are still correct without the early exit', () {
@@ -365,7 +383,8 @@ void main() {
       // filter together should leave nothing to descend into.
       e.resetCounters();
       expect(e.get(17, const CNitriteId(-99)), isNull);
-      expect(e.segmentsProbed.single, 0);
+      expect(e.segmentsProbed.length, 1);
+      expect(e.segmentsProbed.max, 0);
     });
 
     test('an unflushed write is visible to get', () {

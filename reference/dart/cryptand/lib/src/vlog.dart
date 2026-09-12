@@ -654,6 +654,10 @@ final class ValueLog {
     if (s.liveBytes < 0) s.liveBytes = 0;
   }
 
+  /// Returns a dropped segment's file extent to the page space. Set by the
+  /// engine, which owns the store; a log with no file under it has no extents.
+  void Function(int startPage, int pages)? freeExtent;
+
   /// Drops segments with no live bytes. The cheap half of section 6.8.
   int reclaimEmpty() {
     final dead = segments.values
@@ -661,7 +665,11 @@ final class ValueLog {
         .map((s) => s.id)
         .toList();
     for (final id in dead) {
-      segments.remove(id);
+      final s = segments.remove(id)!;
+      // A segment a file placed keeps its extent there, and nothing else
+      // frees it: without this the file leaked the whole preallocated extent
+      // of every segment collected after a reopen.
+      if (s.startPage != 0) freeExtent?.call(s.startPage, s.pageCount);
     }
     return dead.length;
   }

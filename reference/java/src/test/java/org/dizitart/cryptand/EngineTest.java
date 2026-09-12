@@ -78,6 +78,45 @@ class EngineTest {
      * <p>Four passes, because {@code collect0} runs up to four in one call and
      * each is another chance to.
      */
+    /**
+     * {@code 13-operations.md} §5: {@code compact()} is a compaction "to the
+     * last level". It pushed each level down one step instead, so data in L0
+     * was rewritten into L1, L2 and then L3: three copies, each allocated
+     * while its inputs were still named by the live superblock, and the page
+     * cache kept the intermediate copies after they were freed. On the
+     * cross-language CRUD matrix the file went from 1 684 pages to 5 364
+     * inside the call and the cache held 33 MB of which 14 MB was live.
+     */
+    @Test
+    @DisplayName("compact() writes the data once, and the cache drops what it freed")
+    void compactWritesOnce(@TempDir Path dir) {
+        Engine.Options o = options();
+        o.memtableEntries = 1 << 20;
+        try (Engine e = Engine.create(dir.resolve("once.cryptand"), o)) {
+            byte[] doc = new byte[600];
+            for (int i = 0; i < 4000; i++) {
+                e.batch().put(TREE, key(i), doc).commit();
+            }
+            e.commitNow();
+            long before = e.bytesWrittenKeyIndex();
+            e.compact();
+            // Bytes, not the file's growth: in a fixture this small each step
+            // of the old cascade fitted exactly into the extent the step before
+            // it had freed, so the file hid the two extra copies.
+            long written = (e.bytesWrittenKeyIndex() - before) / e.superblock().pageSize();
+            long live = 0;
+            for (SegmentMeta m : e.manifest().all()) {
+                assertEquals(e.superblock().levelCount - 1, m.level, "everything reached the last level");
+                live += m.pages;
+            }
+            assertEquals(live, written, "compact() wrote " + written
+                    + " pages for a " + live + "-page result");
+            long residentPages = e.pager().pageCacheResidentBytes() / e.superblock().pageSize();
+            assertTrue(residentPages <= live + 16, "the cache holds " + residentPages
+                    + " pages with " + live + " live");
+        }
+    }
+
     @Test
     @DisplayName("repeated collection with no write between passes keeps every value")
     void collectionTwiceKeepsValues(@TempDir Path dir) {

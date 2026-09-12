@@ -95,6 +95,10 @@ void pass(int n, int mixedOps, List<Uint8List> v0, List<Uint8List> v1) {
       engine: Engine(
     pageSize: Profile.desktop.pageSize,
     vlogMin: Profile.desktop.vlogMin,
+    // The profile's, as the other two use: left out, the engine's 4 MiB
+    // default ran a `desktop` bench with a sixteenth of `desktop`'s value-log
+    // segment, and a value-log workload wrote a file half the others' size.
+    vlogSegmentBytes: Profile.desktop.vlogSegmentBytes,
     memtableEntries: 4096,
     levels: LevelPolicy.desktop,
   ));

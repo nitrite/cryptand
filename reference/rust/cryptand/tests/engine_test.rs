@@ -125,6 +125,73 @@ fn reopening_after_a_commit_sees_every_committed_row() {
 }
 
 #[test]
+fn a_full_compaction_publishes_so_the_next_flush_reuses_its_inputs() {
+    // `01-container.md` §1: a compaction publishes with one superblock, and
+    // `10-transactions.md` §5 frees the inputs at that commit. `compact()` did
+    // not commit, so the inputs stayed named by the live superblock and the
+    // next flush appended past them: 425 pages next to 1 679 free ones on the
+    // cross-language CRUD matrix.
+    let t = TempDb::new("compact-publishes");
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    let doc = vec![5u8; 600];
+    for i in 0..4000i64 {
+        e.put(T, &Value::NitriteId(i), &doc).unwrap();
+    }
+    e.flush().unwrap();
+    e.commit(Durability::Os).unwrap();
+    let before = e.sb.commit_id;
+    e.compact().unwrap();
+    assert!(e.sb.commit_id > before, "compact() published nothing");
+
+    let after_compact = e.pager.page_count;
+    for i in 0..1000i64 {
+        e.put(T, &Value::NitriteId(i), &vec![6u8; 600]).unwrap();
+    }
+    e.flush().unwrap();
+    // The flush is about 80 pages; out of the free list it grows the file by
+    // at most tree 1's own page or so.
+    assert!(
+        e.pager.page_count - after_compact < 8,
+        "the flush appended {} pages instead of reusing the compacted inputs",
+        e.pager.page_count - after_compact
+    );
+}
+
+#[test]
+fn a_closed_file_ends_at_page_count() {
+    // `Pager::grow` preallocates in chunks; the tail past `page_count` is
+    // debris to every reader, and a closed file has no use for it.
+    let t = TempDb::new("close-trims");
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    for i in 0..300i64 {
+        e.put(T, &Value::NitriteId(i), &vec![1u8; 600]).unwrap();
+    }
+    e.close(true).unwrap();
+    let pages = e.sb.page_count;
+    let len = std::fs::metadata(&t.path).unwrap().len();
+    assert_eq!(len, pages * e.pager.page_size as u64);
+}
+
+#[test]
+fn verify_right_after_an_open_that_sealed_a_segment_finds_no_leak() {
+    // §2.1 step 8 seals every unsealed value-log segment on open, which edits
+    // tree 7; the page that edit orphans is free at the next commit. `verify`
+    // counted only the persisted free list, so it called that page a leak on
+    // every file whose writer left a segment open -- every Dart save.
+    let t = TempDb::new("open-seals");
+    {
+        let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+        e.put(T, &Value::NitriteId(1), &vec![9u8; 8000]).unwrap();
+        e.flush().unwrap();
+        e.commit(Durability::Sync).unwrap();
+        // Dropped without `close`, so the segment is still unsealed on disk.
+    }
+    let mut e = Engine::open(&t.path, None).unwrap();
+    let r = e.verify().unwrap();
+    assert!(r.of(Class::Leak).is_empty(), "{:?}", r.findings);
+}
+
+#[test]
 fn a_large_separated_value_survives_a_reopen() {
     let t = TempDb::new("reopen-vlog");
     let big = vec![9u8; 8000];

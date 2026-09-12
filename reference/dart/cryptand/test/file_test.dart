@@ -171,6 +171,58 @@ void main() {
     }
   });
 
+  test('saving leaks no page, save after save and open after open', () {
+    // `spec/01-container.md` §9 step 7. Two leaks, both per save and both
+    // silent, because a leak is not unsound: tree 1 was edited in place and
+    // its own path copies freed pages after the list it records was taken
+    // (14 pages on the cross-language CRUD matrix), and tree 7 was rebuilt
+    // from nothing without freeing the copy the file already held.
+    final path = tmp('noleak');
+    final db = fresh();
+    final big = Uint8List(4000)..fillRange(0, 4000, 7);
+    for (var i = 0; i < 60; i++) {
+      db.engine.put(t, CNitriteId(i), i.isEven ? big : Uint8List.fromList([i]));
+      if (i % 20 == 19) db.engine.flush();
+    }
+    db.engine.flush();
+    for (var i = 0; i < 30; i++) {
+      db.createCollection('c$i');
+    }
+    DatabaseFile.save(db, path);
+    DatabaseFile.save(db, path);
+
+    for (var round = 0; round < 3; round++) {
+      final back = DatabaseFile.open(path);
+      expect(back.engine.vlog.segments, isNotEmpty,
+          reason: 'tree 7 has something to rebuild');
+      back.engine.put(t, CNitriteId(1000 + round), big);
+      back.engine.flush();
+      back.createCollection('d$round');
+      DatabaseFile.save(back, path);
+
+      final check = DatabaseFile.open(path);
+      final leaks = check.engine.verifyStructure().of(FindingClass.leak);
+      expect(leaks, isEmpty, reason: 'round $round: ${leaks.join('\n')}');
+    }
+
+    // And a value-log segment the file placed, emptied and collected after a
+    // reopen: its extent has to go back to the page space.
+    final back = DatabaseFile.open(path);
+    final placed = back.engine.vlog.segments.length;
+    for (var i = 0; i < 1003; i++) {
+      back.engine.put(t, CNitriteId(i), Uint8List.fromList([1]));
+    }
+    back.engine.compact();
+    expect(back.engine.vlog.segments.length, lessThan(placed),
+        reason: 'a placed segment was collected');
+    DatabaseFile.save(back, path);
+    final leaks = DatabaseFile.open(path)
+        .engine
+        .verifyStructure()
+        .of(FindingClass.leak);
+    expect(leaks, isEmpty, reason: leaks.join('\n'));
+  });
+
   test('the free tree is written, read back, and its space reused', () {
     // `spec/01-container.md` §6 and §9 step 7. Without tree 1 in the file,
     // another SDK reconciling reachable pages against an empty free tree

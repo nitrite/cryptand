@@ -2135,9 +2135,20 @@ public final class Engine implements AutoCloseable {
 
     /** Requires {@link #structure}. Merges every segment at {@code level} into {@code level + 1}. */
     private void compactLevel(int level) {
+        compactLevels(level, level);
+    }
+
+    /**
+     * Requires {@link #structure}. Merges every segment at levels {@code from}
+     * through {@code level} into {@code level + 1}, as one job.
+     */
+    private void compactLevels(int from, int level) {
         int target = level + 1;
         int last = lastLevel();
-        List<SegmentMeta> inputs = new ArrayList<>(manifest.at(level));
+        List<SegmentMeta> inputs = new ArrayList<>();
+        for (int l = from; l <= level; l++) {
+            inputs.addAll(manifest.at(l));
+        }
         if (inputs.isEmpty()) {
             return;
         }
@@ -3351,18 +3362,29 @@ public final class Engine implements AutoCloseable {
     }
 
     /** §5: full or ranged compaction to the last level. Incremental and resumable. */
+    /**
+     * {@code 13-operations.md} §5: "full or ranged compaction <em>to the last
+     * level</em>": one merge of every level above it, as Rust's is. (Dart's
+     * merges each level straight into the last, which is also one copy.)
+     *
+     * <p>This used to drain the triggers and then push each level down one
+     * step, so a database whose data sat in L0 was rewritten into L1, then L2,
+     * then L3: three full copies where one was asked for. On the
+     * cross-language CRUD matrix that took the file from 1 684 pages to 5 364
+     * inside {@code compact()} (each output allocated while its inputs were
+     * still named by the live superblock, and the freed runs too fragmented
+     * for the next level's single extent) and left 2 827 free pages in a
+     * 5 369-page file that the other two write in 3 366. The page cache held
+     * the intermediate copies too.
+     */
     public void compact() {
-        int guard = 0;
-        while (compactOnce() && guard++ < 1000) {
-            // Each call is one job and takes the structure lock for its own
-            // duration only, so a foreground write can interleave.
-        }
         structure.lock();
         try {
             int last = lastLevel();
             for (int l = 0; l < last; l++) {
                 if (!manifest.at(l).isEmpty()) {
-                    compactLevel(l);
+                    compactLevels(0, last - 1);
+                    return;
                 }
             }
         } finally {

@@ -9,6 +9,9 @@ build/
 bin/
 out/
 
+!dart/cryptand-compare/bin/
+!dart/cryptand-compare/bin/**
+
 # Java / Maven
 *.class
 .classpath
@@ -30,3 +33,4 @@ Thumbs.db
 # Local logs / temp files
 *.log
 *.tmp
+

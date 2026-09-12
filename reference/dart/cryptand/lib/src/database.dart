@@ -49,6 +49,10 @@ final class Database {
         catalogRoot: catalogRoot, treeIndexRoot: treeIndexRoot);
     catalog.nextTreeId = nextTreeId;
     attributes = Attributes(store, root: attributesRoot);
+    this.engine.outerTrees
+      ..['the catalog'] = catalog.tree
+      ..['tree 3'] = catalog.byId
+      ..['the attributes'] = attributes.tree;
     if (initStoreMetadata) {
       attributes.initStore(
           formatVersion: kFormatVersion, nitriteVersion: 'reference-dart');

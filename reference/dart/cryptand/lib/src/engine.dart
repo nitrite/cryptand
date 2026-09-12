@@ -214,6 +214,7 @@ final class Engine {
     freelist = CowTree(this.store, treeId: TreeId.freeSpace, root: freelistRoot);
     checkpoints = CheckpointStore(this.store, root: checkpointRoot);
     changeFeed = ChangeFeed(this.store, root: changefeedRoot);
+    vlog.freeExtent = this.store.freeExtent;
     _refreshRetention();
   }
 
@@ -315,6 +316,13 @@ final class Engine {
   /// Tree 1, `spec/01-container.md` §6. Held across saves rather than rebuilt,
   /// so the pages of the previous free tree are freed rather than orphaned.
   late final CowTree freelist;
+
+  /// Trees in this page space that the engine does not hold itself: the
+  /// catalog, tree 3 and the attributes, which [Database] registers, and tree
+  /// 7 as the file last named it, which `DatabaseFile` does. Section 9 step 7
+  /// has to walk them as well; without them every page they own was reported
+  /// as a leak, on files the Rust and Java verifiers call clean.
+  final Map<String, CowTree> outerTrees = {};
 
   /// Tree 8, `spec/13-operations.md` §1.
   late final CheckpointStore checkpoints;
@@ -767,7 +775,7 @@ final class Engine {
 
   /// `segments_probed_per_lookup` (`spec/13-operations.md` §6), one sample per
   /// [get]. This is the metric prediction P10 bounds.
-  final List<int> segmentsProbed = [];
+  final SmallHistogram segmentsProbed = SmallHistogram();
 
   /// Probes the filter admitted that the segment did not in fact hold, over
   /// probes the filter admitted: `filter_false_positive_rate`.
@@ -1127,6 +1135,11 @@ final class Engine {
   void _retire(SegmentRef ref) {
     manifest.remove(ref);
     extents.remove(ref.segmentId);
+    // A segment a file placed keeps its extent there until something frees
+    // it, and nothing else does: every segment compacted away after a reopen
+    // was a leak. At the store's commit id, so the live superblock's pages
+    // are not reused before the next save replaces it.
+    if (ref.startPage != 0) store.freeExtent(ref.startPage, ref.pages);
     _levelCache.remove(ref.level);
     _invalidateCandidateOrder();
   }
@@ -2189,4 +2202,60 @@ int percentile(List<int> samples, double p) {
   final sorted = [...samples]..sort();
   final i = ((sorted.length - 1) * p).round();
   return sorted[i];
+}
+
+/// A count per observed value, for a quantity that is small and bounded.
+///
+/// [Engine.segmentsProbed] was a `List<int>` with one sample appended per
+/// point read and never trimmed: an engine serving reads grew by eight bytes a
+/// read for as long as it ran, and reporting a percentile copied and sorted the
+/// whole history. Rust's engine had the same list and replaced it with this;
+/// probes per lookup are bounded by the live segment count, so a bucket per
+/// value answers the same question in constant space. Same nearest-rank
+/// definition as [percentile]: the element at `round((n - 1) * p)` of the
+/// sorted samples.
+final class SmallHistogram {
+  final List<int> _buckets = [];
+  int _count = 0;
+
+  void add(int v) {
+    while (_buckets.length <= v) {
+      _buckets.add(0);
+    }
+    _buckets[v]++;
+    _count++;
+  }
+
+  void clear() {
+    _buckets.clear();
+    _count = 0;
+  }
+
+  int get length => _count;
+
+  /// The largest value recorded, or 0 when nothing has been.
+  int get max {
+    final i = _buckets.lastIndexWhere((n) => n > 0);
+    return i < 0 ? 0 : i;
+  }
+
+  double get mean {
+    if (_count == 0) return 0;
+    var sum = 0;
+    for (var v = 0; v < _buckets.length; v++) {
+      sum += v * _buckets[v];
+    }
+    return sum / _count;
+  }
+
+  int percentile(double p) {
+    if (_count == 0) return 0;
+    final target = ((_count - 1) * p).round();
+    var seen = 0;
+    for (var v = 0; v < _buckets.length; v++) {
+      seen += _buckets[v];
+      if (seen > target) return v;
+    }
+    return _buckets.length - 1;
+  }
 }

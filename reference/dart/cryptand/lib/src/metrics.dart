@@ -297,8 +297,8 @@ extension EngineMetrics on Engine {
       // read when `isAvailable` says it means something.
       pageCacheHitRate:
           accesses == 0 ? 0 : (accesses - misses) / accesses,
-      segmentsProbedP50: percentile(probes, 0.50),
-      segmentsProbedP99: percentile(probes, 0.99),
+      segmentsProbedP50: probes.percentile(0.50),
+      segmentsProbedP99: probes.percentile(0.99),
       filterFalsePositiveRate:
           filterAdmitted == 0 ? 0 : filterFalsePositives / filterAdmitted,
       // §6: "validates readahead and clustering. Measured 0.100 when

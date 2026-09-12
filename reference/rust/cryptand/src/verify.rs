@@ -379,13 +379,30 @@ impl EngineVerify for Engine {
             }
         }
         let page_count = self.pager.page_count;
-        let free: HashSet<u64> = self
+        let mut free: HashSet<u64> = self
             .pager
             .free_list()
             .into_iter()
             .filter_map(|e| extent_pages(e.start_page, e.pages as u64, page_count))
             .flatten()
             .collect();
+        // Pages an edit since the last commit orphaned, which the next commit
+        // moves into the list (`persist_freelist`). Opening a file whose writer
+        // left a value-log segment unsealed edits tree 7 (§2.1 step 8), and
+        // without these a verify straight after that open reported the old
+        // root as a leak -- on every file the Dart implementation saves.
+        for t in [
+            &self.catalog.tree,
+            &self.catalog.by_id,
+            &self.attributes.tree,
+            &self.manifest.tree,
+            &self.vlog_stats_tree,
+            &self.checkpoints,
+            &self.changefeed,
+            &self.freelist,
+        ] {
+            free.extend(t.freed.iter().copied());
+        }
         r.pages_reachable = reachable.len() as u64;
         for p in 2..self.pager.page_count {
             if !reachable.contains_key(&p) && !free.contains(&p) {

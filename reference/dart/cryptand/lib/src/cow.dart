@@ -195,6 +195,14 @@ final class PageStore {
     return start;
   }
 
+  /// One page at the end of the file, never out of the free list. For the
+  /// tree that records the free list: see [CowTree.rebuildFresh].
+  int allocFresh() {
+    final start = _pageCount;
+    _grow(1);
+    return start;
+  }
+
   void _grow(int pages) {
     if (file == null) {
       for (var i = 0; i < pages; i++) {
@@ -678,8 +686,9 @@ final class CowTree {
 
   _Node _load(int pageId) => _Node.decode(store.read(pageId), pageId);
 
-  int _write(_Node n) {
-    final id = store.alloc();
+  int _write(_Node n) => _writeAt(store.alloc(), n);
+
+  int _writeAt(int id, _Node n) {
     store.write(
         id,
         encodeNodePage(
@@ -930,6 +939,40 @@ final class CowTree {
       payloads.add(_Node.childPayload(_write(n), n.subtreeEntries));
     }
     root = _write(_Node(false, keys, payloads));
+  }
+
+  /// Replaces the whole tree with [entries] (sorted, distinct keys), built
+  /// bottom-up with **file-extending allocations only**, and without reading
+  /// or freeing the old pages; the caller owns those.
+  ///
+  /// This is tree 1's save path, and the Rust and Java engines' commit path
+  /// (`CowTree::rebuild_fresh`). Editing the free tree one `put` at a time
+  /// copies a path per entry, and each copy frees pages after the list being
+  /// recorded was taken: every save of this implementation leaked them, 14
+  /// pages on the cross-language CRUD matrix. Allocating out of that list
+  /// would be worse: a page both free and in use, which
+  /// `spec/01-container.md` §9 calls a double allocation.
+  void rebuildFresh(List<(Uint8List, Uint8List)> entries) {
+    if (entries.isEmpty) {
+      root = 0;
+      return;
+    }
+    var level = _split(_Node(true, [for (final e in entries) e.$1],
+        [for (final e in entries) _Node.leafPayload(e.$2)]));
+    while (true) {
+      final keys = <Uint8List>[];
+      final payloads = <Uint8List>[];
+      for (final n in level) {
+        final id = _writeAt(store.allocFresh(), n);
+        keys.add(n.keys.first);
+        payloads.add(_Node.childPayload(id, n.subtreeEntries));
+      }
+      if (level.length == 1) {
+        root = _Node.childOf(payloads.first).$1;
+        return;
+      }
+      level = _split(_Node(false, keys, payloads));
+    }
   }
 
   /// Splits [n] until every part fits one page.

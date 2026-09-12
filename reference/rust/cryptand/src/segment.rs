@@ -96,7 +96,7 @@ pub fn user_part(ik: &[u8]) -> &[u8] {
 }
 
 /// One entry handed to [`SegmentBuilder`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SegEntry {
     pub internal_key: Vec<u8>,
     pub value_kind: u8,

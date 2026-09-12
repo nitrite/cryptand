@@ -920,6 +920,11 @@ impl Engine {
         }
         self.seal_unsealed_vlog_segments()?;
         self.commit(Durability::Sync)?;
+        // `Pager::grow` preallocates in chunks (`01-container.md` §6 MAY), and
+        // that tail is past `page_count`, so it is debris to every reader. Left
+        // on a closed file it is up to `grow_chunk_pages - 1` pages of nothing
+        // that the other two implementations never write.
+        self.pager.truncate_to_page_count()?;
         if let Some(k) = &mut self.keys {
             k.zeroize();
         }
@@ -2279,21 +2284,20 @@ impl Engine {
 
         // Merge every input, newest version of a key first (§1's inverted seq
         // makes that the natural order).
-        let mut merged: Vec<(Vec<u8>, SegRecord)> = Vec::new();
+        let mut merged: Vec<SegRecord> = Vec::new();
         for r in &inputs {
             let seg = self.segment(r)?;
             for rec in seg.iter() {
-                let rec = rec?;
-                merged.push((rec.internal_key.clone(), rec));
+                merged.push(rec?);
             }
         }
-        merged.sort_by(|a, b| a.0.cmp(&b.0));
+        merged.sort_by(|a, b| a.internal_key.cmp(&b.internal_key));
 
         let mut kept: Vec<SegEntry> = Vec::new();
         let mut last_user: Option<Vec<u8>> = None;
         let mut newer_visible_seq: Option<u64> = None;
-        for (ik, rec) in merged {
-            let uk = user_part(&ik).to_vec();
+        for rec in merged {
+            let uk = user_part(&rec.internal_key).to_vec();
             let same_key = last_user.as_deref() == Some(uk.as_slice());
             if !same_key {
                 last_user = Some(uk.clone());
@@ -2343,9 +2347,9 @@ impl Engine {
                 }
             }
             kept.push(SegEntry {
-                internal_key: ik,
+                internal_key: rec.internal_key,
                 value_kind: rec.value_kind,
-                value: rec.value.clone(),
+                value: rec.value,
                 expiry_ms: rec.expiry_ms,
             });
         }
@@ -2407,7 +2411,11 @@ impl Engine {
                 self.sb.next_segment_id += 1;
                 job.builder = Some(b);
             }
-            let mut e = job.entries[job.cursor].clone();
+            // Moved out, not cloned: the job held every surviving entry for its
+            // whole life *and* the builder was handed a copy of each, so a full
+            // compaction of a 13.7 MB segment peaked at 57 MB of heap. A
+            // consumed slot is never read again; `cursor` only moves forward.
+            let mut e = std::mem::take(&mut job.entries[job.cursor]);
             // §6.3 — during a compaction that outputs the last level, every
             // surviving HOT-tier value is promoted into a COLD segment. The
             // entries arrive in internal-key order, so the cold log is
@@ -2527,9 +2535,20 @@ impl Engine {
     }
 
     /// §5's full compaction to the last level.
+    ///
+    /// It ends by **publishing**: `01-container.md` §1 says a compaction
+    /// publishes with "one small copy-on-write path plus one superblock", and
+    /// `10-transactions.md` §5 frees the inputs "at the publishing
+    /// `commit_id`". Without that commit the inputs stay named by the live
+    /// superblock, so nothing written before the caller's next commit can
+    /// reuse them. The cross-language CRUD matrix measured it: the update
+    /// phase's flush after a full compaction appended 425 pages next to 1 679
+    /// free ones, and the file ended at 3 789 pages where 3 364 held the same
+    /// data. The Java engine already publishes each compaction it runs.
     pub fn compact(&mut self) -> Result<()> {
         let last = self.policy.last_level();
         self.flush()?;
+        let mut compacted = false;
         loop {
             let mut all: Vec<SegmentRef> = Vec::new();
             for level in 0..=last {
@@ -2542,9 +2561,15 @@ impl Engine {
             let Some(mut job) = self.begin_compaction(all, last)? else { break };
             while self.step_compaction(&mut job, Some(u64::MAX))? {}
             self.finish_compaction(job)?;
+            compacted = true;
         }
         if self.auto_collect {
             self.collect_while_over_debt(4)?;
+        }
+        if compacted {
+            // At the durability the caller last asked for: a compaction adds
+            // no data, so it has no business promising more or less than that.
+            self.commit(self.durability_achieved)?;
         }
         Ok(())
     }

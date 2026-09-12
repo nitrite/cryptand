@@ -100,8 +100,9 @@ final class VerifyReport {
   ///
   /// A leak is not a damaged file; it is wasted space in a sound one, and
   /// section 9 says so. A verifier that reported them alongside corruption made
-  /// the ordinary state of a copy-on-write file — which leaks tree 1's own
-  /// pages by one commit, by construction — look like damage.
+  /// a file with a few orphaned pages look like damage. (Tree 1's own pages
+  /// were leaked by every save until it was rebuilt rather than edited; see
+  /// `CowTree.rebuildFresh`.)
   bool get isSound =>
       of(FindingClass.corruption).isEmpty && of(FindingClass.tampering).isEmpty;
 
@@ -191,6 +192,8 @@ extension EngineVerify on Engine {
       (freelist, 'the free tree'),
       (checkpoints.tree, 'the checkpoint tree'),
       (changeFeed.tree, 'the change feed'),
+      for (final MapEntry(key: name, value: tree) in outerTrees.entries)
+        (tree, name),
     ];
     for (final (tree, name) in trees) {
       try {
