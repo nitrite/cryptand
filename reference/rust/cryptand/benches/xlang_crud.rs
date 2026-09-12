@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use cryptand::container::{Durability, Profile};
 use cryptand::engine::Engine;
+use cryptand::spaceapi::SpaceApi;
 use cryptand::value::{NumType, Value};
 
 const TREE: u32 = 16;
@@ -159,9 +160,16 @@ fn pass(n: u64, mixed_ops: u64, v0: &[Vec<u8>], v1: &[Vec<u8>]) {
     e.flush().unwrap();
     e.commit(Durability::Os).unwrap();
     let persist = p0.elapsed();
+    // `13-operations.md` §5: move the live extents down over the space the
+    // compaction freed and end the file at them. Dart has nothing to do here:
+    // it places segments only when it saves.
+    let s0 = Instant::now();
+    e.shrink().unwrap();
+    let shrink = s0.elapsed();
     e.close(true).unwrap();
 
     row("persist_ms", format!("{:.1}", persist.as_secs_f64() * 1e3), "ms");
+    row("shrink_ms", format!("{:.1}", shrink.as_secs_f64() * 1e3), "ms");
     row("file_bytes", std::fs::metadata(&b.path).map(|m| m.len()).unwrap_or(0).to_string(), "bytes");
     row("storage_model", "file-backed, segments resident".into(), "text");
 }

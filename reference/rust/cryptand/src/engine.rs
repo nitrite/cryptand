@@ -2574,6 +2574,191 @@ impl Engine {
         Ok(())
     }
 
+    /// `13-operations.md` §5's `shrink()`: relocate live extents downward and
+    /// truncate, as "an ordinary sequence of commits" (`01-container.md` §6).
+    ///
+    /// A full compaction writes its output past its inputs, so the file ends
+    /// with the live segments above a run of free pages the size of the old
+    /// data: 820 of 3 366 pages on the cross-language CRUD matrix, where the
+    /// Dart file, which places segments only when it saves, held the same data
+    /// in 2 576. Truncating alone could not reach any of it.
+    ///
+    /// Segment extents hold no page numbers and value-log pointers name a
+    /// segment id, so a move is a copy and one reference edit; a key-index
+    /// page is re-sealed at its new page id. Blobs and vector regions, whose
+    /// nonces bind their head page, are not written by this engine.
+    pub fn relocate_and_truncate(&mut self) -> Result<u64> {
+        self.arm()?;
+        if let Some(mut job) = self.job.take() {
+            // Its outputs are written but not yet named by the manifest, so
+            // nothing below would know to keep them.
+            while self.step_compaction(&mut job, Some(u64::MAX))? {}
+            self.finish_compaction(job)?;
+        }
+        let before = self.pager.page_count;
+        // What was freed since the last commit is reusable from the next. Every
+        // commit but the one the truncate follows is at the durability the
+        // caller last asked for, as in `compact()`.
+        self.commit(self.durability_achieved)?;
+        self.pager.low_first = true;
+        let moved = self.relocate_all();
+        self.pager.low_first = false;
+        moved?;
+        self.cut_tail()?;
+        Ok(before.saturating_sub(self.pager.page_count))
+    }
+
+    /// Two passes of [`Engine::relocate_down`], with every copy-on-write tree
+    /// rewritten before and after, which the low-first allocator places as low
+    /// as it can.
+    ///
+    /// The first pass also *hops* an extent that no lower hole fits but that
+    /// sits right on top of one, to the end of the file; the second brings it
+    /// down into that hole grown by its own old place. Sliding it down in one
+    /// step would overwrite pages the live superblock names. The matrix needs
+    /// exactly this: its whole last level is one 1 678-page segment standing
+    /// on the 820 pages its inputs left.
+    ///
+    /// ponytail: it hops whatever stands on a hole, however small; weigh the
+    /// gain against the two copies if shrink time ever matters.
+    fn relocate_all(&mut self) -> Result<()> {
+        // The trees go first as well as last: one page of the manifest left
+        // between a hole and the extent above it is enough to hide the hole.
+        self.relocate_trees()?;
+        // A pinned commit keeps the hopped extent's old place from being
+        // reused, and the file would end one extent longer.
+        let mut hop = self.live_snapshots.is_empty() && self.checkpoint_commits().is_empty();
+        for _ in 0..2 {
+            self.pager.coalesce_reclaimable();
+            self.relocate_down(hop)?;
+            self.commit(self.durability_achieved)?;
+            hop = false;
+        }
+        self.relocate_trees()
+    }
+
+    fn relocate_trees(&mut self) -> Result<()> {
+        let commit_id = self.sb.commit_id;
+        for t in [
+            &mut self.catalog.tree,
+            &mut self.catalog.by_id,
+            &mut self.attributes.tree,
+            &mut self.manifest.tree,
+            &mut self.vlog_stats_tree,
+            &mut self.checkpoints,
+            &mut self.changefeed,
+        ] {
+            t.commit_id = commit_id;
+            t.relocate(&mut self.pager)?;
+        }
+        self.commit(self.durability_achieved).map(|_| ())
+    }
+
+    /// Highest extent first, each into the lowest free extent below it that
+    /// fits.
+    fn relocate_down(&mut self, hop: bool) -> Result<()> {
+        enum Extent {
+            Segment(SegmentRef),
+            Vlog(u64),
+        }
+        let mut all: Vec<(u64, u32, Extent)> = Vec::new();
+        for r in self.all_refs()? {
+            if !self.quarantined.contains_key(&r.segment_id) {
+                all.push((r.start_page, r.pages, Extent::Segment(r)));
+            }
+        }
+        for v in self.vlog_stats.values() {
+            all.push((v.start_page, v.pages, Extent::Vlog(v.segment_id)));
+        }
+        all.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        let ps = self.pager.page_size as u64;
+        for (start, pages, what) in all {
+            let to = match self.pager.alloc_below(pages, start) {
+                Some(to) => to,
+                None if hop && self.pager.free_ends_at(start) => self.pager.alloc_fresh(pages)?,
+                None => continue,
+            };
+            match what {
+                Extent::Segment(r) => {
+                    let bytes = self.pager.read_extent(start, pages)?;
+                    self.pager.write_extent(to, &bytes)?;
+                    let mut m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+                    m.tree.commit_id = self.sb.commit_id;
+                    let moved = SegmentRef { start_page: to, ..r.clone() };
+                    let res = m.remove(&mut self.pager, &r).and_then(|_| m.add(&mut self.pager, &moved));
+                    self.manifest = m;
+                    res?;
+                }
+                Extent::Vlog(id) => {
+                    // Head page in the clear and records sealed by segment id
+                    // and offset (`14-security.md` §5.3), so the bytes move as
+                    // they are. In slices: a `server` segment is 256 MiB.
+                    let mut done = 0u32;
+                    while done < pages {
+                        let n = (pages - done).min(256);
+                        let raw = self.pager.read_extent_clear(start + done as u64, n)?;
+                        self.pager.write_at((to + done as u64) * ps, &raw)?;
+                        done += n;
+                    }
+                    self.vlog_stats.get_mut(&id).unwrap().start_page = to;
+                    self.write_vlog_stats(id)?;
+                }
+            }
+            self.pager.free_extent(start, pages, self.sb.commit_id);
+        }
+        Ok(())
+    }
+
+    /// Ends the file at its highest live page. The commit rewrites tree 1 at
+    /// that page while the live superblock still names the old tree 1, so the
+    /// cut is skipped when the two could overlap.
+    fn cut_tail(&mut self) -> Result<()> {
+        let mut high = 2u64;
+        for r in self.all_refs()? {
+            high = high.max(r.start_page + r.pages as u64);
+        }
+        for v in self.vlog_stats.values() {
+            high = high.max(v.start_page + v.pages as u64);
+        }
+        let mut pages = Vec::new();
+        for t in [
+            &self.catalog.tree,
+            &self.catalog.by_id,
+            &self.attributes.tree,
+            &self.manifest.tree,
+            &self.vlog_stats_tree,
+            &self.checkpoints,
+            &self.changefeed,
+        ] {
+            t.reachable(&mut self.pager, &mut pages)?;
+        }
+        for p in pages {
+            high = high.max(p + 1);
+        }
+        // A retained snapshot or checkpoint can still read what it freed.
+        for e in self.pager.free_list() {
+            if e.commit_id > self.pager.min_retained_commit {
+                high = high.max(e.start_page + e.pages as u64);
+            }
+        }
+        let mut old = Vec::new();
+        self.freelist.reachable(&mut self.pager, &mut old)?;
+        let room = old.len() as u64 + 8;
+        if high + room >= self.pager.page_count || old.iter().any(|&p| p >= high && p < high + room) {
+            return Ok(());
+        }
+        self.pager.cut_at(high);
+        // Released here rather than by the commit, which would read it back
+        // from past the new end; the pages at or past it are simply dropped.
+        for p in old {
+            self.pager.free_extent(p, 1, self.sb.commit_id);
+        }
+        self.freelist.root = 0;
+        self.commit(Durability::Sync)?;
+        // Only now: until that superblock, the old one named pages past it.
+        self.pager.truncate_to_page_count()
+    }
+
     // ---------------------------------------------------------------
     // §6.8, §6.9 — garbage collection and the locality bound
     // ---------------------------------------------------------------

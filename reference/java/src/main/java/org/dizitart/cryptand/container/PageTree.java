@@ -192,6 +192,16 @@ public final class PageTree {
         dirty = true;
     }
 
+    /** Rewrites the tree at the next commit even if nothing in it changed. */
+    public void markDirty() {
+        dirty = true;
+    }
+
+    /** The pages the current generation occupies. */
+    public List<Long> pages() {
+        return List.copyOf(oldPages);
+    }
+
     /** Rebuilds using only file-extending allocations — see {@link Pager#allocateFresh}. */
     public long commitFresh() {
         root = entries.isEmpty() ? 0 : build(true);

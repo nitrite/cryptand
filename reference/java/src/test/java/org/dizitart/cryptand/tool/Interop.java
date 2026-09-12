@@ -363,6 +363,10 @@ public final class Interop {
             intern(db, "touched_by_" + tag, batch);
             batch.commit();
             db.engine.commitNow();
+            // So the other side reads, verifies and allocates from a file whose
+            // extents `shrink()` moved.
+            db.engine.compact();
+            db.engine.shrink();
             System.out.println("mutated by " + tag + ": " + updated + " updated, "
                     + deleted + " deleted, 50 inserted");
         }

@@ -293,6 +293,12 @@ public final class Pager {
         if (pages < 1) {
             throw new InvalidArgumentException("an extent is at least one page, asked for " + pages);
         }
+        if (lowFirst) {
+            long low = allocateBelow(pages, Long.MAX_VALUE);
+            if (low >= 0) {
+                return low;
+            }
+        }
         int best = -1;
         for (int i = 0; i < free.size(); i++) {
             FreeExtent e = free.get(i);
@@ -313,6 +319,98 @@ public final class Pager {
         long start = pageCount;
         pageCount += pages;
         return start;
+    }
+
+    /**
+     * {@code shrink()}'s allocation order: the lowest-addressed fit rather than
+     * the best fit, so everything written while it is set moves down.
+     */
+    private boolean lowFirst;
+
+    public synchronized void setLowFirst(boolean on) {
+        lowFirst = on;
+    }
+
+    /**
+     * The lowest-addressed reclaimable extent that fits and starts below
+     * {@code limit}, allocated; {@code -1} when there is none.
+     */
+    public synchronized long allocateBelow(int pages, long limit) {
+        int best = -1;
+        for (int i = 0; i < free.size(); i++) {
+            FreeExtent e = free.get(i);
+            if (e.commitId() > minRetainedCommit || e.pages() < pages || e.startPage() >= limit) {
+                continue;
+            }
+            if (best < 0 || e.startPage() < free.get(best).startPage()) {
+                best = i;
+            }
+        }
+        if (best < 0) {
+            return -1;
+        }
+        FreeExtent e = free.remove(best);
+        if (e.pages() > pages) {
+            free.add(new FreeExtent(e.commitId(), e.startPage() + pages, e.pages() - pages));
+        }
+        return e.startPage();
+    }
+
+    /** Whether a reclaimable extent ends exactly at {@code page}. */
+    public synchronized boolean freeEndsAt(long page) {
+        for (FreeExtent e : free) {
+            if (e.commitId() <= minRetainedCommit && e.startPage() + e.pages() == page) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Merges adjacent reclaimable extents, so a run freed piecemeal (one
+     * compaction input each) can take an extent bigger than any one piece. The
+     * merged run keeps the newest {@code commit_id}, still reclaimable.
+     */
+    public synchronized void coalesceReclaimable() {
+        List<FreeExtent> runs = new ArrayList<>();
+        free.removeIf(e -> e.commitId() <= minRetainedCommit && runs.add(e));
+        runs.sort(Comparator.comparingLong(FreeExtent::startPage));
+        FreeExtent at = null;
+        for (FreeExtent e : runs) {
+            if (at != null && at.startPage() + at.pages() == e.startPage()
+                    && (long) at.pages() + e.pages() <= Integer.MAX_VALUE) {
+                at = new FreeExtent(Math.max(at.commitId(), e.commitId()), at.startPage(), at.pages() + e.pages());
+                continue;
+            }
+            if (at != null) {
+                free.add(at);
+            }
+            at = e;
+        }
+        if (at != null) {
+            free.add(at);
+        }
+    }
+
+    /**
+     * Moves the end of the file down to {@code end}: reclaimable extents at or
+     * past it leave the list, one straddling it is clipped. The file itself is
+     * cut by {@link #truncateFile} once a superblock naming the new end is
+     * durable.
+     */
+    public synchronized void cutAt(long end) {
+        List<FreeExtent> clipped = new ArrayList<>();
+        free.removeIf(e -> {
+            if (e.commitId() > minRetainedCommit || e.startPage() + e.pages() <= end) {
+                return false;
+            }
+            if (e.startPage() < end) {
+                clipped.add(new FreeExtent(e.commitId(), e.startPage(), (int) (end - e.startPage())));
+            }
+            return true;
+        });
+        free.addAll(clipped);
+        pageCount = end;
     }
 
     /**
@@ -341,7 +439,9 @@ public final class Pager {
      * reaches that id, which is what protects a long-running reader's pages.
      */
     public synchronized void freeExtent(long startPage, int pages) {
-        if (pages < 1) {
+        // Past `page_count` is not the file's any more: `shrink()` lets the
+        // old tree 1 go after moving the end below it.
+        if (pages < 1 || startPage >= pageCount) {
             return;
         }
         pendingFree.add(new FreeExtent(commitId, startPage, pages));
@@ -898,15 +998,8 @@ public final class Pager {
         file.sync();
     }
 
-    /**
-     * Drops the tail past {@code pages} — {@code 13-operations.md} §5's
-     * {@code shrink()}. {@code page_count}, not the file length, defines what is
-     * in use, so this only returns space to the filesystem.
-     */
-    public synchronized void truncateTo(long pages) {
-        pageCount = Math.max(2, pages);
-        free.removeIf(e -> e.startPage() >= pageCount);
-        pendingFree.removeIf(e -> e.startPage() >= pageCount);
+    /** Returns the space past {@code page_count} to the filesystem. */
+    public synchronized void truncateFile() {
         file.truncate(pageCount * (long) pageSize);
     }
 }

@@ -198,7 +198,7 @@ public final class Database implements AutoCloseable {
      * engine was fast and almost never running.
      *
      * <p>The catalog changes only when a collection or an index is created or
-     * dropped, so it is cached against {@link PageTree#version()}. The hot path
+     * dropped, so it is cached against {@code PageTree.version()}. The hot path
      * now reads one {@code volatile} and returns.
      */
     public Map<String, TreeDescriptor> catalog() {

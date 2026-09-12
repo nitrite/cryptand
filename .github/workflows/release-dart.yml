@@ -1,0 +1,51 @@
+name: Release Dart
+
+# Tag `dart-vX.Y.Z`. pub.dev authenticates this workflow over OIDC, which it
+# allows only once the package exists and "Automated publishing" is enabled on
+# its admin page for repository nitrite/cryptand with tag pattern
+# `dart-v{{version}}`. So the first version is published by hand, from
+# reference/dart/cryptand, with `dart pub publish`.
+#
+# Push release tags three at a time at most: GitHub creates no tag events at
+# all for a push carrying more than three.
+
+on:
+  push:
+    tags:
+      - 'dart-v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+    defaults:
+      run:
+        working-directory: reference/dart/cryptand
+    steps:
+      - uses: actions/checkout@v4
+      # Also installs the token pub.dev accepts from this workflow.
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - run: dart test
+      - name: Version
+        id: v
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version: *//p' pubspec.yaml | head -1)"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "dart-v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pubspec version $version"
+            exit 1
+          fi
+          # "already exists" is a permanent failure, so a re-pushed tag skips.
+          if curl -sfo /dev/null "https://pub.dev/api/packages/cryptand/versions/$version"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "cryptand $version is already on pub.dev"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish
+        if: steps.v.outputs.skip == 'false'
+        run: dart pub publish --force

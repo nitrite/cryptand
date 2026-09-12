@@ -45,6 +45,7 @@ use std::time::Instant;
 
 use cryptand::container::{Durability, Profile};
 use cryptand::engine::Engine;
+use cryptand::spaceapi::SpaceApi;
 use cryptand::value::{NumType, Value};
 
 const TREE: u32 = 16;
@@ -223,6 +224,9 @@ fn bench_cryptand(n: u64, mixed_ops: u64, keys: &[Vec<u8>], v0: &[Vec<u8>], v1: 
     e.commit(Durability::Os).unwrap();
     r.mixed = rate(mixed_ops, t.elapsed().as_secs_f64());
 
+    // Untimed: the file after `13-operations.md` §5's `shrink()`, which moves
+    // the live extents down over what compaction freed.
+    e.shrink().unwrap();
     e.close(true).unwrap();
     r.bytes = on_disk(&d.0);
     r

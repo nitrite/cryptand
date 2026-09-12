@@ -3409,40 +3409,166 @@ public final class Engine implements AutoCloseable {
     }
 
     /**
-     * §5: relocate live extents downward and truncate.
+     * §5: relocate live extents downward and truncate, as "an ordinary sequence
+     * of commits" ({@code 01-container.md} §6).
      *
-     * <p><em>ponytail: this truncates trailing free space rather than relocating
-     * live extents.</em> It reclaims everything a compaction has already moved
-     * out of the tail, which is the common case after {@code compact()}, and
-     * needs no extent rewriting at all. A live extent below a free one keeps
-     * its place; add relocation when a workload shows the tail is not where the
-     * free space ends up.
+     * <p>A full compaction writes its output past its inputs, so the file ends
+     * with the live segments above a run of free pages the size of the old
+     * data: 820 of 3 371 pages on the cross-language CRUD matrix, where the
+     * Dart file, which places segments only when it saves, held the same data
+     * in 2 576. Trimming trailing free space, which is all this did, reached
+     * none of it.
+     *
+     * <p>Segments and sealed value-log segments move, highest first, each into
+     * the lowest free extent below it that fits; every internal tree is
+     * rewritten through the low-first allocator before and after. The first of two passes also
+     * <em>hops</em> an extent that no lower hole fits but that sits right on
+     * top of one, to the end of the file, and the second brings it down into
+     * that hole grown by its own old place: sliding it down in one step would
+     * overwrite pages the live superblock names. The matrix needs exactly this,
+     * its last level standing on the space its inputs left.
+     * <em>ponytail: it hops whatever stands on a hole, however small; weigh the
+     * gain against the two copies if shrink time ever matters.</em> Blobs and vector regions stay
+     * put: their nonces bind their head page, and every value naming one would
+     * need rewriting. The cut only ever drops pages that are free.
      */
     public long shrink() {
         structure.lock();
         try {
             long before = pager.pageCount();
-            long tail = before;
-            java.util.Set<Long> free = new HashSet<>();
-            for (Pager.FreeExtent e : pager.freeList()) {
-                if (e.commitId() <= sb.minRetainedCommit) {
-                    for (long p = e.startPage(); p < e.startPage() + e.pages(); p++) {
-                        free.add(p);
-                    }
-                }
-            }
-            while (tail > 2 && free.contains(tail - 1)) {
-                tail--;
-            }
-            if (tail == before) {
-                return 0;
-            }
-            pager.truncateTo(tail);
+            // What was freed since the last commit is reusable from the next.
             publishSuperblock(visibleSeq);
-            return before - tail;
+            pager.setLowFirst(true);
+            try {
+                // The trees go first as well as last: one page of the manifest
+                // left between a hole and the extent above it hides the hole.
+                relocateTrees();
+                // A pinned commit keeps a hopped extent's old place from being
+                // reused, and the file would end one extent longer.
+                boolean hop = liveSnapshots.isEmpty();
+                for (int pass = 0; pass < 2; pass++) {
+                    pager.coalesceReclaimable();
+                    relocateDown(hop);
+                    publishSuperblock(visibleSeq);
+                    hop = false;
+                }
+                relocateTrees();
+            } finally {
+                pager.setLowFirst(false);
+            }
+            cutTail();
+            return before - pager.pageCount();
         } finally {
             structure.unlock();
         }
+    }
+
+    private void relocateTrees() {
+        for (PageTree t : List.of(catalogTree, attributesTree, treeIndexTree, repairTree, usersTree,
+                manifestTree, vlogStatsTree, checkpointTree, changefeedTree)) {
+            t.markDirty();
+        }
+        publishSuperblock(visibleSeq);
+    }
+
+    private void relocateDown(boolean hop) {
+        record Move(long start, int pages, SegmentMeta segment, VlogStats vlogSegment) {
+        }
+        List<Move> all = new ArrayList<>();
+        for (SegmentMeta m : manifest.all()) {
+            all.add(new Move(m.startPage, m.pages, m, null));
+        }
+        for (VlogStats s : vlog.movable()) {
+            all.add(new Move(s.startPage, s.pages, null, s));
+        }
+        all.sort(Comparator.comparingLong(Move::start).reversed());
+        for (Move mv : all) {
+            long to = pager.allocateBelow(mv.pages(), mv.start());
+            if (to < 0 && hop && pager.freeEndsAt(mv.start())) {
+                to = pager.allocateFresh(mv.pages());
+            }
+            if (to < 0) {
+                continue;
+            }
+            if (mv.segment() != null) {
+                try {
+                    copySegment(mv.start(), to, mv.pages());
+                } catch (CorruptionException e) {
+                    // Out of service, or about to be: it stays where it is.
+                    pager.freeExtent(to, mv.pages());
+                    continue;
+                }
+                manifest.remove(mv.segment());
+                mv.segment().startPage = to;
+                manifest.add(mv.segment());
+            } else {
+                vlog.relocate(mv.vlogSegment(), to);
+            }
+            pager.freeExtent(mv.start(), mv.pages());
+        }
+        republishLevels();
+    }
+
+    /**
+     * A segment's pages address each other relative to its start, so they copy
+     * as they are, except that an encrypted page's nonce binds its page id
+     * ({@code 14-security.md} §5.2): it is opened where it was and sealed again
+     * where it goes.
+     */
+    private void copySegment(long from, long to, int pages) {
+        if (pager.crypto() == null) {
+            // In slices, so a large segment costs a bounded buffer.
+            byte[] buf = new byte[Math.min(pages, 256) * sb.pageSize()];
+            for (int done = 0; done < pages; done += 256) {
+                int n = Math.min(256, pages - done) * sb.pageSize();
+                byte[] chunk = n == buf.length ? buf : new byte[n];
+                pager.file().readFully(pager.offsetOf(from + done), chunk, 0, n);
+                pager.writeAt(pager.offsetOf(to + done), chunk);
+            }
+            return;
+        }
+        for (int i = 0; i < pages; i++) {
+            byte[] raw = pager.readRaw(from + i);
+            PageHeader h = PageHeader.verify(raw, from + i);
+            byte[] page = h.isSet(PageHeader.Flags.ENCRYPTED)
+                    ? pager.buildExtentPage(to + i, h, pager.decodePayload(raw, h, from + i))
+                    : raw;
+            pager.writeAt(pager.offsetOf(to + i), page);
+        }
+    }
+
+    /**
+     * Ends the file at its last page that is not free. The commit rewrites tree
+     * 1 at that page while the live superblock still names the old tree 1, so
+     * the cut is skipped when the two could overlap.
+     */
+    private void cutTail() {
+        List<Long> tree1 = freeTree.pages();
+        Set<Long> gone = new HashSet<>(tree1);
+        for (Pager.FreeExtent e : pager.freeList()) {
+            if (e.commitId() <= sb.minRetainedCommit) {
+                for (long p = e.startPage(); p < e.startPage() + e.pages(); p++) {
+                    gone.add(p);
+                }
+            }
+        }
+        long end = pager.pageCount();
+        while (end > 2 && gone.contains(end - 1)) {
+            end--;
+        }
+        long room = tree1.size() + 8L;
+        if (end + room >= pager.pageCount()) {
+            return;
+        }
+        for (long p : tree1) {
+            if (p >= end && p < end + room) {
+                return;
+            }
+        }
+        pager.cutAt(end);
+        publishSuperblock(visibleSeq);
+        // Only now: until that superblock, the old one named pages past it.
+        pager.truncateFile();
     }
 
     /** §5: add a keyslot. One superblock write; the master key is unchanged. */

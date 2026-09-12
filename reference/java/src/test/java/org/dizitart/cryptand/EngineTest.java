@@ -117,6 +117,94 @@ class EngineTest {
         }
     }
 
+    /**
+     * {@code 13-operations.md} §5: {@code shrink()} relocates live extents
+     * downward and truncates. It only trimmed trailing free space, and a full
+     * compaction leaves the free space <em>below</em> the live data, so it
+     * reclaimed nothing: 820 of 3 371 pages on the cross-language CRUD matrix.
+     */
+    @Test
+    @DisplayName("shrink() moves live extents down and ends the file at them")
+    void shrinkRelocates(@TempDir Path dir) {
+        shrinkRelocates(dir.resolve("shrink.cryptand"), options(), 600);
+    }
+
+    /**
+     * Inline values, so the whole last level is one segment, and no hole below
+     * it fits it: it goes to the end of the file and comes back down.
+     */
+    @Test
+    @DisplayName("shrink() hops a segment that stands on a hole too small for it")
+    void shrinkHops(@TempDir Path dir) {
+        shrinkRelocates(dir.resolve("shrink-hop.cryptand"), options(), 200);
+    }
+
+    /**
+     * A key-index page's nonce binds its page id ({@code 14-security.md} §5.2),
+     * so a moved page is sealed again under a fresh nonce; a value-log record's
+     * binds its segment id and offset, so it moves as it is.
+     */
+    @Test
+    @DisplayName("shrink() re-seals what it moves in an encrypted file")
+    void shrinkRelocatesEncrypted(@TempDir Path dir) {
+        byte[] k = new byte[32];
+        new Random(7).nextBytes(k);
+        Engine.Options o = options();
+        o.encrypt = true;
+        o.rawKey = k;
+        shrinkRelocates(dir.resolve("shrink-enc.cryptand"), o, 600);
+    }
+
+    private static long freePages(Engine e) {
+        long n = 0;
+        for (var x : e.pager().freeList()) {
+            n += x.pages();
+        }
+        return n;
+    }
+
+    /**
+     * The cross-language matrix's shape: a full compaction's output standing
+     * on the run its inputs left, part of that run then taken by a later flush.
+     */
+    private static void shrinkRelocates(Path path, Engine.Options o, int size) {
+        o.memtableEntries = 1 << 20;
+        try (Engine e = Engine.create(path, o)) {
+            for (int i = 0; i < 4000; i++) {
+                e.batch().put(TREE, key(i), doc(0, size)).commit();
+            }
+            e.commitNow();
+            e.compact();
+            for (int i = 0; i < 1500; i++) {
+                e.batch().put(TREE, key(i), doc(1, size)).commit();
+            }
+            e.commitNow();
+            long before = e.pager().pageCount();
+            long freeBefore = freePages(e);
+            e.shrink();
+            long pages = e.pager().pageCount();
+            System.out.println("shrink: " + before + " pages (" + freeBefore + " free) -> "
+                    + pages + " (" + freePages(e) + " free)");
+            assertTrue(freeBefore > before / 5, "the fixture left no free run to reclaim");
+            assertTrue(freePages(e) * 20 < pages, freePages(e) + " free pages left in " + pages);
+            Verify.Report r = Verify.run(e);
+            assertTrue(r.of(Verify.Kind.CORRUPTION).isEmpty() && r.of(Verify.Kind.LEAK).isEmpty(), r.toString());
+        }
+        o.encrypt = false;
+        try (Engine e = Engine.open(path, o)) {
+            for (int i = 0; i < 4000; i++) {
+                assertArrayEquals(doc(i < 1500 ? 1 : 0, size), e.get(TREE, key(i)), "key " + i);
+            }
+            assertTrue(Verify.run(e).of(Verify.Kind.CORRUPTION).isEmpty());
+        }
+    }
+
+    private static byte[] doc(int fill, int size) {
+        byte[] d = new byte[size];
+        java.util.Arrays.fill(d, (byte) fill);
+        return d;
+    }
+
     @Test
     @DisplayName("repeated collection with no write between passes keeps every value")
     void collectionTwiceKeepsValues(@TempDir Path dir) {

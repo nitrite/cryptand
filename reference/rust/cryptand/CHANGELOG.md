@@ -66,6 +66,6 @@ chapter (`00`–`14`), **Level 4** conformance, full write profile, no `unsafe`.
 
 ### Testing
 
-- 147 tests in the crate, 212 across the workspace, green in **both** the debug
+- 254 tests in the crate, 319 across the workspace, green in **both** the debug
   and release profiles (they test different arithmetic — an overflow that
   panics in debug silently wraps in release).

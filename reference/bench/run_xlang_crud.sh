@@ -59,7 +59,7 @@ for impl in impls:
         rows.setdefault(name, {})[impl] = rest.split(" unit=")[0]
 
 order = ["create_ops_per_s", "read_ops_per_s", "update_ops_per_s",
-         "delete_ops_per_s", "mixed_ops_per_s", "persist_ms", "file_bytes",
+         "delete_ops_per_s", "mixed_ops_per_s", "persist_ms", "shrink_ms", "file_bytes",
          "storage_model"]
 w = max(len(k) for k in order)
 print(f"{'row'.ljust(w)} | {'rust'.rjust(14)} | {'dart'.rjust(14)} | {'java'.rjust(14)}")

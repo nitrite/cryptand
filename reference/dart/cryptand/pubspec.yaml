@@ -4,7 +4,7 @@ description: >-
   a cross-language, encrypted, LSM storage engine and on-disk format for Nitrite.
 version: 1.0.0
 homepage: https://nitrite.dizitart.com/cryptand
-repository: https://github.com/nitrite/cryptand
+repository: https://github.com/nitrite/cryptand/tree/main/reference/dart/cryptand
 issue_tracker: https://github.com/nitrite/cryptand/issues
 documentation: https://nitrite.dizitart.com/cryptand
 

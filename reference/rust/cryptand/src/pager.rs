@@ -86,6 +86,9 @@ pub struct Pager {
     /// the only place that knows: the read path.
     pub encrypted_pages: u64,
     pub unencrypted_pages: u64,
+    /// `shrink()`'s allocation order: the lowest-addressed fit instead of the
+    /// best fit, so everything written while it is set moves down.
+    pub low_first: bool,
 }
 
 impl Pager {
@@ -169,6 +172,7 @@ impl Pager {
             crypto: None,
             encrypted_pages: 0,
             unencrypted_pages: 0,
+            low_first: false,
         }
     }
 
@@ -225,6 +229,12 @@ impl Pager {
         if pages == 0 {
             return invalid("an extent of zero pages");
         }
+        if self.low_first {
+            return match self.alloc_below(pages, u64::MAX) {
+                Some(start) => Ok(start),
+                None => self.alloc_fresh(pages),
+            };
+        }
         // The list is keyed by `(commit_id, start_page)`, so the reclaimable
         // extents are exactly a prefix of it; and nothing beats an exact fit,
         // so the first one ends the search. Same choice as a full scan -- a
@@ -253,6 +263,22 @@ impl Pager {
         self.alloc_fresh(pages)
     }
 
+    /// The lowest-addressed reclaimable extent that fits and starts below
+    /// `limit`, allocated; `None` when there is none.
+    pub fn alloc_below(&mut self, pages: u32, limit: u64) -> Option<u64> {
+        let (k, n) = self
+            .free
+            .range(..=(self.min_retained_commit, u64::MAX))
+            .filter(|(k, n)| **n >= pages && k.1 < limit)
+            .min_by_key(|(k, _)| k.1)
+            .map(|(k, n)| (*k, *n))?;
+        self.free.remove(&k);
+        if n > pages {
+            self.free.insert((k.0, k.1 + pages as u64), n - pages);
+        }
+        Some(k.1)
+    }
+
     /// An extent at the end of the file, never out of the free list.
     pub fn alloc_fresh(&mut self, pages: u32) -> Result<u64> {
         let start = self.page_count;
@@ -263,10 +289,64 @@ impl Pager {
     /// Pages freed at `commit_id`; they become allocatable when
     /// `min_retained_commit` passes them.
     pub fn free_extent(&mut self, start_page: u64, pages: u32, commit_id: u64) {
-        if start_page < 2 || pages == 0 {
+        // Past `page_count` is not the file's any more: `shrink()` frees the
+        // old tree 1 after moving the end below it.
+        if start_page < 2 || pages == 0 || start_page >= self.page_count {
             return;
         }
         self.free.insert((commit_id, start_page), pages);
+    }
+
+    /// Whether a reclaimable extent ends exactly at `page`.
+    pub fn free_ends_at(&self, page: u64) -> bool {
+        self.free.range(..=(self.min_retained_commit, u64::MAX)).any(|(k, n)| k.1 + *n as u64 == page)
+    }
+
+    /// Merges adjacent reclaimable extents, so a run freed piecemeal (one
+    /// compaction input each) can take an extent bigger than any one piece.
+    /// The merged run keeps the newest `commit_id`, still reclaimable.
+    pub fn coalesce_reclaimable(&mut self) {
+        let keys: Vec<(u64, u64)> = self.free.range(..=(self.min_retained_commit, u64::MAX)).map(|(k, _)| *k).collect();
+        let mut runs: Vec<(u64, u64, u64)> = keys
+            .into_iter()
+            .map(|k| {
+                let n = self.free.remove(&k).unwrap();
+                (k.1, k.1 + n as u64, k.0)
+            })
+            .collect();
+        runs.sort_unstable();
+        let mut merged: Vec<(u64, u64, u64)> = Vec::with_capacity(runs.len());
+        for (s, e, c) in runs {
+            match merged.last_mut() {
+                Some(m) if m.1 == s && e - m.0 <= u32::MAX as u64 => {
+                    m.1 = e;
+                    m.2 = m.2.max(c);
+                }
+                _ => merged.push((s, e, c)),
+            }
+        }
+        for (s, e, c) in merged {
+            self.free.insert((c, s), (e - s) as u32);
+        }
+    }
+
+    /// Moves the end of the file down to `end`: reclaimable extents at or past
+    /// it leave the list, one straddling it is clipped. The caller has checked
+    /// that nothing live, and nothing a retained commit can see, lies past it.
+    pub fn cut_at(&mut self, end: u64) {
+        let past: Vec<(u64, u64)> = self
+            .free
+            .range(..=(self.min_retained_commit, u64::MAX))
+            .filter(|(k, n)| k.1 + **n as u64 > end)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in past {
+            self.free.remove(&k);
+            if k.1 < end {
+                self.free.insert(k, (end - k.1) as u32);
+            }
+        }
+        self.page_count = end;
     }
 
     fn grow(&mut self, pages: u64) -> Result<()> {

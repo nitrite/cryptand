@@ -713,6 +713,46 @@ public final class Vlog {
         return VlogStats.fromValue(VlogStats.key(id), Cve.decode(raw));
     }
 
+    /**
+     * {@code 13-operations.md} §5's {@code shrink()}: sealed segments, the only
+     * ones that can move. An open one is still being appended to at its
+     * current place, without the lock the mover holds.
+     */
+    public synchronized List<VlogStats> movable() {
+        List<VlogStats> out = new ArrayList<>();
+        for (VlogStats s : allStats()) {
+            if (s.sealed && openOf(s.segmentId) == null) {
+                out.add(s);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Moves a sealed segment's extent to {@code to}. Its head page is in the
+     * clear and its records are sealed by segment id and offset
+     * ({@code 14-security.md} §5.3), so the bytes move as they are; tree 7 is
+     * the only thing that names the page.
+     */
+    public synchronized void relocate(VlogStats s, long to) {
+        int pageSize = pager.pageSize();
+        long from = pager.offsetOf(s.startPage);
+        long end = Math.min(from + (long) s.pages * pageSize, pager.file().size());
+        byte[] buf = new byte[(int) Math.min(end - from, 256L * pageSize)];
+        for (long at = from; at < end; at += buf.length) {
+            int n = (int) Math.min(buf.length, end - at);
+            byte[] chunk = n == buf.length ? buf : new byte[n];
+            pager.file().readFully(at, chunk, 0, n);
+            pager.writeAt(pager.offsetOf(to) + (at - from), chunk);
+        }
+        s.startPage = to;
+        statsTree.put(s.key(), Cve.encode(s.toValue()));
+        VlogSegment seg = known.get(s.segmentId);
+        if (seg != null) {
+            seg.startPage = to;
+        }
+    }
+
     /** The tree-7 view of every segment the database knows about. */
     public synchronized List<VlogStats> allStats() {
         List<VlogStats> out = new ArrayList<>();

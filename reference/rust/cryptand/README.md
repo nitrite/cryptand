@@ -68,7 +68,7 @@ and the `interop` binary for complete flows.
 ## Development
 
 ```bash
-cargo test              # 147 tests in this crate, 212 across the workspace
+cargo test              # 254 tests in this crate, 319 across the workspace
 cargo test --release    # run BOTH profiles — they test different arithmetic
 ```
 

@@ -400,6 +400,24 @@ impl CowTree {
     /// out of the list it is recording would make a page both free and in use,
     /// which `01-container.md` §9 calls a double allocation.
     pub fn rebuild_fresh(&mut self, pager: &mut Pager, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<()> {
+        self.build(pager, entries, true)
+    }
+
+    /// `13-operations.md` §5's `shrink()`: every page rewritten through the
+    /// ordinary allocator, the old ones orphaned into `freed`.
+    pub fn relocate(&mut self, pager: &mut Pager) -> Result<()> {
+        if self.root == 0 {
+            return Ok(());
+        }
+        let entries = self.scan(pager, None, None)?;
+        let mut old = Vec::new();
+        self.reachable(pager, &mut old)?;
+        self.build(pager, entries, false)?;
+        self.freed.extend(old);
+        Ok(())
+    }
+
+    fn build(&mut self, pager: &mut Pager, entries: Vec<(Vec<u8>, Vec<u8>)>, fresh: bool) -> Result<()> {
         if entries.is_empty() {
             self.root = 0;
             return Ok(());
@@ -411,7 +429,7 @@ impl CowTree {
             let mut keys = Vec::with_capacity(level.len());
             let mut payloads = Vec::with_capacity(level.len());
             for n in &level {
-                let id = pager.alloc_fresh(1)?;
+                let id = if fresh { pager.alloc_fresh(1)? } else { pager.alloc_extent(1)? };
                 self.write_at(pager, id, n)?;
                 keys.push(n.keys[0].clone());
                 payloads.push(child_payload(id, n.subtree_entries()));

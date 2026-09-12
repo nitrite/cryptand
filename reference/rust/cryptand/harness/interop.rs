@@ -313,6 +313,10 @@ fn cmd_mutate(path: &str, tag: &str) -> cryptand::Result<()> {
     intern(&mut db, &extra)?;
     db.e.flush()?;
     db.e.commit(Durability::Sync)?;
+    // So the other side reads, verifies and allocates from a file whose
+    // extents `shrink()` moved.
+    db.e.compact()?;
+    db.e.relocate_and_truncate()?;
     db.e.close(true)?;
     println!("mutated by {tag}: {updated} updated, {deleted} deleted, 50 inserted");
     Ok(())

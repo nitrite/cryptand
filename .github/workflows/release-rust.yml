@@ -1,0 +1,59 @@
+name: Release Rust
+
+# Tag `rust-vX.Y.Z` (or `rust-vX.Y.Z-rc.N` for a test build). Push release
+# tags three at a time at most: GitHub creates no tag events at all for a push
+# carrying more than three.
+
+on:
+  push:
+    tags:
+      - 'rust-v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Package and verify, but do not upload
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # A publish that stalls on a credential should cost minutes, not the
+    # six-hour default.
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: reference/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: reference/rust
+      - run: cargo test -p cryptand
+      - name: Version
+        id: v
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="cryptand") | .version')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "rust-v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+          # Resumable: a version already on the registry is skipped, not failed.
+          if curl -sfo /dev/null -H 'User-Agent: cryptand-release' \
+               "https://crates.io/api/v1/crates/cryptand/$version"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "cryptand $version is already on crates.io"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Dry run
+        if: github.event.inputs.dry_run == 'true'
+        run: cargo publish -p cryptand --dry-run
+      - name: Publish
+        if: github.event.inputs.dry_run != 'true' && steps.v.outputs.skip == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p cryptand

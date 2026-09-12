@@ -55,40 +55,7 @@ impl SpaceApi for Engine {
     /// `01-container.md` §6 — relocate live extents downward and truncate.
     /// It is an ordinary sequence of commits and is interruptible.
     fn shrink(&mut self) -> Result<u64> {
-        let before = self.pager.page_count;
-        // Everything at or beyond the highest reachable page is debris or free
-        // space; truncating to it is the safe half of relocation, and the only
-        // half that never rewrites a page a live superblock references.
-        let mut high = 2u64;
-        for r in self.all_refs()? {
-            high = high.max(r.start_page + r.pages as u64);
-        }
-        for s in self.vlog_stats.values() {
-            high = high.max(s.start_page + s.pages as u64);
-        }
-        let mut pages = Vec::new();
-        for t in [
-            &self.catalog.tree,
-            &self.catalog.by_id,
-            &self.attributes.tree,
-            &self.manifest.tree,
-            &self.vlog_stats_tree,
-            &self.checkpoints,
-            &self.changefeed,
-            &self.freelist,
-        ] {
-            let tree = crate::cow::CowTree::new(t.tree_id, t.root);
-            tree.reachable(&mut self.pager, &mut pages)?;
-        }
-        for p in pages {
-            high = high.max(p + 1);
-        }
-        if high < before {
-            self.pager.set_page_count(high);
-            self.pager.truncate_to_page_count()?;
-            self.commit(Durability::Sync)?;
-        }
-        Ok(before.saturating_sub(self.pager.page_count))
+        self.relocate_and_truncate()
     }
 
     /// `12-profiles.md` §6 — `set_profile(p)` writes the new constants into the

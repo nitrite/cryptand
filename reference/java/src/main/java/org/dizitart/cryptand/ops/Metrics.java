@@ -21,7 +21,7 @@ import java.util.Map;
  * A fabricated answer defeats this section more thoroughly than a missing one,
  * because a caller cannot tell the two apart: {@code page_cache_hit_rate: 1.0}
  * from an engine with no page-cache accounting reads exactly like a perfect
- * cache. {@link Value#UNAVAILABLE} is how this implementation says so.
+ * cache. {@code Value.unavailable(why)} is how this implementation says so.
  */
 public final class Metrics {
 

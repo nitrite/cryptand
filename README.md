@@ -49,6 +49,27 @@ delegated to whatever the host ecosystem provides. Both are addressed
 **19 074** normalization and **1 826** word-break cases of Unicode's own
 conformance suites from the specification alone.
 
+## Packages
+
+| | install | source |
+|---|---|---|
+| Rust | `cargo add cryptand` | [`reference/rust/cryptand`](reference/rust/cryptand/) |
+| Java | `org.dizitart:cryptand:1.0.0` | [`reference/java`](reference/java/) |
+| Dart | `dart pub add cryptand` | [`reference/dart/cryptand`](reference/dart/cryptand/) |
+
+Each is the storage engine and nothing else. Nitrite reaches it through one thin
+adapter per SDK at the `NitriteStore` / `NitriteMap` seam, which lives in that
+SDK's repository beside its MVStore, RocksDB, Hive and Fjall adapters
+([`adoption/rollout.md`](adoption/rollout.md) §1).
+
+**Releasing.** Push a tag `rust-vX.Y.Z`, `java-vX.Y.Z` or `dart-vX.Y.Z`, at most
+three tags per push. The matching `.github/workflows/release-*.yml` runs the
+tests, refuses a tag that disagrees with the manifest, skips a version the
+registry already has, and publishes. Secrets: `CARGO_REGISTRY_TOKEN`;
+`MAVEN_USERNAME`, `MAVEN_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`. pub.dev
+authenticates the workflow itself, once the first version has been published by
+hand and automated publishing is enabled for the tag pattern `dart-v{{version}}`.
+
 ## The engine
 
 A **key-separated, lazily-levelled, immutable-segment store** with no
@@ -136,19 +157,13 @@ The short answer, at 20 000 documents on one machine:
 
 | | leads | loses |
 |---|---|---|
-| **rust** vs fjall, redb, sled | create, update, delete | read, mixed (to redb) |
-| **java** vs MVStore, RocksDB, PalDB | update, delete, mixed — and **every** row against RocksDB | create (MVStore), read (MVStore, PalDB) |
-| **dart** vs Hive | create, update, delete, mixed | read |
-| **rust** vs java vs dart | rust leads four rows, java leads update, dart is third throughout | — |
+| **rust** vs fjall, redb, sled | every row | nothing |
+| **java** vs MVStore, RocksDB, PalDB | every row against RocksDB and PalDB; read, update, delete and mixed against MVStore | create, to MVStore, whose `put` never reaches the device |
+| **dart** vs Hive | every row | nothing |
+| **rust** vs java vs dart | rust every row, java second, dart third | nothing |
 
-**Every row Cryptand loses is the read row, and every engine that wins it does
-so by not being an LSM**: redb is a copy-on-write B-tree over an mmap, MVStore is
-an in-heap B-tree, PalDB is an immutable perfect-hash file that cannot take a
-write at all, and a Hive `Box` is a `HashMap`. The update, delete and mixed rows
-Cryptand wins are the same trade seen from the other side. `RESULTS.md` §4 shows
-why the remaining read gap is compute per probe rather than cache locality — and
-therefore why the one format change that looked promising was **ruled out by
-measurement**, not attempted.
+On file size, Rust and Java end the same workload at the same byte count after
+`shrink()`, and Dart within 32 pages of them.
 
 ### The predictions this replaces
 
@@ -197,8 +212,9 @@ Read in this order.
 | [`design/tradeoff-analysis.md`](design/tradeoff-analysis.md) | What the write-path design costs reads, durability, space, memory, latency and complexity — the full accounting |
 | [`spec/`](spec/) | The normative format specification — this is the contract |
 | [`adoption/rollout.md`](adoption/rollout.md) | How the three SDKs get there from here, and how existing files migrate |
-| [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md) | **Reference implementation report (phase 15)** — what is built, the spec defects building it has found, and every measurement against a claim in `design/` |
-| [`reference/rust/cryptand-conformance/`](reference/rust/cryptand-conformance/) | **The second implementation** — an independent Rust reader of the byte layer, written from `spec/` alone, that passes nine of the ten conformance vector groups |
+| [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md), [`reference/rust/cryptand/REPORT.md`](reference/rust/cryptand/REPORT.md) | The implementation reports: what is built, the spec defects building it found, and every measurement against a claim in `design/` |
+| [`reference/bench/RESULTS.md`](reference/bench/RESULTS.md) | Benchmarks: each implementation against its field, and the three against each other |
+| [`reference/rust/cryptand-conformance/`](reference/rust/cryptand-conformance/) | An independent Rust reader of the byte layer, written from `spec/` alone |
 | [`reference/rust/cryptand-write/`](reference/rust/cryptand-write/) | **The write protocol** — `10-transactions.md` §2 with real threads, where prediction **P3** is measured, and `13-operations.md` §8's multi-process readers with real processes |
 
 ### Specification chapters
@@ -223,59 +239,29 @@ Read in this order.
 
 ## Status
 
-**Every chapter of the specification is implemented**, in pure Dart at [`reference/dart/cryptand/`](reference/dart/cryptand/) across
-fifteen phases — **546 tests, no skips**, and a conformance vector set at
-[`reference/conformance/vectors/`](reference/conformance/) that is generated,
-byte-exact and self-verifying.
+**Three independent implementations, each complete at Level 4** (core,
+collections, full text, spatial, vector) with encryption, and each reading and
+writing the others' files:
 
-Since phase 15 the vectors are also read by a **second implementation** that did
-not generate them — [`reference/rust/cryptand-conformance/`](reference/rust/cryptand-conformance/),
-41 tests over nine of the ten vector groups, written from `spec/` alone. That is
-what makes "portable" a measurement rather than a claim: a self-generated vector
-set catches regression, and only a second reader catches misreading.
+| | source | package | tests |
+|---|---|---|---|
+| Rust | [`reference/rust/cryptand`](reference/rust/cryptand/) | `cryptand` on crates.io | 319, in debug and release |
+| Java | [`reference/java`](reference/java/) | `org.dizitart:cryptand` on Maven Central | 325 |
+| Dart | [`reference/dart/cryptand`](reference/dart/cryptand/) | `cryptand` on pub.dev | 655 |
 
-| chapter | status |
-|---|---|
-| `00` conventions, `01` container, `02` CVE, `03` CKE | complete |
-| `04` segments | complete except §5.1's parallel compaction, which needs threads |
-| `05` catalog, `06` indexes | complete |
-| `07` full text | complete — the analyzer against Unicode's suites, `porter2` against Snowball's vocabulary |
-| `08` spatial | complete — ISO WKB, the in-container R-tree, and §4's exact second phase |
-| `09` vector | complete — the durable layout and §8's search contract; the graph *algorithms* are deliberately not in the format |
-| `10` transactions | complete — §1 and §3–§10 in Dart; §2, the concurrent write protocol, in Rust (`reference/rust/cryptand-write`), where P3 measures **14.8×** over 32 writer threads |
-| `11` conformance, `12` profiles | complete |
-| `13` operations | complete — §8's multi-process readers built in Rust (`reference/rust/cryptand-write`), tested with processes it spawns |
-| `14` security | complete, Argon2id and BLAKE2b verified against RFC 9106 and RFC 7693 |
+The round-trip gate of `spec/11-conformance.md` §6,
+[`reference/conformance/interop/run.sh`](reference/conformance/interop/run.sh),
+runs every pair in both directions, plaintext and encrypted: one implementation
+writes a file, the other reads the same digest, verifies it clean and mutates
+it (compacting and shrinking it too), and the writer reads the result back. It
+passes, and CI runs it on every push.
 
-**Every section of the specification now has an implementation.** `04` §5.1's
-parallel compaction is the one part left, and it needs an engine underneath it
-rather than a new capability.
-
-Read [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md).
-Building the code has found **forty-nine defects in these documents** — a headline
-invariant that was literally false, a page header whose field table did not fit
-its own declared size, a nonce rule that did nothing, filter rates quoted from
-the wrong formula, "unknown tags round-trip" that no reader could implement —
-and three gaps in the **design** rather than its description: the aged-scan bound
-was missing a mechanism and the metric meant to detect that was blind to it, the
-read-tail bound turned out to belong to a read path the prediction never named,
-and the last level's disjointness rule was stated over the wrong key space — a
-levelled level that had quietly stopped being disjoint returned **stale
-versions**, under 338 passing tests, until snapshot retention exposed it. The
-two before last came from the second implementation: a conformance vector whose
-field name promised more bytes than it carried, in the one structure whose
-failure mode is silent key loss, and a decoder reject rule that both
-implementations followed and neither had read. The most recent is the write
-design's **headline claim** — "N writers drive N independent append streams into
-the device" — which measurement showed to be a property of the operating
-system's write path rather than of the format, false on at least one mainstream
-platform, and not recoverable by any file layout. The argument for having no
-write-ahead log survives, but the reason is the group-commit barrier that
-amortizes over a whole commit group, not the parallel streams. The three after
-that came from building the multi-process reader protocol: a sidecar header
-declaring two fields no rule read, which left an abandoned database silently
-degrading every reader that opened it, and a volatile mode reachable two ways
-with only one of them written down.
+The conformance vectors in [`reference/conformance/`](reference/conformance/)
+are byte-exact and self-verifying, and all three consume them. What building
+three implementations found wrong in the spec is in
+[`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md) and
+[`reference/rust/cryptand/REPORT.md`](reference/rust/cryptand/REPORT.md), and
+the security pass in [`reference/HARDENING.md`](reference/HARDENING.md).
 
 **Confirmed by measurement:**
 
@@ -290,10 +276,7 @@ with only one of them written down.
 | **P4** mechanism | ~10× for a projection | **11.1×** one field, 6.5× two |
 | **P3** write concurrency | near-linear to 8–16 threads | **14.8×** at 32 writer threads with p50 flat — but **only in a durable mode**; without the barrier it peaks at two threads, and that number measures the host's write path, not this design |
 
-**Still unmeasured, and stated as such:** P2 and P3 — write amplification
-against Fjall and RocksDB, and write concurrency — because they need those
-engines and real threads, and Dart has neither. `spec/10-transactions.md` is
-therefore not merely under-tested but *untested*, which is the largest single
-gap and the reason phase 4 is Rust. Every other figure in these documents
+**Still unmeasured:** P2, write amplification against Fjall and RocksDB on
+sustained random writes much larger than RAM. Every other figure in `design/`
 remains an analytic prediction, labelled as such, with the measurement that
 would confirm or refute it.

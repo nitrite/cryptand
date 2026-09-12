@@ -81,7 +81,7 @@ See [`example/`](example/) for the full round-trip, and
 
 ```bash
 dart pub get
-dart test          # 561 tests
+dart test          # 655 tests
 dart analyze
 ```
 

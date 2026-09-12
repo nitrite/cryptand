@@ -175,6 +175,7 @@ public final class XlangCrudBench {
         o.durability = Superblock.Durability.OS;
 
         long persistNanos;
+        long shrinkNanos;
         try (Engine e = Engine.create(path, o)) {
             long t0 = System.nanoTime();
             for (int i = 0; i < n; i++) {
@@ -238,8 +239,15 @@ public final class XlangCrudBench {
             long p0 = System.nanoTime();
             e.commitNow();
             persistNanos = System.nanoTime() - p0;
+            // `13-operations.md` §5: move the live extents down over the space
+            // the compaction freed and end the file at them. Dart has nothing
+            // to do here: it places segments only when it saves.
+            long s0 = System.nanoTime();
+            e.shrink();
+            shrinkNanos = System.nanoTime() - s0;
         }
         row("persist_ms", String.format("%.1f", persistNanos / 1e6), "ms");
+        row("shrink_ms", String.format("%.1f", shrinkNanos / 1e6), "ms");
         row("file_bytes", Long.toString(sizeOf(dir)), "bytes");
         row("storage_model", "file-backed", "text");
         deleteTree(dir);

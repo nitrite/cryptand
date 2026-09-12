@@ -157,6 +157,85 @@ fn a_full_compaction_publishes_so_the_next_flush_reuses_its_inputs() {
     );
 }
 
+/// The cross-language matrix's shape: a full compaction's output standing on
+/// the run its inputs left, part of that run then taken by a later flush.
+fn compacted(e: &mut Engine, size: usize) {
+    for i in 0..4000i64 {
+        e.put(T, &Value::NitriteId(i), &vec![0u8; size]).unwrap();
+    }
+    e.flush().unwrap();
+    e.commit(Durability::Sync).unwrap();
+    e.compact().unwrap();
+    for i in 0..1500i64 {
+        e.put(T, &Value::NitriteId(i), &vec![1u8; size]).unwrap();
+    }
+    e.flush().unwrap();
+    e.commit(Durability::Sync).unwrap();
+}
+
+fn expected(i: i64, size: usize) -> Option<Vec<u8>> {
+    Some(vec![(i < 1500) as u8; size])
+}
+
+fn free_pages(e: &Engine) -> u64 {
+    e.pager.free_list().iter().map(|x| x.pages as u64).sum()
+}
+
+fn shrink_relocates(mut e: Engine, path: &std::path::Path, key: Option<&[u8]>, size: usize) {
+    // `13-operations.md` §5: `shrink()` relocates live extents downward and
+    // truncates. It only truncated, and a full compaction leaves the free
+    // space *below* the live data, so it reclaimed nothing: 820 of 3 366
+    // pages on the cross-language CRUD matrix.
+    compacted(&mut e, size);
+    let before = e.pager.page_count;
+    let free_before = free_pages(&e);
+    e.shrink().unwrap();
+    println!(
+        "shrink: {before} pages ({free_before} free) -> {} ({} free)",
+        e.pager.page_count,
+        free_pages(&e)
+    );
+    assert!(free_before > before / 5, "the fixture left no free run to reclaim");
+    assert!(free_pages(&e) * 20 < e.pager.page_count, "{} free pages left in {}", free_pages(&e), e.pager.page_count);
+    let r = e.verify().unwrap();
+    assert!(r.of(Class::Corruption).is_empty() && r.of(Class::Leak).is_empty(), "{:?}", r.findings);
+    let pages = e.pager.page_count;
+    e.close(false).unwrap();
+    assert_eq!(std::fs::metadata(path).unwrap().len(), pages * e.pager.page_size as u64);
+    let mut e = Engine::open(path, key).unwrap();
+    for i in 0..4000i64 {
+        assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap(), expected(i, size), "key {i}");
+    }
+    assert!(e.verify().unwrap().of(Class::Corruption).is_empty());
+}
+
+#[test]
+fn shrink_moves_live_extents_down_and_ends_the_file_at_them() {
+    let t = TempDb::new("shrink-relocates");
+    let e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    shrink_relocates(e, &t.path, None, 600);
+}
+
+#[test]
+fn shrink_hops_a_segment_that_stands_on_a_hole_too_small_for_it() {
+    // Inline values, so the whole last level is one segment, and no hole below
+    // it fits it: it goes to the end and comes back down.
+    let t = TempDb::new("shrink-hops");
+    let e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    shrink_relocates(e, &t.path, None, 200);
+}
+
+#[test]
+fn shrink_reseals_what_it_moves_in_an_encrypted_file() {
+    // A key-index page's nonce binds its page id (`14-security.md` §5.2), so a
+    // moved page is sealed again under a fresh nonce; a value-log record's
+    // binds its segment id and offset, so it moves as it is.
+    let t = TempDb::new("shrink-encrypted");
+    let key = [7u8; 32];
+    let e = Engine::create_encrypted(&t.path, Profile::Desktop, &key, 0, 0, 0, 0).unwrap();
+    shrink_relocates(e, &t.path, Some(&key), 600);
+}
+
 #[test]
 fn a_closed_file_ends_at_page_count() {
     // `Pager::grow` preallocates in chunks; the tail past `page_count` is

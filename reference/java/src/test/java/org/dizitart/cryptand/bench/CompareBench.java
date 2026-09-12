@@ -312,6 +312,9 @@ public final class CompareBench {
             }
             e.commitNow();
             row("cryptand", "mixed", mixedOps, (System.nanoTime() - t0) / 1e9, mix);
+            // Untimed: the file after `13-operations.md` §5's `shrink()`,
+            // which moves the live extents down over what compaction freed.
+            e.shrink();
         }
         size("cryptand", path.getParent());
         deleteTree(path.getParent());

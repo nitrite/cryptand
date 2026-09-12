@@ -64,8 +64,8 @@ What the table cannot do is make the engines equal. Cryptand maintains a
 manifest, per-segment filters, liveness statistics and a value-log GC, verifies
 a CRC-32C per page, and writes a file three other language runtimes can open;
 redb has no background compaction at all, MVStore and Hive keep their data in
-memory, and PalDB cannot accept a write without being rebuilt. `RESULTS.md` §4
-sets out which side of that trade each row lands on.
+memory, and PalDB cannot accept a write without being rebuilt. The notes under
+each table in `RESULTS.md` say which side of that trade each row lands on.
 
 ## Running it
 

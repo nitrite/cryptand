@@ -151,9 +151,15 @@ public final class PageFile implements AutoCloseable {
         }
     }
 
+    /**
+     * Cuts the file, forcing what was written first whatever the durability
+     * mode: the superblock that names the new end has to reach the device
+     * before the pages past it leave.
+     */
     public void truncate(long bytes) {
         try {
             if (channel.size() > bytes) {
+                channel.force(false);
                 channel.truncate(bytes);
             }
         } catch (IOException e) {
