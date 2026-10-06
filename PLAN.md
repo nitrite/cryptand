@@ -115,7 +115,7 @@ test compares the engine against a model on random histories.
   engine **and** a sorted in-memory map; compare every read, and a full-scan
   digest at the end and after every `reopen`. Rust harness bin, Java test
   class, Dart test.
-- [ ] **1.3** (10-07: `--hop` legs in all three, `tools/oplog_hop.sh`; seeds 0..50 plain + 0..20 encrypted clean after F-042…F-051; 1 000 seeds to run)
+- [ ] **1.3** (10-07: `--hop` legs in all three, `tools/oplog_hop.sh`; seeds 0..150 plain + 0..40 encrypted clean after F-042…F-055; 1 000 seeds to run)
   Cross-language hop: Rust plays ops 0..k, Java k..m, Dart m..n on
   the same file, then all three compute the digest. Plaintext and encrypted.
 - [ ] **1.4** (started: shrinkers in all three; 8 logs in `regress/`, replayed by all three
