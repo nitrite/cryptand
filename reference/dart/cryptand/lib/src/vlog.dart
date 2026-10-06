@@ -424,6 +424,11 @@ final class ValueLog {
     if (s.id >= _nextId) _nextId = s.id + 1;
   }
 
+  /// The superblock's `next_vlog_segment_id`: no id below it is handed out.
+  void reserveIdsBelow(int next) {
+    if (next > _nextId) _nextId = next;
+  }
+
   /// One open segment per (tier, heat class). Section 6.2: "the number of open
   /// value-log segments is bounded by the number of **heat classes**, *not* by
   /// the number of writer threads".

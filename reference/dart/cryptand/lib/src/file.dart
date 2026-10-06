@@ -614,6 +614,10 @@ abstract final class DatabaseFile {
       }
       e.vlog.adopt(seg);
     }
+    // F-045: ids are "globally unique, never reused" (04 §2.1). A collected
+    // segment has no tree-7 entry, so the highest adopted id can be below the
+    // superblock's counter, and reusing one gives a dead pointer a new record.
+    e.vlog.reserveIdsBelow(sb.nextVlogSegmentId);
 
     // Trees 0, 2 and 3, rooted from the superblock like everything else.
     return Database(

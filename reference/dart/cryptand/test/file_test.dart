@@ -42,6 +42,29 @@ void main() {
     expect(back.engine.scanTree(t).length, 500);
   });
 
+  test('F-045: a reopen continues value-log ids from the superblock', () {
+    // 04 section 2.1: segment ids are "globally unique, never reused". A file
+    // whose newest segment was collected has no tree-7 entry for it, so the
+    // counter in the superblock is the only record that the id was used.
+    final path = tmp('vlogid');
+    final db = fresh();
+    db.engine.put(t, const CNitriteId(1), Uint8List(4000));
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+    final b = File(path).readAsBytesSync();
+    final bd = ByteData.sublistView(b);
+    const nextVlogSegmentId = 136, checksum = 4092; // 01-container section 2
+    final next = bd.getUint64(nextVlogSegmentId, Endian.little) + 5;
+    for (final slot in [0, 4096]) {
+      bd.setUint64(slot + nextVlogSegmentId, next, Endian.little);
+      bd.setUint32(slot + checksum, crc32c(b, slot, slot + checksum), Endian.little);
+    }
+    File(path).writeAsBytesSync(b, flush: true);
+    final back = DatabaseFile.open(path);
+    back.engine.put(t, const CNitriteId(2), Uint8List(4000));
+    expect(back.engine.vlog.segments.keys, contains(next));
+  });
+
   test('a separated value survives the file, and its watermark with it', () {
     final path = tmp('vlog');
     final db = fresh();
