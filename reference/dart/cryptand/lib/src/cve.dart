@@ -527,10 +527,10 @@ final class DocView {
         throw const CorruptionException(
             'document uses a name dictionary but none was supplied');
       }
-      return d.nameOf(ref >> 1);
+      return d.nameOf(ref >>> 1);
     }
     final idx = _inlineIndex;
-    final slot = ref >> 1;
+    final slot = ref >>> 1;
     if (slot >= idx.length) {
       throw CorruptionException('inline name index $slot out of range');
     }
@@ -549,10 +549,10 @@ final class DocView {
         throw const CorruptionException(
             'document uses a name dictionary but none was supplied');
       }
-      return d.bytesOf(ref >> 1);
+      return d.bytesOf(ref >>> 1);
     }
     final idx = _inlineIndex;
-    final slot = ref >> 1;
+    final slot = ref >>> 1;
     if (slot >= idx.length) {
       throw CorruptionException('inline name index $slot out of range');
     }
@@ -644,10 +644,10 @@ final class DocView {
         throw const CorruptionException(
             'document uses a name dictionary but none was supplied');
       }
-      return d.bytesOf(ref >> 1);
+      return d.bytesOf(ref >>> 1);
     }
     final idx = _inlineIndex;
-    final slot = ref >> 1;
+    final slot = ref >>> 1;
     if (slot >= idx.length) {
       throw CorruptionException('inline name index $slot out of range');
     }

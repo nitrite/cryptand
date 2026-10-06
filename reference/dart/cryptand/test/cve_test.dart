@@ -52,6 +52,17 @@ List<CValue> corpus() => <CValue>[
     ];
 
 void main() {
+  test('F-041: a 2^64-1 inline name ref is corruption, not a RangeError', () {
+    // {"a": null} with its name ref replaced by the 10-byte uvar 2^64-1.
+    final b = Uint8List.fromList([
+      0x22, 0x10, 0x01, 0x01, //
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, //
+      0x00, 0x01, 0x61, 0x00,
+    ]);
+    expect(() => decodeValue(b), throwsA(isA<CorruptionException>()));
+    expect(() => DocView.parse(b).nameAt(0), throwsA(isA<CorruptionException>()));
+  });
+
   group('round trip', () {
     test('every value in the corpus', () {
       for (final v in corpus()) {

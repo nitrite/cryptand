@@ -507,14 +507,15 @@ public final class Cve {
             long ref = nameRefs[i];
             String name;
             if ((ref & 1) == 1) {
-                int index = (int) (ref >>> 1);
+                // F-041: compared as a long; an int cast made a huge index negative.
+                long index = ref >>> 1;
                 if (index >= inline.size()) {
                     throw new CorruptionException("DOC inline name index " + index + " out of range");
                 }
-                name = inline.get(index);
+                name = inline.get((int) index);
             } else {
-                int id = (int) (ref >>> 1);
-                name = dict == null ? null : dict.nameOf(id);
+                long id = ref >>> 1;
+                name = dict == null || id > Integer.MAX_VALUE ? null : dict.nameOf((int) id);
                 if (name == null) {
                     throw new CorruptionException("DOC references name_id " + id
                             + ", which is not in the tree's name dictionary");

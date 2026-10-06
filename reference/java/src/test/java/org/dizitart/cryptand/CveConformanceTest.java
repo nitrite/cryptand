@@ -218,4 +218,12 @@ class CveConformanceTest {
         Value deep = v;
         assertThrows(LimitException.class, () -> Cve.encode(deep));
     }
+
+    @org.junit.jupiter.api.Test
+    void f041AHugeInlineNameRefIsCorruptionNotAnIndexError() {
+        // {"a": null} with its name ref replaced by the 10-byte uvar 2^64-1.
+        byte[] b = java.util.HexFormat.of().parseHex("221001" + "01" + "ffffffffffffffffff01" + "00016100");
+        org.junit.jupiter.api.Assertions.assertThrows(org.dizitart.cryptand.CorruptionException.class,
+                () -> org.dizitart.cryptand.value.Cve.decode(b));
+    }
 }

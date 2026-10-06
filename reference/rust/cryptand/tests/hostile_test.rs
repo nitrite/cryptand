@@ -307,3 +307,15 @@ fn a_leaf_cell_with_an_empty_key_is_refused_and_does_not_panic() {
         );
     }
 }
+
+/// F-041: a name id above u32 is unknown, not truncated onto a real one.
+#[test]
+fn a_name_id_above_u32_is_refused_not_aliased() {
+    // {name_id 1: null} with the ref replaced by the even uvar 2^33 + 2
+    // (id 2^32 + 1, which `as u32` truncated to 1).
+    let dict = |id: u32| (id == 1).then(|| "a".to_string());
+    let good = [0x22, 0x05, 0x01, 0x01, 0x02, 0x00, 0x00];
+    assert!(cryptand::cve::decode_all(&good, &dict).is_ok());
+    let bad = [0x22, 0x09, 0x01, 0x01, 0x82, 0x80, 0x80, 0x80, 0x20, 0x00, 0x00];
+    assert!(cryptand::cve::decode_all(&bad, &dict).is_err());
+}

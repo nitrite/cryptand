@@ -578,10 +578,11 @@ fn read_doc_body(
     for (i, (name_ref, offset)) in refs.iter().enumerate() {
         let name = match &names[i] {
             Some(s) => s.clone(),
-            None => {
-                let id = (name_ref >> 1) as u32;
-                dict(id).ok_or_else(|| crate::Error::Corrupt(format!("unknown name_id {id}")))?
-            }
+            // F-041: checked, not `as u32`, which aliased a hostile id onto a real name.
+            None => u32::try_from(name_ref >> 1)
+                .ok()
+                .and_then(&dict)
+                .ok_or_else(|| crate::Error::Corrupt(format!("unknown name_id {}", name_ref >> 1)))?,
         };
         if value_area + offset > body.len() {
             return corrupt("field value_offset past the document");
