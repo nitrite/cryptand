@@ -2878,6 +2878,21 @@ impl Engine {
         }
         let mut old = Vec::new();
         self.freelist.reachable(&mut self.pager, &mut old)?;
+        // F-054: and never below a page that is neither free nor the free
+        // tree's own. The owners above are the ones this implementation writes;
+        // Java's BLOB extents are not among them, and a cut through one
+        // truncated a live value.
+        {
+            let mut spare: HashSet<u64> = old.iter().copied().collect();
+            for e in self.pager.free_list() {
+                spare.extend(e.start_page..e.start_page + e.pages as u64);
+            }
+            let mut top = self.pager.page_count;
+            while top > high && spare.contains(&(top - 1)) {
+                top -= 1;
+            }
+            high = high.max(top);
+        }
         let room = old.len() as u64 + 8;
         if high + room >= self.pager.page_count || old.iter().any(|&p| p >= high && p < high + room) {
             return Ok(());
