@@ -16,7 +16,10 @@
 - Plan, ledger and rules are written: `PLAN.md` (M0–M8, Verify per step,
   calendar), `FINDINGS.md` (F-001…F-017 seeded: 3 confirmed Dart storage
   defects, 4 suspects, and the known gaps from HARDENING and the REPORTs).
-- Nothing has been executed beyond the baseline. M0.1 and M0.3 are done.
+- M0.1–M0.3 done. `tools/gate.sh quick` is green (190 s, M2 Pro) and proven
+  to fail. Its later stages print `PENDING` until M1.4/M2.2/M3/M6 build them.
+  Clippy correctness/suspicious had 2 hits, both intentional, now `#[allow]`ed
+  with a reason (`container.rs` `writable`, `multiproc.rs` perms restore).
 
 ## Decisions already made (human, 10-06)
 
@@ -38,9 +41,8 @@
 
 ## Next action
 
-**M0.2:** write `tools/gate.sh quick|full` exactly as specified in PLAN.md
-M0.2. Run `quick`, prove it fails on a flipped assertion, and commit.
-Then start M1.1 (the op-log generator) on track A.
+**M1.1:** op-log format in `reference/conformance/oplog/` (JSON lines) and the
+seeded generator behind the Rust `harness` feature. Then M1.2 model checker.
 
 Parallel sessions, if wanted: track B starts M5.1 in a worktree on
 `dart-storage`; track C starts M6.1 (the workload binary) in a worktree on
@@ -50,3 +52,4 @@ Parallel sessions, if wanted: track B starts M5.1 in a worktree on
 
 - 2026-10-06 — Surveyed the repo, ran the full baseline (green), got the scope
   and Dart decisions, wrote PLAN/HANDOFF/FINDINGS/CLAUDE.md.
+- 2026-10-06 — M0.2: `tools/gate.sh` written, quick green, flip test fails it.

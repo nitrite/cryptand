@@ -15,7 +15,7 @@ interop gate 12/12 directions plaintext+encrypted.
 
 | | milestone | track | due | status |
 |---|---|---|---|---|
-| M0 | Execution infra, gates, CI matrix | all | 10-07 | in progress (0.1, 0.3 done) |
+| M0 | Execution infra, gates, CI matrix | all | 10-07 | in progress (0.1–0.3 done; 0.4 [H], 0.5 blocked) |
 | M1 | Differential + model testing | A | 10-14 | todo |
 | M2 | Crash consistency + concurrency | A | 10-16 | todo |
 | M3 | Coverage-guided fuzzing | A | 10-16 | todo |
@@ -73,7 +73,7 @@ macOS locally and CI green on Linux/macOS/Windows, M6 scale table filled in.
 ## M0 — Execution infrastructure (10-06 → 10-07)
 
 - [x] **0.1** PLAN.md, HANDOFF.md, FINDINGS.md, CLAUDE.md written and committed.
-- [ ] **0.2** `tools/gate.sh quick|full` at the repo root. `quick`: rust
+- [x] **0.2** `tools/gate.sh quick|full` at the repo root. `quick`: rust
   `cargo test --workspace` (debug and `--release`) +
   `cargo clippy --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious`;
   java `mvn -B verify`; dart `dart analyze --fatal-infos` + `dart test`;
@@ -83,6 +83,8 @@ macOS locally and CI green on Linux/macOS/Windows, M6 scale table filled in.
   *Not gated:* `cargo fmt` (863 hunks, the code is hand-formatted on purpose)
   and clippy style lints (~35, none correctness).
   **Verify:** `tools/gate.sh quick` exits 0; flip one assertion and it exits 1.
+  *Done 10-06:* quick green in 190 s; a flipped `multiproc.rs` assert → exit 1.
+  Stages not built yet print `PENDING` (regress replays, fuzz, scale, kill -9).
 - [x] **0.3** `FINDINGS.md` ledger, seeded with the suspects found on 10-06.
 - [ ] **0.4 [H]** Create GitHub repo `nitrite/cryptand` (it does not exist; this
   checkout has **no remote**), push `main` and `packaging/v1.0.0`.

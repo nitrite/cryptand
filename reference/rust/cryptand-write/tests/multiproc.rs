@@ -159,6 +159,7 @@ fn a_read_only_sidecar_opens_volatile_and_says_so() {
     assert!(sc.slots().unwrap().iter().all(|s| s.is_free()), "and it wrote nothing");
 
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)] // restores a temp file, then it is deleted
     perms.set_readonly(false);
     std::fs::set_permissions(&path, perms).unwrap();
 }

@@ -529,6 +529,8 @@ impl Superblock {
 
     /// §2.1 step 6 — a file whose `write_version_minor` exceeds ours opens
     /// read-only, it is not refused (`00-conventions.md` §9).
+    // `<=` stays right once VERSION_MINOR moves past 0.
+    #[allow(clippy::absurd_extreme_comparisons)]
     pub fn writable(&self) -> bool {
         self.write_version_minor <= VERSION_MINOR
     }
