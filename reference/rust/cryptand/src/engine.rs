@@ -2475,10 +2475,11 @@ impl Engine {
                 let p = VlogPointer::parse(&e.value)?;
                 let hot = self.vlog_stats.get(&p.segment_id).map(|s| s.tier == Tier::Hot as u8);
                 if hot == Some(true) {
-                    let rec = self.read_vlog_record(&p)?;
                     let value = self.read_vlog(&p)?;
                     let parsed = parse_internal_key(&e.internal_key)?;
-                    let np = self.append_cold(parsed.tree_id, &rec.key, &value)?;
+                    // F-046: the entry's key, not the record's: an encrypted
+                    // record's key is ciphertext, which decode leaves empty.
+                    let np = self.append_cold(parsed.tree_id, parsed.cke, &value)?;
                     self.release_vlog(&p);
                     e.value = np.encode().to_vec();
                 }
@@ -2889,9 +2890,9 @@ impl Engine {
         let dest = self.open_vlog_segment(Tier::Cold, Heat::First)?;
         let mut rewrites: Vec<(Vec<u8>, VlogPointer, Option<u64>)> = Vec::new();
         for (uk, (tree, p, expiry)) in &live {
-            let rec = self.read_vlog_record(p)?;
             let value = self.read_vlog(p)?;
-            let np = self.append_into(Tier::Cold, Heat::First, *tree, &rec.key, &value)?;
+            // F-046: `uk` is `u32be(tree) || CKE(key)`; see promotion above.
+            let np = self.append_into(Tier::Cold, Heat::First, *tree, &uk[4..], &value)?;
             self.counters.write_amp_gc += np.len as u64;
             rewrites.push((uk.clone(), np, *expiry));
         }
