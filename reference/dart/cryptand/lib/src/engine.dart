@@ -20,6 +20,7 @@ import 'container.dart';
 import 'checkpoint.dart';
 import 'cke.dart';
 import 'cow.dart';
+import 'crc32c.dart';
 import 'errors.dart';
 import 'filter.dart' show cfh64;
 import 'manifest.dart';
@@ -1842,7 +1843,7 @@ final class Engine {
   Uint8List? getView(int treeId, CValue key, {Snapshot? at}) {
     final rec = _winner(treeId, key, at);
     if (rec == null) return null;
-    return rec.valueKind == ValueKind.vlog ? _resolve(rec) : rec.value.asUnmodifiableView();
+    return ValueKind.isPointer(rec.valueKind) ? _resolve(rec) : rec.value.asUnmodifiableView();
   }
 
   /// The record [get] resolves, or null when the key is absent, deleted or
@@ -1973,9 +1974,51 @@ final class Engine {
   }
 
   Uint8List _resolve(SegRecord rec, {bool coalesce = true}) =>
-      rec.valueKind == ValueKind.vlog
-          ? vlog.readValue(VlogPointer.decode(rec.value), coalesce: coalesce)
-          : Uint8List.fromList(rec.value);
+      _resolveKind(rec.valueKind, rec.value, coalesce: coalesce);
+
+  Uint8List _resolveKind(int kind, Uint8List value, {bool coalesce = true}) =>
+      switch (kind) {
+        ValueKind.vlog =>
+          vlog.readValue(VlogPointer.decode(value), coalesce: coalesce),
+        ValueKind.blob => readBlob(value),
+        _ => Uint8List.fromList(value),
+      };
+
+  /// F-044: `spec/01-container.md` §5's BLOB, which another implementation
+  /// writes for a value at or above `blob_threshold` (this one never does).
+  /// Pointer `u64 start_page || u32 byte_len || u32 crc32c`; the payload
+  /// follows the head page's 40-byte header and runs on through header-less
+  /// interior pages, or, encrypted, one §5.4 chunk per page.
+  Uint8List readBlob(Uint8List pointer) {
+    if (pointer.length != kPointerBytes) {
+      throw CorruptionException(
+          'a BLOB pointer is $kPointerBytes bytes, got ${pointer.length}');
+    }
+    final r = ByteReader(pointer);
+    final start = r.u64(), len = r.u32(), crc = r.u32();
+    final out = BytesBuilder(copy: false);
+    final crypto = store.crypto;
+    // §5.4: a page less the 8-byte counter and the 16-byte tag.
+    final chunk = crypto == null ? pageSize : pageSize - 24;
+    for (var i = 0; out.length < len; i++) {
+      final page = store.readClear(start + i);
+      final at = i == 0 ? PageHeader.size : 0;
+      final n = (len - out.length).clamp(0, chunk - at);
+      out.add(crypto == null
+          ? Uint8List.sublistView(page, at, at + n)
+          : decryptExtentChunk(
+              keys: crypto.ring,
+              headPageId: start,
+              chunkIndex: i,
+              stored: Uint8List.sublistView(page, at, at + 8 + n + 16)));
+    }
+    final value = out.takeBytes();
+    if (crc32c(value) != crc) {
+      throw CorruptionException('blob checksum mismatch at page $start',
+          pageId: start);
+    }
+    return value;
+  }
 
   /// A key-ordered scan of one tree, optionally bounded by [range].
   ///
@@ -2074,9 +2117,7 @@ final class Engine {
       if (expiry != null && expiry <= nowMs) continue;
       yield (
         cke: Uint8List.sublistView(userKey, 4),
-        value: valueKind == ValueKind.vlog
-            ? vlog.readValue(VlogPointer.decode(value))
-            : Uint8List.fromList(value),
+        value: _resolveKind(valueKind, value),
       );
     }
   }

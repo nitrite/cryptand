@@ -596,6 +596,38 @@ Uint8List decryptPagePayload({
   return pt;
 }
 
+/// Section 5.4: one chunk of an encrypted extent (a blob), stored as
+/// `u64 counter || ciphertext || tag` and bound to its head page and index.
+Uint8List decryptExtentChunk({
+  required KeyRing keys,
+  required int headPageId,
+  required int chunkIndex,
+  required Uint8List stored,
+}) {
+  if (stored.length < 24) {
+    throw CorruptionException('encrypted extent chunk shorter than its counter and tag',
+        pageId: headPageId);
+  }
+  final counter = ByteData.sublistView(stored).getUint64(0, Endian.little);
+  final aad = Uint8List(16);
+  ByteData.sublistView(aad)
+    ..setUint64(0, headPageId, Endian.little)
+    ..setUint64(8, chunkIndex, Endian.little);
+  final pt = xchacha20Poly1305Decrypt(
+    key: keys.pageKey,
+    nonce24: buildNonce(NonceDomain.page, counter, headPageId, chunkIndex),
+    ciphertext: Uint8List.sublistView(stored, 8, stored.length - 16),
+    tag: Uint8List.sublistView(stored, stored.length - 16),
+    aad: aad,
+  );
+  if (pt == null) {
+    throw TamperException(
+        'extent chunk $chunkIndex at page $headPageId failed authentication',
+        pageId: headPageId);
+  }
+  return pt;
+}
+
 /// Encrypts one value-log record body, section 5.3.
 ///
 /// ```
