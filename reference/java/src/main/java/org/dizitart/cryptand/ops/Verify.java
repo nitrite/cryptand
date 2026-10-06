@@ -266,7 +266,12 @@ public final class Verify {
         }
         BtreePage.Leaf newest = engine.newestVersion(
                 Ikey.treeIdOf(ik), Ikey.ckeOf(ik), engine.visibleSeq());
-        return newest != null && Ikey.seqOf(newest.key()) > seq;
+        if (newest != null && Ikey.seqOf(newest.key()) > seq) {
+            return true;
+        }
+        // F-043: the newest version, but range-deleted or expired. No reader
+        // resolves it, so GC (§6.8 step 2) may already have freed its record.
+        return !engine.containsKey(Ikey.treeIdOf(ik), Ikey.ckeOf(ik));
     }
 
     /** Invariant 3: {@code subtree_entries} sums correctly and every leaf is at one depth. */

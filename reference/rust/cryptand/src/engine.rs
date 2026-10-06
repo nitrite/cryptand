@@ -1302,10 +1302,16 @@ impl Engine {
     fn write_vlog_stats(&mut self, id: u64) -> Result<()> {
         let Some(s) = self.vlog_stats.get(&id).cloned() else { return Ok(()) };
         let key = cke::encode(&Value::Int { w: NumType::U64, neg: false, mag: id as u128 })?;
-        let v = encode_vlog_stats(&s);
         let mut t = std::mem::replace(&mut self.vlog_stats_tree, CowTree::new(tree_id::VLOG_STATS, 0));
         t.commit_id = self.sb.commit_id;
-        let r = t.put(&mut self.pager, &key, &v);
+        // F-043: a retired segment's extent is free, so tree 7 must not name it
+        // (04 §11 invariant 8b: once reused, the head says another segment).
+        // The in-memory entry stays for snapshots older than the collection.
+        let r = if s.retired() {
+            t.remove(&mut self.pager, &key).map(drop)
+        } else {
+            t.put(&mut self.pager, &key, &encode_vlog_stats(&s))
+        };
         self.vlog_stats_tree = t;
         r
     }
