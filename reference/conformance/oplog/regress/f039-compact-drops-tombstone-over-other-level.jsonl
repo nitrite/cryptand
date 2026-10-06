@@ -1,0 +1,13 @@
+{"oplog":1,"seed":8,"profile":"desktop","encrypted":false,"trees":2,"keys":1000,"skew":0.5,"big":0.05,"prefix":0}
+{"op":"snapshot","id":1}
+{"op":"del","t":1,"k":"39"}
+{"op":"commit","d":"none"}
+{"op":"range_del","t":1,"lo":"3230","hi":"343335"}
+{"op":"commit","d":"sync"}
+{"op":"del","t":1,"k":"3230"}
+{"op":"commit","d":"os"}
+{"op":"release","id":1}
+{"op":"put","t":2,"k":"30","v":{"n":189,"s":555652633165531}}
+{"op":"commit","d":"sync"}
+{"op":"del","t":2,"k":"30"}
+{"op":"compact"}

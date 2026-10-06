@@ -1324,9 +1324,12 @@ final class Engine {
   void compact() {
     flush();
     drainCompaction();
-    for (var l = 0; l < lastLevel; l++) {
-      if (refsAt(l).isNotEmpty) _compactInto(refsAt(l), lastLevel);
-    }
+    // F-039: every level in one job, as Java's `compactLevels(0, last - 1)`.
+    // Merging one level at a time put L0 into the last level while L1 still
+    // held older versions, so §5's condition 3 failed silently: a tombstone was
+    // dropped over a version outside the job, and the key came back.
+    final upper = [for (var l = 0; l < lastLevel; l++) ...refsAt(l)];
+    if (upper.isNotEmpty) _compactInto(upper, lastLevel);
     collectWhileOverDebt();
   }
 
@@ -1494,7 +1497,12 @@ final class Engine {
           job.out.add(_promote(rec, parsed.treeId, job.dead, job.recluster,
               levelled: job.levelled));
         }
-      } else if (job.levelled && job.newestSeq <= job.retained) {
+      } else if (job.levelled &&
+          job.newestSeq <= job.retained &&
+          // F-033: a RANGE_DELETE is keyed at its start key but is not a
+          // version of it; dropped as "superseded" by a newer put there, it
+          // took every row it covered back with it.
+          rec.op != Op.rangeDelete) {
         // §5 condition 3 holds only at the last level, so a superseded version
         // may be dropped only here — and only once the version that supersedes
         // it is itself visible to every live snapshot (condition 2). A tiered
@@ -1852,16 +1860,16 @@ final class Engine {
     // `visible_seq` sees them; a `get` that skipped it would lose every write
     // since the last flush.
     SegRecord? best = _memtableLookup(prefix, ceiling);
-    if (best != null && earlyExit) {
-      // Nothing in a segment can be newer than an unflushed record.
-      segmentsProbed.add(0);
-      return best.op == Op.delete ? null : best;
-    }
+    // Nothing in a segment can be newer than an unflushed record, so a hit
+    // skips the segments -- but not the checks after them (F-032: it returned
+    // a RANGE_DELETE's payload as the value of its start key, and ignored
+    // range deletes and expiry for every memtable hit).
+    final memHit = best != null && earlyExit;
 
     // §4 step 4: a read landing inside an unavailable range fails naming the
     // range, "never with a wrong or empty answer". The test is on the manifest
     // entry, so it costs no I/O and works even though the extent is unreadable.
-    for (final r in quarantined.isEmpty ? const <SegmentRef>[] : quarantined.values) {
+    for (final r in memHit || quarantined.isEmpty ? const <SegmentRef>[] : quarantined.values) {
       if (r.covers(prefix)) {
         throw UnavailableRangeException(
             'key falls inside the range of quarantined segment '
@@ -1878,7 +1886,7 @@ final class Engine {
     final hash = cfh64(prefix);
     var probed = 0;
     var stop = false;
-    for (final ref in _candidateRefs()) {
+    for (final ref in memHit ? const <SegmentRef>[] : _candidateRefs()) {
       if (!ref.covers(prefix)) continue;
       final s = extents[ref.segmentId]!;
       final f = s.filter;
@@ -1936,7 +1944,7 @@ final class Engine {
       if (!match) break;
       if (ceiling == null || parseInternalKey(k).seq <= ceiling) {
         final p = _memtable[k]!;
-        final rec = SegRecord(k, p.valueKind, p.value, null);
+        final rec = SegRecord(k, p.valueKind, p.value, p.expiryMs);
         if (best == null || rec.seq > best.seq) best = rec;
       }
       k = _memtable.firstKeyAfter(k);

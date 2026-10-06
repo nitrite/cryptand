@@ -1,0 +1,9 @@
+{"oplog":1,"seed":0,"profile":"desktop","encrypted":false,"trees":1,"keys":10,"skew":0.5,"big":0.05,"prefix":0}
+{"op":"put","t":1,"k":"31","v":{"n":10,"s":1}}
+{"op":"commit","d":"none"}
+{"op":"compact"}
+{"op":"range_del","t":1,"lo":"30","hi":"40"}
+{"op":"put","t":1,"k":"30","v":{"n":10,"s":2}}
+{"op":"compact"}
+{"op":"get","t":1,"k":"31"}
+{"op":"scan","t":1}

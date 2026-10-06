@@ -31,7 +31,7 @@ stage "interop"             "$root" "$ref/conformance/interop/run.sh"
 
 stage "oplog regress (rust)" "$ref/rust" sh -c 'cargo build -q --release -p cryptand --features harness --bin oplog_check && target/release/oplog_check ../conformance/oplog/regress/*.jsonl'
 stage "oplog regress (java)" "$ref/java" mvn -B -q test -Djacoco.skip=true -Dtest=OplogCheckTest
-pending "oplog regress (dart)" "M1.2"
+stage "oplog regress (dart)" "$ref/dart/cryptand" dart test test/oplog_check_test.dart
 [[ -d $ref/conformance/files/fuzz-regress ]] || pending "fuzz regress replay" "M3.5"
 
 if [[ $mode == full ]]; then
