@@ -90,7 +90,20 @@ impl EngineRepair for Engine {
         let mut rep = RepairReport::default();
         let mut page = 2u64;
         let mut found: Vec<(u64, VlogStats)> = Vec::new();
+        // F-048: a collected segment's head page outlives it in its freed
+        // extent; rebuilding an entry from it gives tree 7 an extent the free
+        // list also owns.
+        let free: std::collections::HashSet<u64> = self
+            .pager
+            .free_list()
+            .into_iter()
+            .flat_map(|e| e.start_page..e.start_page + e.pages as u64)
+            .collect();
         while page < self.pager.page_count {
+            if free.contains(&page) {
+                page += 1;
+                continue;
+            }
             let raw = match self.pager.read_page(page) {
                 Ok(p) => p,
                 Err(_) => {

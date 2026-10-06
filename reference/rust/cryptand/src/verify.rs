@@ -99,6 +99,7 @@ impl EngineVerify for Engine {
 
         let refs = self.all_refs()?;
         r.segments = refs.len() as u64;
+        const BLOB_OWNER: u64 = u64::MAX - 3;
         let mut reachable: HashMap<u64, u64> = HashMap::new(); // page -> owner
         // Pages 0 and 1 are the superblock slots.
         reachable.insert(0, u64::MAX);
@@ -177,10 +178,32 @@ impl EngineVerify for Engine {
                         format!("segment {}: an entry falls outside its declared key bounds", rf.segment_id),
                     );
                 }
+                // F-048: a BLOB (01 §5, written by Java) owns its own extent.
+                // Unclaimed, its pages read as leaks and `repair` freed them.
+                if rec.value_kind == crate::segment::value_kind::BLOB && rec.value.len() == 16 {
+                    let start = u64::from_le_bytes(rec.value[0..8].try_into().unwrap());
+                    let len = u32::from_le_bytes(rec.value[8..12].try_into().unwrap()) as u64;
+                    let ps = self.pager.page_size as u64;
+                    let chunk = if self.sb.cipher != 0 { ps - 24 } else { ps };
+                    let head = chunk - crate::container::PAGE_HEADER_BYTES as u64;
+                    let pages = 1 + len.saturating_sub(head).div_ceil(chunk);
+                    for p in start..start.saturating_add(pages) {
+                        // Versions of one key may share a blob; only a foreign owner collides.
+                        if let Some(other) = reachable.insert(p, BLOB_OWNER) {
+                            if other != BLOB_OWNER {
+                                r.add(Class::Corruption, format!("page {p} is allocated to both {other} and a blob"));
+                            }
+                        }
+                    }
+                }
                 // §9 step 4 and §11 invariant 8.
                 if rec.value_kind == crate::segment::value_kind::VLOG {
                     let p = VlogPointer::parse(&rec.value)?;
                     match self.vlog_stats.get(&p.segment_id).cloned() {
+                        // F-048: GC frees a segment once no *current* entry points
+                        // into it (§6.8) and F-043 drops its tree-7 entry, so a
+                        // superseded, deleted or expired cell may name it.
+                        None if self.current_pointer(user_part(&rec.internal_key))?.map(|(c, _)| c) != Some(p) => {}
                         None => r.add(
                             Class::Corruption,
                             format!("VLOG pointer names unknown value-log segment {}", p.segment_id),

@@ -10,7 +10,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 rel="$root/reference/rust/target/release"
-(cd "$root/reference/rust" && cargo build -q --release -p cryptand --features harness --bin oplog_gen --bin oplog_check)
+(cd "$root/reference/rust" && cargo build -q --release -p cryptand --features harness --bin oplog_gen --bin oplog_check --bin cryptand)
 (cd "$root/reference/java" && mvn -B -q test-compile -Djacoco.skip=true &&
   mvn -B -q dependency:build-classpath -Dmdep.outputFile="$dir/cp" -Dmdep.includeScope=test)
 jcp="$root/reference/java/target/classes:$root/reference/java/target/test-classes:$(cat "$dir/cp")"
@@ -43,6 +43,17 @@ play() { # log db first-leg-index
   r=$(leg rust "$log" "$db" $end $end) j=$(leg java "$log" "$db" $end $end) d=$(leg dart "$log" "$db" $end $end)
   if [ "$r" != "$j" ] || [ "$r" != "$d" ]; then
     echo "seed $seed: digests differ: rust $r java $j dart $d" >&2
+    exit 1
+  fi
+  # And Rust's integrity pass, leaks included: an extent nothing claims is
+  # what `repair` frees (F-048 freed a live Java blob that way).
+  if grep -q '"encrypted":true' "$log"; then
+    v=$(CRYPTAND_KEY=$(printf '\007%.0s' $(seq 32)) "$rel/cryptand" verify "$db" 2>&1 || true)
+  else
+    v=$("$rel/cryptand" verify "$db" 2>&1 || true)
+  fi
+  if echo "$v" | grep -q 'Leak\|Corruption\|Tampering\|Double'; then
+    echo "seed $seed: rust verify of the final file: $v" | head -5 >&2
     exit 1
   fi
 }

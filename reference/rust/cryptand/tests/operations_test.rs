@@ -260,6 +260,42 @@ fn a_lost_value_log_stats_entry_is_rebuilt_by_scanning_the_records() {
     }
 }
 
+/// F-048: a collected value-log segment's head page outlives it in its freed
+/// extent. Rebuilding tree 7 from it gave the free list and tree 7 one extent.
+#[test]
+fn rebuilding_value_log_stats_skips_a_collected_segments_leftover_head() {
+    let (t, mut e) = engine("repair-collected", Profile::Desktop);
+    let n = e.sb.vlog_min as usize + 512;
+    // Half the keys per round, so every cold run stays partly live and
+    // `collect` (which takes only runs with live bytes) has something to merge.
+    let mut want = vec![0u8; 50];
+    for round in 0..4u8 {
+        for i in (0..50i64).filter(|i| round == 0 || (i + round as i64) % 2 == 0) {
+            e.put(T, &Value::NitriteId(i), &vec![round; n]).unwrap();
+            want[i as usize] = round;
+        }
+        e.flush().unwrap();
+        e.commit(Durability::Sync).unwrap();
+        e.compact().unwrap();
+    }
+    e.collect().unwrap();
+    e.commit(Durability::Sync).unwrap();
+    assert!(e.vlog_stats.values().any(|s| s.retired()), "nothing was collected; the test needs it");
+    e.close(true).unwrap();
+    let mut e = Engine::open(&t.path, None).unwrap();
+    e.rebuild_vlog_stats().unwrap();
+    let free: std::collections::HashSet<u64> =
+        e.pager.free_list().into_iter().flat_map(|x| x.start_page..x.start_page + x.pages as u64).collect();
+    for (id, s) in &e.vlog_stats {
+        assert!(!free.contains(&s.start_page), "value-log segment {id} rebuilt over a free extent");
+    }
+    let v = e.verify().unwrap();
+    assert!(v.of(Class::Corruption).is_empty(), "{:?}", v.of(Class::Corruption));
+    for i in 0..50i64 {
+        assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap().unwrap(), vec![want[i as usize]; n]);
+    }
+}
+
 #[test]
 fn every_maintenance_operation_is_incremental_and_resumable() {
     let (_t, mut e) = engine("spaceapi", Profile::Mobile);
@@ -280,7 +316,8 @@ fn every_maintenance_operation_is_incremental_and_resumable() {
     assert_eq!(e.cluster_pass().unwrap(), Step::Done);
     let freed = e.shrink().unwrap();
     println!("compaction took {steps} bounded steps; shrink released {freed} pages");
-    assert!(e.verify().unwrap().of(Class::Corruption).is_empty());
+    let v = e.verify().unwrap();
+    assert!(v.of(Class::Corruption).is_empty(), "{:?}", v.of(Class::Corruption));
 }
 
 #[test]

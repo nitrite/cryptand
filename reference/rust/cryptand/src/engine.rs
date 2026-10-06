@@ -2967,7 +2967,7 @@ impl Engine {
 
     /// The pointer a reader would resolve for `user_key` now, and its expiry;
     /// `None` when the current version is not a live VLOG record.
-    fn current_pointer(&mut self, user_key: &[u8]) -> Result<Option<(VlogPointer, Option<u64>)>> {
+    pub(crate) fn current_pointer(&mut self, user_key: &[u8]) -> Result<Option<(VlogPointer, Option<u64>)>> {
         let tree = u32::from_be_bytes(user_key[0..4].try_into().unwrap());
         let key = cke::decode_all(&user_key[4..])?;
         let _ = tree;
