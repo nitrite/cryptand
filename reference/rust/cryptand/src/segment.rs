@@ -769,20 +769,25 @@ impl RangeDelete {
 }
 
 /// §2.5's payload: `uvar end_key_len || end_key`, carried as an INLINE value.
-pub fn encode_range_delete_payload(end_user_prefix: &[u8]) -> Vec<u8> {
+/// `end_key` is `CKE(end)`, the same `key` §1 puts inside the internal key,
+/// with no tree id (F-042: this wrote `u32be(tree_id) || CKE(end)`, which
+/// Java and Dart read as a different bound).
+pub fn encode_range_delete_payload(end_cke: &[u8]) -> Vec<u8> {
     let mut v = Vec::new();
-    put_uvar(&mut v, end_user_prefix.len() as u64);
-    v.extend_from_slice(end_user_prefix);
+    put_uvar(&mut v, end_cke.len() as u64);
+    v.extend_from_slice(end_cke);
     v
 }
 
-pub fn decode_range_delete_payload(p: &[u8]) -> Result<Vec<u8>> {
+/// The payload's end bound as a user-key prefix of `tree_id`, the form
+/// [`RangeDelete::covers`] compares against.
+pub fn decode_range_delete_payload(tree_id: u32, p: &[u8]) -> Result<Vec<u8>> {
     let (len, n) = get_uvar(p)?;
     let end = n
         .checked_add(len as usize)
         .filter(|e| *e <= p.len())
         .ok_or_else(|| crate::error::Error::Corrupt("range delete end_key runs past the cell".into()))?;
-    Ok(p[n..end].to_vec())
+    Ok(user_prefix(tree_id, &p[n..end]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1770,7 +1775,7 @@ impl Segment {
             out.push(RangeDelete {
                 tree_id: parsed.tree_id,
                 start: user_part(&rec.internal_key).to_vec(),
-                end: decode_range_delete_payload(&rec.value)?,
+                end: decode_range_delete_payload(parsed.tree_id, &rec.value)?,
                 seq: parsed.seq,
             });
         }

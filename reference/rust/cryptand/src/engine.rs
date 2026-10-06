@@ -1023,7 +1023,7 @@ impl Engine {
             ik,
             MemEntry {
                 value_kind: value_kind::INLINE,
-                value: encode_range_delete_payload(&e),
+                value: encode_range_delete_payload(&e[4..]),
                 expiry_ms: None,
             },
         );
@@ -1893,7 +1893,7 @@ impl Engine {
                     out.push(RangeDelete {
                         tree_id: tree,
                         start: user_part(ik).to_vec(),
-                        end: crate::segment::decode_range_delete_payload(&e.value)?,
+                        end: crate::segment::decode_range_delete_payload(tree, &e.value)?,
                         seq: p.seq,
                     });
                 }
@@ -2323,7 +2323,7 @@ impl Engine {
                 range_tombstones.push(RangeDelete {
                     tree_id: 0, // unused: `start`/`end` already carry the tree prefix
                     start: user_part(&rec.internal_key).to_vec(),
-                    end: crate::segment::decode_range_delete_payload(&rec.value)?,
+                    end: crate::segment::decode_range_delete_payload(parse_internal_key(&rec.internal_key)?.tree_id, &rec.value)?,
                     seq: rec.seq(),
                 });
             }

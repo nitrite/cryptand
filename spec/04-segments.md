@@ -389,7 +389,9 @@ above is the right one.
 
 `op = RANGE_DELETE` marks a half-open interval `[key, end_key)` deleted at `seq`.
 The value payload holds `uvar end_key_len || end_key`. Set
-`flags.HAS_RANGE_DELETES` on the segment.
+`flags.HAS_RANGE_DELETES` on the segment. `end_key` is `CKE(end)`, encoded as
+`key` is in §1, **without** `tree_id`: the interval lies inside the entry's own
+tree.
 
 This makes `clear()`, `drop()` and rollback of a bulk insert O(1) writes rather
 than O(n) tombstones. A reader MUST apply range deletes: an entry at
