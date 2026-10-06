@@ -29,7 +29,8 @@ stage "dart analyze"        "$ref/dart/cryptand" dart analyze --fatal-infos
 stage "dart test"           "$ref/dart/cryptand" dart test
 stage "interop"             "$root" "$ref/conformance/interop/run.sh"
 
-[[ -d $ref/conformance/oplog/regress ]] || pending "oplog regress replay" "M1.4"
+stage "oplog regress (rust)" "$ref/rust" sh -c 'cargo build -q --release -p cryptand --features harness --bin oplog_check && target/release/oplog_check ../conformance/oplog/regress/*.jsonl'
+pending "oplog regress (java, dart)" "M1.2"
 [[ -d $ref/conformance/files/fuzz-regress ]] || pending "fuzz regress replay" "M3.5"
 
 if [[ $mode == full ]]; then

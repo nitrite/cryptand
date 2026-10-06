@@ -96,9 +96,9 @@ impl Gen {
         1 + self.r.below(self.c.trees as u64) as u32
     }
 
-    fn put(&mut self) -> String {
+    fn put(&mut self, ttl: bool) -> String {
         let (t, k, v) = (self.tree(), self.key(), self.value());
-        if self.r.below(10) == 0 {
+        if ttl && self.r.below(10) == 0 {
             let x = self.clock + 1 + self.r.below(5000);
             format!(r#"{{"op":"put","t":{t},"k":"{k}","v":{v},"x":{x}}}"#)
         } else {
@@ -140,7 +140,7 @@ impl Gen {
             i += 1;
         }
         match OPS[i] {
-            "put" => self.put(),
+            "put" => self.put(true),
             "del" => self.del(),
             "range_del" => match self.bounds() {
                 Some((lo, hi)) => {
@@ -152,7 +152,7 @@ impl Gen {
             "batch" => {
                 let n = 1 + self.r.below(16);
                 let ops: Vec<String> = (0..n)
-                    .map(|_| if self.r.below(4) == 0 { self.del() } else { self.put() })
+                    .map(|_| if self.r.below(4) == 0 { self.del() } else { self.put(false) })
                     .collect();
                 format!(r#"{{"op":"batch","ops":[{}]}}"#, ops.join(","))
             }
@@ -183,7 +183,7 @@ impl Gen {
                 let id = self.live.swap_remove(self.r.below(self.live.len() as u64) as usize);
                 format!(r#"{{"op":"release","id":{id}}}"#)
             }
-            "snapshot" | "release" => self.put(),
+            "snapshot" | "release" => self.put(true),
             "commit" => {
                 let d = ["none", "os", "sync", "full"][self.r.below(4) as usize];
                 format!(r#"{{"op":"commit","d":"{d}"}}"#)
@@ -323,6 +323,7 @@ mod tests {
                 "release" => assert!(live.remove(&j["id"].as_u64().unwrap())),
                 "reopen" => assert!(live.is_empty(), "reopen with a live snapshot"),
                 "ttl_advance" => clock += j["ms"].as_u64().unwrap(),
+                "batch" => assert!(j["ops"].as_array().unwrap().iter().all(|w| w.get("x").is_none())),
                 "put" => {
                     if let Some(x) = j["x"].as_u64() {
                         assert!(x > clock, "expiry already in the past");
@@ -357,4 +358,11 @@ mod tests {
             assert!(parse(&a).is_err(), "{a:?}");
         }
     }
+}
+
+/// One log as a string, from command-line style knobs (used by `oplog_check --seeds`).
+pub fn generate(args: &[String]) -> Result<String, String> {
+    let mut out = Vec::new();
+    Gen::new(parse(args)?).write(&mut out).map_err(|e| e.to_string())?;
+    Ok(String::from_utf8(out).expect("utf8"))
 }

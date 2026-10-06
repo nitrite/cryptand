@@ -1,0 +1,13 @@
+{"oplog":1,"seed":6,"profile":"desktop","encrypted":false,"trees":2,"keys":1000,"skew":0.5,"big":0.05,"prefix":0}
+{"op":"put","t":1,"k":"393833","v":{"n":6899,"s":7789174227383582}}
+{"op":"batch","ops":[{"k":"34","op":"put","t":2,"v":{"n":181,"s":2013096144751400}}]}
+{"op":"del","t":1,"k":"323135"}
+{"op":"compact"}
+{"op":"reopen"}
+{"op":"put","t":2,"k":"30","v":{"n":4735,"s":7968780398645242}}
+{"op":"commit","d":"none"}
+{"op":"compact"}
+{"op":"shrink"}
+{"op":"reopen"}
+{"op":"put","t":1,"k":"3136","v":{"n":7003,"s":8305301310654791}}
+{"op":"shrink"}

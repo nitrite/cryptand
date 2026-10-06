@@ -1,0 +1,7 @@
+{"oplog":1,"seed":1,"profile":"desktop","encrypted":false,"trees":2}
+{"op":"put","t":2,"k":"313433","v":{"n":5318,"s":5}}
+{"op":"compact"}
+{"op":"put","t":1,"k":"313735","v":{"n":6310,"s":8}}
+{"op":"snapshot","id":14}
+{"op":"range_del","t":1,"lo":"3134","hi":"333238"}
+{"op":"compact"}

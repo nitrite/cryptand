@@ -2265,14 +2265,36 @@ impl Engine {
         let mut inputs = inputs;
         if target == last {
             let have: HashSet<u64> = inputs.iter().map(|r| r.segment_id).collect();
+            let mut have = have;
             let lo = inputs.iter().map(|r| user_part(&r.min_key).to_vec()).min().unwrap_or_default();
-            let hi = inputs.iter().map(|r| user_part(&r.max_key).to_vec()).max().unwrap_or_default();
-            for r in self.healthy_refs_at(last)? {
-                if have.contains(&r.segment_id) {
-                    continue;
+            let mut hi = inputs.iter().map(|r| user_part(&r.max_key).to_vec()).max().unwrap_or_default();
+            // F-018: a range delete reaches past its segment's `max_key` to its
+            // `end`. Every last-level segment under that reach joins too, or
+            // the tombstone is dropped below while the rows it hides survive.
+            // Repeated until no input widens the span.
+            let mut scanned: HashSet<u64> = HashSet::new();
+            loop {
+                let fresh: Vec<SegmentRef> =
+                    inputs.iter().filter(|r| r.has_range_deletes && scanned.insert(r.segment_id)).cloned().collect();
+                for r in &fresh {
+                    for rd in self.segment(r)?.range_deletes()? {
+                        if rd.end > hi {
+                            hi = rd.end;
+                        }
+                    }
                 }
-                if user_part(&r.max_key) >= &lo[..] && user_part(&r.min_key) <= &hi[..] {
-                    inputs.push(r);
+                let before = inputs.len();
+                for r in self.healthy_refs_at(last)? {
+                    if have.contains(&r.segment_id) {
+                        continue;
+                    }
+                    if user_part(&r.max_key) >= &lo[..] && user_part(&r.min_key) <= &hi[..] {
+                        have.insert(r.segment_id);
+                        inputs.push(r);
+                    }
+                }
+                if inputs.len() == before {
+                    break;
                 }
             }
         }
@@ -2292,28 +2314,51 @@ impl Engine {
             }
         }
         merged.sort_by(|a, b| a.internal_key.cmp(&b.internal_key));
+        // F-018: range tombstones every snapshot already sees. A record they
+        // cover (with an older seq) is dropped here, in the same pass that may
+        // drop the tombstone itself; otherwise it outlives what hid it.
+        let mut range_tombstones: Vec<RangeDelete> = Vec::new();
+        if reaches_last {
+            for rec in merged.iter().filter(|r| r.op() == op::RANGE_DELETE && r.seq() <= min_retained) {
+                range_tombstones.push(RangeDelete {
+                    tree_id: 0, // unused: `start`/`end` already carry the tree prefix
+                    start: user_part(&rec.internal_key).to_vec(),
+                    end: crate::segment::decode_range_delete_payload(&rec.value)?,
+                    seq: rec.seq(),
+                });
+            }
+        }
 
         let mut kept: Vec<SegEntry> = Vec::new();
         let mut last_user: Option<Vec<u8>> = None;
         let mut newer_visible_seq: Option<u64> = None;
+        // Whether this key already passed its newest version with
+        // `seq <= min_retained` -- the one every snapshot resolves to.
+        let mut floor_seen = false;
         for rec in merged {
             let uk = user_part(&rec.internal_key).to_vec();
             let same_key = last_user.as_deref() == Some(uk.as_slice());
             if !same_key {
                 last_user = Some(uk.clone());
                 newer_visible_seq = None;
+                floor_seen = false;
             }
             let seq = rec.seq();
-            let drop_it = if same_key {
-                // Conditions 1 and 2: a newer version exists in this
-                // compaction and its seq is <= the oldest live snapshot's.
-                matches!(newer_visible_seq, Some(ns) if ns <= min_retained) && reaches_last
-            } else {
-                false
-            };
+            // Conditions 1 and 2: a newer version exists in this compaction
+            // and its seq is <= the oldest live snapshot's. F-021: *any* newer
+            // version, not only the newest -- with the newest above the floor,
+            // the version under a dropped tombstone used to survive and the
+            // oldest snapshot read it.
+            let drop_it = same_key && floor_seen && reaches_last;
+            if seq <= min_retained {
+                floor_seen = true;
+            }
             if newer_visible_seq.is_none() {
                 newer_visible_seq = Some(seq);
             }
+            let drop_it = drop_it
+                || (rec.op() != op::RANGE_DELETE
+                    && range_tombstones.iter().any(|rd| rd.seq > seq && rd.covers(&uk)));
             if drop_it {
                 // §6.7 — `live_bytes` is decremented when a compaction observes
                 // a record superseded or deleted. Without this the hot tier's
@@ -2667,7 +2712,7 @@ impl Engine {
                 all.push((r.start_page, r.pages, Extent::Segment(r)));
             }
         }
-        for v in self.vlog_stats.values() {
+        for v in self.vlog_stats.values().filter(|v| !v.retired()) {
             all.push((v.start_page, v.pages, Extent::Vlog(v.segment_id)));
         }
         all.sort_unstable_by(|a, b| b.0.cmp(&a.0));
@@ -2717,7 +2762,7 @@ impl Engine {
         for r in self.all_refs()? {
             high = high.max(r.start_page + r.pages as u64);
         }
-        for v in self.vlog_stats.values() {
+        for v in self.vlog_stats.values().filter(|v| !v.retired()) {
             high = high.max(v.start_page + v.pages as u64);
         }
         let mut pages = Vec::new();
@@ -2804,7 +2849,7 @@ impl Engine {
         // Build the survivor set by walking the trees, which is what §6.8's
         // invariant 1 requires: a record is live only if the tree's current
         // entry for its key is a VLOG pointer to this exact (segment, offset).
-        let mut live: BTreeMap<Vec<u8>, (u32, VlogPointer, Vec<u8>)> = BTreeMap::new();
+        let mut live: BTreeMap<Vec<u8>, (u32, VlogPointer, Option<u64>)> = BTreeMap::new();
         let refs = self.all_refs()?;
         for r in refs {
             let seg = self.segment(&r)?;
@@ -2820,14 +2865,15 @@ impl Engine {
                 }
                 let uk = rec.user_key().to_vec();
                 let parsed = parse_internal_key(&rec.internal_key)?;
-                hits.push((uk, parsed.tree_id, p, rec.internal_key.clone()));
+                hits.push((uk, parsed.tree_id, p));
             }
-            for (uk, tree, p, ik) in hits {
+            for (uk, tree, p) in hits {
                 // Only the current entry counts; a superseded record carries
                 // the same key, so a key match alone is not sufficient.
-                let current = self.current_pointer(&uk)?;
-                if current == Some(p) {
-                    live.insert(uk, (tree, p, ik));
+                if let Some((cur, expiry)) = self.current_pointer(&uk)? {
+                    if cur == p {
+                        live.insert(uk, (tree, p, expiry));
+                    }
                 }
             }
         }
@@ -2835,19 +2881,19 @@ impl Engine {
             return Ok(());
         }
         let dest = self.open_vlog_segment(Tier::Cold, Heat::First)?;
-        let mut rewrites: Vec<(Vec<u8>, VlogPointer)> = Vec::new();
-        for (uk, (tree, p, _ik)) in &live {
+        let mut rewrites: Vec<(Vec<u8>, VlogPointer, Option<u64>)> = Vec::new();
+        for (uk, (tree, p, expiry)) in &live {
             let rec = self.read_vlog_record(p)?;
             let value = self.read_vlog(p)?;
             let np = self.append_into(Tier::Cold, Heat::First, *tree, &rec.key, &value)?;
             self.counters.write_amp_gc += np.len as u64;
-            rewrites.push((uk.clone(), np));
+            rewrites.push((uk.clone(), np, *expiry));
         }
         self.mark_clustered(dest, true)?;
         self.seal_vlog(dest)?;
         // Step 4: write the updated pointers through the normal commit path.
-        for (uk, np) in rewrites {
-            self.rewrite_pointer(&uk, np)?;
+        for (uk, np, expiry) in rewrites {
+            self.rewrite_pointer(&uk, np, expiry)?;
         }
         for v in victims {
             if let Some(s) = self.vlog_stats.get_mut(&v) {
@@ -2866,7 +2912,9 @@ impl Engine {
         Ok(())
     }
 
-    fn current_pointer(&mut self, user_key: &[u8]) -> Result<Option<VlogPointer>> {
+    /// The pointer a reader would resolve for `user_key` now, and its expiry;
+    /// `None` when the current version is not a live VLOG record.
+    fn current_pointer(&mut self, user_key: &[u8]) -> Result<Option<(VlogPointer, Option<u64>)>> {
         let tree = u32::from_be_bytes(user_key[0..4].try_into().unwrap());
         let key = cke::decode_all(&user_key[4..])?;
         let _ = tree;
@@ -2883,22 +2931,30 @@ impl Engine {
                 }
             }
         }
+        // F-019: point lookups do not see range deletes; a covering one newer
+        // than the record hides it exactly as it does for a reader.
+        if let Some(rec) = &best {
+            if self.range_delete_seq(tree, user_key, None)? > rec.seq() || self.expired(rec) {
+                return Ok(None);
+            }
+        }
         match best {
             Some(rec) if rec.value_kind == value_kind::VLOG => {
-                Ok(Some(VlogPointer::parse(&rec.value)?))
+                Ok(Some((VlogPointer::parse(&rec.value)?, rec.expiry_ms)))
             }
             _ => Ok(None),
         }
     }
 
-    fn rewrite_pointer(&mut self, user_key: &[u8], np: VlogPointer) -> Result<()> {
+    fn rewrite_pointer(&mut self, user_key: &[u8], np: VlogPointer, expiry_ms: Option<u64>) -> Result<()> {
         let tree = u32::from_be_bytes(user_key[0..4].try_into().unwrap());
         let cke_key = &user_key[4..];
         let seq = self.allocate_seq(1);
         let ik = internal_key(tree, cke_key, seq, op::PUT);
         self.insert_mem(
             ik,
-            MemEntry { value_kind: value_kind::VLOG, value: np.encode().to_vec(), expiry_ms: None },
+            // F-020: the copy keeps the original's expiry.
+            MemEntry { value_kind: value_kind::VLOG, value: np.encode().to_vec(), expiry_ms },
         );
         Ok(())
     }

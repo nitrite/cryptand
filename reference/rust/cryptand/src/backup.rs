@@ -129,7 +129,7 @@ impl Backup for Engine {
             r.bytes_copied += extent.len() as u64;
         }
         for s in self.vlog_stats.values() {
-            if have.contains(&s.segment_id) || s.pages == 0 {
+            if have.contains(&s.segment_id) || s.pages == 0 || s.retired() {
                 continue;
             }
             let extent = self.pager.read_extent(s.start_page, s.pages)?;

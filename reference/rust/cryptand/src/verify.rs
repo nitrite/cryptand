@@ -279,7 +279,7 @@ impl EngineVerify for Engine {
 
         // §11 invariants 8b, 9 and 10.
         for (id, s) in self.vlog_stats.clone() {
-            if s.pages == 0 {
+            if s.pages == 0 || s.retired() {
                 continue;
             }
             let head_page = self.pager.read_page(s.start_page)?;

@@ -170,6 +170,17 @@ pub struct VlogStats {
     pub last_gc_seq: u64,
 }
 
+impl VlogStats {
+    /// Collected (§6.8): its extent is already on the free list. The entry
+    /// stays so a snapshot older than the collection can still resolve its
+    /// pointers, but the pages are not this segment's any more -- moving,
+    /// copying or freeing them again hands one extent to two owners (F-022).
+    /// `last_gc_seq` is set only by `collect`, at the moment it frees.
+    pub fn retired(&self) -> bool {
+        self.last_gc_seq != 0
+    }
+}
+
 /// One decoded value-log record.
 #[derive(Clone, Debug)]
 pub struct VlogRecord {

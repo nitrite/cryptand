@@ -38,16 +38,16 @@ generator knobs so a log can be regenerated. A reader MUST reject `oplog` ≠ 1.
 | `put` | `t k v [x]` | put; `x` = absolute expiry in ms on the op-log clock |
 | `del` | `t k` | point tombstone |
 | `range_del` | `t lo hi` | delete `[lo, hi)`; always `lo < hi` |
-| `batch` | `ops` | array of `put`/`del`, committed atomically as one transaction |
+| `batch` | `ops` | array of `put` (never with `x`) / `del`, committed atomically as one transaction |
 | `get` | `t k [at]` | read; compare engine vs model. `at` = snapshot id |
 | `scan` | `t [lo] [hi] [at]` | ordered scan of `[lo, hi)`, compare every pair |
-| `snapshot` | `id` | take a snapshot, name it `id` |
+| `snapshot` | `id` | take a snapshot, name it `id`; it sees only **committed** writes (`spec/10` §1) |
 | `release` | `id` | release it |
-| `commit` | `d` | `none` \| `os` \| `sync` \| `full` |
-| `reopen` | | commit `sync`, close, open again; every snapshot was released before |
+| `commit` | `d` | make every write so far committed (Rust: `flush` then `commit`), at durability `none` \| `os` \| `sync` \| `full` |
+| `reopen` | | `commit` at `sync`, close, open again; every snapshot was released before |
 | `compact` | | full compaction |
 | `shrink` | | relocate live extents and truncate |
-| `checkpoint` | | commit `full` (the durable checkpoint) |
+| `checkpoint` | | `commit` at `full` |
 | `ttl_advance` | `ms` | advance the clock; a put with `x ≤ clock` reads as absent |
 
 The clock starts at 0 (Rust `Engine::now_ms`). An absent field means "none"

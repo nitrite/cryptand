@@ -283,6 +283,111 @@ fn a_large_separated_value_survives_a_reopen() {
     assert_eq!(e.get(T, &Value::NitriteId(42)).unwrap().unwrap(), big);
 }
 
+/// F-018. A last-level compaction dropped the range tombstone (its seq was
+/// below every snapshot) but kept the point records it covered, which have
+/// different user keys and so were never shadowed: the rows came back. Found
+/// by `oplog_check` (M1.2), seed 1, minimized to put, range_del, commit, compact.
+#[test]
+fn compaction_does_not_resurrect_rows_hidden_by_a_range_delete() {
+    let (_t, mut e) = engine("rangedelete-compact", Profile::Desktop);
+    for i in 0..100i64 {
+        e.put(T, &Value::NitriteId(i), b"x").unwrap();
+    }
+    e.flush().unwrap();
+    e.remove_range(T, &Value::NitriteId(20), &Value::NitriteId(40)).unwrap();
+    e.flush().unwrap();
+    e.compact().unwrap();
+    assert!(e.get(T, &Value::NitriteId(25)).unwrap().is_none(), "a deleted row came back");
+    assert_eq!(e.scan_tree(T, None, None, None, false).unwrap().len(), 80);
+    // and once more, now that everything is in the last level
+    e.put(T, &Value::NitriteId(1000), b"y").unwrap();
+    e.flush().unwrap();
+    e.compact().unwrap();
+    assert_eq!(e.scan_tree(T, None, None, None, false).unwrap().len(), 81);
+}
+
+/// F-018, second shape: the tombstone's range reaches past every point key of
+/// the compaction's inputs into a last-level segment the inputs do not
+/// overlap. That segment must join the compaction, or the tombstone is dropped
+/// while the rows it hides survive next to it.
+#[test]
+fn a_range_delete_reaching_past_its_inputs_still_hides_the_rows_it_covers() {
+    let (_t, mut e) = engine("rangedelete-reach", Profile::Desktop);
+    for i in 500..600i64 {
+        e.put(T, &Value::NitriteId(i), b"far").unwrap();
+    }
+    e.flush().unwrap();
+    e.compact().unwrap(); // 500..600 now sits alone in the last level
+    e.put(T, &Value::NitriteId(1), b"near").unwrap();
+    e.remove_range(T, &Value::NitriteId(2), &Value::NitriteId(10_000)).unwrap();
+    e.flush().unwrap();
+    // A partial compaction: only the new L0 segment, straight into the last
+    // level. (`compact()` takes everything and would hide the defect.)
+    let last = e.policy.last_level();
+    let l0 = e.refs_at(0).unwrap();
+    assert_eq!(l0.len(), 1);
+    let mut job = e.begin_compaction(l0, last).unwrap().unwrap();
+    while e.step_compaction(&mut job, Some(u64::MAX)).unwrap() {}
+    e.finish_compaction(job).unwrap();
+    assert!(e.get(T, &Value::NitriteId(550)).unwrap().is_none(), "a deleted row came back");
+    assert_eq!(e.scan_tree(T, None, None, None, false).unwrap().len(), 1);
+}
+
+/// F-019. Value-log collection decided a record was live with point lookups
+/// that ignore range deletes, then re-wrote it as a fresh PUT -- at a seq
+/// above the range delete that hid it. A live snapshot is what keeps the old
+/// version in the tree for collection to find. `oplog_check` seed 1, shrunk
+/// from 2019 lines to 7.
+#[test]
+fn value_log_collection_does_not_resurrect_a_range_deleted_row() {
+    let (_t, mut e) = engine("collect-rangedelete", Profile::Desktop);
+    let big = vec![7u8; 6000]; // past every profile's vlog_min
+    e.put(T + 1, &Value::NitriteId(1), &big).unwrap();
+    e.compact().unwrap();
+    e.put(T, &Value::NitriteId(5), &big).unwrap();
+    let s = e.snapshot();
+    e.remove_range(T, &Value::NitriteId(0), &Value::NitriteId(10)).unwrap();
+    e.compact().unwrap();
+    assert!(e.get(T, &Value::NitriteId(5)).unwrap().is_none(), "a deleted row came back");
+    assert!(e.get_at(T, &Value::NitriteId(5), Some(&s)).unwrap().is_none(), "and the snapshot never saw it");
+    assert!(e.scan_tree(T, None, None, None, false).unwrap().is_empty());
+}
+
+/// F-020. Collection re-wrote a relocated value with no expiry, so a TTL
+/// value that the collector moved never expired.
+#[test]
+fn value_log_collection_keeps_a_values_expiry() {
+    let (_t, mut e) = engine("collect-expiry", Profile::Desktop);
+    let big = vec![7u8; 6000];
+    e.put(T + 1, &Value::NitriteId(1), &big).unwrap();
+    e.compact().unwrap();
+    e.put_with_expiry(T, &Value::NitriteId(5), &big, 1_000).unwrap();
+    let _s = e.snapshot();
+    e.put(T + 1, &Value::NitriteId(2), &big).unwrap();
+    e.compact().unwrap();
+    e.now_ms = 2_000;
+    assert!(e.get(T, &Value::NitriteId(5)).unwrap().is_none(), "an expired value is still readable");
+}
+
+/// F-021. A last-level compaction dropped a tombstone that every snapshot
+/// sees, but kept the version beneath it because the key's *newest* version
+/// was newer than the oldest snapshot. That snapshot then read the deleted
+/// value. `oplog_check` seed 1.
+#[test]
+fn compaction_does_not_resurrect_a_deleted_version_under_a_snapshot() {
+    let (_t, mut e) = engine("compact-snapshot-tombstone", Profile::Desktop);
+    e.put(T, &Value::NitriteId(1), b"v1").unwrap();
+    e.remove(T, &Value::NitriteId(1)).unwrap();
+    e.flush().unwrap();
+    let s = e.snapshot();
+    e.put(T, &Value::NitriteId(1), b"v2").unwrap();
+    e.flush().unwrap();
+    e.compact().unwrap();
+    assert!(e.get_at(T, &Value::NitriteId(1), Some(&s)).unwrap().is_none(), "the snapshot read a deleted value");
+    assert!(e.scan_tree(T, None, None, Some(&s), false).unwrap().is_empty());
+    assert_eq!(e.get(T, &Value::NitriteId(1)).unwrap().as_deref(), Some(&b"v2"[..]));
+}
+
 #[test]
 fn range_delete_is_one_write_and_hides_the_interval() {
     let (_t, mut e) = engine("rangedelete", Profile::Desktop);
