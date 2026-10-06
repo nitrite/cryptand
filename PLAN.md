@@ -16,7 +16,7 @@ interop gate 12/12 directions plaintext+encrypted.
 | | milestone | track | due | status |
 |---|---|---|---|---|
 | M0 | Execution infra, gates, CI matrix | all | 10-07 | in progress (0.1–0.4 done; 0.5 todo) |
-| M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 Rust done, 1.4 started) |
+| M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 Rust done, Java in progress, 1.4 started) |
 | M2 | Crash consistency + concurrency | A | 10-16 | todo |
 | M3 | Coverage-guided fuzzing | A | 10-16 | todo |
 | M4 | Security review + pentest | A | 10-21 | todo |
@@ -108,7 +108,7 @@ test compares the engine against a model on random histories.
   *Done 10-06:* format in `oplog/README.md` (+ `release`, `commit`; values as
   SplitMix64 `{n,s}`); `oplog_gen` bin, 4 tests in the gate, shown failing.
 - [ ] **1.2** (Rust done 10-06: `oplog_check`, 300 seeds × 2000 ops clean after
-  fixing F-018…F-022; Java, Dart todo) Model checker per implementation: replay an op-log against the
+  fixing F-018…F-022; Java checker built, F-026…F-029 fixed, compact/reopen mixes still red; Dart todo) Model checker per implementation: replay an op-log against the
   engine **and** a sorted in-memory map; compare every read, and a full-scan
   digest at the end and after every `reopen`. Rust harness bin, Java test
   class, Dart test.

@@ -516,6 +516,9 @@ public final class Vlog {
                 end++;
             }
             to = Math.min(to, (long) seg.pages * pageSize);
+            // The open segment's extent is reserved, not written: rounding the
+            // window up to a page read past the end of the file (F-026).
+            to = Math.min(to, pager.file().size() - pager.offsetOf(seg.startPage));
             byte[] window = new byte[(int) (to - from)];
             pager.file().readFully(pager.offsetOf(seg.startPage) + from, window, 0, window.length);
             // `reads` is §6's metric - one per physical read, however wide.

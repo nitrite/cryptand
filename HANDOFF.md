@@ -20,20 +20,25 @@
   to fail. Its later stages print `PENDING` until M1.4/M2.2/M3/M6 build them.
   Clippy correctness/suspicious had 2 hits, both intentional, now `#[allow]`ed
   with a reason (`container.rs` `writable`, `multiproc.rs` perms restore).
-- M1.1 done (op-log format + `oplog_gen`). M1.2 **Rust** done: `oplog_check`
-  replays a log against `Engine` + a model; `--seeds A..B` generates in
-  process; `--shrink` minimizes (2015 → 13 lines). 300 seeds × 2000 ops: 0
-  divergences, after it found and we fixed **4 S0 + 1 S1 in Rust** (F-018
-  range tombstone dropped at last level; F-019 GC resurrects range-deleted
-  rows; F-020 GC drops expiry; F-021 snapshot reads a deleted version; F-022
-  shrink re-frees collected value-log extents, one extent two owners). Each
-  has a test shown failing with its fix reverted, except F-022's two filters
-  (`relocate_down`, `cut_tail`): either alone stops the regress log, so each
-  one needs the M2.5 ownership audit as its own control.
-- Model semantics learned: a snapshot sees only *committed* writes
-  (`visible_seq`, advanced by flush); op-log `commit` = flush + commit.
-- **Same bug, three languages:** F-018…F-022 are `?` for Java and Dart. The
-  Java/Dart checkers (rest of M1.2) are how we find out.
+- M1.1 done. M1.2 Rust done: `oplog_check` (replay, `--seeds A..B`,
+  `--shrink`), 300 seeds × 2000 ops clean after fixing F-018…F-022 (commit
+  edbd6cd). F-022's two filters still need the M2.5 ownership audit as control.
+- Model semantics: a snapshot sees only *committed* writes (`visible_seq`);
+  op-log `commit` = flush + commit.
+- **M1.2 Java in progress (10-06).** `OplogCheckTest` (lsm package) replays
+  `regress/` (in the gate) and `-Doplog.dir` logs; `tools/oplog_java.sh A B
+  [knobs]` feeds it Rust `oplog_gen` output. `main --shrink FILE` minimizes
+  (any-of-5 replays, since Java's committer/compactor threads make some bugs
+  racy). Fixed in Java: F-026 scan read-ahead past EOF, F-027 GC rewrites a
+  snapshot-only version over newer data, F-028 scan misses acknowledged
+  writes, F-029 lookup early exit wrong across range-partition groups. F-025
+  (cursor upper bound inclusive) noted only. Regress logs f027, f029 added;
+  Rust replays them with identical digests.
+- **Java still red at scale:** mix without compact/reopen/shrink is clean
+  (100 seeds × 2000 ops); `+compact` ~65/100 and `+reopen` ~25/100 seeds
+  diverge (stale/absent gets, "value-log segment N has no entry in tree 7").
+  Racy: a 55-line shrink passed 20/20 replays. Unproven suspect: GC
+  check-then-rewrite races a concurrent user put (writers skip `structure`).
 
 ## Decisions already made (human, 10-06)
 
@@ -54,13 +59,11 @@
 
 ## Next action
 
-**M1.2 Java:** a test class that replays `oplog/regress/*.jsonl` and generated
-logs (port SplitMix64 `value_bytes`, compare to the Rust test vector). Expect
-F-018…F-022 analogues; record J in FINDINGS. Then Dart.
-
-Parallel sessions, if wanted: track B starts M5.1 in a worktree on
-`dart-storage`; track C starts M6.1 (the workload binary) in a worktree on
-`scale`.
+Make the Java `+compact` divergence deterministic: replay with the background
+compactor idle (or call `maintain()` only from op-log `compact`) to tell an
+engine race from a sequential bug; then shrink, fix, add `regress/`, repeat for
+`+reopen`. Target: `tools/oplog_java.sh 0 300 --ops 2000` → 0 divergences.
+Then Dart.
 
 ## Log
 
@@ -69,3 +72,4 @@ Parallel sessions, if wanted: track B starts M5.1 in a worktree on
 - 2026-10-06 — M0.2: `tools/gate.sh` written, quick green, flip test fails it.
 - 2026-10-06 — M1.1: op-log format + seeded generator; origin added, not pushed.
 - 2026-10-06 — Pushed to origin. M1.2 Rust checker + shrinker; fixed F-018…F-022 (4×S0, 1×S1); gate green.
+- 2026-10-06 — M1.2 Java checker; fixed F-026…F-029 in Java (2×S0, 2×S1); compact/reopen mixes still diverge.

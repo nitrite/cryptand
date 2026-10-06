@@ -1592,7 +1592,8 @@ public final class Engine implements AutoCloseable {
         long rd = greatestRangeDelete(treeId, cke, snapshotSeq);
 
         LevelState state = levels;
-        boolean stop = false;
+        // Segments below this level cannot hold a newer version (see the hit).
+        int stopBelow = Integer.MAX_VALUE;
         // One hash for every candidate's filter and point index.
         long hash = Cfh64.hash(uk);
         for (Segment seg : state.segments()) {
@@ -1610,7 +1611,7 @@ public final class Engine implements AutoCloseable {
             if (!coversUserKey(seg.meta(), uk)) {
                 continue;
             }
-            if (stop || !seg.mayContainHash(hash)) {
+            if (seg.meta().level > stopBelow || !seg.mayContainHash(hash)) {
                 continue;
             }
             segmentsProbed.incrementAndGet();
@@ -1655,12 +1656,17 @@ public final class Engine implements AutoCloseable {
                     best = hit;
                 }
                 // The early exit, and its proof. `levels.segments()` is ordered
-                // L0 newest-flush-first then strictly increasing level, and
-                // within a level newest run first, so the first candidate that
-                // hits holds the newest version of THIS key. Absent that proof
-                // §4 requires every candidate to be examined, which is what
-                // `earlyExit = false` restores.
-                stop = earlyExit;
+                // L0 newest-flush-first then strictly increasing level, and a
+                // level is always compacted whole into the next, so every
+                // version at level L is newer than any below it, and within L0
+                // the first hit is the newest. Within a tiered level it is NOT
+                // (F-029): an L0 merge lands in one range-partition group and
+                // folds in that group's old segments, so a newer run can hold
+                // an older version than a sibling group's run. There every run
+                // of the level is examined. `earlyExit = false` examines all.
+                if (earlyExit) {
+                    stopBelow = seg.meta().level == 0 ? -1 : seg.meta().level;
+                }
             }
         }
 
@@ -1982,7 +1988,11 @@ public final class Engine implements AutoCloseable {
     }
 
     public Cursor scan(int treeId, byte[] lowCke, byte[] highCke, boolean reverse) {
-        return new Cursor(treeId, lowCke, highCke, reverse, visibleSeq, options.clock.getAsLong());
+        // F-028: not `visibleSeq`, which under `none`/`os` lags an acknowledged
+        // batch (see `get`). The cursor does not filter in-flight entries the
+        // way `lookup` does, so it takes the contiguous completed prefix.
+        return new Cursor(treeId, lowCke, highCke, reverse, Math.max(visibleSeq, completedThrough()),
+                options.clock.getAsLong());
     }
 
     public Cursor scan(int treeId, byte[] lowCke, byte[] highCke, boolean reverse,
@@ -2613,6 +2623,13 @@ public final class Engine implements AutoCloseable {
 
     /** Requires {@link #structure}. One merge, in {@code (tree_id, CKE(key))} order. */
     private void mergeColdRuns(List<VlogStats> runs) {
+        // F-027: a record only a snapshot (or open cursor) still reads cannot be
+        // moved - its rewrite takes a fresh seq and would shadow every newer
+        // version - and its extent cannot be freed under the reader (§6.8 step
+        // 5). Not collecting is always correct (§6.7).
+        if (!liveSnapshots.isEmpty()) {
+            return;
+        }
         record Survivor(int treeId, byte[] key, byte[] value, BtreePage.Leaf entry) {
         }
         List<Survivor> survivors = new ArrayList<>();
@@ -2622,7 +2639,8 @@ public final class Engine implements AutoCloseable {
         // frees extents and removes tree-7 entries just as `collectSegment`
         // does, so it needs the same test; judging at `visibleSeq` alone drops
         // records a written-but-not-yet-visible batch still points at.
-        long[] seqs = livenessSeqs();
+        // F-027: with no snapshot live (above), that is the current seq.
+        long[] seqs = {nextSeq.get()};
         for (VlogStats stats : runs) {
             int before = survivors.size();
             boolean complete = vlog.walk(stats, w -> {
@@ -2701,6 +2719,13 @@ public final class Engine implements AutoCloseable {
      * </ol>
      */
     private void collect0() {
+        // F-027: a record only a snapshot (or open cursor) still reads cannot be
+        // moved - its rewrite takes a fresh seq and would shadow every newer
+        // version - and its extent cannot be freed under the reader (§6.8 step
+        // 5). Not collecting is always correct (§6.7).
+        if (!liveSnapshots.isEmpty()) {
+            return;
+        }
         List<VlogStats> candidates = new ArrayList<>();
         for (VlogStats s : vlog.allStats()) {
             if (s.sealed && s.bytes > 0) {
@@ -2736,7 +2761,8 @@ public final class Engine implements AutoCloseable {
         // a batch that is written but not yet visible read as dead here, was
         // collected, and its still-live pointer then failed on the next read
         // with "value-log segment N has no entry in tree 7".
-        long[] seqs = livenessSeqs();
+        // F-027: with no snapshot live (collect0), that is the current seq.
+        long[] seqs = {nextSeq.get()};
         boolean complete = vlog.walk(stats, w -> {
             // **No yieldStructure here.** Vlog.walk is synchronized, so this
             // callback runs holding the value-log monitor, and releasing
