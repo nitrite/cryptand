@@ -1738,7 +1738,15 @@ impl Engine {
         let cands = self.candidate_order()?;
         // One hash for every candidate's filter and point index.
         let hash = crate::hash::cfh64(prefix);
+        // F-029 (found here as F-053): a hit at L1+ proves nothing about the
+        // level's *other* range-partition groups, which hold disjoint runs of
+        // any age, so the early exit waits for the level boundary. L0 is in
+        // flush order, so its first hit is its newest.
+        let mut hit_level: Option<u8> = None;
         for r in cands.iter() {
+            if hit_level.is_some_and(|l| l == 0 || r.level > l) {
+                break;
+            }
             if !r.covers(prefix) {
                 continue;
             }
@@ -1771,7 +1779,7 @@ impl Engine {
                 // key. Level discipline is that proof, and `candidate_order`
                 // emits candidates in exactly that order.
                 if self.early_exit {
-                    break;
+                    hit_level = Some(r.level);
                 }
             } else {
                 self.counters.filter_false_positives += 1;

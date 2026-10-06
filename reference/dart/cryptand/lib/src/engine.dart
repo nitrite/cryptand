@@ -1216,6 +1216,9 @@ final class Engine {
       // later data. Descending `segment_id` within a level is therefore
       // newest-first, and `max_seq` -- which §4 explicitly disqualifies for
       // picking a winner -- is not needed for the ordering either.
+      // **Newest by creation, not by contents** (F-053): a run compacted from
+      // an old segment of its group carries that segment's old versions, so
+      // `_winner` may not stop at a hit before the level ends.
       refs.sort((a, b) => b.segmentId.compareTo(a.segmentId));
       out.addAll(refs);
     }
@@ -1897,7 +1900,16 @@ final class Engine {
     final hash = cfh64(prefix);
     var probed = 0;
     var stop = false;
+    // F-053 (Java's F-029): a hit at L1+ proves nothing about the level's
+    // *other* range-partition groups. A newer run there may have been compacted
+    // from older data (it took in an old segment of its group), so descending
+    // segment_id is not newest-first across groups: finish the level first.
+    // L0 is flush-ordered, so its first hit is its newest.
+    int? hitLevel;
     for (final ref in memHit ? const <SegmentRef>[] : _candidateRefs()) {
+      if (hitLevel != null && (hitLevel == 0 || ref.level > hitLevel)) {
+        stop = true;
+      }
       if (!ref.covers(prefix)) continue;
       final s = extents[ref.segmentId]!;
       final f = s.filter;
@@ -1916,7 +1928,7 @@ final class Engine {
         continue;
       }
       if (best == null || rec.seq > best.seq) best = rec;
-      stop = earlyExit;
+      if (earlyExit) hitLevel ??= ref.level;
     }
     segmentsProbed.add(probed);
 

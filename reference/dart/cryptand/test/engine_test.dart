@@ -8,6 +8,7 @@ import 'dart:typed_data';
 import 'package:cryptand/src/bytes.dart';
 import 'package:cryptand/src/cve.dart';
 import 'package:cryptand/src/engine.dart';
+import 'package:cryptand/src/manifest.dart' show SegmentRef;
 import 'package:cryptand/src/errors.dart';
 import 'package:cryptand/src/value.dart';
 import 'package:cryptand/src/vlog.dart';
@@ -29,6 +30,29 @@ Uint8List docBytes(NameDict dict, int i) {
 }
 
 void main() {
+  test('F-053: a lookup does not stop at an older version in a newer run', () {
+    // L1 is tiered: its groups hold runs of any age, so the run with the
+    // higher segment id can carry the *older* version of a key.
+    final e = Engine();
+    void l0ToL1([List<SegmentRef> extra = const []]) {
+      e.flush();
+      final job = e.beginCompaction([...e.refsAt(0), ...extra], 1)!;
+      while (!e.stepCompaction(job)) {}
+      e.finishCompaction(job);
+    }
+
+    final k = CBytes(Uint8List.fromList([1]));
+    e.put(1, k, Uint8List.fromList([1]));
+    l0ToL1(); // K=v1 in a group of L1
+    final old = e.refsAt(1).single;
+    e.put(1, k, Uint8List.fromList([2]));
+    l0ToL1(); // K=v2 in a second group
+    e.put(1, CBytes(Uint8List.fromList([9])), Uint8List.fromList([9]));
+    l0ToL1([old]); // a newer run built from the old one: K=v1 again
+    expect(e.refsAt(1).length, 2);
+    expect(e.get(1, k), [2]);
+  });
+
   group('value log', () {
     test('a record round-trips through its pointer', () {
       final vlog = ValueLog(pageSize: 4096, segmentBytes: 1 << 20);
