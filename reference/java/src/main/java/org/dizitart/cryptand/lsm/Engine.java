@@ -2212,7 +2212,7 @@ public final class Engine implements AutoCloseable {
             }
         }
         for (SegmentMeta m : manifest.at(target, group)) {
-            if (BtreePage.memcmp(m.minKey, hi) <= 0 && BtreePage.memcmp(lo, m.maxKey) <= 0) {
+            if (overlapsUserKeys(m, lo, hi)) {
                 inputs.add(m);
             }
         }
@@ -2434,6 +2434,17 @@ public final class Engine implements AutoCloseable {
     }
 
     /**
+     * F-040: whether {@code m} shares a USER key with the internal-key range
+     * {@code [lo, hi]}. On internal keys ({@code user_key || ~seq || op}) two
+     * versions of one key look disjoint, so the older one stayed out of a
+     * last-level job that then dropped the tombstone over it.
+     */
+    private static boolean overlapsUserKeys(SegmentMeta m, byte[] lo, byte[] hi) {
+        return BtreePage.memcmp(Ikey.userKeyOf(m.minKey), Ikey.userKeyOf(hi)) <= 0
+                && BtreePage.memcmp(Ikey.userKeyOf(lo), Ikey.userKeyOf(m.maxKey)) <= 0;
+    }
+
+    /**
      * Whether any segment that could hold an older version of a key in
      * {@code [lo, hi]} is outside this compaction — at the target level or
      * below it.
@@ -2447,7 +2458,7 @@ public final class Engine implements AutoCloseable {
             if (m.level < target || included.contains(m.segmentId)) {
                 continue;
             }
-            if (BtreePage.memcmp(m.minKey, hi) <= 0 && BtreePage.memcmp(lo, m.maxKey) <= 0) {
+            if (overlapsUserKeys(m, lo, hi)) {
                 return true;
             }
         }

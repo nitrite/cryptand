@@ -1,0 +1,7 @@
+{"oplog":1,"seed":353,"profile":"desktop","encrypted":false,"trees":2,"keys":1000,"skew":0.5,"big":0.05,"prefix":0}
+{"op":"put","t":1,"k":"30","v":{"n":216,"s":7985670076236488}}
+{"op":"commit","d":"os"}
+{"op":"del","t":1,"k":"30"}
+{"op":"compact"}
+{"op":"commit","d":"sync"}
+{"op":"compact"}
