@@ -2260,6 +2260,7 @@ public final class Engine implements AutoCloseable {
         // its interval's START, so a forward merge always meets one before the
         // entries it hides.
         List<RangeDelete> activeDeletes = new ArrayList<>();
+        List<Blob> deadBlobs = new ArrayList<>();
         byte[] maxUserKey = Ikey.userKeyOf(hi);
 
         while (merge.isValid()) {
@@ -2324,6 +2325,9 @@ public final class Engine implements AutoCloseable {
             }
             if (drop) {
                 liveBytes.add(-(Ikey.ckeOf(ik).length + cell.value().length));
+                if (cell.kind() == BtreePage.Kind.BLOB) {
+                    deadBlobs.add(Blob.decode(cell.value()));
+                }
                 continue;
             }
             if (!newUserKey && !bottommost) {
@@ -2387,6 +2391,10 @@ public final class Engine implements AutoCloseable {
         for (SegmentMeta m : inputs) {
             manifest.remove(m);
             pager.freeExtent(m.startPage, m.pages);
+        }
+        // F-050: 01 §5, "a very large value is reclaimed on its own".
+        for (Blob b : deadBlobs) {
+            pager.freeExtent(b.startPage(), b.extentPages(pager));
         }
         for (SegmentMeta m : outputs) {
             bytesKeyIndex.addAndGet((long) m.pages * sb.pageSize());

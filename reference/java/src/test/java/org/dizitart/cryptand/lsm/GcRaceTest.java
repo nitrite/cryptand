@@ -147,6 +147,28 @@ class GcRaceTest {
         assertEquals(1000, v == null ? -1 : v.length);
     }
 
+    /** F-050: 01 §5, a blob "is reclaimed on its own" when compaction drops its entry. */
+    @Test
+    void aDroppedBlobsExtentIsFreed(@TempDir Path dir) {
+        Engine.Options o = new Engine.Options();
+        o.backgroundCompaction = false;
+        Path path = dir.resolve("db.cff");
+        Engine e = Engine.create(path, o);
+        e.batch().put(1, key(0, 0), new byte[300_000]).commit(); // above blob_threshold
+        e.commitNow(true);
+        e.compact();
+        e.batch().put(1, key(0, 0), new byte[10]).commit();
+        e.commitNow(true);
+        e.compact();
+        e.commitNow(true);
+        e.close();
+        e = Engine.open(path, o);
+        var leaks = org.dizitart.cryptand.ops.Verify.run(e).findings().stream()
+                .filter(f -> f.kind() == org.dizitart.cryptand.ops.Verify.Kind.LEAK).toList();
+        e.close();
+        assertTrue(leaks.isEmpty(), leaks.toString());
+    }
+
     private static byte[] key(int w, int k) {
         return Cke.encode(new Value.Bytes(new byte[]{(byte) w, (byte) k}));
     }

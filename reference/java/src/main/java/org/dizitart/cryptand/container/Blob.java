@@ -96,6 +96,13 @@ public record Blob(long startPage, int byteLen, int crc32c) {
         return out;
     }
 
+    /** Pages the extent occupies on this file, encrypted or not (F-050). */
+    public int extentPages(Pager pager) {
+        return pager.crypto() instanceof FileCipher
+                ? encryptedPages(pager.pageSize(), byteLen)
+                : pages(pager.pageSize());
+    }
+
     /** Pages the extent occupies, so it can be freed. */
     public int pages(int pageSize) {
         int firstPageRoom = pageSize - PageHeader.BYTES;

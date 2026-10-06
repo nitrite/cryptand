@@ -63,6 +63,8 @@ final class CompactionJob {
   final int group;
   final List<SegmentCursor> sources;
   final List<VlogPointer> dead = [];
+  /// BLOB pointers of dropped entries; their extents are freed at finish.
+  final List<Uint8List> deadBlobs = [];
   final List<Segment> outputs = [];
 
   SegmentBuilder out;
@@ -1494,6 +1496,7 @@ final class Engine {
           // snapshot's. The second half is not optional: a snapshot older than
           // the tombstone still sees the versions it hides, so dropping the
           // tombstone alone would resurrect them for every later reader.
+          if (rec.valueKind == ValueKind.blob) job.deadBlobs.add(rec.value);
         } else {
           job.out.add(_promote(rec, parsed.treeId, job.dead, job.recluster,
               levelled: job.levelled));
@@ -1514,6 +1517,7 @@ final class Engine {
           // *observed* the value superseded, which is here.
           job.dead.add(VlogPointer.decode(rec.value));
         }
+        if (rec.valueKind == ValueKind.blob) job.deadBlobs.add(rec.value);
       } else {
         if (job.levelled && job.newestSeq <= job.published) {
           // Kept only because a snapshot older than the superseding version is
@@ -1554,6 +1558,12 @@ final class Engine {
             '${job.inputs.length} inputs, ${job.steps} steps'));
     for (final p in job.dead) {
       vlog.markDead(p);
+    }
+    // F-050: 01 §5, "a very large value is reclaimed on its own".
+    for (final b in job.deadBlobs) {
+      final r = ByteReader(b);
+      final start = r.u64(), len = r.u32();
+      store.freeExtent(start, blobPages(len));
     }
     vlog
       ..sealCold()
@@ -1989,6 +1999,14 @@ final class Engine {
   /// Pointer `u64 start_page || u32 byte_len || u32 crc32c`; the payload
   /// follows the head page's 40-byte header and runs on through header-less
   /// interior pages, or, encrypted, one §5.4 chunk per page.
+  /// Pages a blob of [len] bytes occupies: the head page's payload follows its
+  /// 40-byte header; encrypted, each page holds one §5.4 chunk.
+  int blobPages(int len) {
+    final chunk = store.crypto == null ? pageSize : pageSize - 24;
+    final head = chunk - PageHeader.size;
+    return len <= head ? 1 : 1 + (len - head + chunk - 1) ~/ chunk;
+  }
+
   Uint8List readBlob(Uint8List pointer) {
     if (pointer.length != kPointerBytes) {
       throw CorruptionException(

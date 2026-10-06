@@ -1,0 +1,11 @@
+{"oplog":1,"seed":50,"profile":"desktop","encrypted":false,"trees":1,"keys":10,"skew":0.5,"big":0.05,"prefix":0}
+{"op":"put","t":1,"k":"31","v":{"n":10,"s":1}}
+{"op":"put","t":1,"k":"30","v":{"n":300000,"s":2}}
+{"op":"reopen"}
+{"op":"get","t":1,"k":"30"}
+{"op":"reopen"}
+{"op":"put","t":1,"k":"30","v":{"n":10,"s":3}}
+{"op":"commit","d":"sync"}
+{"op":"compact"}
+{"op":"reopen"}
+{"op":"get","t":1,"k":"30"}

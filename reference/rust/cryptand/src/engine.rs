@@ -189,6 +189,8 @@ pub struct CompactionJob {
     outputs: Vec<(Vec<u8>, u64)>,
     per_output: u64,
     pub bytes_written: u64,
+    /// F-050: BLOB pointers of dropped entries, freed when the job publishes.
+    dead_blobs: Vec<Vec<u8>>,
 }
 
 impl CompactionJob {
@@ -1834,6 +1836,13 @@ impl Engine {
     /// `u64 start_page || u32 byte_len || u32 crc32c`; the payload follows the
     /// head page's 40-byte header and runs on through header-less interior
     /// pages, or, encrypted, one `14-security.md` §5.4 chunk per page.
+    /// Pages a blob of `len` bytes occupies (see [`Engine::read_blob`]).
+    fn blob_pages(&self, len: u64) -> u64 {
+        let ps = self.pager.page_size as u64;
+        let chunk = if self.pager.crypto.is_some() { ps - 24 } else { ps };
+        1 + len.saturating_sub(chunk - crate::container::PAGE_HEADER_BYTES as u64).div_ceil(chunk)
+    }
+
     pub fn read_blob(&mut self, ptr: &[u8]) -> Result<Vec<u8>> {
         if ptr.len() != 16 {
             return corrupt(format!("a BLOB pointer is 16 bytes, got {}", ptr.len()));
@@ -2382,6 +2391,7 @@ impl Engine {
         }
 
         let mut kept: Vec<SegEntry> = Vec::new();
+        let mut dead_blobs: Vec<Vec<u8>> = Vec::new();
         let mut last_user: Option<Vec<u8>> = None;
         let mut newer_visible_seq: Option<u64> = None;
         // Whether this key already passed its newest version with
@@ -2418,6 +2428,9 @@ impl Engine {
                 // database whose values have all been promoted or superseded,
                 // and collection never fires.
                 self.release_if_vlog(&rec);
+                if rec.value_kind == value_kind::BLOB {
+                    dead_blobs.push(rec.value.clone());
+                }
                 continue;
             }
             if !same_key && matches!(newer_visible_seq, Some(ns) if ns > min_retained) {
@@ -2432,6 +2445,9 @@ impl Engine {
                 if let Some(x) = rec.expiry_ms {
                     if x <= self.now_ms && seq <= min_retained {
                         self.release_if_vlog(&rec);
+                        if rec.value_kind == value_kind::BLOB {
+                            dead_blobs.push(rec.value.clone());
+                        }
                         continue;
                     }
                 }
@@ -2440,6 +2456,9 @@ impl Engine {
                 // versions it hides.
                 if (rec.op() == op::DELETE || rec.op() == op::RANGE_DELETE) && seq <= min_retained {
                     self.release_if_vlog(&rec);
+                    if rec.value_kind == value_kind::BLOB {
+                        dead_blobs.push(rec.value.clone());
+                    }
                     continue;
                 }
             }
@@ -2474,6 +2493,7 @@ impl Engine {
             outputs: Vec::new(),
             per_output,
             bytes_written: 0,
+            dead_blobs,
         }))
     }
 
@@ -2597,6 +2617,15 @@ impl Engine {
         for r in &job.inputs {
             self.pager.free_extent(r.start_page, r.pages, self.sb.commit_id);
             self.segments.remove(&r.segment_id);
+        }
+        // F-050: 01 §5, "a very large value is reclaimed on its own".
+        for b in std::mem::take(&mut job.dead_blobs) {
+            if b.len() == 16 {
+                let start = u64::from_le_bytes(b[0..8].try_into().unwrap());
+                let len = u32::from_le_bytes(b[8..12].try_into().unwrap()) as u64;
+                let pages = self.blob_pages(len);
+                self.pager.free_extent(start, pages as u32, self.sb.commit_id);
+            }
         }
         self.events.push(StoreEvent::Compacted {
             from: job.inputs[0].level,

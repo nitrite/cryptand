@@ -386,7 +386,7 @@ public final class Verify {
             }
             case BtreePage.Kind.BLOB -> {
                 Blob b = Blob.decode(cell.value());
-                claim(b.startPage(), b.pages(pager.pageSize()), "blob");
+                claim(b.startPage(), b.extentPages(pager), "blob");
                 try {
                     b.read(pager);
                 } catch (RuntimeException e) {
