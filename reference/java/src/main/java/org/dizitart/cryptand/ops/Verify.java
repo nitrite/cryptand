@@ -371,7 +371,10 @@ public final class Verify {
                 try {
                     VlogSegment.Record rec = engine.vlog().read(p);
                     byte[] cke = Ikey.ckeOf(cell.key());
-                    if (BtreePage.memcmp(rec.key(), cke) != 0) {
+                    // A dead cell may point into a collected segment whose
+                    // extent has since been reused (F-037 keeps it readable
+                    // for old snapshots); no reader resolves it.
+                    if (BtreePage.memcmp(rec.key(), cke) != 0 && !isDead(cell)) {
                         findings.add(new Finding(Kind.CORRUPTION, "a VLOG pointer in segment "
                                 + m.segmentId + " resolves to a record with a different key"));
                     }
