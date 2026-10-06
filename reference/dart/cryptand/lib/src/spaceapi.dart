@@ -59,7 +59,7 @@ extension EngineSpaceApi on Engine {
     final before = vlog.allocatedBytes;
     vlog
       ..sealOpen()
-      ..reclaimEmpty();
+      ..reclaimEmpty(referenced: referencedVlogSegments);
     return MaintenanceStep(
         done: true, bytesProcessed: before - vlog.allocatedBytes);
   }

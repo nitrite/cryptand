@@ -1570,7 +1570,7 @@ final class Engine {
     }
     vlog
       ..sealCold()
-      ..reclaimEmpty();
+      ..reclaimEmpty(referenced: referencedVlogSegments);
 
     // §6.9's bound is a MUST on the *state*, and promotion is what moves it:
     // every levelled compaction lands a fresh cold generation, so a database
@@ -2011,6 +2011,30 @@ final class Engine {
   /// Pointer `u64 start_page || u32 byte_len || u32 crc32c`; the payload
   /// follows the head page's 40-byte header and runs on through header-less
   /// interior pages, or, encrypted, one §5.4 chunk per page.
+  /// F-055: every value-log segment that a memtable entry or a cell of a live
+  /// segment points into. A full walk, so [ValueLog.reclaimEmpty] runs it
+  /// only when a segment looks empty (ponytail: per-segment reference counts
+  /// if that becomes frequent at scale).
+  Set<int> referencedVlogSegments() {
+    final out = <int>{};
+    for (final p in _memtable.values) {
+      if (p.valueKind == ValueKind.vlog) {
+        out.add(VlogPointer.decode(p.value).segmentId);
+      }
+    }
+    for (final seg in liveSegments) {
+      final c = seg.cursor()..seekFirst();
+      while (c.isValid) {
+        final r = c.record();
+        if (r.valueKind == ValueKind.vlog) {
+          out.add(VlogPointer.decode(r.value).segmentId);
+        }
+        c.next();
+      }
+    }
+    return out;
+  }
+
   /// Pages a blob of [len] bytes occupies: the head page's payload follows its
   /// 40-byte header; encrypted, each page holds one §5.4 chunk.
   int blobPages(int len) {

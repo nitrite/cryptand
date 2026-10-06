@@ -664,11 +664,21 @@ final class ValueLog {
   void Function(int startPage, int pages)? freeExtent;
 
   /// Drops segments with no live bytes. The cheap half of section 6.8.
-  int reclaimEmpty() {
-    final dead = segments.values
+  ///
+  /// F-055: a counter at zero is not proof. Counters a file brings from
+  /// another writer may already exclude superseded records that this engine
+  /// then decrements again when compaction drops them, so a segment some cell
+  /// still points into reads as empty. [referenced] (the segment ids any cell
+  /// names) is asked only when a segment looks empty.
+  int reclaimEmpty({Set<int> Function()? referenced}) {
+    var dead = segments.values
         .where((s) => s.sealed && s.liveRecords <= 0)
         .map((s) => s.id)
         .toList();
+    if (dead.isNotEmpty && referenced != null) {
+      final keep = referenced();
+      dead = dead.where((id) => !keep.contains(id)).toList();
+    }
     for (final id in dead) {
       final s = segments.remove(id)!;
       // A segment a file placed keeps its extent there, and nothing else
