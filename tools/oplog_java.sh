@@ -13,5 +13,5 @@ while [ "$s" -lt "$b" ]; do
   s=$((s + 1))
 done
 cd "$root/reference/java"
-mvn -B -q test -Djacoco.skip=true -Dtest=OplogCheckTest#generatedLogsReplay -Doplog.dir="$dir"
+mvn -B -q test -Djacoco.skip=true -Dtest=OplogCheckTest#generatedLogsReplay -Doplog.dir="$dir" ${OPLOG_JAVA_OPTS:-}
 echo "java: seeds $a..$b: 0 divergences"

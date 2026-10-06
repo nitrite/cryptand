@@ -112,6 +112,8 @@ class OplogCheckTest {
         final Map<Long, Snapshot> snaps = new HashMap<>();
         final Map<Long, Model> snapModels = new HashMap<>();
         long clock;
+        /** Run the background compactor's round after every op, at a deterministic point. */
+        boolean maintain = Boolean.getBoolean("oplog.maintain");
 
         Run(Path path, boolean encrypted, Profile profile, int trees) {
             this.path = path;
@@ -126,6 +128,7 @@ class OplogCheckTest {
             // `none`: the writer acknowledges itself, so a lone put is not an fsync.
             o.durability = Superblock.Durability.NONE;
             o.clock = () -> clock;
+            o.backgroundCompaction = !Boolean.getBoolean("oplog.idle");
             if (encrypted) {
                 o.encrypt = true;
                 o.rawKey = KEY.clone();
@@ -323,6 +326,9 @@ class OplogCheckTest {
                 }
                 default -> throw new Diverged("unknown op " + j.get("op"));
             }
+            if (maintain) {
+                e.maintain();
+            }
             // Nothing below the published visible_seq can be snapshotted again.
             Long floor = history.floorKey(Snapshot.of(e.superblock()).seq());
             if (floor != null) {
@@ -334,6 +340,10 @@ class OplogCheckTest {
 
     /** Replays one log; returns the digest or throws Diverged("line N: …"). */
     static String replay(List<String> lines, Path dir) throws Exception {
+        return replay(lines, dir, Boolean.getBoolean("oplog.maintain"));
+    }
+
+    static String replay(List<String> lines, Path dir, boolean maintain) throws Exception {
         JsonNode h = JSON.readTree(lines.get(0));
         if (h.path("oplog").asInt() != 1) {
             throw new Diverged("line 1: not an oplog v1");
@@ -347,6 +357,7 @@ class OplogCheckTest {
         Path path = dir.resolve("oplog-" + h.path("seed").asText() + ".cff");
         Files.deleteIfExists(path);
         Run r = new Run(path, h.path("encrypted").asBoolean(), profile, h.path("trees").asInt(1));
+        r.maintain = maintain;
         r.e = Engine.create(path, r.options());
         try {
             r.history.put(0L, new Model());
@@ -358,6 +369,9 @@ class OplogCheckTest {
                 try {
                     r.step(j);
                 } catch (RuntimeException x) {
+                    if (Boolean.getBoolean("oplog.trace")) {
+                        x.printStackTrace();
+                    }
                     throw new Diverged("line " + (n + 1) + ": " + j.get("op") + " — " + x);
                 }
             }
@@ -385,13 +399,15 @@ class OplogCheckTest {
         }
     }
 
-    static void replayAll(List<Path> files, Path tmp) throws Exception {
+    static void replayAll(List<Path> files, Path tmp, boolean... maintain) throws Exception {
         List<String> fails = new ArrayList<>();
         for (Path f : files) {
-            try {
-                replay(Files.readAllLines(f), tmp);
-            } catch (RuntimeException x) {
-                fails.add(f.getFileName() + ": " + x.getMessage());
+            for (boolean m : maintain.length == 0 ? new boolean[]{Boolean.getBoolean("oplog.maintain")} : maintain) {
+                try {
+                    replay(Files.readAllLines(f), tmp, m);
+                } catch (RuntimeException x) {
+                    fails.add(f.getFileName() + (m ? " (maintain)" : "") + ": " + x.getMessage());
+                }
             }
         }
         assertTrue(fails.isEmpty(), fails.size() + "/" + files.size() + " logs diverge:\n" + String.join("\n", fails));
@@ -463,7 +479,9 @@ class OplogCheckTest {
     void regressLogsReplay(@TempDir Path tmp) throws Exception {
         List<Path> files = logs(Path.of("../conformance/oplog/regress"));
         assertFalse(files.isEmpty());
-        replayAll(files, tmp);
+        // Twice: as logged, and with maintain() after every op (F-031 needs a
+        // maintenance round between its writes; Rust compacts synchronously).
+        replayAll(files, tmp, false, true);
     }
 
     @Test

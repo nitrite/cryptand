@@ -83,6 +83,8 @@ public final class Engine implements AutoCloseable {
         public int levelCount = 4;
         /** Entries a memtable shard holds before the committer flushes it. */
         public int memtableEntries = 4096;
+        /** False runs compaction only from explicit calls: deterministic replays (op-log checker). */
+        public boolean backgroundCompaction = true;
         /** §5.2's step bound; the profile's value on mobile. */
         public long compactionStepBytes = 256 * 1024;
         public String writerId = "nitrite-java/1.0.0";
@@ -235,6 +237,13 @@ public final class Engine implements AutoCloseable {
     private volatile RuntimeException committerFailure;
     private volatile long appliedDelayMs;
     private volatile double lastLocalityDebt;
+    /**
+     * F-030: writers hold it shared from taking a seq to publishing in the
+     * memtable; a GC rewrite holds it exclusively to re-check liveness and
+     * insert, so no user write can land between the check and the rewrite.
+     */
+    private final java.util.concurrent.locks.ReentrantReadWriteLock writeGate =
+            new java.util.concurrent.locks.ReentrantReadWriteLock();
     private volatile String backpressureCause = "";
 
     // §6's counters. Every one of them is accumulated where the fact is known,
@@ -798,6 +807,7 @@ public final class Engine implements AutoCloseable {
 
         // Step 4: one fetch_add on next_seq. The only serialization point on
         // the write path.
+        writeGate.readLock().lock();
         long base = nextSeq.getAndAdd(staged.size());
         boolean filled = false;
 
@@ -826,6 +836,7 @@ public final class Engine implements AutoCloseable {
             }
             seq++;
         }
+        writeGate.readLock().unlock();
         long end = seq - 1;
 
         // Steps 6 and 7 under one acquisition of `seqLock`. They were two, and
@@ -995,6 +1006,9 @@ public final class Engine implements AutoCloseable {
         committer = new Thread(this::committerLoop, "cryptand-committer");
         committer.setDaemon(true);
         committer.start();
+        if (!options.backgroundCompaction) {
+            return;
+        }
         compactor = new Thread(this::compactorLoop, "cryptand-compactor");
         compactor.setDaemon(true);
         compactor.start();
@@ -1454,7 +1468,14 @@ public final class Engine implements AutoCloseable {
         // behind a completed batch whenever another writer holds a lower range
         // in flight. `isPublished` is what keeps that from exposing a
         // half-published batch.
-        return get(treeId, cke, readHorizon(), CLOCK_ON_DEMAND);
+        // F-037: pinned across the lookup *and* the value read, so a GC that
+        // retires the segment in between leaves it readable.
+        readPins.acquire(sb.commitId);
+        try {
+            return get(treeId, cke, readHorizon(), CLOCK_ON_DEMAND);
+        } finally {
+            readPins.release();
+        }
     }
 
     /** The resolved entry, or null when the key is absent, deleted or expired at {@code now}. */
@@ -2313,8 +2334,12 @@ public final class Engine implements AutoCloseable {
                 // cold segment that is key-clustered BY CONSTRUCTION, at no
                 // extra cost - the sort had to happen anyway.
                 VlogPointer p = VlogPointer.decode(cell.value());
-                VlogSegment src = vlog.segment(p.segmentId());
-                if (src.tier == VlogSegment.TIER_HOT) {
+                // F-034: GC retires a segment once no *current* entry points
+                // into it, so a superseded, expired or range-deleted cell kept
+                // here may point at a retired one. No reader resolves to it;
+                // it stays as it is (as Rust's), and reading it would fail.
+                VlogSegment src = vlog.exists(p.segmentId()) ? vlog.segment(p.segmentId()) : null;
+                if (src != null && src.tier == VlogSegment.TIER_HOT) {
                     VlogSegment.Record rec = vlog.read(p);
                     VlogPointer moved = vlog.appendCold(rec.treeId(), rec.key(), rec.value());
                     bytesValue.add(p.len());
@@ -2485,6 +2510,11 @@ public final class Engine implements AutoCloseable {
     public void clusterIfNeeded() {
         structure.lock();
         try {
+            // mergeColdRuns does nothing under a live snapshot (F-027); sealing
+            // and republishing anyway looped every 5 ms with nothing to show.
+            if (!liveSnapshots.isEmpty()) {
+                return;
+            }
             refreshLiveness();
             if (vlog.localityDebt() * 100 <= sb.localityDebtPct) {
                 return;
@@ -2680,12 +2710,8 @@ public final class Engine implements AutoCloseable {
         for (Survivor s : survivors) {
             VlogPointer moved = vlog.appendCold(s.treeId(), s.key(), s.value());
             bytesGc.addAndGet(moved.len());
-            long seq = nextSeq.getAndIncrement();
-            byte[] ik = Ikey.of(s.treeId(), s.key(), seq, BtreePage.Op.PUT);
-            shardFor(s.treeId(), s.key()).put(ik, new BtreePage.Leaf(ik, BtreePage.Kind.VLOG,
-                    s.entry().expiryMs(), s.entry().hasExpiry(), moved.encode(), 0));
-            completeRange(seq, seq);
-            lastRewriteSeq = Math.max(lastRewriteSeq, seq);
+            lastRewriteSeq = Math.max(lastRewriteSeq,
+                    rewriteIfCurrent(s.treeId(), s.key(), VlogPointer.decode(s.entry().value()), s.entry(), moved, now));
         }
         vlog.sealCold();
         long visible = Math.max(visibleSeq, completedThrough());
@@ -2699,6 +2725,46 @@ public final class Engine implements AutoCloseable {
         // As in `collectSegment`: retired here, released after the superblock
         // naming the rewrites is published.
         pendingVlogRemoval.addAll(merged);
+    }
+
+    /**
+     * F-030: points {@code key} at {@code moved} if its current entry is still
+     * {@code was}; returns the rewrite's seq, or 0 when a user write got there
+     * first (the appended copy is then garbage, which §6.8 invariant 3 allows).
+     */
+    /** Test hook: widens the check-to-rewrite window so {@code GcRaceTest} can fail without the gate. */
+    static volatile long rewriteDelayNanos;
+
+    private long rewriteIfCurrent(int treeId, byte[] key, VlogPointer was, BtreePage.Leaf old,
+                                  VlogPointer moved, long now) {
+        if (rewriteDelayNanos > 0) {
+            java.util.concurrent.locks.LockSupport.parkNanos(rewriteDelayNanos);
+        }
+        writeGate.writeLock().lock();
+        try {
+            BtreePage.Leaf cur = lookup(treeId, key, nextSeq.get(), now, false);
+            if (cur == null || cur.kind() != BtreePage.Kind.VLOG) {
+                return 0;
+            }
+            VlogPointer p = VlogPointer.decode(cur.value());
+            if (p.segmentId() != was.segmentId() || p.offset() != was.offset()) {
+                return 0;
+            }
+            long seq = nextSeq.getAndIncrement();
+            byte[] ik = Ikey.of(treeId, key, seq, BtreePage.Op.PUT);
+            int sh = shardIndex(treeId, key);
+            shards[sh].put(ik, new BtreePage.Leaf(ik, BtreePage.Kind.VLOG, old.expiryMs(),
+                    old.hasExpiry(), moved.encode(), 0));
+            // F-031: counted as a user write is, or the flush that drains it
+            // takes `residentEntries` to zero while the memtable still holds
+            // entries, and every read then skips the memtable.
+            shardEntries[sh].incrementAndGet();
+            residentEntries.incrementAndGet();
+            completeRange(seq, seq);
+            return seq;
+        } finally {
+            writeGate.writeLock().unlock();
+        }
     }
 
     /**
@@ -2809,13 +2875,8 @@ public final class Engine implements AutoCloseable {
                     : vlog.append(rec.treeId(), rec.key(), rec.value(), stats.heat);
             bytesGc.addAndGet(moved.len());
             bytesDevice.addAndGet(moved.len());
-            long seq = nextSeq.getAndIncrement();
-            byte[] ik = Ikey.of(rec.treeId(), rec.key(), seq, BtreePage.Op.PUT);
-            BtreePage.Leaf cell = new BtreePage.Leaf(ik, BtreePage.Kind.VLOG, old.expiryMs(),
-                    old.hasExpiry(), moved.encode(), 0);
-            shardFor(rec.treeId(), rec.key()).put(ik, cell);
-            completeRange(seq, seq);
-            lastRewriteSeq = Math.max(lastRewriteSeq, seq);
+            lastRewriteSeq = Math.max(lastRewriteSeq,
+                    rewriteIfCurrent(rec.treeId(), rec.key(), VlogPointer.decode(old.value()), old, moved, now));
         }
         long visible = Math.max(visibleSeq, completedThrough());
         flushShards(visible);
@@ -2866,9 +2927,16 @@ public final class Engine implements AutoCloseable {
     private void retireCollectedSegments() {
         for (VlogStats stats : pendingVlogRemoval) {
             pager.freeExtent(stats.startPage, stats.pages);
-            vlogStatsTree.remove(VlogStats.key(stats.segmentId));
+            vlog.retire(stats, sb.commitId);
         }
         pendingVlogRemoval.clear();
+        // F-037: a snapshot, cursor or get pinned before this commit may still
+        // resolve a pointer into a retired segment.
+        long oldest = readPins.oldest(sb.commitId);
+        for (long[] snap : liveSnapshots) {
+            oldest = Math.min(oldest, snap[1]);
+        }
+        vlog.pruneRetired(oldest - 1);
     }
 
     // ==================================================================
@@ -2886,6 +2954,9 @@ public final class Engine implements AutoCloseable {
      * a throughput problem into a hang, and that is the failure users report.
      */
     private void applyBackpressure() {
+        if (compactor == null) {
+            return; // nothing would relieve the debt; the caller compacts explicitly
+        }
         double worst = 0;
         String cause = "";
 
@@ -2920,7 +2991,9 @@ public final class Engine implements AutoCloseable {
             worst = x;
             cause = "memtable_bytes";
         }
-        x = overshoot((int) Math.round(lastLocalityDebt * 100), Math.max(1, sb.localityDebtPct),
+        // Locality debt cannot be paid while a snapshot is live (F-027), so
+        // stalling the writer for it would only slow it down.
+        x = !liveSnapshots.isEmpty() ? 0 : overshoot((int) Math.round(lastLocalityDebt * 100), Math.max(1, sb.localityDebtPct),
                 Math.max(2, sb.localityDebtPct * 2));
         if (x > worst) {
             worst = x;

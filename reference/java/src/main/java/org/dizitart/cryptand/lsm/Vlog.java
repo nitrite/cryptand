@@ -398,16 +398,56 @@ public final class Vlog {
     // reading
     // ==================================================================
 
+    /**
+     * F-037: segments GC retired (tree-7 entry removed), with the commit that
+     * retired them. A reader pinned before that commit can still hold a pointer
+     * into one, and the pager keeps the bytes for it; this keeps the head and
+     * watermark readable until {@link #pruneRetired} says no such reader is left.
+     */
+    private record Retired(VlogStats stats, long commit) {
+    }
+
+    private final Map<Long, Retired> retired = new HashMap<>();
+
+    public synchronized void retire(VlogStats st, long commit) {
+        statsTree.remove(VlogStats.key(st.segmentId));
+        retired.put(st.segmentId, new Retired(st, commit));
+    }
+
+    /** Forgets segments retired at or before {@code oldestReaderCommit}. */
+    public synchronized void pruneRetired(long oldestReaderCommit) {
+        retired.values().removeIf(r -> {
+            if (r.commit() > oldestReaderCommit) {
+                return false;
+            }
+            known.remove(r.stats().segmentId);
+            return true;
+        });
+    }
+
+    private VlogStats statsOf(long id) {
+        byte[] raw = statsTree.get(VlogStats.key(id));
+        if (raw != null) {
+            return VlogStats.fromValue(VlogStats.key(id), Cve.decode(raw));
+        }
+        Retired r = retired.get(id);
+        if (r == null) {
+            throw new CorruptionException("value-log segment " + id + " has no entry in tree 7");
+        }
+        return r.stats();
+    }
+
+    /** Whether segment {@code id} is open or still has its tree-7 entry (not retired by GC). */
+    public synchronized boolean exists(long id) {
+        return openOf(id) != null || statsTree.get(VlogStats.key(id)) != null;
+    }
+
     public synchronized VlogSegment segment(long id) {
         VlogSegment s = known.get(id);
         if (s != null) {
             return s;
         }
-        byte[] raw = statsTree.get(VlogStats.key(id));
-        if (raw == null) {
-            throw new CorruptionException("value-log segment " + id + " has no entry in tree 7");
-        }
-        VlogStats st = VlogStats.fromValue(VlogStats.key(id), Cve.decode(raw));
+        VlogStats st = statsOf(id);
         VlogSegment seg = readHead(pager, st.startPage);
         // §11 invariant 8b: a head page and a tree-7 entry that disagree on
         // identity is corruption, not a discrepancy to reconcile.
@@ -591,12 +631,7 @@ public final class Vlog {
     }
 
     private long durableBytesOf(long id) {
-        byte[] raw = statsTree.get(VlogStats.key(id));
-        if (raw == null) {
-            throw new CorruptionException("value-log segment " + id + " has no entry in tree 7");
-        }
-        VlogStats st = VlogStats.fromValue(VlogStats.key(id), Cve.decode(raw));
-        return st.bytes;
+        return statsOf(id).bytes;
     }
 
     // ==================================================================
