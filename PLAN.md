@@ -16,7 +16,7 @@ interop gate 12/12 directions plaintext+encrypted.
 | | milestone | track | due | status |
 |---|---|---|---|---|
 | M0 | Execution infra, gates, CI matrix | all | 10-07 | in progress (0.1–0.4 done; 0.5 todo) |
-| M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 Rust done, Java in progress, 1.4 started) |
+| M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 checkers in all three; 1.3 hop built; 1.4 regress + hop in the gate; 1.5 todo) |
 | M2 | Crash consistency + concurrency | A | 10-16 | todo |
 | M3 | Coverage-guided fuzzing | A | 10-16 | todo |
 | M4 | Security review + pentest | A | 10-21 | todo |
@@ -107,14 +107,18 @@ test compares the engine against a model on random histories.
   value log), and op mix.
   *Done 10-06:* format in `oplog/README.md` (+ `release`, `commit`; values as
   SplitMix64 `{n,s}`); `oplog_gen` bin, 4 tests in the gate, shown failing.
-- [ ] **1.2** (Rust done 10-06: `oplog_check`, 300 seeds × 2000 ops clean after
-  fixing F-018…F-022; Java checker built, F-026…F-029 fixed, compact/reopen mixes still red; Dart todo) Model checker per implementation: replay an op-log against the
+- [ ] **1.2** (10-06: checkers in all three. Rust 300 seeds × 2000 clean after
+  F-018…F-022; Java 0..300 full mix clean after F-026…F-031, F-034, F-036,
+  F-037, F-040 (0..600 plain + 100 encrypted, 0 divergences); Dart 200 plain +
+  24 encrypted clean after F-032, F-033, F-039. Dart replays are minutes per
+  log because of F-038; 10 000 seeds still to run) Model checker per implementation: replay an op-log against the
   engine **and** a sorted in-memory map; compare every read, and a full-scan
   digest at the end and after every `reopen`. Rust harness bin, Java test
   class, Dart test.
-- [ ] **1.3** Cross-language hop: Rust plays ops 0..k, Java k..m, Dart m..n on
+- [ ] **1.3** (10-06: `--hop` legs in all three, `tools/oplog_hop.sh`; found F-042)
+  Cross-language hop: Rust plays ops 0..k, Java k..m, Dart m..n on
   the same file, then all three compute the digest. Plaintext and encrypted.
-- [ ] **1.4** (started: `oplog_check --shrink`; 3 logs in `regress/`, Rust replay
+- [ ] **1.4** (started: shrinkers in all three; 8 logs in `regress/`, replayed by all three
   in the gate) Shrink every failure to a minimal op-log, commit it under
   `oplog/regress/`, and replay the whole directory in `gate.sh quick`.
 - [ ] **1.5** Query differential: random documents + random filters (eq, range,
