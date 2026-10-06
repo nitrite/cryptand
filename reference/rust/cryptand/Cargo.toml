@@ -86,6 +86,11 @@ path = "benches/filter_fpr.rs"
 required-features = ["harness"]
 
 [[bin]]
+name = "oplog_gen"
+path = "harness/oplog_gen.rs"
+required-features = ["harness"]
+
+[[bin]]
 name = "interop"
 path = "harness/interop.rs"
 required-features = ["harness"]

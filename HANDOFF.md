@@ -2,8 +2,9 @@
 
 ## State (2026-10-06)
 
-- Branch `packaging/v1.0.0`; `main` exists locally. **No git remote**, and
-  `nitrite/cryptand` does not exist on GitHub yet (F-016).
+- Branch `packaging/v1.0.0`; `main` exists locally. `origin` =
+  github.com/nitrite/cryptand (public, created by the human 10-06, still
+  **empty — nothing pushed yet**, awaiting the human's go).
 - Three engines, each Level 4 + encryption, ~30k / 36k / 37k LOC
   (Rust / Java / Dart), in `reference/`. Packages are at version 1.0.0 in their
   manifests; nothing is published and there are no tags.
@@ -20,6 +21,10 @@
   to fail. Its later stages print `PENDING` until M1.4/M2.2/M3/M6 build them.
   Clippy correctness/suspicious had 2 hits, both intentional, now `#[allow]`ed
   with a reason (`container.rs` `writable`, `multiproc.rs` perms restore).
+- M1.1 done: op-log format `reference/conformance/oplog/README.md`, generator
+  `cargo run -p cryptand --features harness --bin oplog_gen -- --seed N`.
+  Unverified assumptions for M1.2: engine trees 1..N need no creation step;
+  `Value::Bytes` CKE order = memcmp of the raw bytes.
 
 ## Decisions already made (human, 10-06)
 
@@ -31,8 +36,7 @@
 
 ## Open questions for the human
 
-1. **[H] M0.4:** create `github.com/nitrite/cryptand` (public?) and add it as
-   `origin`. CI, the OS matrix and releases are all blocked on it.
+1. **[H] M0.4:** OK to push `main` and `packaging/v1.0.0` to `origin`? Then M0.5 (CI).
 2. **[H] M8.2:** are crates.io, Maven Central `org.dizitart` and a pub.dev
    publisher available to you? pub.dev needs you to publish `1.0.0-rc.1` by
    hand once.
@@ -41,8 +45,8 @@
 
 ## Next action
 
-**M1.1:** op-log format in `reference/conformance/oplog/` (JSON lines) and the
-seeded generator behind the Rust `harness` feature. Then M1.2 model checker.
+**M1.2:** Rust model checker (harness bin `oplog_check`): replay a log against
+`Engine` and a `BTreeMap`, compare every read and the digest. Then Java, Dart.
 
 Parallel sessions, if wanted: track B starts M5.1 in a worktree on
 `dart-storage`; track C starts M6.1 (the workload binary) in a worktree on
@@ -53,3 +57,4 @@ Parallel sessions, if wanted: track B starts M5.1 in a worktree on
 - 2026-10-06 — Surveyed the repo, ran the full baseline (green), got the scope
   and Dart decisions, wrote PLAN/HANDOFF/FINDINGS/CLAUDE.md.
 - 2026-10-06 — M0.2: `tools/gate.sh` written, quick green, flip test fails it.
+- 2026-10-06 — M1.1: op-log format + seeded generator; origin added, not pushed.

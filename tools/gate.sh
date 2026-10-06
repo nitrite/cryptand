@@ -23,6 +23,7 @@ pending() { printf '\n\033[33m== PENDING %s — not built yet (%s)\033[0m\n' "$1
 stage "rust test (debug)"   "$ref/rust" cargo test --workspace -q
 stage "rust test (release)" "$ref/rust" cargo test --workspace --release -q
 stage "rust clippy"         "$ref/rust" cargo clippy -q --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious
+stage "oplog_gen tests"     "$ref/rust" cargo test -q -p cryptand --features harness --bin oplog_gen
 stage "java verify"         "$ref/java" mvn -B -q verify
 stage "dart analyze"        "$ref/dart/cryptand" dart analyze --fatal-infos
 stage "dart test"           "$ref/dart/cryptand" dart test

@@ -15,8 +15,8 @@ interop gate 12/12 directions plaintext+encrypted.
 
 | | milestone | track | due | status |
 |---|---|---|---|---|
-| M0 | Execution infra, gates, CI matrix | all | 10-07 | in progress (0.1–0.3 done; 0.4 [H], 0.5 blocked) |
-| M1 | Differential + model testing | A | 10-14 | todo |
+| M0 | Execution infra, gates, CI matrix | all | 10-07 | in progress (0.1–0.3 done; 0.4 origin added, push pending) |
+| M1 | Differential + model testing | A | 10-14 | in progress (1.1 done) |
 | M2 | Crash consistency + concurrency | A | 10-16 | todo |
 | M3 | Coverage-guided fuzzing | A | 10-16 | todo |
 | M4 | Security review + pentest | A | 10-21 | todo |
@@ -100,11 +100,13 @@ macOS locally and CI green on Linux/macOS/Windows, M6 scale table filled in.
 Target: wrong answers, not crashes. The current suites are example-based; no
 test compares the engine against a model on random histories.
 
-- [ ] **1.1** Op-log format `reference/conformance/oplog/` (JSON lines: `put`,
+- [x] **1.1** Op-log format `reference/conformance/oplog/` (JSON lines: `put`,
   `del`, `range_del`, `batch`, `get`, `scan`, `snapshot`, `reopen`,
   `compact`, `shrink`, `checkpoint`, `ttl_advance`) plus a seeded generator
   (Rust, `harness` feature) with knobs for key skew, value size (inline vs
   value log), and op mix.
+  *Done 10-06:* format in `oplog/README.md` (+ `release`, `commit`; values as
+  SplitMix64 `{n,s}`); `oplog_gen` bin, 4 tests in the gate, shown failing.
 - [ ] **1.2** Model checker per implementation: replay an op-log against the
   engine **and** a sorted in-memory map; compare every read, and a full-scan
   digest at the end and after every `reopen`. Rust harness bin, Java test
