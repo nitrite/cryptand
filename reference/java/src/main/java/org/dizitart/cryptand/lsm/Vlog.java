@@ -1031,7 +1031,11 @@ public final class Vlog {
                 long liveRecords = counts[1];
                 Open open = openOf(snap.segmentId());
                 if (open != null) {
-                    liveBytes += Math.max(0, open.watermark - snap.end());
+                    // F-051: to the reserved tail, not the watermark. `append`
+                    // counts a record live when it reserves it; one reserved
+                    // before the snapshot and completed after was neither
+                    // walked nor credited, and this overwrite lost it for good.
+                    liveBytes += Math.max(0, open.tail.get() - snap.end());
                     liveRecords += Math.max(0, open.records - snap.records());
                 }
                 s.liveBytes = liveBytes;
