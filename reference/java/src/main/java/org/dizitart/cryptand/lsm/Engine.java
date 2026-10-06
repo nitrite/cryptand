@@ -1461,6 +1461,14 @@ public final class Engine implements AutoCloseable {
      */
     public static final long CLOCK_ON_DEMAND = Long.MIN_VALUE;
 
+    /**
+     * F-049: the "now" GC judges liveness at. Below every expiry, so an expired
+     * entry still owns its record: §9 says a backwards clock jump resurrects
+     * entries, and GC freeing an expired entry's value turned that into a
+     * dangling pointer. Only compaction may drop an expired entry, whole.
+     */
+    private static final long GC_NOW = Long.MIN_VALUE + 1;
+
     public byte[] get(int treeId, byte[] cke) {
         // `readHorizon`, not `visibleSeq`: an `os`-durability batch is
         // acknowledged when `commitBatch` returns, and §7 says acknowledged
@@ -2656,7 +2664,7 @@ public final class Engine implements AutoCloseable {
      * {@link #livenessSeqs}.
      */
     private void refreshLiveness() {
-        long now = options.clock.getAsLong();
+        long now = GC_NOW;
         long[] seqs = livenessSeqs();
         vlog.recomputeLiveness((treeId, cke, segmentId, offset) ->
                 referencedAt(seqs, treeId, cke, segmentId, offset, now));
@@ -2675,7 +2683,7 @@ public final class Engine implements AutoCloseable {
         }
         List<Survivor> survivors = new ArrayList<>();
         List<VlogStats> merged = new ArrayList<>();
-        long now = options.clock.getAsLong();
+        long now = GC_NOW;
         // Every seq a reader can still resolve — see `livenessSeqs`. This
         // frees extents and removes tree-7 entries just as `collectSegment`
         // does, so it needs the same test; judging at `visibleSeq` alone drops
@@ -2831,7 +2839,7 @@ public final class Engine implements AutoCloseable {
         record Survivor(VlogSegment.Record record, BtreePage.Leaf entry) {
         }
         List<Survivor> survivors = new ArrayList<>();
-        long now = options.clock.getAsLong();
+        long now = GC_NOW;
         // Every seq a reader can still resolve, not just `visibleSeq` — see
         // `livenessSeqs`. This is the check that decides what gets freed, so it
         // is the one where understating loses data: a record referenced only by

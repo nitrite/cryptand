@@ -107,6 +107,46 @@ class GcRaceTest {
         e.close();
     }
 
+    /**
+     * F-049: §9 says a backwards clock jump resurrects an expired entry. GC
+     * freed the value of an entry that was merely expired, so the resurrected
+     * entry pointed at nothing.
+     */
+    @Test
+    void anExpiredEntryKeepsItsValueThroughCollection(@TempDir Path dir) {
+        long[] clock = {0};
+        Engine.Options o = new Engine.Options();
+        o.durability = Superblock.Durability.NONE;
+        o.vlogMin = 64;
+        o.backgroundCompaction = false;
+        o.clock = () -> clock[0];
+        Path path = dir.resolve("db.cff");
+        Engine e = Engine.create(path, o);
+        int keys = 2_000;
+        e.batch().putWithExpiry(1, key(9, 9), new byte[1000], 1000).commit();
+        for (int k = 0; k < keys; k++) {
+            e.batch().put(1, key(k >> 8, k & 0xFF), new byte[1000]).commit();
+        }
+        e.close(); // seals the value-log segment, so GC may take it
+        e = Engine.open(path, o);
+        for (int k = 0; k < keys; k++) {
+            e.batch().put(1, key(k >> 8, k & 0xFF), new byte[1001]).commit();
+        }
+        clock[0] = 2000; // the entry expires
+        e.commitNow(true);
+        long gc = e.bytesWrittenGc();
+        e.collectIfNeeded();
+        e.commitNow(true);
+        assertTrue(e.vlog().allStats().stream().noneMatch(st -> st.segmentId == 1),
+                "segment 1 was not collected; the test needs it to be (GC moved " + (e.bytesWrittenGc() - gc) + " bytes)");
+        e.close();
+        clock[0] = 0; // §9: a backwards jump resurrects the entry, and its value
+        e = Engine.open(path, o);
+        byte[] v = e.get(1, key(9, 9));
+        e.close();
+        assertEquals(1000, v == null ? -1 : v.length);
+    }
+
     private static byte[] key(int w, int k) {
         return Cke.encode(new Value.Bytes(new byte[]{(byte) w, (byte) k}));
     }

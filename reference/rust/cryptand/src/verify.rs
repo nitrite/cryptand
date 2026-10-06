@@ -200,10 +200,15 @@ impl EngineVerify for Engine {
                 if rec.value_kind == crate::segment::value_kind::VLOG {
                     let p = VlogPointer::parse(&rec.value)?;
                     match self.vlog_stats.get(&p.segment_id).cloned() {
-                        // F-048: GC frees a segment once no *current* entry points
-                        // into it (§6.8) and F-043 drops its tree-7 entry, so a
-                        // superseded, deleted or expired cell may name it.
-                        None if self.current_pointer(user_part(&rec.internal_key))?.map(|(c, _)| c) != Some(p) => {}
+                        // F-048: GC frees a segment once no reader resolves into it
+                        // (§6.8) and F-043 drops its tree-7 entry, so a superseded,
+                        // deleted, range-deleted or expired cell may name it. It
+                        // is corruption only if a read of the key actually fails.
+                        None if {
+                            let uk = user_part(&rec.internal_key);
+                            let tree = u32::from_be_bytes(uk[0..4].try_into().unwrap());
+                            crate::cke::decode_all(&uk[4..]).is_ok_and(|k| self.get(tree, &k).is_ok())
+                        } => {}
                         None => r.add(
                             Class::Corruption,
                             format!("VLOG pointer names unknown value-log segment {}", p.segment_id),
