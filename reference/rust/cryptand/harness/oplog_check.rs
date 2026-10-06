@@ -284,6 +284,70 @@ fn replay(log: &str, dir: &Path) -> Result<String, String> {
     out
 }
 
+/// The model effect of one op, without an engine: what a hop leg replays for
+/// the lines another language already played.
+fn model_apply(m: &mut Model, clock: &mut u64, j: &J) {
+    let t = j["t"].as_u64().unwrap_or(0) as u32;
+    match j["op"].as_str().unwrap() {
+        "put" => {
+            let v = gen::value_bytes(j["v"]["n"].as_u64().unwrap() as usize, j["v"]["s"].as_u64().unwrap());
+            m.entry(t).or_default().insert(unhex(j["k"].as_str().unwrap()), (v, j["x"].as_u64()));
+        }
+        "del" => drop(m.entry(t).or_default().remove(&unhex(j["k"].as_str().unwrap()))),
+        "range_del" => {
+            let (lo, hi) = (unhex(j["lo"].as_str().unwrap()), unhex(j["hi"].as_str().unwrap()));
+            m.entry(t).or_default().retain(|k, _| !(k >= &lo && k < &hi));
+        }
+        "batch" => j["ops"].as_array().unwrap().iter().for_each(|w| model_apply(m, clock, w)),
+        "ttl_advance" => *clock += j["ms"].as_u64().unwrap(),
+        _ => {}
+    }
+}
+
+/// M1.3, one leg of a cross-language hop: log lines before `from` (1-based,
+/// the header is line 1) update only the model; `db` is created (`from` = 2)
+/// or opened as another language left it, its digest checked, lines
+/// `[from, to)` replayed; then commit at `sync`, close, keep the file.
+/// Cut only where no snapshot is live (the generator's `reopen` lines).
+fn hop(log: &str, db: &Path, from: usize, to: usize) -> Result<String, String> {
+    let lines: Vec<&str> = log.lines().collect();
+    let h: J = serde_json::from_str(lines[0]).map_err(|e| format!("line 1: {e}"))?;
+    let profile = match h["profile"].as_str().unwrap_or("desktop") {
+        "mobile" => Profile::Mobile,
+        "tablet" => Profile::Tablet,
+        "server" => Profile::Server,
+        _ => Profile::Desktop,
+    };
+    let encrypted = h["encrypted"] == true;
+    let (mut model, mut clock) = (Model::new(), 0);
+    for l in &lines[1..from - 1] {
+        model_apply(&mut model, &mut clock, &serde_json::from_str(l).map_err(|e| e.to_string())?);
+    }
+    let key = encrypted.then_some(&KEY[..]);
+    let mut e = match (from, key) {
+        (2, Some(k)) => Engine::create_encrypted(db, profile, k, 0, 0, 0, 0),
+        (2, None) => Engine::create(db, profile),
+        _ => Engine::open(db, key),
+    }
+    .map_err(|e| format!("open: {e}"))?;
+    e.now_ms = clock;
+    let trees = h["trees"].as_u64().unwrap_or(1) as u32;
+    let seen_visible = e.visible_seq;
+    let mut r = Run { path: db.to_path_buf(), encrypted, e, committed: model.clone(), model, snaps: HashMap::new(), clock, trees, seen_visible };
+    let out = (|| {
+        r.digest_check().map_err(|e| format!("at open: {e}"))?;
+        for (n, l) in lines.iter().enumerate().take(to - 1).skip(from - 1) {
+            let j: J = serde_json::from_str(l).map_err(|e| format!("line {}: {e}", n + 1))?;
+            r.step(&j).map_err(|e| format!("line {}: {} — {e}", n + 1, j["op"]))?;
+        }
+        r.e.flush().map_err(|e| format!("flush: {e}"))?;
+        r.e.commit(Durability::Sync).map_err(|e| format!("commit: {e}"))?;
+        r.digest_check().map_err(|e| format!("end: {e}"))
+    })();
+    let _ = r.e.close(true);
+    out
+}
+
 /// Greedy delta debugging over the op lines: drop chunks while the log still
 /// fails (an invalid log does not count), halving the chunk when none drops;
 /// then drop each snapshot id's lines together, and shrink inside batches.
@@ -355,7 +419,15 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = std::env::temp_dir().join(format!("oplog_check-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let code = if args.first().map(String::as_str) == Some("--shrink") {
+    let code = if args.first().map(String::as_str) == Some("--hop") {
+        // --hop LOG DB FROM TO
+        let log = std::fs::read_to_string(&args[1]).expect("read log");
+        let n = |i: usize| args[i].parse::<usize>().expect("--hop LOG DB FROM TO");
+        match hop(&log, Path::new(&args[2]), n(3), n(4)) {
+            Ok(d) => { println!("ok digest {d}"); 0 }
+            Err(e) => { println!("FAIL {e}"); 1 }
+        }
+    } else if args.first().map(String::as_str) == Some("--shrink") {
         let log = std::fs::read_to_string(&args[1]).expect("read log");
         let small = shrink(&log, &dir);
         print!("{small}");

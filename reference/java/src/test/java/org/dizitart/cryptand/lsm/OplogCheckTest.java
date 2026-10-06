@@ -393,6 +393,69 @@ class OplogCheckTest {
         }
     }
 
+    /** The model effect of one op without an engine: lines another language played (M1.3). */
+    static long modelApply(Model m, long clock, JsonNode j) {
+        switch (j.get("op").asText()) {
+            case "put" -> m.tree(j.get("t").asInt()).put(unhex(j.get("k").asText()),
+                    new Cell(valueBytes(j.get("v").get("n").asInt(), j.get("v").get("s").asLong()),
+                            j.has("x") ? j.get("x").asLong() : 0));
+            case "del" -> m.tree(j.get("t").asInt()).remove(unhex(j.get("k").asText()));
+            case "range_del" -> m.tree(j.get("t").asInt())
+                    .subMap(unhex(j.get("lo").asText()), unhex(j.get("hi").asText())).clear();
+            case "batch" -> {
+                for (JsonNode w : j.get("ops")) {
+                    clock = modelApply(m, clock, w);
+                }
+            }
+            case "ttl_advance" -> clock += j.get("ms").asLong();
+            default -> {
+            }
+        }
+        return clock;
+    }
+
+    /**
+     * M1.3, one leg of a cross-language hop, as Rust's {@code oplog_check --hop}:
+     * lines before {@code from} (1-based, header = 1) update only the model;
+     * {@code db} is created ({@code from} = 2) or opened as another language
+     * left it and its digest checked; lines {@code [from, to)} are replayed;
+     * then commit, close, keep the file.
+     */
+    static String hop(List<String> lines, Path db, int from, int to) throws Exception {
+        JsonNode h = JSON.readTree(lines.get(0));
+        Profile profile = switch (h.path("profile").asText("desktop")) {
+            case "mobile" -> Profile.MOBILE;
+            case "tablet" -> Profile.TABLET;
+            case "server" -> Profile.SERVER;
+            default -> Profile.DESKTOP;
+        };
+        Run r = new Run(db, h.path("encrypted").asBoolean(), profile, h.path("trees").asInt(1));
+        for (String l : lines.subList(1, from - 1)) {
+            r.clock = modelApply(r.model, r.clock, JSON.readTree(l));
+        }
+        r.e = from == 2 ? Engine.create(db, r.options()) : Engine.open(db, r.options());
+        try {
+            r.history.put(Snapshot.of(r.e.superblock()).seq(), r.model.copy());
+            try {
+                r.digestCheck();
+            } catch (RuntimeException x) {
+                throw new Diverged("at open: " + x.getMessage());
+            }
+            for (int n = from - 1; n < to - 1; n++) {
+                JsonNode j = JSON.readTree(lines.get(n));
+                try {
+                    r.step(j);
+                } catch (RuntimeException x) {
+                    throw new Diverged("line " + (n + 1) + ": " + j.get("op") + " — " + x);
+                }
+            }
+            r.e.commitNow(true);
+            return r.digestCheck();
+        } finally {
+            r.e.close();
+        }
+    }
+
     static List<Path> logs(Path dir) throws Exception {
         try (Stream<Path> s = Files.list(dir)) {
             return s.filter(p -> p.toString().endsWith(".jsonl")).sorted().toList();
@@ -418,6 +481,16 @@ class OplogCheckTest {
      * prints a minimal still-failing log (greedy chunk removal, as Rust's).
      */
     public static void main(String[] args) throws Exception {
+        if (args[0].equals("--hop")) {
+            try {
+                System.out.println("ok digest " + hop(Files.readAllLines(Path.of(args[1])), Path.of(args[2]),
+                        Integer.parseInt(args[3]), Integer.parseInt(args[4])));
+            } catch (Diverged x) {
+                System.out.println("FAIL " + x.getMessage());
+                System.exit(1);
+            }
+            return;
+        }
         Path tmp = Files.createTempDirectory("oplog_check");
         if (args[0].equals("--shrink")) {
             List<String> lines = new ArrayList<>(Files.readAllLines(Path.of(args[1])));

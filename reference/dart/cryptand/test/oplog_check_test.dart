@@ -243,6 +243,72 @@ class _Run {
   }
 }
 
+/// The model effect of one op without an engine: lines another language
+/// played (M1.3). Returns the clock.
+int _modelApply(_Run r, Map<String, dynamic> j) {
+  switch (j['op']) {
+    case 'put':
+      final x = (j['x'] as int?) ?? 0;
+      r.tree(j['t'] as int)[_unhex(j['k'] as String)] =
+          (v: valueBytes(j['v']['n'] as int, j['v']['s'] as int), x: x);
+    case 'del':
+      r.tree(j['t'] as int).remove(_unhex(j['k'] as String));
+    case 'range_del':
+      final lo = _unhex(j['lo'] as String), hi = _unhex(j['hi'] as String);
+      r.tree(j['t'] as int).removeWhere((k, _) => _memcmp(k, lo) >= 0 && _memcmp(k, hi) < 0);
+    case 'batch':
+      for (final w in j['ops'] as List) {
+        _modelApply(r, w as Map<String, dynamic>);
+      }
+    case 'ttl_advance':
+      r.clock += j['ms'] as int;
+  }
+  return r.clock;
+}
+
+/// M1.3, one leg of a cross-language hop, as Rust's `oplog_check --hop`:
+/// lines before [from] (1-based, header = 1) update only the model; [db] is
+/// created ([from] = 2) or opened as another language left it and its digest
+/// checked; lines `[from, to)` are replayed; then commit, save, close.
+String hop(List<String> lines, String db, int from, int to) {
+  final h = jsonDecode(lines[0]) as Map<String, dynamic>;
+  final profile = switch (h['profile']) {
+    'mobile' => Profile.mobile,
+    'tablet' => Profile.tablet,
+    'server' => Profile.server,
+    _ => Profile.desktop,
+  };
+  final r = _Run(db, h['encrypted'] == true, profile, (h['trees'] as int?) ?? 1);
+  for (final l in lines.sublist(1, from - 1)) {
+    _modelApply(r, jsonDecode(l) as Map<String, dynamic>);
+  }
+  if (from == 2) {
+    r.create();
+  } else {
+    r.db = DatabaseFile.open(db, key: r.encrypted ? _key : null);
+    r.e.nowMs = r.clock;
+  }
+  r.history[r.e.visibleSeq] = _copy(r.model);
+  try {
+    r.digestCheck();
+  } on Diverged catch (x) {
+    throw Diverged('at open: $x');
+  }
+  for (var n = from - 1; n < to - 1; n++) {
+    final j = jsonDecode(lines[n]) as Map<String, dynamic>;
+    try {
+      r.step(j);
+    } on Diverged catch (x) {
+      throw Diverged('line ${n + 1}: ${j['op']} — $x');
+    }
+  }
+  r.e.commit();
+  final d = r.digestCheck();
+  DatabaseFile.save(r.db, db);
+  r.e.close();
+  return d;
+}
+
 /// Replays one log; returns the digest or throws Diverged('line N: …').
 String replay(List<String> lines, Directory dir) {
   final h = jsonDecode(lines[0]) as Map<String, dynamic>;
@@ -350,6 +416,17 @@ void main() {
     tmp.deleteSync(recursive: true);
   }, skip: shrink == null ? 'set OPLOG_SHRINK to minimize a failing log' : false,
       timeout: Timeout.none);
+
+  // `OPLOG_HOP="LOG DB FROM TO"` runs one hop leg and prints its digest.
+  final hopArgs = Platform.environment['OPLOG_HOP']?.split(' ');
+  test('hop', () {
+    try {
+      print('ok digest ${hop(File(hopArgs![0]).readAsLinesSync(), hopArgs[1], int.parse(hopArgs[2]), int.parse(hopArgs[3]))}');
+    } on Diverged catch (x) {
+      print('FAIL $x');
+      rethrow;
+    }
+  }, skip: hopArgs == null ? 'set OPLOG_HOP to run one hop leg' : false);
 
   final dir = Platform.environment['OPLOG_DIR'];
   test('generated logs replay', () => _replayAll(_logs(dir!)),
