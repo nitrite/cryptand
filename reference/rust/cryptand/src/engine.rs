@@ -1803,6 +1803,10 @@ impl Engine {
                     let p = VlogPointer::parse(&seg.extent[rec.value.clone()])?;
                     return self.read_vlog(&p).map(|v| Some(ValueRef::Owned(v)));
                 }
+                if rec.value_kind == value_kind::BLOB {
+                    let ptr = seg.extent[rec.value.clone()].to_vec();
+                    return self.read_blob(&ptr).map(|v| Some(ValueRef::Owned(v)));
+                }
                 Ok(Some(ValueRef::Segment(seg, rec.value)))
             }
         }
@@ -1820,8 +1824,46 @@ impl Engine {
                 let p = VlogPointer::parse(&rec.value)?;
                 self.read_vlog(&p)
             }
+            value_kind::BLOB => self.read_blob(&rec.value),
             _ => Ok(rec.value.clone()),
         }
+    }
+
+    /// F-044: `01-container.md` §5's BLOB, which Java writes for a value at or
+    /// above `blob_threshold` (this implementation never does). Pointer
+    /// `u64 start_page || u32 byte_len || u32 crc32c`; the payload follows the
+    /// head page's 40-byte header and runs on through header-less interior
+    /// pages, or, encrypted, one `14-security.md` §5.4 chunk per page.
+    pub fn read_blob(&mut self, ptr: &[u8]) -> Result<Vec<u8>> {
+        if ptr.len() != 16 {
+            return corrupt(format!("a BLOB pointer is 16 bytes, got {}", ptr.len()));
+        }
+        let start = u64::from_le_bytes(ptr[0..8].try_into().unwrap());
+        let len = u32::from_le_bytes(ptr[8..12].try_into().unwrap()) as usize;
+        let crc = u32::from_le_bytes(ptr[12..16].try_into().unwrap());
+        let ps = self.pager.page_size;
+        let encrypted = self.pager.crypto.is_some();
+        let chunk = if encrypted { ps - 24 } else { ps };
+        let mut out = Vec::with_capacity(len);
+        let mut i = 0u64;
+        while out.len() < len {
+            let at = if i == 0 { crate::container::PAGE_HEADER_BYTES } else { 0 };
+            let n = (len - out.len()).min(chunk - at);
+            let off = (start + i) * ps as u64 + at as u64;
+            if encrypted {
+                let raw = self.pager.read_at(off, 8 + n + 16)?;
+                let counter = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+                let ring = &self.pager.crypto.as_ref().unwrap().ring;
+                out.extend_from_slice(&ring.decrypt_chunk(start, counter, i, &raw[8..])?);
+            } else {
+                out.extend_from_slice(&self.pager.read_at(off, n)?);
+            }
+            i += 1;
+        }
+        if crate::hash::crc32c(&out) != crc {
+            return corrupt(format!("blob checksum mismatch at page {start}"));
+        }
+        Ok(out)
     }
 
     /// `resolve_value` for a record the caller owns and is finished with. An
@@ -1835,6 +1877,7 @@ impl Engine {
                 let p = VlogPointer::parse(&rec.value)?;
                 self.read_vlog(&p)
             }
+            value_kind::BLOB => self.read_blob(&rec.value),
             _ => Ok(rec.value),
         }
     }
@@ -2168,6 +2211,9 @@ impl Engine {
                 if pending.len() >= window {
                     self.drain_readahead(&mut pending, &mut rows)?;
                 }
+            } else if rec.value_kind == value_kind::BLOB {
+                let v = self.read_blob(&rec.value)?;
+                rows.push((cke_key.to_vec(), Some(v)));
             } else {
                 rows.push((cke_key.to_vec(), Some(rec.value.clone())));
             }
