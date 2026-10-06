@@ -422,8 +422,8 @@ void main() {
   test('hop', () {
     try {
       print('ok digest ${hop(File(hopArgs![0]).readAsLinesSync(), hopArgs[1], int.parse(hopArgs[2]), int.parse(hopArgs[3]))}');
-    } on Diverged catch (x) {
-      print('FAIL $x');
+    } catch (x) {
+      print('FAIL $x'); // a refused open is a failed leg too
       rethrow;
     }
   }, skip: hopArgs == null ? 'set OPLOG_HOP to run one hop leg' : false);

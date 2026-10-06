@@ -193,6 +193,15 @@ class OplogCheckTest {
             return i < rows.size() ? "k=" + hex(rows.get(i)[0]) + " " + shortV(rows.get(i)[1]) : "end";
         }
 
+        /** §9's integrity pass: damage diverges; a LEAK (repairable) and POLICY (maintenance not run in idle replays) do not. */
+        void verify() {
+            for (var f : org.dizitart.cryptand.ops.Verify.run(e).findings()) {
+                if (f.kind() != org.dizitart.cryptand.ops.Verify.Kind.LEAK && f.kind() != org.dizitart.cryptand.ops.Verify.Kind.POLICY) {
+                    throw new Diverged("verify: " + f.kind() + " " + f.message());
+                }
+            }
+        }
+
         String digestCheck() throws Exception {
             MessageDigest d = MessageDigest.getInstance("SHA-256");
             for (int t = 1; t <= trees; t++) {
@@ -322,6 +331,7 @@ class OplogCheckTest {
                     history.clear();
                     batchFirst.clear();
                     history.put(Snapshot.of(e.superblock()).seq(), model.copy());
+                    verify();
                     digestCheck();
                 }
                 default -> throw new Diverged("unknown op " + j.get("op"));
@@ -376,6 +386,7 @@ class OplogCheckTest {
                 }
             }
             try {
+                r.verify();
                 return r.digestCheck();
             } catch (RuntimeException x) {
                 throw new Diverged("end: " + x);
@@ -450,6 +461,7 @@ class OplogCheckTest {
                 }
             }
             r.e.commitNow(true);
+            r.verify();
             return r.digestCheck();
         } finally {
             r.e.close();
