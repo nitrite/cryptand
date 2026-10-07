@@ -1296,6 +1296,10 @@ public final class Engine implements AutoCloseable {
 
         sb.nextNonce = cipher == null ? 0 : cipher.nextNonceWatermark();
         long offset = Superblock.slotOffsetFor(sb.commitId, sb.pageSize());
+        // F-071: a barrier over the tree pages written just above, before the
+        // superblock that names them. Without it a power cut before the sync
+        // below could land the superblock and not its pages.
+        pager.sync();
         file.write(offset, sealSuperblock());
         pager.sync();
         pager.publishFrees();
