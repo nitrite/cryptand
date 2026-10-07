@@ -37,6 +37,20 @@ public final class PageFile implements AutoCloseable {
     private static final long LOCK_BYTE = 1L << 62;
     private FileLock writerLock;
 
+    /**
+     * PLAN M2.1's fault-injection seam. Package-private and null outside the
+     * test tree's {@code container.Faults}, so it is not API.
+     */
+    interface Hook {
+        void beforeWrite(PageFile f, long offset, byte[] src, int srcOff, int len) throws IOException;
+
+        void beforeSync(PageFile f) throws IOException;
+
+        void beforeTruncate(PageFile f) throws IOException;
+    }
+
+    static volatile Hook hook;
+
     public PageFile(Path path, boolean readOnly, int requestedDurability) {
         this.path = path;
         this.readOnly = readOnly;
@@ -126,6 +140,10 @@ public final class PageFile implements AutoCloseable {
         ByteBuffer b = ByteBuffer.wrap(src, srcOff, len);
         long pos = offset;
         try {
+            Hook h = hook;
+            if (h != null) {
+                h.beforeWrite(this, offset, src, srcOff, len);
+            }
             while (b.hasRemaining()) {
                 pos += channel.write(b, pos);
             }
@@ -149,6 +167,10 @@ public final class PageFile implements AutoCloseable {
             return;
         }
         try {
+            Hook h = hook;
+            if (h != null) {
+                h.beforeSync(this);
+            }
             channel.force(false);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -163,6 +185,11 @@ public final class PageFile implements AutoCloseable {
     public void truncate(long bytes) {
         try {
             if (channel.size() > bytes) {
+                Hook h = hook;
+                if (h != null) {
+                    h.beforeSync(this);
+                    h.beforeTruncate(this);
+                }
                 channel.force(false);
                 channel.truncate(bytes);
             }
