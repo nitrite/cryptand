@@ -600,13 +600,30 @@ public final class Engine implements AutoCloseable {
         } catch (RuntimeException ex) {
             failA = ex;
         }
-        int pageSize = sbA != null ? sbA.pageSize() : 4096;
+        // F-069: with slot A invalid the page size is unknown, and slot B sits
+        // at offset page_size. Try every legal size (page_size_log2 12..16) and
+        // accept a slot only where its own page size names the offset it was
+        // found at. Assuming 4096 lost every other file whose slot A was bad,
+        // including any crashed before its first close.
         Superblock sbB = null;
-        byte[] b = new byte[Superblock.BYTES];
-        if (file.size() >= (long) pageSize + Superblock.BYTES) {
-            file.readFully(pageSize, b, 0, Superblock.BYTES);
+        byte[] b = null;
+        for (int log2 = 12; log2 <= 16; log2++) {
+            int pageSize = 1 << log2;
+            if (sbA != null && pageSize != sbA.pageSize()) {
+                continue;
+            }
+            if (file.size() < (long) pageSize + Superblock.BYTES) {
+                continue;
+            }
+            byte[] cand = new byte[Superblock.BYTES];
+            file.readFully(pageSize, cand, 0, Superblock.BYTES);
             try {
-                sbB = Superblock.decode(b);
+                Superblock sb = Superblock.decode(cand);
+                if (sb.pageSize() == pageSize
+                        && (sbB == null || Long.compareUnsigned(sb.commitId, sbB.commitId) > 0)) {
+                    sbB = sb;
+                    b = cand;
+                }
             } catch (RuntimeException ignored) {
                 // A slot that fails is simply not a candidate; that is the whole
                 // of recovery, and it is why the two slots alternate.

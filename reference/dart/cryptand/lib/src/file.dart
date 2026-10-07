@@ -451,7 +451,26 @@ abstract final class DatabaseFile {
     }
     // §2.1 steps 1–3, and the page size is not known until slot A is read.
     final probe = Superblock.tryDecode(Uint8List.sublistView(bytes, 0, Sb.size));
-    final pageSize = probe?.pageSize ?? 4096;
+    // F-069: with slot A invalid the page size is unknown, and slot B sits at
+    // offset page_size. Try every legal size (page_size_log2 12..16) and take
+    // a slot only where its own page size names the offset it was found at.
+    // Assuming 4096 lost every other file whose slot A was bad, including any
+    // crashed before its first close.
+    var pageSize = probe?.pageSize ?? 4096;
+    if (probe == null) {
+      Superblock? best;
+      for (var log2 = 12; log2 <= 16; log2++) {
+        final size = 1 << log2;
+        if (bytes.length < size + Sb.size) continue;
+        final b = Superblock.tryDecode(
+            Uint8List.sublistView(bytes, size, size + Sb.size));
+        if (b != null && b.pageSize == size &&
+            (best == null || b.commitId > best.commitId)) {
+          best = b;
+          pageSize = size;
+        }
+      }
+    }
     if (bytes.length < 2 * pageSize) {
       throw const CorruptionException('file is shorter than its two slots');
     }

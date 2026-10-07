@@ -545,12 +545,25 @@ impl Engine {
         // at offset 0 and is exactly 4096 bytes.
         let mut probe = Pager::open_shared(path, 4096, u64::MAX)?;
         let a = Superblock::parse(&probe.read_at(0, 4096)?).ok();
-        let page_size = match &a {
-            Some(sb) => sb.page_size(),
-            None => 4096,
+        // F-069: with slot A invalid the page size is unknown, and slot B sits
+        // at offset `page_size`. Try every legal size (`page_size_log2`
+        // 12..=16) and accept a slot only where its own page size names the
+        // offset it was found at. Assuming 4096 lost every other file whose
+        // slot A was bad, including any crashed before its first close.
+        let sizes: Vec<usize> = match &a {
+            Some(sb) => vec![sb.page_size()],
+            None => (12..=16).map(|l| 1usize << l).collect(),
         };
-        let mut probe = Pager::open_shared(path, page_size, u64::MAX)?;
-        let b = Superblock::parse(&probe.read_at(page_size as u64, 4096)?).ok();
+        let mut b: Option<Superblock> = None;
+        for page_size in sizes {
+            let mut probe = Pager::open_shared(path, page_size, u64::MAX)?;
+            let Ok(raw) = probe.read_at(page_size as u64, 4096) else { continue };
+            if let Ok(sb) = Superblock::parse(&raw) {
+                if sb.page_size() == page_size && b.as_ref().is_none_or(|x| sb.commit_id > x.commit_id) {
+                    b = Some(sb);
+                }
+            }
+        }
         // Step 3: the valid slot with the greater commit_id.
         let sb = match (a, b) {
             (Some(x), Some(y)) => {

@@ -42,6 +42,24 @@ void main() {
     expect(back.engine.scanTree(t).length, 500);
   });
 
+  test('F-069: a file whose slot A is invalid opens from slot B', () {
+    // Slot B sits at offset page_size, which a reader cannot know when slot A
+    // is invalid; all three readers assumed 4096 and lost an 8 KiB file.
+    final path = tmp('f069');
+    final db = Database(
+        engine: Engine(memtableEntries: 200, vlogMin: 256, pageSize: 8192));
+    db.engine.put(t, CNitriteId(1), Uint8List.fromList('one'.codeUnits));
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+    DatabaseFile.save(db, path); // both slots written, then A destroyed
+    final raf = File(path).openSync(mode: FileMode.append);
+    raf.setPositionSync(0);
+    raf.writeFromSync(Uint8List(Sb.size));
+    raf.closeSync();
+    final back = DatabaseFile.open(path);
+    expect(String.fromCharCodes(back.engine.get(t, CNitriteId(1))!), 'one');
+  });
+
   test('F-045: a reopen continues value-log ids from the superblock', () {
     // 04 section 2.1: segment ids are "globally unique, never reused". A file
     // whose newest segment was collected has no tree-7 entry for it, so the

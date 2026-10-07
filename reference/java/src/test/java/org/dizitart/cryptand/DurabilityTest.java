@@ -159,4 +159,26 @@ class DurabilityTest {
             assertArrayEquals(val("x"), e.get(TREE, key(1)));
         }
     }
+
+    /**
+     * F-069: slot B sits at offset {@code page_size}, which a reader cannot know
+     * when slot A is invalid. Rust's {@code create} leaves slot A blank until the
+     * first close, so a crash before it lost an 8 KiB file in all three readers.
+     */
+    @Test
+    @DisplayName("F-069: a file whose slot A is invalid opens from slot B at any page size")
+    void slotBAloneOpens(@TempDir Path dir) throws Exception {
+        Path p = dir.resolve("b.cryptand");
+        try (Engine e = Engine.create(p, sync())) {
+            e.batch().put(TREE, key(1), val("one")).commit();
+        }
+        try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(p,
+                java.nio.file.StandardOpenOption.WRITE)) {
+            ch.write(java.nio.ByteBuffer.allocate(Superblock.BYTES), 0);
+        }
+        try (Engine e = Engine.open(p, sync())) {
+            assertTrue(e.superblock().pageSize() != 4096, "the case needs a non-4 KiB page");
+            assertTrue(Verify.run(e).findings().isEmpty(), "verify: " + Verify.run(e).findings());
+        }
+    }
 }
