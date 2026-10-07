@@ -14,12 +14,18 @@
   Dart waits for M5. Found F-069 (S0, all three, slot B lookup; spec 01 §2.1
   amended), F-070, F-071 (S0, Java barrier; Dart's whole-file save → M5),
   F-074 (Rust nonce-floor publish overwrote the live slot; Dart → M5).
-- **F-072** (13 §5 MUSTs): Rust complete — `keyapi.rs`, `convert.rs`
-  (encrypt, decrypt with confirmation, resumable `convert_step`, fraction),
-  `rotate.rs` (copy-and-swap, synchronous, refused while checkpoints exist).
-  Interop steps 7–9 green in all three. Java: key ops only. Dart: M5.
-- **F-073** (readers inferred encryption from `cipher`): Rust fixed; Java and
-  Dart read Rust's converted files fine (blobs untested until Java converts).
+- **F-072** (13 §5 MUSTs): Rust complete (`keyapi.rs`, `convert.rs`,
+  `rotate.rs`). Java: key ops, `encrypt`/`decrypt(ConfirmDecrypt)`/
+  `convertStep`/`conversion`/`fullyEncrypted` in `Engine` (blobs re-chunked
+  in the conversion compaction), `ConvertTest`; interop steps 7–8 now run
+  with Rust and Java as converter, all green. Java rotate not yet. Vector
+  regions converted/rotated by neither (PLAN F-072 g). Dart: M5.
+- **F-073** Java side fixed too (value log per head byte, blobs per head page).
+- **F-076** (S0): golden `v1.0-encrypted` has byte 39 = 0 over encrypted
+  records; Rust's F-073 fix broke the corpus test (gate red 97ca8ad..fde39d3).
+  Fixed in Rust (56e7cf3) by a one-record probe; Java tolerates it; Dart M5.
+- Suspects: F-075 (Java encrypted vector regions: clear head page, undersized
+  extent), F-077 (Java `MandatoryTest.containment` flaked 1 of 2 full runs).
 - Open S1/S0 outside M5: F-072 (Java, Dart). M5: F-035, F-038.
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
   never build Java while a hop or Java fault sweep runs.
@@ -48,9 +54,9 @@
 
 ## Next action
 
-F-072 for Java: port `convert.rs` (encrypt,
-decrypt, convert_step, conversion) and `rotate.rs`; Java already has the key
-ops. Java-written blobs give Rust's blob reader its first mixed-file test.
+Java `rotateMasterKey` (port `rotate.rs`: copy-and-swap; re-seal pages,
+value-log records, blob chunks under a fresh master). Then reproduce F-075
+(encrypted Java vector index read by Rust) and fix it with PLAN F-072 g.
 Then M2.2 kill -9 torture.
 
 ## Log
@@ -70,3 +76,4 @@ Then M2.2 kill -9 torture.
 - 2026-10-07 — F-072 (S1) found scoping M2.2: 13 §5 MUSTs missing; human: implement all; Rust key ops done; design in PLAN.
 - 2026-10-07 — F-072 Rust: encrypt/decrypt/convert/rotate + interop 7–9; F-073 (Rust readers); conversion crash sweep.
 - 2026-10-07 — F-074 from the 1000-seed conversion sweep (fixed in Rust); rerun 1000 × 6 sweeps clean.
+- 2026-10-07 — F-072 Java encrypt/decrypt/convert + interop 7–8 both converters; F-073 Java; F-076 (gate red since 97ca8ad) fixed in Rust; F-075, F-077 suspects.

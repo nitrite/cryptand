@@ -197,14 +197,15 @@ fi
 # same in every implementation, half-converted (plaintext and encrypted pages
 # and value-log segments side by side; 14 §5.2 says a reader decides per
 # object) and fully converted.
+for conv in rust java; do
 for mode in half full; do
-  say "7. rust encrypts in place ($mode); every implementation reads and verifies"
-  ef="$work/encrypt-$mode.cryptand"
-  run_impl rust write "$ef" >/dev/null || { bad "rust could not write"; continue; }
-  want="$(field "$(run_impl rust read "$ef")" digest)"
+  say "7. $conv encrypts in place ($mode); every implementation reads and verifies"
+  ef="$work/encrypt-$conv-$mode.cryptand"
+  run_impl $conv write "$ef" >/dev/null || { bad "$conv could not write"; continue; }
+  want="$(field "$(run_impl $conv read "$ef")" digest)"
   KEY=0909090909090909090909090909090909090909090909090909090909090909
   extra=(); [[ $mode == half ]] && extra=(--half)
-  run_impl rust encrypt "$ef" ${extra[@]+"${extra[@]}"} >/dev/null || { bad "rust could not encrypt"; KEY=""; continue; }
+  run_impl $conv encrypt "$ef" ${extra[@]+"${extra[@]}"} >/dev/null || { bad "$conv could not encrypt"; KEY=""; continue; }
   for impl in rust java dart; do
     got="$(field "$(run_impl "$impl" read "$ef")" digest)"
     v="$(run_impl "$impl" verify "$ef" 2>&1 | tail -1)"
@@ -215,13 +216,13 @@ for mode in half full; do
 done
 
 for mode in half full; do
-  say "8. rust decrypts in place ($mode); every implementation reads and verifies"
-  df="$work/decrypt-$mode.cryptand"
+  say "8. $conv decrypts in place ($mode); every implementation reads and verifies"
+  df="$work/decrypt-$conv-$mode.cryptand"
   KEY=0909090909090909090909090909090909090909090909090909090909090909
-  run_impl rust write "$df" >/dev/null || { bad "rust could not write"; KEY=""; continue; }
-  want="$(field "$(run_impl rust read "$df")" digest)"
+  run_impl $conv write "$df" >/dev/null || { bad "$conv could not write"; KEY=""; continue; }
+  want="$(field "$(run_impl $conv read "$df")" digest)"
   extra=(); [[ $mode == half ]] && extra=(--half)
-  run_impl rust decrypt "$df" ${extra[@]+"${extra[@]}"} >/dev/null || { bad "rust could not decrypt"; KEY=""; continue; }
+  run_impl $conv decrypt "$df" ${extra[@]+"${extra[@]}"} >/dev/null || { bad "$conv could not decrypt"; KEY=""; continue; }
   [[ $mode == full ]] && KEY=""   # decrypted: no key needed, and none accepted
   for impl in rust java dart; do
     got="$(field "$(run_impl "$impl" read "$df")" digest)"
@@ -230,6 +231,7 @@ for mode in half full; do
     else bad "$impl: digest '$got' want '$want'; $v"; fi
   done
   KEY=""
+done
 done
 
 say "9. rust rotates the master key (copy-and-swap); every implementation reads with the new key only"

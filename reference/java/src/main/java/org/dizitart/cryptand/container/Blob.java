@@ -87,7 +87,7 @@ public final class Blob {
      * after its 40-byte header, and the interior pages carry no header at all.
      */
     public static Blob write(Pager pager, byte[] value) {
-        if (pager.crypto() instanceof FileCipher) {
+        if (pager.seals() && pager.crypto() instanceof FileCipher) {
             FileCipher cipher = ((FileCipher) pager.crypto());
             return writeEncrypted(pager, cipher, value);
         }
@@ -123,9 +123,12 @@ public final class Blob {
     }
 
     public byte[] read(Pager pager) {
-        if (pager.crypto() instanceof FileCipher) {
-            FileCipher cipher = ((FileCipher) pager.crypto());
-            return readEncrypted(pager, cipher);
+        if (encrypted(pager)) {
+            if (!(pager.crypto() instanceof FileCipher)) {
+                throw new org.dizitart.cryptand.CannotUnlockException(
+                        "blob at page " + startPage + " is encrypted and no key is available");
+            }
+            return readEncrypted(pager, (FileCipher) pager.crypto());
         }
         int pageSize = pager.pageSize();
         int firstPageRoom = pageSize - PageHeader.BYTES;
@@ -145,9 +148,16 @@ public final class Blob {
 
     /** Pages the extent occupies on this file, encrypted or not (F-050). */
     public int extentPages(Pager pager) {
-        return pager.crypto() instanceof FileCipher
+        return encrypted(pager)
                 ? encryptedPages(pager.pageSize(), byteLen)
                 : pages(pager.pageSize());
+    }
+
+    /** The head page's {@code flags.ENCRYPTED}, never the key in hand (14 §5.2, F-073). */
+    public boolean encrypted(Pager pager) {
+        byte[] head = new byte[PageHeader.BYTES];
+        pager.file().readFully(pager.offsetOf(startPage), head, 0, head.length);
+        return PageHeader.parse(head, 0).isSet(PageHeader.Flags.ENCRYPTED);
     }
 
     /** Pages the extent occupies, so it can be freed. */

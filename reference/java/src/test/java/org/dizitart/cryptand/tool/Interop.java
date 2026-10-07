@@ -417,6 +417,34 @@ public final class Interop {
         }
     }
 
+    /**
+     * F-072: {@code encrypt <plaintext file> --key K [--half]}; {@code --half}
+     * stops before converting anything, so plaintext and encrypted objects
+     * sit side by side.
+     */
+    private static void encrypt(String path, byte[] key, boolean half) {
+        try (Engine e = Engine.open(Path.of(path), options(null))) {
+            e.encrypt(null, key);
+            while (!half && e.convertStep()) {
+                // until nothing plaintext remains
+            }
+            Engine.Conversion c = e.conversion();
+            System.out.println("encrypted " + path + ": converted=" + c.converted + " remaining=" + c.remaining);
+        }
+    }
+
+    /** {@code decrypt <encrypted file> --key K [--half]}: {@code --half} stops after one step. */
+    private static void decrypt(String path, byte[] key, boolean half) {
+        try (Engine e = Engine.open(Path.of(path), options(key))) {
+            e.decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
+            boolean more = e.convertStep();
+            while (!half && more) {
+                more = e.convertStep();
+            }
+            System.out.println("decrypted " + path + ": cipher=" + e.superblock().cipher);
+        }
+    }
+
     private static int verify(String path, byte[] key) {
         try (Engine e = Engine.open(Path.of(path), options(key))) {
             Verify.Report r = Verify.run(e);
@@ -628,11 +656,15 @@ public final class Interop {
                 mutate(args[1], args[2], key);
             } else if (args.length >= 2 && args[0].equals("verify")) {
                 System.exit(verify(args[1], key));
+            } else if (args.length >= 2 && args[0].equals("encrypt")) {
+                encrypt(args[1], key, java.util.Arrays.asList(args).contains("--half"));
+            } else if (args.length >= 2 && args[0].equals("decrypt")) {
+                decrypt(args[1], key, java.util.Arrays.asList(args).contains("--half"));
             } else if (args.length >= 2 && args[0].equals("corpus")) {
                 System.exit(corpus(args[1]));
             } else {
                 System.err.println(
-                        "interop write|read|mutate <tag>|verify <file>|corpus <dir> [--key <hex>]");
+                        "interop write|read|mutate <tag>|verify|encrypt|decrypt <file>|corpus <dir> [--key <hex>] [--half]");
                 System.exit(2);
             }
         } catch (Exception e) {

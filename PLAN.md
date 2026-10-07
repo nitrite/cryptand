@@ -165,7 +165,7 @@ test compares the engine against a model on random histories.
 ## F-072 — 13 §5 maintenance MUSTs (human 10-07: all of them, all three)
 
 - [x] **a** Rust `add_key`/`remove_key`/`crypto_erase` (`keyapi.rs`); Java had them.
-- [~] **b** In-place `encrypt()` (Rust done 10-07; Java next). Set `cipher`, keyslot 0,
+- [~] **b** In-place `encrypt()` (Rust and Java done 10-07; Java also re-chunks blobs). Set `cipher`, keyslot 0,
   seal the open value-log segments, commit; new pages and new value-log
   segments are encrypted (head byte 39). Then a resumable `convert_step()`
   until nothing plaintext remains: full compaction (segments re-laid with the
@@ -174,17 +174,18 @@ test compares the engine against a model on random histories.
   full to `page_size − 40`, so pages are re-laid, never just re-sealed.
   Expose the fraction converted; never report "encrypted" while plaintext
   remains (14 §8.3).
-- [~] **c** (Rust fixed, J/D ok on Rust-written files; blobs untested) Readers decide per page (`flags.ENCRYPTED`), per value-log segment
+- [~] **c** (Rust and Java fixed; Java blobs per head page; F-076 byte-0 probe in both) Readers decide per page (`flags.ENCRYPTED`), per value-log segment
   (head byte 39) and per extent, never from `cipher` (14 §5.2). Known suspect:
   Rust `read_vlog_record` and `verify` use `sb.cipher` / `false`. Driven by a
   half-converted file in all three readers and through interop.
-- [~] **d** (Rust done 10-07) `decrypt()`: the mirror. Requires explicit confirmation; `cipher`
+- [~] **d** (Rust and Java done 10-07) `decrypt()`: the mirror. Requires explicit confirmation; `cipher`
   stays 1 and the keyslots stay until no encrypted page or record remains,
   then one superblock clears both (no 14 §6.1 downgrade window).
 - [~] **e** (Rust done 10-07, synchronous; refused while checkpoints exist) `rotate_master_key()`: copy-and-swap. Stream into a sibling file
   under a fresh master in bounded steps, catch up concurrent writes, fsync,
   rename over. Crash leaves the old file intact. Spec 14 §8.3/§8.4 note.
 - [ ] **f** Dart: all of the above inside M5.
+- [ ] **g** Vector regions: neither Rust nor Java converts or rotates them (census and rotate skip them; Java also has F-075). Engine cannot enumerate regions; find them from the vector indexes' descriptors.
   **Verify:** each op has a crash test (M2.1 fault sweep over a conversion,
   1000 seeds) and an interop step (a half-converted Rust file read by Java and
   Dart and vice versa); `verify` clean after each; 14 §8.3's fraction reported.

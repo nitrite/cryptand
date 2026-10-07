@@ -2258,10 +2258,20 @@ public final class Engine implements AutoCloseable {
      * through {@code level} into {@code level + 1}, as one job.
      */
     private void compactLevels(int from, int level) {
+        compactLevels(from, level, false);
+    }
+
+    /**
+     * {@code everything}: F-072's conversion pass, every segment of every
+     * level into the last level as one job. Never a subset: an output newer
+     * by id than segments holding newer versions of its keys lets stale
+     * values win (Rust's M2.1 sweep found it).
+     */
+    private void compactLevels(int from, int level, boolean everything) {
         int target = level + 1;
         int last = lastLevel();
         List<SegmentMeta> inputs = new ArrayList<>();
-        for (int l = from; l <= level; l++) {
+        for (int l = from; l <= (everything ? last : level); l++) {
             inputs.addAll(manifest.at(l));
         }
         if (inputs.isEmpty()) {
@@ -2295,7 +2305,7 @@ public final class Engine implements AutoCloseable {
                 }
             }
         }
-        for (SegmentMeta m : manifest.at(target, group)) {
+        for (SegmentMeta m : everything ? List.<SegmentMeta>of() : manifest.at(target, group)) {
             if (overlapsUserKeys(m, lo, hi)) {
                 inputs.add(m);
             }
@@ -2414,6 +2424,17 @@ public final class Engine implements AutoCloseable {
             }
 
             BtreePage.Leaf out = cell;
+            if (everything && cell.kind() == BtreePage.Kind.BLOB) {
+                // 14 §8.3: a blob is re-chunked in the write mode, and its
+                // old extent goes with the inputs.
+                Blob b = Blob.decode(cell.value());
+                if (b.encrypted(pager) != pager.seals()) {
+                    Blob moved = Blob.write(pager, b.read(pager));
+                    deadBlobs.add(b);
+                    out = new BtreePage.Leaf(ik, BtreePage.Kind.BLOB, cell.expiryMs(),
+                            cell.hasExpiry(), moved.encode(), 0);
+                }
+            }
             if (target >= last && cell.kind() == BtreePage.Kind.VLOG) {
                 // §6.3: during a compaction that outputs the last level, a
                 // surviving HOT-tier value MUST be promoted into a COLD segment
@@ -3996,6 +4017,227 @@ public final class Engine implements AutoCloseable {
         } finally {
             structure.unlock();
         }
+    }
+
+    // ==================================================================
+    // F-072: 13 §5 encrypt() / decrypt(), 14 §8.3/§8.4 conversion in place
+    // ==================================================================
+
+    /** 14 §8.3's fraction, counted in objects each rewritten whole. */
+    public static final class Conversion {
+        public final long converted;
+        public final long remaining;
+
+        Conversion(long converted, long remaining) {
+            this.converted = converted;
+            this.remaining = remaining;
+        }
+
+        public boolean done() {
+            return remaining == 0;
+        }
+
+        public double fraction() {
+            long all = converted + remaining;
+            return all == 0 ? 1.0 : (double) converted / all;
+        }
+
+        @Override
+        public String toString() {
+            return "Conversion[converted=" + converted + ", remaining=" + remaining + "]";
+        }
+    }
+
+    /** The explicit confirmation {@link #decrypt} requires (14 §8.3). */
+    public enum ConfirmDecrypt { NO, REMOVE_ENCRYPTION }
+
+    /**
+     * 13 §5 {@code encrypt()}: {@code cipher = 1}, keyslot 0 and the open
+     * value-log segments sealed, in one commit. From then on every page and
+     * every new value-log segment is encrypted; {@link #convertStep} rewrites
+     * what is still plaintext. Exactly one of {@code password}, {@code rawKey}.
+     */
+    public void encrypt(byte[] password, byte[] rawKey) {
+        if ((password == null) == (rawKey == null)) {
+            throw new InvalidArgumentException("encrypt() takes a password or a raw key, not both or neither");
+        }
+        structure.lock();
+        try {
+            if (sb.cipher != Superblock.Cipher.NONE) {
+                throw new InvalidArgumentException("the file is already encrypted");
+            }
+            options.password = password;
+            options.rawKey = rawKey;
+            enableEncryption();
+            // enableEncryption installed the cipher on the pager; the value
+            // log switches with its open segments sealed, so none mixes framings.
+            vlog.switchMode(cipher, false);
+            cipher.attach(this::publishNonceFloor);
+            publishSuperblock(visibleSeq);
+        } finally {
+            structure.unlock();
+        }
+    }
+
+    /**
+     * 14 §8.3's mirror, which "MUST make the user confirm it": refused unless
+     * {@code confirm} is {@link ConfirmDecrypt#REMOVE_ENCRYPTION}. Writes go
+     * plaintext; {@code cipher} and the keyslots stay until {@link #convertStep}
+     * has rewritten every encrypted object. Not persisted: after a reopen, call
+     * it again to carry on.
+     */
+    public void decrypt(ConfirmDecrypt confirm) {
+        if (confirm != ConfirmDecrypt.REMOVE_ENCRYPTION) {
+            throw new InvalidArgumentException(
+                    "decrypt() removes encryption from the whole file; it needs ConfirmDecrypt.REMOVE_ENCRYPTION");
+        }
+        requireEncrypted();
+        structure.lock();
+        try {
+            pager.setWriteClear(true);
+            vlog.switchMode(cipher, true);
+            publishSuperblock(visibleSeq);
+        } finally {
+            structure.unlock();
+        }
+    }
+
+    /**
+     * Rewrites one kind of object not yet in the target mode, then commits.
+     *
+     * @return true while more steps are needed
+     */
+    // ponytail: one step is one whole kind of object, not a slice bounded by
+    // 12 §4's stall budget; slice each phase if a large file's conversion
+    // stalls a foreground caller. Vector regions are not converted (F-072 g).
+    public boolean convertStep() {
+        requireEncrypted();
+        structure.lock();
+        try {
+            Census c = census();
+            if (!c.plainSegments.isEmpty() || c.plainBlobs > 0) {
+                int last = lastLevel();
+                compactLevels(0, last - 1, true);
+            } else if (c.plainTreePages > 0) {
+                relocateTrees();
+                // Tree 1 is rewritten by every publish; once more so the
+                // pages the last one freed are not the ones it lands on.
+                publishSuperblock(visibleSeq);
+            } else if (!c.plainVlog.isEmpty()) {
+                if (!liveSnapshots.isEmpty()) {
+                    throw new InvalidArgumentException(
+                            "a value-log segment cannot be rewritten under a live snapshot; close them first");
+                }
+                for (VlogStats st : c.plainVlog) {
+                    collectSegment(st);
+                }
+                republishLevels();
+                publishSuperblock(visibleSeq);
+                retireCollectedSegments();
+            } else if (pager.crypto() != null && !pager.seals()) {
+                // Nothing encrypted remains: one superblock drops the cipher
+                // and the keyslots together, so no file ever says cipher = 0
+                // while carrying keyslots (14 §6.1). Twice, so neither slot
+                // keeps them; with cipher = 0 sb_mac is written as zero (§6.2).
+                sb.keyslots = new byte[Keyslot.COUNT * Keyslot.BYTES];
+                sb.cipher = Superblock.Cipher.NONE;
+                sb.featuresRequired &= ~Feature.bit(Feature.CIPHER);
+                sb.featuresOptional &= ~Feature.bit(Feature.CIPHER);
+                sb.sbMac = new byte[32];
+                FileCipher was = cipher;
+                cipher = null;
+                pager.setCrypto(null);
+                pager.setWriteClear(false);
+                vlog.switchMode(null, false);
+                options.password = null;
+                options.rawKey = null;
+                publishSuperblock(visibleSeq);
+                publishSuperblock(visibleSeq);
+                was.close();
+                return false;
+            } else {
+                return false;
+            }
+            return !conversion().done() || !pager.seals();
+        } finally {
+            structure.unlock();
+        }
+    }
+
+    /** What is converted and what is not, read from the objects themselves. */
+    public Conversion conversion() {
+        structure.lock();
+        try {
+            Census c = census();
+            return new Conversion(c.converted,
+                    c.plainSegments.size() + c.plainTreePages + c.plainVlog.size() + c.plainBlobs);
+        } finally {
+            structure.unlock();
+        }
+    }
+
+    /** True only when the file is encrypted and nothing plaintext remains (14 §8.3). */
+    public boolean fullyEncrypted() {
+        return sb.cipher != Superblock.Cipher.NONE && pager.seals() && conversion().done();
+    }
+
+    private static final class Census {
+        final List<SegmentMeta> plainSegments = new ArrayList<>();
+        long plainTreePages;
+        final List<VlogStats> plainVlog = new ArrayList<>();
+        long plainBlobs;
+        long converted;
+    }
+
+    /** Objects not in the target mode ("plain" when encrypting). Requires {@link #structure}. */
+    private Census census() {
+        boolean want = pager.seals();
+        Census c = new Census();
+        for (SegmentMeta m : manifest.all()) {
+            if (pageEncrypted(m.startPage) == want) {
+                c.converted++;
+            } else {
+                c.plainSegments.add(m);
+            }
+            Segment seg = Segment.open(pager, m.startPage);
+            for (EntrySource.OfSegment it = new EntrySource.OfSegment(seg); it.isValid(); it.next()) {
+                BtreePage.Leaf cell = it.entry();
+                if (cell.kind() == BtreePage.Kind.BLOB) {
+                    if (Blob.decode(cell.value()).encrypted(pager) == want) {
+                        c.converted++;
+                    } else {
+                        c.plainBlobs++;
+                    }
+                }
+            }
+        }
+        Set<Long> pages = new HashSet<>();
+        for (PageTree t : List.of(catalogTree, freeTree, attributesTree, treeIndexTree, repairTree,
+                usersTree, manifestTree, vlogStatsTree, checkpointTree, changefeedTree)) {
+            pages.addAll(t.pages());
+        }
+        for (long p : pages) {
+            if (pageEncrypted(p) == want) {
+                c.converted++;
+            } else {
+                c.plainTreePages++;
+            }
+        }
+        for (VlogStats st : vlog.allStats()) {
+            if (st.pages == 0 || st.bytes == 0) {
+                continue;
+            }
+            if ((vlog.segment(st.segmentId).encrypted != 0) == want) {
+                c.converted++;
+            } else {
+                c.plainVlog.add(st);
+            }
+        }
+        return c;
+    }
+
+    private boolean pageEncrypted(long page) {
+        return PageHeader.parse(pager.readRaw(page), 0).isSet(PageHeader.Flags.ENCRYPTED);
     }
 
     private void requireEncrypted() {

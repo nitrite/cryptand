@@ -286,7 +286,20 @@ public final class Pager {
      * produced a page that cannot be written at all.
      */
     public int payloadSize() {
-        return pageSize - PageHeader.BYTES - (crypto != null ? XChaCha20Poly1305.TAG_BYTES : 0);
+        return pageSize - PageHeader.BYTES - (seals() ? XChaCha20Poly1305.TAG_BYTES : 0);
+    }
+
+    /** Pages written now are encrypted: a key is installed and {@code decrypt()} is not under way. */
+    public boolean seals() {
+        return crypto != null && !writeClear;
+    }
+
+    /**
+     * {@code decrypt()}'s mode ({@code 14-security.md} §8.3): the key stays so
+     * encrypted pages still read, but every page written is plaintext.
+     */
+    public void setWriteClear(boolean clear) {
+        this.writeClear = clear;
     }
 
     /**
@@ -388,6 +401,8 @@ public final class Pager {
     public void setCrypto(PageCrypto crypto) {
         this.crypto = crypto;
     }
+
+    private volatile boolean writeClear;
 
     public PageCrypto crypto() {
         return crypto;
@@ -1100,7 +1115,7 @@ public final class Pager {
             h.codecOrReserved = pageCodec;
             h.storedLen = body.length;
         }
-        if (crypto != null) {
+        if (seals()) {
             // Every field of the header is settled BEFORE the encryption,
             // because §5.2's AAD is the header as stored. `stored_len` is
             // `payload_len` plus the tag, so it is known in advance.

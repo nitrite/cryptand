@@ -151,6 +151,23 @@ public final class Vlog {
         this.cipher = cipher;
     }
 
+    /** {@code decrypt()}'s mode: records still read under the key, new segments are plaintext. */
+    private volatile boolean writeClear;
+
+    private boolean seals() {
+        return cipher != null && !writeClear;
+    }
+
+    /**
+     * F-072: switches the write mode. Every open segment is sealed first, so
+     * no segment ever holds records of both framings.
+     */
+    public synchronized void switchMode(FileCipher cipher, boolean writeClear) {
+        sealAll();
+        this.cipher = cipher;
+        this.writeClear = writeClear;
+    }
+
     public Vlog(Pager pager, PageTree statsTree, int segmentBytes, long nextSegmentId) {
         this.pager = pager;
         this.statsTree = statsTree;
@@ -320,7 +337,9 @@ public final class Vlog {
         VlogSegment.Record rec = new VlogSegment.Record(treeId, cke, value);
         // The size has to be known before the reservation, because the
         // reservation fixes the offset and §5.3 puts the offset in the nonce.
-        int size = cipher == null
+        // The segment's own framing, never the key in hand (14 §5.2).
+        boolean enc = open.seg.encrypted != 0;
+        int size = !enc
                 ? VlogSegment.recordSize(cke, value)
                 : VlogSegment.encryptedRecordSize(cke, value);
         long offset = open.tail.getAndAdd(size);
@@ -339,7 +358,7 @@ public final class Vlog {
             }
             return reserve(!cold, open.seg.heatClass, treeId, cke, value);
         }
-        byte[] record = cipher == null
+        byte[] record = !enc
                 ? rec.encode()
                 : VlogSegment.encodeEncrypted(rec, open.seg.segmentId, offset, cipher, cipher.allocateNonce());
         if (record.length != size) {
@@ -412,8 +431,8 @@ public final class Vlog {
         s.capacity = (long) pages * pageSize - s.dataOffset;
         s.tier = tier;
         s.heatClass = heatClass;
-        s.encrypted = cipher == null ? 0 : 1;
-        s.nonceBase = cipher == null ? 0 : cipher.nextNonceWatermark();
+        s.encrypted = seals() ? 1 : 0;
+        s.nonceBase = seals() ? cipher.nextNonceWatermark() : 0;
         s.startPage = start;
         s.pages = pages;
 
@@ -727,15 +746,9 @@ public final class Vlog {
     /**
      * Decodes a record read from {@code seg} at {@code offset}.
      *
-     * <p>The framing is chosen by whether <em>the database</em> has a key, not
-     * by the head page's {@code encrypted} byte. §6.2 makes that byte the
-     * per-segment truth and this implementation writes it correctly, but the
-     * Dart reference writes 0 on an encrypted file, and refusing to read those
-     * segments would fail the round-trip gate over a file whose records are
-     * perfectly well formed. There is no ambiguity to resolve either way: the
-     * per-page mixture {@code 14-security.md} §8.3 allows during a conversion is
-     * about pages, and no writer produces a value log with both framings in one
-     * database.
+     * <p>The framing is the segment's head byte 39 (14 §5.2, F-073), never
+     * whether the database has a key: a file converted in place (§8.3) holds
+     * segments of both kinds.
      */
     public VlogSegment.Record decodeAt(VlogSegment seg, byte[] buf, long offset) {
         return decodeAt(seg, buf, offset, false);
@@ -748,8 +761,23 @@ public final class Vlog {
      * undecrypted without also leaving it unauthenticated.
      */
     public VlogSegment.Record decodeAt(VlogSegment seg, byte[] buf, long offset, boolean keysOnly) {
-        if (cipher != null) {
+        if (seg.encrypted != 0) {
+            if (cipher == null) {
+                throw new org.dizitart.cryptand.CannotUnlockException(
+                        "value-log segment " + seg.segmentId + " is encrypted and no key is available");
+            }
             return VlogSegment.decodeEncryptedRecord(buf, 0, buf.length, seg.segmentId, offset, cipher);
+        }
+        if (cipher != null) {
+            // ponytail: F-075, Dart writes head byte 0 on encrypted segments,
+            // so with a key in hand a byte-0 segment may be either. A clear
+            // record whose CRC fails is tried as encrypted, whose tag is the
+            // authority. Drop the fallback once Dart writes the byte (M5).
+            try {
+                return VlogSegment.decodeRecord(buf, 0, buf.length);
+            } catch (RuntimeException clearFailed) {
+                return VlogSegment.decodeEncryptedRecord(buf, 0, buf.length, seg.segmentId, offset, cipher);
+            }
         }
         return keysOnly
                 ? VlogSegment.decodeRecordKeyOnly(buf, 0, buf.length)
