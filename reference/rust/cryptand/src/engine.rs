@@ -304,6 +304,9 @@ pub struct Engine {
     pub vlog_cold_open: Option<u64>,
     pub vlog_stats: BTreeMap<u64, VlogStats>,
     vlog_tail: BTreeMap<u64, u64>,
+    /// Head byte 39 per value-log segment (04 §6.2), read once. A reader
+    /// decides per segment, never from `cipher` (14 §5.2, F-073).
+    vlog_enc: HashMap<u64, bool>,
     /// Value-log segments whose tree-7 entry has changed since the last commit.
     /// `10-transactions.md` §2.3 invariant 2 puts the durable `bytes`
     /// watermark in tree 7 precisely so advancing it is an ordinary
@@ -472,6 +475,7 @@ impl Engine {
             vlog_cold_open: None,
             vlog_stats: BTreeMap::new(),
             vlog_tail: BTreeMap::new(),
+            vlog_enc: HashMap::new(),
             vlog_dirty: HashSet::new(),
             now_ms: 0,
             visible_seq: 0,
@@ -679,6 +683,7 @@ impl Engine {
             vlog_cold_open: None,
             vlog_stats: BTreeMap::new(),
             vlog_tail: BTreeMap::new(),
+            vlog_enc: HashMap::new(),
             vlog_dirty: HashSet::new(),
             now_ms: 0,
             visible_seq: sb.visible_seq,
@@ -851,7 +856,7 @@ impl Engine {
     /// unsealed value-log segment is sealed at its durable watermark and a
     /// fresh segment is opened for new writes. Unencrypted this is harmless
     /// housekeeping; encrypted, re-appending would reuse a nonce.
-    fn seal_unsealed_vlog_segments(&mut self) -> Result<()> {
+    pub(crate) fn seal_unsealed_vlog_segments(&mut self) -> Result<()> {
         let ids: Vec<u64> =
             self.vlog_stats.iter().filter(|(_, s)| !s.sealed).map(|(&id, _)| id).collect();
         for id in ids {
@@ -1182,6 +1187,7 @@ impl Engine {
             encrypted: self.sb.cipher != 0,
             nonce_base,
         };
+        self.vlog_enc.insert(id, head.encrypted);
         let page = head.encode(self.pager.page_size, pages);
         // §5.1: a value-log segment's head page stays in the clear — its
         // records are appended into its tail and encrypted one by one (§5.3).
@@ -1230,7 +1236,8 @@ impl Engine {
     }
 
     fn append_into(&mut self, tier: Tier, heat: Heat, tree: u32, cke_key: &[u8], value: &[u8]) -> Result<VlogPointer> {
-        let record = if self.sb.cipher != 0 {
+        let seg0 = self.current_vlog(tier, heat)?;
+        let record = if self.vlog_encrypted(seg0)? {
             let counter = self.allocate_nonce()?;
             let seg = self.current_vlog(tier, heat)?;
             let offset = *self.vlog_tail.get(&seg).unwrap();
@@ -1346,7 +1353,7 @@ impl Engine {
         vlog::check_pointer_in_bounds(p, &stats, DATA_OFFSET)?;
         let at = stats.start_page * self.pager.page_size as u64 + p.offset as u64;
         let raw = self.pager.read_at(at, p.len as usize)?;
-        let encrypted = self.sb.cipher != 0;
+        let encrypted = self.vlog_encrypted(p.segment_id)?;
         let rec = vlog::decode_record(&raw, encrypted)?;
         if encrypted {
             let ring = self.keys.as_ref().unwrap();
@@ -1369,7 +1376,21 @@ impl Engine {
         };
         let at = stats.start_page * self.pager.page_size as u64 + p.offset as u64;
         let raw = self.pager.read_at(at, p.len as usize)?;
-        vlog::decode_record(&raw, self.sb.cipher != 0)
+        let encrypted = self.vlog_encrypted(p.segment_id)?;
+        vlog::decode_record(&raw, encrypted)
+    }
+
+    /// Head byte 39 of value-log segment `id`.
+    pub fn vlog_encrypted(&mut self, id: u64) -> Result<bool> {
+        if let Some(&e) = self.vlog_enc.get(&id) {
+            return Ok(e);
+        }
+        let Some(start) = self.vlog_stats.get(&id).map(|s| s.start_page) else {
+            return corrupt(format!("unknown value-log segment {id}"));
+        };
+        let e = vlog::VlogHead::parse(&self.pager.read_page_clear(start)?)?.encrypted;
+        self.vlog_enc.insert(id, e);
+        Ok(e)
     }
 
     pub fn allocate_nonce(&mut self) -> Result<u64> {
@@ -1858,10 +1879,19 @@ impl Engine {
     /// head page's 40-byte header and runs on through header-less interior
     /// pages, or, encrypted, one `14-security.md` §5.4 chunk per page.
     /// Pages a blob of `len` bytes occupies (see [`Engine::read_blob`]).
-    fn blob_pages(&self, len: u64) -> u64 {
+    fn blob_pages(&mut self, start: u64, len: u64) -> u64 {
         let ps = self.pager.page_size as u64;
-        let chunk = if self.pager.crypto.is_some() { ps - 24 } else { ps };
+        let chunk = if self.blob_encrypted(start) { ps - 24 } else { ps };
         1 + len.saturating_sub(chunk - crate::container::PAGE_HEADER_BYTES as u64).div_ceil(chunk)
+    }
+
+    /// A blob is chunked per its own head page's `flags.ENCRYPTED`, never
+    /// per `cipher` or the key in hand (14 §5.2, F-073).
+    fn blob_encrypted(&mut self, start: u64) -> bool {
+        self.pager
+            .read_page_clear(start)
+            .and_then(|b| PageHeader::parse(&b))
+            .map_or(self.pager.crypto.is_some(), |h| h.encrypted())
     }
 
     pub fn read_blob(&mut self, ptr: &[u8]) -> Result<Vec<u8>> {
@@ -1872,7 +1902,7 @@ impl Engine {
         let len = u32::from_le_bytes(ptr[8..12].try_into().unwrap()) as usize;
         let crc = u32::from_le_bytes(ptr[12..16].try_into().unwrap());
         let ps = self.pager.page_size;
-        let encrypted = self.pager.crypto.is_some();
+        let encrypted = self.blob_encrypted(start);
         let chunk = if encrypted { ps - 24 } else { ps };
         let mut out = Vec::with_capacity(len);
         let mut i = 0u64;
@@ -2649,7 +2679,7 @@ impl Engine {
             if b.len() == 16 {
                 let start = u64::from_le_bytes(b[0..8].try_into().unwrap());
                 let len = u32::from_le_bytes(b[8..12].try_into().unwrap()) as u64;
-                let pages = self.blob_pages(len);
+                let pages = self.blob_pages(start, len);
                 self.pager.free_extent(start, pages as u32, self.sb.commit_id);
             }
         }
@@ -2790,7 +2820,7 @@ impl Engine {
         self.relocate_trees()
     }
 
-    fn relocate_trees(&mut self) -> Result<()> {
+    pub(crate) fn relocate_trees(&mut self) -> Result<()> {
         let commit_id = self.sb.commit_id;
         for t in [
             &mut self.catalog.tree,
@@ -2969,6 +2999,12 @@ impl Engine {
         if victims.len() < 2 {
             return Ok(());
         }
+        self.rewrite_vlog_segments(victims)
+    }
+
+    /// Moves every live record out of `victims` into a fresh, sealed COLD
+    /// segment (written in the current mode), and retires the victims.
+    pub(crate) fn rewrite_vlog_segments(&mut self, victims: Vec<u64>) -> Result<()> {
         // Build the survivor set by walking the trees, which is what §6.8's
         // invariant 1 requires: a record is live only if the tree's current
         // entry for its key is a VLOG pointer to this exact (segment, offset).
@@ -3000,23 +3036,24 @@ impl Engine {
                 }
             }
         }
-        if live.is_empty() {
-            return Ok(());
-        }
-        let dest = self.open_vlog_segment(Tier::Cold, Heat::First)?;
-        let mut rewrites: Vec<(Vec<u8>, VlogPointer, Option<u64>)> = Vec::new();
-        for (uk, (tree, p, expiry)) in &live {
-            let value = self.read_vlog(p)?;
-            // F-046: `uk` is `u32be(tree) || CKE(key)`; see promotion above.
-            let np = self.append_into(Tier::Cold, Heat::First, *tree, &uk[4..], &value)?;
-            self.counters.write_amp_gc += np.len as u64;
-            rewrites.push((uk.clone(), np, *expiry));
-        }
-        self.mark_clustered(dest, true)?;
-        self.seal_vlog(dest)?;
-        // Step 4: write the updated pointers through the normal commit path.
-        for (uk, np, expiry) in rewrites {
-            self.rewrite_pointer(&uk, np, expiry)?;
+        // Nothing live: the victims are retired all the same, or a dead
+        // segment would never leave (and a conversion never finish).
+        if !live.is_empty() {
+            let dest = self.open_vlog_segment(Tier::Cold, Heat::First)?;
+            let mut rewrites: Vec<(Vec<u8>, VlogPointer, Option<u64>)> = Vec::new();
+            for (uk, (tree, p, expiry)) in &live {
+                let value = self.read_vlog(p)?;
+                // F-046: `uk` is `u32be(tree) || CKE(key)`; see promotion above.
+                let np = self.append_into(Tier::Cold, Heat::First, *tree, &uk[4..], &value)?;
+                self.counters.write_amp_gc += np.len as u64;
+                rewrites.push((uk.clone(), np, *expiry));
+            }
+            self.mark_clustered(dest, true)?;
+            self.seal_vlog(dest)?;
+            // Step 4: write the updated pointers through the normal commit path.
+            for (uk, np, expiry) in rewrites {
+                self.rewrite_pointer(&uk, np, expiry)?;
+            }
         }
         for v in victims {
             if let Some(s) = self.vlog_stats.get_mut(&v) {

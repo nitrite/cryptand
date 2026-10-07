@@ -191,7 +191,13 @@ impl EngineVerify for Engine {
                     let start = u64::from_le_bytes(rec.value[0..8].try_into().unwrap());
                     let len = u32::from_le_bytes(rec.value[8..12].try_into().unwrap()) as u64;
                     let ps = self.pager.page_size as u64;
-                    let chunk = if self.sb.cipher != 0 { ps - 24 } else { ps };
+                    // The blob's own head page says how it is chunked (F-073).
+                    let enc = self
+                        .pager
+                        .read_page_clear(start)
+                        .and_then(|b| crate::container::PageHeader::parse(&b))
+                        .map_or(self.sb.cipher != 0, |h| h.encrypted());
+                    let chunk = if enc { ps - 24 } else { ps };
                     let head = chunk - crate::container::PAGE_HEADER_BYTES as u64;
                     let pages = 1 + len.saturating_sub(head).div_ceil(chunk);
                     for p in start..start.saturating_add(pages) {
@@ -336,7 +342,8 @@ impl EngineVerify for Engine {
                 }
             }
             // §9 — a segment marked `clustered` really is in key order.
-            if s.clustered && self.sb.cipher == 0 {
+            // Per segment, never from `cipher` (14 §5.2, F-073).
+            if s.clustered && !self.vlog_encrypted(id)? {
                 let mut off = 0u64;
                 let mut prev: Option<Vec<u8>> = None;
                 while off < s.bytes {
