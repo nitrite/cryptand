@@ -356,6 +356,12 @@ class MandatoryTest {
             }
             b.commit();
             e.commitNow();
+        }
+        // F-077: the victim is chosen once the writer has closed. Chosen inside
+        // it, a background compaction (memtableEntries = 64 makes many L0
+        // flushes) could merge it away before close, leaving the damage in a
+        // freed page and nothing to refuse: 11 of 400 runs under load.
+        try (Engine e = Engine.open(f, readOnlyOptions())) {
             // **No `maintain()` here, and the segment count is asserted.**
             //
             // Containment is per segment, so this property is only observable
@@ -388,7 +394,9 @@ class MandatoryTest {
         raw[(int) (damagedPage * pageSize) + PageHeader.BYTES + 5] ^= 0x55;
         Files.write(f, raw);
 
-        try (Engine e = Engine.open(f, options())) {
+        Engine.Options noCompaction = options();
+        noCompaction.backgroundCompaction = false; // the damaged segment stays put
+        try (Engine e = Engine.open(f, noCompaction)) {
             // It opened. That is the first half of the requirement.
             int served = 0;
             int refused = 0;
