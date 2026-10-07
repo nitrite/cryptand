@@ -662,3 +662,36 @@ fn a_read_only_handle_writes_nothing_at_open_and_refuses_writes_after() {
 
     assert_eq!(digest(&t.path), before, "a refused write still changed the file");
 }
+
+/// F-072: 13 §5's keyslot operations.
+#[test]
+fn add_key_remove_key_and_crypto_erase() {
+    use cryptand::keyapi::KeyApi;
+    let t = TempDb::new("keyapi");
+    let (k1, k2) = ([1u8; 32], [2u8; 32]);
+    let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &k1, 0, 0, 0, 0).unwrap();
+    e.put(16, &Value::NitriteId(1), b"secret").unwrap();
+    e.flush().unwrap();
+    assert_eq!(e.add_key(&k2, 0, 0, 0, 0, "second").unwrap(), 1);
+    e.close(true).unwrap();
+    drop(e);
+
+    let mut e = Engine::open(&t.path, Some(&k2)).unwrap();
+    assert_eq!(e.get(16, &Value::NitriteId(1)).unwrap().as_deref(), Some(&b"secret"[..]));
+    e.remove_key(0).unwrap();
+    assert!(e.remove_key(1).is_err(), "the last keyslot is crypto-erase, by name only");
+    e.close(true).unwrap();
+    drop(e);
+    assert!(matches!(Engine::open(&t.path, Some(&k1)), Err(cryptand::Error::CannotUnlock)));
+
+    let mut e = Engine::open(&t.path, Some(&k2)).unwrap();
+    e.crypto_erase().unwrap();
+    drop(e);
+    assert!(matches!(Engine::open(&t.path, Some(&k2)), Err(cryptand::Error::CannotUnlock)));
+    let bytes = std::fs::read(&t.path).unwrap();
+    let ps = 8192;
+    for slot in [0usize, ps] {
+        let area = &bytes[slot + 3512..slot + 3512 + 576];
+        assert!(area.iter().all(|&b| b == 0), "keyslot bytes left at offset {slot}");
+    }
+}

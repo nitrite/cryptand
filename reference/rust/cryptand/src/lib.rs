@@ -58,6 +58,7 @@ pub mod repair;
 pub mod rtree;
 pub mod security;
 pub mod segment;
+pub mod keyapi;
 pub mod spaceapi;
 pub mod stats;
 pub mod store;

@@ -55,6 +55,8 @@
 - 10-07: push every commit. Soak (M6.7) runs on the remote Mac
   (`anindya@207.254.39.186`) when it is free, never here. It was busy 10-07
   (llama-server at 96 % CPU) and has no Dart SDK; Rust and Java soak only.
+- 10-07: F-072 — implement all of 13 §5 (encrypt/decrypt, rotate_master_key,
+  add/remove_key, crypto_erase, cluster) in all three for 1.0; Dart's in M5.
 - 10-07: F-069 approved — spec 01 §2.1 step 1 probes slot B at every legal page size.
 
 ## Open questions for the human
