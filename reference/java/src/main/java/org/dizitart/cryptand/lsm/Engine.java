@@ -656,7 +656,7 @@ public final class Engine implements AutoCloseable {
             Value.Array k = (Value.Array) Cke.decode(e.getKey());
             long commit = SegmentMeta.longOf(k.items().get(0));
             long start = SegmentMeta.longOf(k.items().get(1));
-            Value.Doc d = (Value.Doc) Cve.decode(e.getValue());
+            Value.Doc d = Cve.decodeDoc(e.getValue());
             extents.add(new Pager.FreeExtent(commit, start, (int) SegmentMeta.longOf(d.field("pages"))));
         }
         pager.loadFreeList(extents);
@@ -3309,7 +3309,7 @@ public final class Engine implements AutoCloseable {
     public long pinnedByCheckpoints() {
         long bytes = 0;
         for (Map.Entry<byte[], byte[]> e : checkpointTree.map().entrySet()) {
-            Value.Doc d = (Value.Doc) Cve.decode(e.getValue());
+            Value.Doc d = Cve.decodeDoc(e.getValue());
             long seq = SegmentMeta.longOf(d.field("seq"));
             if (seq < visibleSeq) {
                 bytes += pinnedBySnapshots.get();

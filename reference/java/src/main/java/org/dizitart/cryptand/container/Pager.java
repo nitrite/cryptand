@@ -334,6 +334,18 @@ public final class Pager {
         return pageSize - PageHeader.BYTES;
     }
 
+    /**
+     * A page id from a fuzzed or damaged record can lie past the file, or
+     * overflow {@code pageId * pageSize} to a negative position: corruption, a
+     * typed error, not NIO's {@code IllegalArgumentException} (F-068).
+     */
+    private void checkInFile(long pageId) {
+        if (pageId < 0 || pageId >= pageCount()) {
+            throw new CorruptionException("page " + pageId + " is outside the file ("
+                    + pageCount() + " pages)", pageId, null);
+        }
+    }
+
     public long pageCount() {
         return pageCount;
     }
@@ -630,6 +642,7 @@ public final class Pager {
         cacheMisses.incrementAndGet();
         pageReads.incrementAndGet();
         byte[] page = new byte[pageSize];
+        checkInFile(pageId);
         file.readFully(offsetOf(pageId), page, 0, pageSize);
         PageHeader h = PageHeader.verify(page, pageId);
         byte[] payload = decodePayload(page, h, pageId);
@@ -681,6 +694,7 @@ public final class Pager {
         cacheMisses.incrementAndGet();
         pageReads.incrementAndGet();
         byte[] page = new byte[pageSize];
+        checkInFile(pageId);
         file.readFully(offsetOf(pageId), page, 0, pageSize);
         PageHeader h = PageHeader.verify(page, pageId);
         byte[] payload = decodePayload(page, h, pageId);
@@ -809,6 +823,7 @@ public final class Pager {
         cacheMisses.incrementAndGet();
         pageReads.incrementAndGet();
         byte[] page = new byte[pageSize];
+        checkInFile(pageId);
         file.readFully(offsetOf(pageId), page, 0, pageSize);
         admit(pageId, page);
         return page;

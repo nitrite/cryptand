@@ -116,7 +116,7 @@ public final class Database implements AutoCloseable {
         engine.lockStructure();
         try {
             byte[] raw = engine.attributesTree().get(Cke.encode(new Value.Str(treeName)));
-            return raw == null ? null : (Value.Doc) Cve.decode(raw);
+            return raw == null ? null : Cve.decodeDoc(raw);
         } finally {
             engine.unlockStructure();
         }

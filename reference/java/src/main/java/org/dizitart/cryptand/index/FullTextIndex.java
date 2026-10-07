@@ -154,7 +154,7 @@ public final class FullTextIndex {
         try (Engine.Cursor c = engine.scan(termDictTree, null, null, false)) {
             while (c.next()) {
                 String term = ((Value.Str) Cke.decode(c.row().key())).value();
-                Value.Doc d = (Value.Doc) Cve.decode(c.row().value());
+                Value.Doc d = Cve.decodeDoc(c.row().value());
                 out.put(term, new Term((int) SegmentMeta.longOf(d.field("id")),
                         SegmentMeta.longOf(d.field("df")), SegmentMeta.longOf(d.field("ttf"))));
             }
@@ -167,7 +167,7 @@ public final class FullTextIndex {
         if (raw == null) {
             return null;
         }
-        Value.Doc d = (Value.Doc) Cve.decode(raw);
+        Value.Doc d = Cve.decodeDoc(raw);
         return new Term((int) SegmentMeta.longOf(d.field("id")),
                 SegmentMeta.longOf(d.field("df")), SegmentMeta.longOf(d.field("ttf")));
     }

@@ -341,6 +341,23 @@ public final class Cve {
     // ==================================================================
 
     /** Decodes a whole value and asserts nothing follows it. */
+    /**
+     * {@link #decode} where the bytes come from the file and must be a
+     * document: anything else is corruption, a typed error (01 §9.1), never a
+     * {@code ClassCastException} (F-068).
+     */
+    public static Value.Doc decodeDoc(byte[] bytes, NameDict dict) {
+        Value v = decode(bytes, dict);
+        if (!(v instanceof Value.Doc)) {
+            throw new CorruptionException("expected a document, found " + v);
+        }
+        return (Value.Doc) v;
+    }
+
+    public static Value.Doc decodeDoc(byte[] bytes) {
+        return decodeDoc(bytes, null);
+    }
+
     public static Value decode(byte[] bytes) {
         return decode(bytes, null);
     }

@@ -190,7 +190,7 @@ public final class Collection {
 
     public Value.Doc get(long id) {
         byte[] raw = engine.get(descriptor.treeId(), documentKey(id));
-        return raw == null ? null : (Value.Doc) Cve.decode(raw, names);
+        return raw == null ? null : Cve.decodeDoc(raw, names);
     }
 
     /**
@@ -202,8 +202,9 @@ public final class Collection {
     }
 
     public Value.Doc decode(byte[] cve) {
-        return (Value.Doc) Cve.decode(cve, names);
+        return Cve.decodeDoc(cve, names);
     }
+
 
     /** Removes every document with one range delete rather than O(n) tombstones. */
     public void clear() {

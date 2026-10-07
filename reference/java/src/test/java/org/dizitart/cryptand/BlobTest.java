@@ -42,6 +42,17 @@ class BlobTest {
         return new Pager(f, 4096, 2, 1, 0);
     }
 
+    @Test
+    @DisplayName("a page id past the file is corruption, not an NIO error (F-068)")
+    void aPageOutsideTheFileIsCorruption(@TempDir Path dir) {
+        Pager p = pager(dir, "f068.cryptand");
+        // 2^51 * 4096 = 2^63 overflows to a negative file position.
+        org.junit.jupiter.api.Assertions.assertThrows(CorruptionException.class,
+                () -> p.readPage(1L << 51));
+        org.junit.jupiter.api.Assertions.assertThrows(CorruptionException.class,
+                () -> p.readPage(p.pageCount() + 5));
+    }
+
     /** Compressible, so a needle is findable; deterministic, so a failure reproduces. */
     private static byte[] payload(int n) {
         byte[] b = new byte[n];

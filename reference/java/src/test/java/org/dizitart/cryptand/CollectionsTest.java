@@ -121,6 +121,16 @@ class CollectionsTest {
     }
 
     @Test
+    @DisplayName("a collection record that is not a document is corruption (F-068)")
+    void aNonDocumentRecordIsCorruption(@TempDir Path dir) {
+        try (Database db = Database.create(dir.resolve("f068.cryptand"), options())) {
+            Collection c = db.collection("orders");
+            byte[] notADoc = org.dizitart.cryptand.value.Cve.encode(new Value.Str("x"));
+            assertThrows(CorruptionException.class, () -> c.decode(notADoc));
+        }
+    }
+
+    @Test
     @DisplayName("an index is maintained in the same commit as the document")
     void indexTracksDocuments(@TempDir Path dir) {
         try (Database db = Database.create(dir.resolve("c.cryptand"), options())) {
