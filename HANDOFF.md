@@ -40,6 +40,15 @@
   Found **F-071 (S0)**: no barrier before Java's superblock write (fixed; one
   more fsync per commit, re-measure in M6); Dart's whole-file `save` is the same
   class, left to M5. Dart fault layer waits for M5.
+- **F-072 Rust done** (PLAN "F-072" a–e): `keyapi.rs` (add/remove_key,
+  crypto_erase), `convert.rs` (in-place `encrypt()`, `decrypt(ConfirmDecrypt)`,
+  resumable `convert_step()`, `conversion()` fraction, `fully_encrypted()`),
+  `rotate.rs` (copy-and-swap; synchronous; refused while checkpoints exist).
+  Interop steps 7–9 (encrypt half/full, decrypt half/full, rotate) green in all
+  three. **F-073** (readers inferred encryption from `cipher`) fixed in Rust;
+  Java/Dart read Rust's converted files fine (blobs untested). A conversion
+  crash sweep (`power_cut_during_in_place_encryption`) found and fixed a
+  conversion data-loss bug before commit (partial same-level compaction).
 - Rust `stall_test` fails whenever another job is fsyncing on /Volumes/External;
   run the gate on a quiet disk.
 
@@ -67,9 +76,11 @@
 
 ## Next action
 
-F-072 b (PLAN "F-072" section): Rust in-place `encrypt()` + `convert_step()`,
-with a half-converted-file test that drives c. Then M2.2 kill -9 torture
-(its op list now includes these). The 10 000-seed M1.2 runs still pending.
+Check `reference/bench/runs/fault_rust_convert_0_1000.log` (1000-seed Rust
+sweeps incl. conversion). Then F-072 for Java: port `convert.rs` (encrypt,
+decrypt, convert_step, conversion) and `rotate.rs`; Java already has the key
+ops. Java-written blobs give Rust's blob reader its first mixed-file test.
+Then M2.2 kill -9 torture.
 
 ## Log
 
@@ -86,3 +97,4 @@ with a half-converted-file test that drives c. Then M2.2 kill -9 torture
 - 2026-10-07 — Hop 0..300 enc clean; M2.1 Rust fault seam, 3000 fault seeds clean; F-069 (S0, all three), F-070.
 - 2026-10-07 — Spec 01 §2.1 (F-069 approved); M2.1 Java fault seam, 3000 seeds clean; F-071 (S0, Java barrier; Dart → M5).
 - 2026-10-07 — F-072 (S1) found scoping M2.2: 13 §5 MUSTs missing; human: implement all; Rust key ops done; design in PLAN.
+- 2026-10-07 — F-072 Rust: encrypt/decrypt/convert/rotate + interop 7–9; F-073 (Rust readers); conversion crash sweep.
