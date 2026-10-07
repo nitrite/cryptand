@@ -920,7 +920,7 @@ impl Engine {
     /// Installs the page cipher (idempotent) and arms the nonce window.
     /// Encryption can be switched on after open — `14-security.md` §8.3's
     /// conversion — so this cannot live in `open` alone.
-    fn arm(&mut self) -> Result<()> {
+    pub(crate) fn arm(&mut self) -> Result<()> {
         // Every write path passes through here, so refusing here is exhaustive.
         if self.read_only {
             return Err(Error::Invalid(
@@ -1175,7 +1175,9 @@ impl Engine {
         let id = self.sb.next_vlog_segment_id;
         self.sb.next_vlog_segment_id += 1;
         let capacity = pages as u64 * page_size - DATA_OFFSET as u64;
-        let nonce_base = if self.sb.cipher != 0 { self.allocate_nonce()? } else { 0 };
+        // The write mode, which `decrypt()` turns off while `cipher` stays 1.
+        let sealed = self.sb.cipher != 0 && !self.pager.write_clear;
+        let nonce_base = if sealed { self.allocate_nonce()? } else { 0 };
         let head = VlogHead {
             segment_id: id,
             created_seq: self.next_seq,
@@ -1184,7 +1186,7 @@ impl Engine {
             tier,
             heat,
             codec: codec::NONE,
-            encrypted: self.sb.cipher != 0,
+            encrypted: sealed,
             nonce_base,
         };
         self.vlog_enc.insert(id, head.encrypted);

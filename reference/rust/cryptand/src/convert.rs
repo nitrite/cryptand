@@ -39,10 +39,24 @@ impl Conversion {
     }
 }
 
+/// The explicit confirmation `decrypt()` requires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmDecrypt {
+    No,
+    RemoveEncryption,
+}
+
 pub trait ConvertApi {
     /// Turns encryption on: `kdf` 0 is a raw 32-byte key, 1 Argon2id.
     fn encrypt(&mut self, credential: &[u8], kdf: u8, t_cost: u32, m_cost_kib: u32, lanes: u32) -> Result<()>;
-    /// Rewrites one kind of still-plaintext object, then commits.
+    /// 14 §8.3's mirror, which "MUST make the user confirm it, because it is a
+    /// silent downgrade of everything": refused unless `confirm` is
+    /// [`ConfirmDecrypt::RemoveEncryption`]. Switches the write mode to
+    /// plaintext; `cipher` and the keyslots stay until [`ConvertApi::convert_step`]
+    /// has rewritten every encrypted object, then one step clears them.
+    /// Not persisted: after a reopen, call it again to carry on.
+    fn decrypt(&mut self, confirm: ConfirmDecrypt) -> Result<()>;
+    /// Rewrites one kind of object not yet in the target mode, then commits.
     fn convert_step(&mut self) -> Result<Step>;
     /// What is converted and what is not, read from the objects themselves.
     fn conversion(&mut self) -> Result<Conversion>;
@@ -52,6 +66,7 @@ pub trait ConvertApi {
 }
 
 struct Census {
+    /// Objects not yet in the target mode (`plain_*` when encrypting).
     plain_segments: Vec<crate::manifest::SegmentRef>,
     plain_tree_pages: u64,
     plain_vlog: Vec<u64>,
@@ -59,9 +74,11 @@ struct Census {
 }
 
 fn census(e: &mut Engine) -> Result<Census> {
+    // The target: encrypted, unless `decrypt()` is under way.
+    let want = !e.pager.write_clear;
     let mut c = Census { plain_segments: Vec::new(), plain_tree_pages: 0, plain_vlog: Vec::new(), converted: 0 };
     for r in e.all_refs()? {
-        if page_encrypted(e, r.start_page)? {
+        if page_encrypted(e, r.start_page)? == want {
             c.converted += 1;
         } else {
             c.plain_segments.push(r);
@@ -80,7 +97,7 @@ fn census(e: &mut Engine) -> Result<Census> {
         t.reachable(&mut e.pager, &mut pages)?;
     }
     for p in pages.into_iter().collect::<HashSet<_>>() {
-        if page_encrypted(e, p)? {
+        if page_encrypted(e, p)? == want {
             c.converted += 1;
         } else {
             c.plain_tree_pages += 1;
@@ -88,7 +105,7 @@ fn census(e: &mut Engine) -> Result<Census> {
     }
     let ids: Vec<u64> = e.vlog_stats.values().filter(|s| !s.retired() && s.pages > 0).map(|s| s.segment_id).collect();
     for id in ids {
-        if e.vlog_encrypted(id)? {
+        if e.vlog_encrypted(id)? == want {
             c.converted += 1;
         } else {
             c.plain_vlog.push(id);
@@ -121,6 +138,21 @@ impl ConvertApi for Engine {
         Ok(())
     }
 
+    fn decrypt(&mut self, confirm: ConfirmDecrypt) -> Result<()> {
+        if confirm != ConfirmDecrypt::RemoveEncryption {
+            return invalid("decrypt() removes encryption from the whole file; it needs ConfirmDecrypt::RemoveEncryption");
+        }
+        if self.sb.cipher == 0 || self.keys.is_none() {
+            return invalid("the file is not encrypted, or is not unlocked");
+        }
+        self.drain_compaction()?;
+        self.seal_unsealed_vlog_segments()?;
+        self.arm()?; // the cipher stays installed: encrypted pages must still read
+        self.pager.write_clear = true;
+        self.commit(Durability::Sync)?;
+        Ok(())
+    }
+
     // ponytail: one step is one whole kind of object (all plaintext segments,
     // all tree pages, all plaintext value-log segments), not a slice bounded by
     // `max_foreground_stall_ms` (12 §4). Slice each phase if a large file's
@@ -149,11 +181,28 @@ impl ConvertApi for Engine {
             self.rewrite_vlog_segments(c.plain_vlog)?;
             // The rewrite moved pointers through the memtable.
             self.flush()?;
+        } else if self.pager.write_clear {
+            // Nothing encrypted remains: one superblock drops the cipher and
+            // the keyslots together, so no file ever says `cipher = 0` while
+            // carrying keyslots (14 §6.1). Twice, so neither slot keeps them.
+            self.sb.keyslots.fill(0);
+            self.sb.cipher = 0;
+            self.sb.features_required &= !feature::bit(feature::CIPHER);
+            self.sb.features_optional &= !feature::bit(feature::CIPHER);
+            // Key dropped first: with `cipher = 0`, `sb_mac` is written as
+            // zero (14 §6.2), and Dart refuses a plaintext superblock with one.
+            self.keys = None;
+            self.sb.sb_mac = [0; 32];
+            self.pager.crypto = None;
+            self.pager.write_clear = false;
+            self.commit(Durability::Sync)?;
+            self.commit(Durability::Sync)?;
+            return Ok(Step::Done);
         } else {
             return Ok(Step::Done);
         }
         self.commit(Durability::Sync)?;
-        Ok(if census(self)?.plain_segments.is_empty() && self.conversion()?.done() { Step::Done } else { Step::More })
+        Ok(if self.conversion()?.done() && !self.pager.write_clear { Step::Done } else { Step::More })
     }
 
     fn conversion(&mut self) -> Result<Conversion> {
@@ -163,6 +212,6 @@ impl ConvertApi for Engine {
     }
 
     fn fully_encrypted(&mut self) -> Result<bool> {
-        Ok(self.sb.cipher != 0 && self.conversion()?.done())
+        Ok(self.sb.cipher != 0 && !self.pager.write_clear && self.conversion()?.done())
     }
 }

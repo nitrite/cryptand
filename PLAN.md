@@ -165,7 +165,7 @@ test compares the engine against a model on random histories.
 ## F-072 — 13 §5 maintenance MUSTs (human 10-07: all of them, all three)
 
 - [x] **a** Rust `add_key`/`remove_key`/`crypto_erase` (`keyapi.rs`); Java had them.
-- [ ] **b** In-place `encrypt()` (Rust, then Java). Set `cipher`, keyslot 0,
+- [~] **b** In-place `encrypt()` (Rust done 10-07; Java next). Set `cipher`, keyslot 0,
   seal the open value-log segments, commit; new pages and new value-log
   segments are encrypted (head byte 39). Then a resumable `convert_step()`
   until nothing plaintext remains: full compaction (segments re-laid with the
@@ -174,11 +174,11 @@ test compares the engine against a model on random histories.
   full to `page_size − 40`, so pages are re-laid, never just re-sealed.
   Expose the fraction converted; never report "encrypted" while plaintext
   remains (14 §8.3).
-- [ ] **c** Readers decide per page (`flags.ENCRYPTED`), per value-log segment
+- [~] **c** (Rust fixed, J/D ok on Rust-written files; blobs untested) Readers decide per page (`flags.ENCRYPTED`), per value-log segment
   (head byte 39) and per extent, never from `cipher` (14 §5.2). Known suspect:
   Rust `read_vlog_record` and `verify` use `sb.cipher` / `false`. Driven by a
   half-converted file in all three readers and through interop.
-- [ ] **d** `decrypt()`: the mirror. Requires explicit confirmation; `cipher`
+- [~] **d** (Rust done 10-07) `decrypt()`: the mirror. Requires explicit confirmation; `cipher`
   stays 1 and the keyslots stay until no encrypted page or record remains,
   then one superblock clears both (no 14 §6.1 downgrade window).
 - [ ] **e** `rotate_master_key()`: copy-and-swap. Stream into a sibling file

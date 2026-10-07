@@ -89,6 +89,9 @@ pub struct Pager {
     /// `shrink()`'s allocation order: the lowest-addressed fit instead of the
     /// best fit, so everything written while it is set moves down.
     pub low_first: bool,
+    /// `decrypt()`'s mode (14 §8.3): the key stays loaded so encrypted pages
+    /// still read, but every page written is plaintext.
+    pub write_clear: bool,
 }
 
 impl Pager {
@@ -173,6 +176,7 @@ impl Pager {
             encrypted_pages: 0,
             unencrypted_pages: 0,
             low_first: false,
+            write_clear: false,
         }
     }
 
@@ -185,11 +189,16 @@ impl Pager {
     }
 
     pub fn tag_reserve(&self) -> usize {
-        if self.crypto.is_some() {
+        if self.seals() {
             AEAD_TAG_BYTES
         } else {
             0
         }
+    }
+
+    /// Pages written now are encrypted.
+    pub fn seals(&self) -> bool {
+        self.crypto.is_some() && !self.write_clear
     }
 
     pub fn is_file(&self) -> bool {
@@ -454,7 +463,7 @@ impl Pager {
         // order compresses ciphertext, which does not compress.
         let deflated = self.deflate_page(page)?;
         let page: &[u8] = deflated.as_deref().unwrap_or(page);
-        if self.crypto.is_some() {
+        if self.seals() {
             let sealed = self.seal_page(page_id, page)?;
             return self.write_at(page_id * self.page_size as u64, &sealed);
         }
@@ -506,7 +515,7 @@ impl Pager {
         // there, but the check is cheap and the alternative is a page that
         // cannot be written.
         let room = self.page_size - PAGE_HEADER_BYTES
-            - if self.crypto.is_some() { AEAD_TAG_BYTES } else { 0 };
+            - if self.seals() { AEAD_TAG_BYTES } else { 0 };
         if compressed.len() > room {
             return Ok(None);
         }
@@ -686,7 +695,7 @@ impl Pager {
             return invalid("an extent must be a whole number of pages");
         }
         self.page_writes += (bytes.len() / self.page_size) as u64;
-        if self.crypto.is_none() {
+        if !self.seals() {
             return self.write_at(start_page * self.page_size as u64, bytes);
         }
         let mut out = Vec::with_capacity(bytes.len());
@@ -718,7 +727,12 @@ impl Pager {
     /// does for a value-log record, and for the same reason: it is what lets
     /// one chunk be decrypted without reading the rest.
     pub fn chunk_plain_bytes(&self) -> usize {
-        if self.crypto.is_some() {
+        self.chunk_bytes(self.crypto.is_some() && !self.write_clear)
+    }
+
+    /// Plaintext bytes per chunk of an extent that is (or is not) encrypted.
+    pub fn chunk_bytes(&self, encrypted: bool) -> usize {
+        if encrypted {
             self.page_size - 8 - AEAD_TAG_BYTES
         } else {
             self.page_size
@@ -732,18 +746,24 @@ impl Pager {
     }
 
     /// Reads `len` plaintext bytes at `plain_off` within an extent's data area.
+    /// `encrypted` is the extent's own head-page flag, never the key in hand
+    /// (14 §5.2, F-073).
     pub fn read_extent_data(
         &mut self,
         head_page: u64,
         data_offset: u64,
         plain_off: u64,
         len: usize,
+        encrypted: bool,
     ) -> Result<Vec<u8>> {
         let base = head_page * self.page_size as u64 + data_offset;
-        if self.crypto.is_none() {
+        if !encrypted {
             return self.read_at(base + plain_off, len);
         }
-        let cps = self.chunk_plain_bytes() as u64;
+        if self.crypto.is_none() {
+            return Err(crate::error::Error::CannotUnlock);
+        }
+        let cps = self.chunk_bytes(true) as u64;
         let mut out = Vec::with_capacity(len);
         let mut off = plain_off;
         while out.len() < len {
@@ -774,12 +794,16 @@ impl Pager {
         data_offset: u64,
         plain_off: u64,
         buf: &[u8],
+        encrypted: bool,
     ) -> Result<()> {
         let base = head_page * self.page_size as u64 + data_offset;
-        if self.crypto.is_none() {
+        if !encrypted {
             return self.write_at(base + plain_off, buf);
         }
-        let cps = self.chunk_plain_bytes();
+        if self.crypto.is_none() {
+            return Err(crate::error::Error::CannotUnlock);
+        }
+        let cps = self.chunk_bytes(true);
         let mut written = 0usize;
         while written < buf.len() {
             let off = plain_off + written as u64;

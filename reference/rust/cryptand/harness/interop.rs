@@ -340,6 +340,23 @@ fn cmd_encrypt(path: &str) -> cryptand::Result<()> {
     Ok(())
 }
 
+/// `decrypt <encrypted file> --key K [--half]`: 14 §8.3's mirror; `--half`
+/// stops after one conversion step, `cipher` still 1.
+fn cmd_decrypt(path: &str) -> cryptand::Result<()> {
+    use cryptand::convert::{ConfirmDecrypt, ConvertApi};
+    let half = std::env::args().any(|a| a == "--half");
+    let mut e = Engine::open(&PathBuf::from(path), key_arg().as_deref())?;
+    e.decrypt(ConfirmDecrypt::RemoveEncryption)?;
+    if half {
+        e.convert_step()?;
+    } else {
+        while e.convert_step()? == cryptand::spaceapi::Step::More {}
+    }
+    e.close(true)?;
+    println!("decrypted {path}: cipher={}", e.sb.cipher);
+    Ok(())
+}
+
 fn cmd_verify(path: &str) -> cryptand::Result<ExitCode> {
     let mut e = Engine::open(&PathBuf::from(path), key_arg().as_deref())?;
     let r = e.verify()?;
@@ -528,6 +545,7 @@ fn main() -> ExitCode {
         }
         Some("verify") if args.len() >= 2 => cmd_verify(&args[1]),
         Some("encrypt") if args.len() >= 2 => cmd_encrypt(&args[1]).map(|_| ExitCode::SUCCESS),
+        Some("decrypt") if args.len() >= 2 => cmd_decrypt(&args[1]).map(|_| ExitCode::SUCCESS),
         Some("corpus") if args.len() >= 2 => cmd_corpus(&args[1]),
         _ => {
             eprintln!(

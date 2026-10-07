@@ -151,6 +151,9 @@ pub struct Region {
     pub start_page: u64,
     pub pages: u32,
     pub header: RegionHeader,
+    /// The head page's `flags.ENCRYPTED`: how this region's data is chunked
+    /// (14 §5.4), whatever the file's `cipher` says now (F-073).
+    pub encrypted: bool,
 }
 
 impl Region {
@@ -166,7 +169,8 @@ impl Region {
         let data_offset = page_size;
         // `14-security.md` §5.4 — an encrypted region's data area is chunked,
         // so it needs more pages than `ceil(len / page_size)`.
-        let pages = (1 + pager.extent_data_pages(slots * stride as u64)) as u32;
+        let encrypted = pager.seals();
+        let pages = (1 + (slots * stride as u64).div_ceil(pager.chunk_bytes(encrypted) as u64)) as u32;
         let start = pager.alloc_extent(pages)?;
         let header = RegionHeader {
             dim,
@@ -179,13 +183,13 @@ impl Region {
         };
         let page = header.encode(pager.page_size, pages);
         pager.write_page(start, &page)?;
-        Ok(Region { start_page: start, pages, header })
+        Ok(Region { start_page: start, pages, header, encrypted })
     }
 
     pub fn open(pager: &mut Pager, start_page: u64) -> Result<Region> {
         let (h, raw) = pager.read_verified(start_page)?;
         let header = RegionHeader::parse(&raw)?;
-        Ok(Region { start_page, pages: h.extent_pages.max(1), header })
+        Ok(Region { start_page, pages: h.extent_pages.max(1), header, encrypted: h.encrypted() })
     }
 
     pub fn write_slot(&mut self, pager: &mut Pager, slot: u64, v: &[f32]) -> Result<()> {
@@ -212,6 +216,7 @@ impl Region {
             self.header.data_offset,
             slot * self.header.stride as u64,
             &buf,
+            self.encrypted,
         )
     }
 
@@ -224,6 +229,7 @@ impl Region {
             self.header.data_offset,
             slot * self.header.stride as u64,
             self.header.stride as usize,
+            self.encrypted,
         )?;
         let d = self.header.dim as usize;
         Ok(match self.header.dtype {

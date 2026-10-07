@@ -214,6 +214,24 @@ for mode in half full; do
   KEY=""
 done
 
+for mode in half full; do
+  say "8. rust decrypts in place ($mode); every implementation reads and verifies"
+  df="$work/decrypt-$mode.cryptand"
+  KEY=0909090909090909090909090909090909090909090909090909090909090909
+  run_impl rust write "$df" >/dev/null || { bad "rust could not write"; KEY=""; continue; }
+  want="$(field "$(run_impl rust read "$df")" digest)"
+  extra=(); [[ $mode == half ]] && extra=(--half)
+  run_impl rust decrypt "$df" ${extra[@]+"${extra[@]}"} >/dev/null || { bad "rust could not decrypt"; KEY=""; continue; }
+  [[ $mode == full ]] && KEY=""   # decrypted: no key needed, and none accepted
+  for impl in rust java dart; do
+    got="$(field "$(run_impl "$impl" read "$df")" digest)"
+    v="$(run_impl "$impl" verify "$df" 2>&1 | tail -1)"
+    if [[ "$got" == "$want" && "$v" == *" 0 findings"* ]]; then ok "$impl digest $got, $v"
+    else bad "$impl: digest '$got' want '$want'; $v"; fi
+  done
+  KEY=""
+done
+
 say "result"
 if [[ $fail -eq 0 ]]; then
   printf '   \033[32mthe round-trip gate passes in both directions\033[0m\n'
