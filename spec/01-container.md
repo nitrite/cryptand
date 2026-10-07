@@ -110,7 +110,10 @@ phone-written and a server-written database the same format.
 
 ### 2.1 Open procedure
 
-1. Read 4096 bytes at offset 0 and at offset `page_size`.
+1. Read 4096 bytes at offset 0 and at offset `page_size`. If slot A is
+   invalid, `page_size` is unknown: look for slot B at each legal page size
+   (4096·2^k, k = 0…4) and accept a candidate only where its own
+   `page_size_log2` names the offset it was found at.
 2. For each: verify `magic`, `checksum`, `version_major == 1`.
 3. Choose the valid slot with the greater `commit_id`. If neither is valid, the
    file is not a Cryptand database, or is corrupt beyond container-level repair.

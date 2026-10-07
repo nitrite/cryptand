@@ -50,13 +50,11 @@
 - 10-07: push every commit. Soak (M6.7) runs on the remote Mac
   (`anindya@207.254.39.186`) when it is free, never here. It was busy 10-07
   (llama-server at 96 % CPU) and has no Dart SDK; Rust and Java soak only.
+- 10-07: F-069 approved — spec 01 §2.1 step 1 probes slot B at every legal page size.
 
 ## Open questions for the human
 
-- F-069: spec 01 §2.1 step 1 says "read at offset `page_size`" but a reader
-  cannot know `page_size` when slot A is invalid. Proposed wording: "If slot A
-  is invalid, look for slot B at each legal page size (4096·2^k, k = 0..4) and
-  accept it only where its `page_size_log2` names that offset." Approve?
+(none)
 
 ## Next action
 
