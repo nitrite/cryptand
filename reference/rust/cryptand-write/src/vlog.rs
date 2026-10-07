@@ -7,7 +7,7 @@
 //! drive *N* independent append streams instead of serializing on a journal.
 
 use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::posio::PosIo;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 

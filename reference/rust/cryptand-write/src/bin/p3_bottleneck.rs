@@ -17,7 +17,7 @@
 //!     cargo run --release --bin p3_bottleneck
 
 use std::fs::File;
-use std::os::unix::fs::FileExt;
+use cryptand_write::posio::PosIo;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::time::Instant;

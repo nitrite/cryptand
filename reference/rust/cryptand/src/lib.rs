@@ -49,6 +49,7 @@ pub mod manifest;
 pub mod metrics;
 pub mod multiproc;
 pub mod pager;
+pub mod posio;
 pub mod porter2;
 pub mod profile;
 pub mod repair;

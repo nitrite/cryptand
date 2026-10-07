@@ -11,6 +11,7 @@
 pub mod engine;
 pub mod multiproc;
 pub mod nonce;
+pub mod posio;
 pub mod prefix;
 pub mod vlog;
 
