@@ -336,7 +336,11 @@ impl CowTree {
         while level > 0 {
             let mut children = Vec::with_capacity(replacements.len());
             for n in &replacements {
-                children.push((self.write(pager, n)?, n.clone()));
+                // An emptied page is unlinked, not written: writing it first
+                // allocated a page nothing referenced or freed (F-065).
+                if n.count() > 0 {
+                    children.push((self.write(pager, n)?, n.clone()));
+                }
             }
             let (parent_id, parent, child_index) = &mut path[level - 1];
             if *parent_id != 0 {
@@ -347,9 +351,6 @@ impl CowTree {
             parent.payloads.remove(ci);
             let mut at = ci;
             for (id, n) in &children {
-                if n.count() == 0 {
-                    continue; // an emptied page is unlinked, not written
-                }
                 parent.keys.insert(at, n.keys[0].clone());
                 parent.payloads.insert(at, child_payload(*id, n.subtree_entries()));
                 at += 1;

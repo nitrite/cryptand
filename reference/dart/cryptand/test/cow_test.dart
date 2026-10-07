@@ -27,6 +27,35 @@ void main() {
       expect(t.height, 0);
     });
 
+    test('every page is reachable or free, also when a leaf empties (F-065)',
+        () {
+      final store = PageStore();
+      final t = CowTree(store, treeId: TreeId.catalog);
+      void check(String when) {
+        final live = t.reachablePages().toSet();
+        final free = <int>{
+          for (final e in store.freeExtents)
+            for (var p = e.startPage; p < e.startPage + e.pages; p++) p
+        };
+        for (var p = 2; p < store.pageCount; p++) {
+          expect(live.contains(p) || free.contains(p), isTrue,
+              reason: 'page $p leaked $when');
+        }
+      }
+
+      final big = Uint8List(200);
+      for (var i = 0; i < 400; i++) {
+        t.put(_k('k${i.toString().padLeft(4, '0')}'), big);
+      }
+      expect(t.height, greaterThan(1));
+      check('after the inserts');
+      // In key order, so leaves empty one at a time.
+      for (var i = 0; i < 400; i++) {
+        t.remove(_k('k${i.toString().padLeft(4, '0')}'));
+        check('after removing key $i');
+      }
+    });
+
     test('put publishes a new root every time — copy-on-write', () {
       final t = CowTree(PageStore(), treeId: TreeId.catalog);
       final roots = <int>{};

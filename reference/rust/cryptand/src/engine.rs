@@ -2602,7 +2602,12 @@ impl Engine {
         // is the normal case for a last-level merge — would otherwise collide
         // with itself in the manifest key space.
         for r in &job.inputs {
-            m.remove(&mut self.pager, r)?;
+            // Not `?`: that returned with the empty placeholder in place of the
+            // manifest.
+            if let Err(e) = m.remove(&mut self.pager, r) {
+                self.manifest = m;
+                return Err(e);
+            }
         }
         for (extent, start) in std::mem::take(&mut job.outputs) {
             match Segment::open(extent, self.pager.page_size) {

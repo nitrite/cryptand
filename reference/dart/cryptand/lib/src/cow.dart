@@ -900,7 +900,12 @@ final class CowTree {
     store.free(path[level].$1);
 
     while (level > 0) {
-      final children = [for (final n in replacements) (_write(n), n)];
+      // An emptied page is unlinked, not written: writing it first allocated
+      // a page nothing referenced or freed (F-065).
+      final children = [
+        for (final n in replacements)
+          if (n.count > 0) (_write(n), n)
+      ];
       final (parentId, parent, childIndex) = path[level - 1];
       store.free(parentId);
 
@@ -908,7 +913,6 @@ final class CowTree {
       parent.payloads.removeAt(childIndex);
       for (var i = 0; i < children.length; i++) {
         final (id, n) = children[i];
-        if (n.count == 0) continue; // an emptied page is unlinked, not written
         parent.keys.insert(childIndex + i, Uint8List.fromList(n.keys.first));
         parent.payloads
             .insert(childIndex + i, _Node.childPayload(id, n.subtreeEntries));
