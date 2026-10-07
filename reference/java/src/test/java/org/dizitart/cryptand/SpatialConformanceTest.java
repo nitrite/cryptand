@@ -28,7 +28,53 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class SpatialConformanceTest {
 
-    private record Corpus(List<byte[]> wkb, List<String> names, JsonNode doc) {}
+    private static final class Corpus {
+        private final List<byte[]> wkb;
+        private final List<String> names;
+        private final JsonNode doc;
+
+        public Corpus(List<byte[]> wkb, List<String> names, JsonNode doc) {
+            this.wkb = wkb;
+            this.names = names;
+            this.doc = doc;
+        }
+
+        public List<byte[]> wkb() {
+            return wkb;
+        }
+
+        public List<String> names() {
+            return names;
+        }
+
+        public JsonNode doc() {
+            return doc;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Corpus)) {
+                return false;
+            }
+            Corpus that = (Corpus) o;
+            return java.util.Objects.equals(wkb, that.wkb)
+                    && java.util.Objects.equals(names, that.names)
+                    && java.util.Objects.equals(doc, that.doc);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(wkb, names, doc);
+        }
+
+        @Override
+        public String toString() {
+            return "Corpus[" + "wkb=" + wkb + ", " + "names=" + names + ", " + "doc=" + doc + "]";
+        }
+    }
 
     private static Corpus corpus() {
         JsonNode doc = Vectors.load("spatial/geometries.json");
@@ -46,11 +92,12 @@ class SpatialConformanceTest {
         for (byte[] a : gs) {
             StringBuilder row = new StringBuilder();
             for (byte[] b : gs) {
-                boolean r = switch (kind) {
-                    case "intersects" -> Geometry.intersects(a, b);
-                    case "contains" -> Geometry.contains(a, b);
-                    default -> Geometry.within(a, b);
-                };
+                boolean r;
+                switch (kind) {
+                    case "intersects": r = Geometry.intersects(a, b); break;
+                    case "contains": r = Geometry.contains(a, b); break;
+                    default: r = Geometry.within(a, b); break;
+                }
                 row.append(r ? '1' : '0');
             }
             rows.add(row.toString());
@@ -152,11 +199,12 @@ class SpatialConformanceTest {
             int a = r.get("a").asInt();
             int b = r.get("b").asInt();
             String kind = r.get("predicate").asText();
-            boolean got = switch (kind) {
-                case "intersects" -> Geometry.intersects(c.wkb().get(a), c.wkb().get(b));
-                case "contains" -> Geometry.contains(c.wkb().get(a), c.wkb().get(b));
-                default -> Geometry.within(c.wkb().get(a), c.wkb().get(b));
-            };
+            boolean got;
+            switch (kind) {
+                case "intersects": got = Geometry.intersects(c.wkb().get(a), c.wkb().get(b)); break;
+                case "contains": got = Geometry.contains(c.wkb().get(a), c.wkb().get(b)); break;
+                default: got = Geometry.within(c.wkb().get(a), c.wkb().get(b)); break;
+            }
             assertEquals(r.get("expect").asBoolean(), got,
                     "\u00a7" + r.path("rule").asText("?") + " \u2014 " + r.path("note").asText("")
                             + "\n  " + kind + "(" + c.names().get(a) + ", " + c.names().get(b) + ")");

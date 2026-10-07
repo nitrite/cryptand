@@ -64,11 +64,14 @@ public final class Cve {
         }
         if (v instanceof Value.Null) {
             w.u8(Tag.NULL);
-        } else if (v instanceof Value.Bool b) {
+        } else if (v instanceof Value.Bool) {
+            Value.Bool b = ((Value.Bool) v);
             w.u8(b.value() ? Tag.TRUE : Tag.FALSE);
-        } else if (v instanceof Value.Int i) {
+        } else if (v instanceof Value.Int) {
+            Value.Int i = ((Value.Int) v);
             writeInt(w, i);
-        } else if (v instanceof Value.Float f) {
+        } else if (v instanceof Value.Float) {
+            Value.Float f = ((Value.Float) v);
             if (f.type() == NumType.F32) {
                 // floatToIntBits, not floatToRawIntBits: §3 of 00-conventions
                 // canonicalizes any NaN payload to the quiet NaN.
@@ -76,62 +79,85 @@ public final class Cve {
             } else {
                 w.u8(Tag.F64).u64(Double.doubleToLongBits(f.value()));
             }
-        } else if (v instanceof Value.Dec128 d) {
+        } else if (v instanceof Value.Dec128) {
+            Value.Dec128 d = ((Value.Dec128) v);
             w.u8(Tag.DEC128).bytes(d.bytes());
-        } else if (v instanceof Value.Char c) {
+        } else if (v instanceof Value.Char) {
+            Value.Char c = ((Value.Char) v);
             w.u8(Tag.CHAR).u32(c.scalar());
-        } else if (v instanceof Value.Str s) {
+        } else if (v instanceof Value.Str) {
+            Value.Str s = ((Value.Str) v);
             w.u8(Tag.STR).str(s.value());
-        } else if (v instanceof Value.Bytes b) {
+        } else if (v instanceof Value.Bytes) {
+            Value.Bytes b = ((Value.Bytes) v);
             byte[] raw = b.value();
             w.u8(Tag.BYTES).uvar(raw.length).bytes(raw);
-        } else if (v instanceof Value.Timestamp t) {
+        } else if (v instanceof Value.Timestamp) {
+            Value.Timestamp t = ((Value.Timestamp) v);
             w.u8(Tag.TIMESTAMP).u64(t.millis());
-        } else if (v instanceof Value.TimestampNs t) {
+        } else if (v instanceof Value.TimestampNs) {
+            Value.TimestampNs t = ((Value.TimestampNs) v);
             w.u8(Tag.TIMESTAMP_NS).u64(t.secs()).u32(t.nanos());
-        } else if (v instanceof Value.Zoned z) {
+        } else if (v instanceof Value.Zoned) {
+            Value.Zoned z = ((Value.Zoned) v);
             w.u8(Tag.ZONED).u64(z.millis()).str(z.zoneId());
-        } else if (v instanceof Value.Date d) {
+        } else if (v instanceof Value.Date) {
+            Value.Date d = ((Value.Date) v);
             w.u8(Tag.DATE).u32(d.days());
-        } else if (v instanceof Value.Time t) {
+        } else if (v instanceof Value.Time) {
+            Value.Time t = ((Value.Time) v);
             w.u8(Tag.TIME).u64(t.nanos());
-        } else if (v instanceof Value.Duration d) {
+        } else if (v instanceof Value.Duration) {
+            Value.Duration d = ((Value.Duration) v);
             w.u8(Tag.DURATION).u64(d.secs()).u32(d.nanos());
-        } else if (v instanceof Value.Uuid u) {
+        } else if (v instanceof Value.Uuid) {
+            Value.Uuid u = ((Value.Uuid) v);
             w.u8(Tag.UUID).bytes(u.bytes());
-        } else if (v instanceof Value.NitriteId n) {
+        } else if (v instanceof Value.NitriteId) {
+            Value.NitriteId n = ((Value.NitriteId) v);
             w.u8(Tag.NITRITE_ID).u64(n.id());
-        } else if (v instanceof Value.Regex r) {
+        } else if (v instanceof Value.Regex) {
+            Value.Regex r = ((Value.Regex) v);
             w.u8(Tag.REGEX).str(r.pattern()).str(r.flags());
-        } else if (v instanceof Value.Array a) {
+        } else if (v instanceof Value.Array) {
+            Value.Array a = ((Value.Array) v);
             writeLengthPrefixed(w, Tag.ARRAY, inner -> {
                 inner.uvar(a.items().size());
                 for (Value e : a.items()) {
                     write(inner, e, dict, depth + 1);
                 }
             });
-        } else if (v instanceof Value.Map m) {
+        } else if (v instanceof Value.Map) {
+            Value.Map m = ((Value.Map) v);
             writeMap(w, m, dict, depth);
-        } else if (v instanceof Value.Doc d) {
+        } else if (v instanceof Value.Doc) {
+            Value.Doc d = ((Value.Doc) v);
             writeDoc(w, d, dict, depth);
-        } else if (v instanceof Value.Vector vec) {
+        } else if (v instanceof Value.Vector) {
+            Value.Vector vec = ((Value.Vector) v);
             w.u8(Tag.VECTOR).u8(vec.dtype()).uvar(vec.dim()).bytes(vec.payload());
-        } else if (v instanceof Value.Geometry g) {
+        } else if (v instanceof Value.Geometry) {
+            Value.Geometry g = ((Value.Geometry) v);
             byte[] wkb = g.wkb();
             w.u8(Tag.GEOMETRY).uvar(wkb.length).bytes(wkb);
-        } else if (v instanceof Value.BlobRef b) {
+        } else if (v instanceof Value.BlobRef) {
+            Value.BlobRef b = ((Value.BlobRef) v);
             w.u8(Tag.BLOB_REF).u64(b.startPage()).u32((int) b.byteLen()).u32(b.crc32c());
-        } else if (v instanceof Value.OverflowRef o) {
+        } else if (v instanceof Value.OverflowRef) {
+            Value.OverflowRef o = ((Value.OverflowRef) v);
             byte[] inline = o.inline();
             w.u8(Tag.OVERFLOW_REF).uvar(inline.length).bytes(inline).u64(o.nextPage());
-        } else if (v instanceof Value.VlogRef vl) {
+        } else if (v instanceof Value.VlogRef) {
+            Value.VlogRef vl = ((Value.VlogRef) v);
             w.u8(Tag.VLOG_REF).u64(vl.segmentId()).u32((int) vl.offset()).u32(vl.len());
-        } else if (v instanceof Value.Opaque o) {
+        } else if (v instanceof Value.Opaque) {
+            Value.Opaque o = ((Value.Opaque) v);
             writeLengthPrefixed(w, Tag.OPAQUE, inner -> {
                 byte[] data = o.data();
                 inner.str(o.origin()).str(o.typeName()).uvar(data.length).bytes(data);
             });
-        } else if (v instanceof Value.Unknown u) {
+        } else if (v instanceof Value.Unknown) {
+            Value.Unknown u = ((Value.Unknown) v);
             // §1.1: reserved and implementation-private tags are
             // length-prefixed, so preserving one is writing back what we read.
             byte[] payload = u.payload();
@@ -168,11 +194,11 @@ public final class Cve {
         U128 mag = v.magnitude();
         long lo = v.negative() ? -mag.lo() : mag.lo();
         switch (t.bits()) {
-            case 8 -> w.u8((int) (lo & 0xFF));
-            case 16 -> w.u16((int) (lo & 0xFFFF));
-            case 32 -> w.u32((int) lo);
-            case 64 -> w.u64(lo);
-            default -> w.bytes((v.negative() ? mag.negate() : mag).toBytesLE());
+            case 8: w.u8((int) (lo & 0xFF)); break;
+            case 16: w.u16((int) (lo & 0xFFFF)); break;
+            case 32: w.u32((int) lo); break;
+            case 64: w.u64(lo); break;
+            default: w.bytes((v.negative() ? mag.negate() : mag).toBytesLE()); break;
         }
     }
 
@@ -182,7 +208,52 @@ public final class Cve {
      * diffable across languages; duplicate keys are corruption.
      */
     private static void writeMap(ByteWriter w, Value.Map v, NameDict dict, int depth) {
-        record Keyed(byte[] cke, Value key, Value value) {
+        final class Keyed {
+            private final byte[] cke;
+            private final Value key;
+            private final Value value;
+
+            Keyed(byte[] cke, Value key, Value value) {
+                this.cke = cke;
+                this.key = key;
+                this.value = value;
+            }
+
+            public byte[] cke() {
+                return cke;
+            }
+
+            public Value key() {
+                return key;
+            }
+
+            public Value value() {
+                return value;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof Keyed)) {
+                    return false;
+                }
+                Keyed that = (Keyed) o;
+                return java.util.Objects.equals(cke, that.cke)
+                        && java.util.Objects.equals(key, that.key)
+                        && java.util.Objects.equals(value, that.value);
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Objects.hash(cke, key, value);
+            }
+
+            @Override
+            public String toString() {
+                return "Keyed[" + "cke=" + cke + ", " + "key=" + key + ", " + "value=" + value + "]";
+            }
         }
         List<Keyed> keyed = new ArrayList<>(v.entries().size());
         for (Value.Map.Entry e : v.entries()) {
@@ -446,13 +517,12 @@ public final class Cve {
         if (dim < 0 || dim > 0xFFFF) {
             throw new LimitException("vector dimension " + dim + " out of range");
         }
-        return switch (dtype) {
-            case Value.Vector.DTYPE_F32 -> (int) (dim * 4);
-            case Value.Vector.DTYPE_F16 -> (int) (dim * 2);
-            // i8 payload carries a trailing f32 scale and f32 zero_point.
-            case Value.Vector.DTYPE_I8 -> (int) (dim + 8);
-            default -> throw new CorruptionException("unknown VECTOR dtype " + dtype);
-        };
+        switch (dtype) {
+            case Value.Vector.DTYPE_F32: return (int) (dim * 4);
+            case Value.Vector.DTYPE_F16: return (int) (dim * 2);
+            case Value.Vector.DTYPE_I8: return (int) (dim + 8);
+            default: throw new CorruptionException("unknown VECTOR dtype " + dtype);
+        }
     }
 
     /**

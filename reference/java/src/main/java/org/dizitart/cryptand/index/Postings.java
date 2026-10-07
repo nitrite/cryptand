@@ -36,7 +36,52 @@ public final class Postings {
     public static final int FLAG_HAS_POSITIONS = 0x01;
 
     /** One document's posting: its id, its term frequency, and optionally its positions. */
-    public record Posting(long nitriteId, int frequency, int[] positions) {
+    public static final class Posting {
+        private final long nitriteId;
+        private final int frequency;
+        private final int[] positions;
+
+        public Posting(long nitriteId, int frequency, int[] positions) {
+            this.nitriteId = nitriteId;
+            this.frequency = frequency;
+            this.positions = positions;
+        }
+
+        public long nitriteId() {
+            return nitriteId;
+        }
+
+        public int frequency() {
+            return frequency;
+        }
+
+        public int[] positions() {
+            return positions;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Posting)) {
+                return false;
+            }
+            Posting that = (Posting) o;
+            return nitriteId == that.nitriteId
+                    && frequency == that.frequency
+                    && java.util.Objects.equals(positions, that.positions);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(nitriteId, frequency, positions);
+        }
+
+        @Override
+        public String toString() {
+            return "Posting[" + "nitriteId=" + nitriteId + ", " + "frequency=" + frequency + ", " + "positions=" + positions + "]";
+        }
 
         public Posting(long nitriteId, int frequency) {
             this(nitriteId, frequency, null);

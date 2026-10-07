@@ -50,7 +50,7 @@
           knowing when adding a CVE type: the build will not tell you where to
           go, the tests will.
         -->
-        <maven.compiler.release>17</maven.compiler.release>
+        <maven.compiler.release>11</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.11.4</junit.version>
         <jackson.version>2.18.2</jackson.version>

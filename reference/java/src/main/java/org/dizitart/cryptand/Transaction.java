@@ -39,7 +39,73 @@ public final class Transaction implements AutoCloseable {
         READ_ONLY
     }
 
-    private record Staged(int treeId, byte[] key, byte[] value, int op, Long expiry, byte[] rangeEnd) {
+    private static final class Staged {
+        private final int treeId;
+        private final byte[] key;
+        private final byte[] value;
+        private final int op;
+        private final Long expiry;
+        private final byte[] rangeEnd;
+
+        public Staged(int treeId, byte[] key, byte[] value, int op, Long expiry, byte[] rangeEnd) {
+            this.treeId = treeId;
+            this.key = key;
+            this.value = value;
+            this.op = op;
+            this.expiry = expiry;
+            this.rangeEnd = rangeEnd;
+        }
+
+        public int treeId() {
+            return treeId;
+        }
+
+        public byte[] key() {
+            return key;
+        }
+
+        public byte[] value() {
+            return value;
+        }
+
+        public int op() {
+            return op;
+        }
+
+        public Long expiry() {
+            return expiry;
+        }
+
+        public byte[] rangeEnd() {
+            return rangeEnd;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Staged)) {
+                return false;
+            }
+            Staged that = (Staged) o;
+            return treeId == that.treeId
+                    && java.util.Objects.equals(key, that.key)
+                    && java.util.Objects.equals(value, that.value)
+                    && op == that.op
+                    && java.util.Objects.equals(expiry, that.expiry)
+                    && java.util.Objects.equals(rangeEnd, that.rangeEnd);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(treeId, key, value, op, expiry, rangeEnd);
+        }
+
+        @Override
+        public String toString() {
+            return "Staged[" + "treeId=" + treeId + ", " + "key=" + key + ", " + "value=" + value + ", " + "op=" + op + ", " + "expiry=" + expiry + ", " + "rangeEnd=" + rangeEnd + "]";
+        }
     }
 
     private final Database db;
@@ -157,10 +223,10 @@ public final class Transaction implements AutoCloseable {
             Engine.Batch b = engine.batch();
             for (Staged s : staged) {
                 switch (s.op()) {
-                    case BtreePage.Op.PUT -> b.put(s.treeId(), s.key(), s.value());
-                    case BtreePage.Op.DELETE -> b.remove(s.treeId(), s.key());
-                    case BtreePage.Op.RANGE_DELETE -> b.removeRange(s.treeId(), s.key(), s.rangeEnd());
-                    default -> throw new IllegalStateException("unreachable op " + s.op());
+                    case BtreePage.Op.PUT: b.put(s.treeId(), s.key(), s.value()); break;
+                    case BtreePage.Op.DELETE: b.remove(s.treeId(), s.key()); break;
+                    case BtreePage.Op.RANGE_DELETE: b.removeRange(s.treeId(), s.key(), s.rangeEnd()); break;
+                    default: throw new IllegalStateException("unreachable op " + s.op());
                 }
             }
             return b.commit();
@@ -192,7 +258,7 @@ public final class Transaction implements AutoCloseable {
         for (String k : check) {
             int sep = k.indexOf(':');
             int treeId = Integer.parseInt(k.substring(0, sep));
-            byte[] cke = java.util.HexFormat.of().parseHex(k.substring(sep + 1));
+            byte[] cke = org.dizitart.cryptand.util.Hex.parse(k.substring(sep + 1));
             BtreePage.Leaf now = engine.newestVersion(treeId, cke, visible);
             if (now != null && Ikey.seqOf(now.key()) > start.seq()) {
                 throw new ConflictException("transaction conflict on tree " + treeId
@@ -225,6 +291,6 @@ public final class Transaction implements AutoCloseable {
     }
 
     private static String fingerprint(int treeId, byte[] cke) {
-        return treeId + ":" + java.util.HexFormat.of().formatHex(cke);
+        return treeId + ":" + org.dizitart.cryptand.util.Hex.format(cke);
     }
 }

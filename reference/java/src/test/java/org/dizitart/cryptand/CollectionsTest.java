@@ -52,19 +52,24 @@ class CollectionsTest {
     }
 
     private static Value value(Object o) {
-        if (o instanceof Value v) {
+        if (o instanceof Value) {
+            Value v = ((Value) o);
             return v;
         }
-        if (o instanceof String s) {
+        if (o instanceof String) {
+            String s = ((String) o);
             return new Value.Str(s);
         }
-        if (o instanceof Integer i) {
+        if (o instanceof Integer) {
+            Integer i = ((Integer) o);
             return Value.i32(i);
         }
-        if (o instanceof Long l) {
+        if (o instanceof Long) {
+            Long l = ((Long) o);
             return Value.i64(l);
         }
-        if (o instanceof List<?> list) {
+        if (o instanceof List<?>) {
+            List<?> list = ((List<?>) o);
             List<Value> items = new ArrayList<>();
             for (Object item : list) {
                 items.add(value(item));

@@ -34,7 +34,52 @@ import java.util.TreeMap;
 public final class FullTextIndex {
 
     /** A term's dictionary entry. Both counts MUST be accurate after a merge. */
-    public record Term(int id, long df, long ttf) {
+    public static final class Term {
+        private final int id;
+        private final long df;
+        private final long ttf;
+
+        public Term(int id, long df, long ttf) {
+            this.id = id;
+            this.df = df;
+            this.ttf = ttf;
+        }
+
+        public int id() {
+            return id;
+        }
+
+        public long df() {
+            return df;
+        }
+
+        public long ttf() {
+            return ttf;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Term)) {
+                return false;
+            }
+            Term that = (Term) o;
+            return id == that.id
+                    && df == that.df
+                    && ttf == that.ttf;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(id, df, ttf);
+        }
+
+        @Override
+        public String toString() {
+            return "Term[" + "id=" + id + ", " + "df=" + df + ", " + "ttf=" + ttf + "]";
+        }
     }
 
     private final Database db;
@@ -62,21 +107,24 @@ public final class FullTextIndex {
         List<String> stopwords = new ArrayList<>();
         Value analyzerParams = params.field("analyzer_params");
         String stemmer = "none";
-        if (analyzerParams instanceof Value.Doc ap) {
+        if (analyzerParams instanceof Value.Doc) {
+            Value.Doc ap = ((Value.Doc) analyzerParams);
             Value sw = ap.field("stopwords");
-            if (sw instanceof Value.Array a) {
+            if (sw instanceof Value.Array) {
+                Value.Array a = ((Value.Array) sw);
                 for (Value v : a.items()) {
                     stopwords.add(((Value.Str) v).value());
                 }
             }
             Value st = ap.field("stemmer");
-            if (st instanceof Value.Str s) {
+            if (st instanceof Value.Str) {
+                Value.Str s = ((Value.Str) st);
                 stemmer = s.value();
             }
         }
         this.analyzer = Analyzer.of(((Value.Str) params.field("analyzer")).value(), stopwords, stemmer);
         Value pos = params.field("positions");
-        this.positions = pos instanceof Value.Bool b && b.value();
+        this.positions = pos instanceof Value.Bool && ((Value.Bool) pos).value();
         this.termDictTree = (int) SegmentMeta.longOf(params.field("term_dict"));
         this.termIndexTree = (int) SegmentMeta.longOf(params.field("term_index"));
         this.postingsTree = descriptor.treeId();
@@ -144,10 +192,11 @@ public final class FullTextIndex {
                 continue;
             }
             for (Value v : values) {
-                if (!(v instanceof Value.Str s)) {
+                if (!(v instanceof Value.Str)) {
                     // Step 1: non-string values are skipped.
                     continue;
                 }
+                Value.Str s = ((Value.Str) v);
                 for (Analyzer.Token t : analyzer.analyze(s.value())) {
                     byTerm.computeIfAbsent(t.text(), k -> new ArrayList<>()).add(t.position());
                 }
@@ -391,7 +440,8 @@ public final class FullTextIndex {
                         continue;
                     }
                     for (Value v : values) {
-                        if (v instanceof Value.Str s) {
+                        if (v instanceof Value.Str) {
+                            Value.Str s = ((Value.Str) v);
                             for (Analyzer.Token t : analyzer.analyze(s.value())) {
                                 counts.merge(t.text(), 1, Integer::sum);
                             }

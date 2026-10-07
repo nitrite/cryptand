@@ -40,7 +40,46 @@ class OplogCheckTest {
     }
 
     /** One model row: value and absolute expiry (0 = none). */
-    record Cell(byte[] v, long x) {}
+    static final class Cell {
+        private final byte[] v;
+        private final long x;
+
+        public Cell(byte[] v, long x) {
+            this.v = v;
+            this.x = x;
+        }
+
+        public byte[] v() {
+            return v;
+        }
+
+        public long x() {
+            return x;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Cell)) {
+                return false;
+            }
+            Cell that = (Cell) o;
+            return java.util.Objects.equals(v, that.v)
+                    && x == that.x;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(v, x);
+        }
+
+        @Override
+        public String toString() {
+            return "Cell[" + "v=" + v + ", " + "x=" + x + "]";
+        }
+    }
 
     /** tree → key → cell. */
     static final class Model extends TreeMap<Integer, TreeMap<byte[], Cell>> {
@@ -69,11 +108,11 @@ class OplogCheckTest {
     }
 
     static byte[] unhex(String s) {
-        return HexFormat.of().parseHex(s);
+        return org.dizitart.cryptand.util.Hex.parse(s);
     }
 
     static String hex(byte[] b) {
-        return HexFormat.of().formatHex(b);
+        return org.dizitart.cryptand.util.Hex.format(b);
     }
 
     static byte[] cke(byte[] raw) {
@@ -221,7 +260,7 @@ class OplogCheckTest {
             int t = w.get("t").asInt();
             byte[] k = unhex(w.get("k").asText());
             switch (w.get("op").asText()) {
-                case "put" -> {
+                case "put": {
                     byte[] v = valueBytes(w.get("v").get("n").asInt(), w.get("v").get("s").asLong());
                     long x = w.has("x") ? w.get("x").asLong() : 0;
                     model.tree(t).put(k, new Cell(v, x));
@@ -231,11 +270,13 @@ class OplogCheckTest {
                         b.put(t, cke(k), v);
                     }
                 }
-                case "del" -> {
+                    break;
+                case "del": {
                     model.tree(t).remove(k);
                     b.remove(t, cke(k));
                 }
-                default -> throw new Diverged(w.get("op") + " not allowed here");
+                    break;
+                default: throw new Diverged(w.get("op") + " not allowed here");
             }
         }
 
@@ -252,25 +293,28 @@ class OplogCheckTest {
 
         void step(JsonNode j) throws Exception {
             switch (j.get("op").asText()) {
-                case "put", "del" -> {
+                case "put": case "del": {
                     Engine.Batch b = e.batch();
                     write(j, b);
                     commit(b);
                 }
-                case "range_del" -> {
+                    break;
+                case "range_del": {
                     int t = j.get("t").asInt();
                     byte[] lo = unhex(j.get("lo").asText()), hi = unhex(j.get("hi").asText());
                     model.tree(t).subMap(lo, hi).clear();
                     commit(e.batch().removeRange(t, cke(lo), cke(hi)));
                 }
-                case "batch" -> {
+                    break;
+                case "batch": {
                     Engine.Batch b = e.batch();
                     for (JsonNode w : j.get("ops")) {
                         write(w, b);
                     }
                     commit(b);
                 }
-                case "get" -> {
+                    break;
+                case "get": {
                     int t = j.get("t").asInt();
                     byte[] k = unhex(j.get("k").asText());
                     Snapshot s = at(j);
@@ -282,7 +326,8 @@ class OplogCheckTest {
                         throw new Diverged("get t=" + t + " k=" + hex(k) + ": model " + shortV(want) + " engine " + shortV(got));
                     }
                 }
-                case "scan" -> {
+                    break;
+                case "scan": {
                     int t = j.get("t").asInt();
                     byte[] lo = j.has("lo") ? unhex(j.get("lo").asText()) : null;
                     byte[] hi = j.has("hi") ? unhex(j.get("hi").asText()) : null;
@@ -290,7 +335,8 @@ class OplogCheckTest {
                     Model m = s == null ? model : snapModels.get(j.get("at").asLong());
                     compareScan(t, modelScan(m, t, lo, hi), engineScan(t, lo, hi, s));
                 }
-                case "snapshot" -> {
+                    break;
+                case "snapshot": {
                     long id = j.get("id").asLong();
                     if (snaps.containsKey(id)) {
                         throw new IllegalArgumentException("invalid log");
@@ -306,7 +352,8 @@ class OplogCheckTest {
                     snaps.put(id, s);
                     snapModels.put(id, m);
                 }
-                case "release" -> {
+                    break;
+                case "release": {
                     Snapshot s = snaps.remove(j.get("id").asLong());
                     if (s == null) {
                         throw new IllegalArgumentException("invalid log");
@@ -314,14 +361,16 @@ class OplogCheckTest {
                     snapModels.remove(j.get("id").asLong());
                     e.unpin(s);
                 }
-                case "commit", "checkpoint" -> e.commitNow(true); // ponytail: durability is the engine option, not per commit
-                case "compact" -> {
+                    break;
+                case "commit": case "checkpoint": e.commitNow(true); break;
+                case "compact": {
                     e.compact();
                     e.collectIfNeeded(); // Rust's compact runs GC while over debt
                 }
-                case "shrink" -> e.shrink();
-                case "ttl_advance" -> clock += j.get("ms").asLong();
-                case "reopen" -> {
+                    break;
+                case "shrink": e.shrink(); break;
+                case "ttl_advance": clock += j.get("ms").asLong(); break;
+                case "reopen": {
                     if (!snaps.isEmpty()) {
                         throw new IllegalArgumentException("invalid log");
                     }
@@ -334,7 +383,8 @@ class OplogCheckTest {
                     verify();
                     digestCheck();
                 }
-                default -> throw new Diverged("unknown op " + j.get("op"));
+                    break;
+                default: throw new Diverged("unknown op " + j.get("op"));
             }
             if (maintain) {
                 e.maintain();
@@ -358,12 +408,13 @@ class OplogCheckTest {
         if (h.path("oplog").asInt() != 1) {
             throw new Diverged("line 1: not an oplog v1");
         }
-        Profile profile = switch (h.path("profile").asText("desktop")) {
-            case "mobile" -> Profile.MOBILE;
-            case "tablet" -> Profile.TABLET;
-            case "server" -> Profile.SERVER;
-            default -> Profile.DESKTOP;
-        };
+        Profile profile;
+        switch (h.path("profile").asText("desktop")) {
+            case "mobile": profile = Profile.MOBILE; break;
+            case "tablet": profile = Profile.TABLET; break;
+            case "server": profile = Profile.SERVER; break;
+            default: profile = Profile.DESKTOP; break;
+        }
         Path path = dir.resolve("oplog-" + h.path("seed").asText() + ".cff");
         Files.deleteIfExists(path);
         Run r = new Run(path, h.path("encrypted").asBoolean(), profile, h.path("trees").asInt(1));
@@ -407,20 +458,22 @@ class OplogCheckTest {
     /** The model effect of one op without an engine: lines another language played (M1.3). */
     static long modelApply(Model m, long clock, JsonNode j) {
         switch (j.get("op").asText()) {
-            case "put" -> m.tree(j.get("t").asInt()).put(unhex(j.get("k").asText()),
+            case "put": m.tree(j.get("t").asInt()).put(unhex(j.get("k").asText()),
                     new Cell(valueBytes(j.get("v").get("n").asInt(), j.get("v").get("s").asLong()),
-                            j.has("x") ? j.get("x").asLong() : 0));
-            case "del" -> m.tree(j.get("t").asInt()).remove(unhex(j.get("k").asText()));
-            case "range_del" -> m.tree(j.get("t").asInt())
-                    .subMap(unhex(j.get("lo").asText()), unhex(j.get("hi").asText())).clear();
-            case "batch" -> {
+                            j.has("x") ? j.get("x").asLong() : 0)); break;
+            case "del": m.tree(j.get("t").asInt()).remove(unhex(j.get("k").asText())); break;
+            case "range_del": m.tree(j.get("t").asInt())
+                    .subMap(unhex(j.get("lo").asText()), unhex(j.get("hi").asText())).clear(); break;
+            case "batch": {
                 for (JsonNode w : j.get("ops")) {
                     clock = modelApply(m, clock, w);
                 }
             }
-            case "ttl_advance" -> clock += j.get("ms").asLong();
-            default -> {
+                break;
+            case "ttl_advance": clock += j.get("ms").asLong(); break;
+            default: {
             }
+                break;
         }
         return clock;
     }
@@ -434,12 +487,13 @@ class OplogCheckTest {
      */
     static String hop(List<String> lines, Path db, int from, int to) throws Exception {
         JsonNode h = JSON.readTree(lines.get(0));
-        Profile profile = switch (h.path("profile").asText("desktop")) {
-            case "mobile" -> Profile.MOBILE;
-            case "tablet" -> Profile.TABLET;
-            case "server" -> Profile.SERVER;
-            default -> Profile.DESKTOP;
-        };
+        Profile profile;
+        switch (h.path("profile").asText("desktop")) {
+            case "mobile": profile = Profile.MOBILE; break;
+            case "tablet": profile = Profile.TABLET; break;
+            case "server": profile = Profile.SERVER; break;
+            default: profile = Profile.DESKTOP; break;
+        }
         Run r = new Run(db, h.path("encrypted").asBoolean(), profile, h.path("trees").asInt(1));
         for (String l : lines.subList(1, from - 1)) {
             r.clock = modelApply(r.model, r.clock, JSON.readTree(l));
@@ -470,7 +524,7 @@ class OplogCheckTest {
 
     static List<Path> logs(Path dir) throws Exception {
         try (Stream<Path> s = Files.list(dir)) {
-            return s.filter(p -> p.toString().endsWith(".jsonl")).sorted().toList();
+            return s.filter(p -> p.toString().endsWith(".jsonl")).sorted().collect(java.util.stream.Collectors.toList());
         }
     }
 

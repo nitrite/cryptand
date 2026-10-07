@@ -101,15 +101,15 @@ class FullTextTest {
     void openingExample() {
         List<Analyzer.Token> tokens = Analyzer.standard().analyze("Bäckerei-Straße 12");
         assertEquals(List.of("bäckerei", "straße", "12"),
-                tokens.stream().map(Analyzer.Token::text).toList());
-        assertEquals(List.of(0, 1, 2), tokens.stream().map(Analyzer.Token::position).toList());
+                tokens.stream().map(Analyzer.Token::text).collect(java.util.stream.Collectors.toList()));
+        assertEquals(List.of(0, 1, 2), tokens.stream().map(Analyzer.Token::position).collect(java.util.stream.Collectors.toList()));
     }
 
     @Test
     @DisplayName("simple lowercasing keeps the sharp s that full folding would split")
     void simpleLowercasing() {
         assertEquals(List.of("straße"),
-                Analyzer.standard().analyze("STRAẞE").stream().map(Analyzer.Token::text).toList());
+                Analyzer.standard().analyze("STRAẞE").stream().map(Analyzer.Token::text).collect(java.util.stream.Collectors.toList()));
     }
 
     /**
@@ -141,8 +141,8 @@ class FullTextTest {
         Analyzer a = Analyzer.of(Analyzer.STD_V1, List.of("the"), "none");
         List<Analyzer.Token> tokens = a.analyze("jump over the lazy dog");
         assertEquals(List.of("jump", "over", "lazy", "dog"),
-                tokens.stream().map(Analyzer.Token::text).toList());
-        assertEquals(List.of(0, 1, 3, 4), tokens.stream().map(Analyzer.Token::position).toList());
+                tokens.stream().map(Analyzer.Token::text).collect(java.util.stream.Collectors.toList()));
+        assertEquals(List.of(0, 1, 3, 4), tokens.stream().map(Analyzer.Token::position).collect(java.util.stream.Collectors.toList()));
     }
 
     @Test

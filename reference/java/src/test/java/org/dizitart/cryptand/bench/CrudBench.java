@@ -298,7 +298,45 @@ public final class CrudBench {
             row("mixed_page_reads_per_op",
                     f((double) (db.engine().pager().pageReads() - p0) / Math.max(1, mixedOps), 3),
                     "pages/op", true);
-            record Bucket(String name, List<Long> lat) {
+            final class Bucket {
+                private final String name;
+                private final List<Long> lat;
+
+                Bucket(String name, List<Long> lat) {
+                    this.name = name;
+                    this.lat = lat;
+                }
+
+                public String name() {
+                    return name;
+                }
+
+                public List<Long> lat() {
+                    return lat;
+                }
+
+                @Override
+                public boolean equals(Object o) {
+                    if (this == o) {
+                        return true;
+                    }
+                    if (!(o instanceof Bucket)) {
+                        return false;
+                    }
+                    Bucket that = (Bucket) o;
+                    return java.util.Objects.equals(name, that.name)
+                            && java.util.Objects.equals(lat, that.lat);
+                }
+
+                @Override
+                public int hashCode() {
+                    return java.util.Objects.hash(name, lat);
+                }
+
+                @Override
+                public String toString() {
+                    return "Bucket[" + "name=" + name + ", " + "lat=" + lat + "]";
+                }
             }
             for (Bucket b : new Bucket[] {
                     new Bucket("mixed_read", mixRead),

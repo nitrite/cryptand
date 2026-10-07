@@ -13,7 +13,6 @@ import org.dizitart.cryptand.util.Crc32c;
 import org.dizitart.cryptand.util.Utf8;
 
 import java.util.Arrays;
-import java.util.HexFormat;
 
 /**
  * The superblock — {@code spec/01-container.md} §2.
@@ -303,7 +302,7 @@ public final class Superblock {
         }
         if (!Arrays.equals(Arrays.copyOf(slot, 8), MAGIC)) {
             throw new CorruptionException("not a Cryptand database: magic is "
-                    + HexFormat.of().formatHex(slot, 0, 8) + ", expected 4352595054414e44");
+                    + org.dizitart.cryptand.util.Hex.format(slot, 0, 8) + ", expected 4352595054414e44");
         }
         int stored = (slot[CHECKSUM_OFFSET] & 0xFF)
                 | ((slot[CHECKSUM_OFFSET + 1] & 0xFF) << 8)

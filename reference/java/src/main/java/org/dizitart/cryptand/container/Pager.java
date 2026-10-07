@@ -36,7 +36,52 @@ import java.util.List;
 public final class Pager {
 
     /** An extent on the free list: {@code pages} pages at {@code startPage}, freed at {@code commitId}. */
-    public record FreeExtent(long commitId, long startPage, int pages) {
+    public static final class FreeExtent {
+        private final long commitId;
+        private final long startPage;
+        private final int pages;
+
+        public FreeExtent(long commitId, long startPage, int pages) {
+            this.commitId = commitId;
+            this.startPage = startPage;
+            this.pages = pages;
+        }
+
+        public long commitId() {
+            return commitId;
+        }
+
+        public long startPage() {
+            return startPage;
+        }
+
+        public int pages() {
+            return pages;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof FreeExtent)) {
+                return false;
+            }
+            FreeExtent that = (FreeExtent) o;
+            return commitId == that.commitId
+                    && startPage == that.startPage
+                    && pages == that.pages;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(commitId, startPage, pages);
+        }
+
+        @Override
+        public String toString() {
+            return "FreeExtent[" + "commitId=" + commitId + ", " + "startPage=" + startPage + ", " + "pages=" + pages + "]";
+        }
     }
 
     private final PageFile file;
@@ -88,7 +133,45 @@ public final class Pager {
     private final java.util.LinkedHashMap<Long, byte[]> payloads =
             new java.util.LinkedHashMap<>(64, 0.75f, true);
     /** One parsed page in {@link #treeSlots}. Immutable, so publishing it publishes the page. */
-    private record Cached(long pageId, BtreePage page) {
+    private static final class Cached {
+        private final long pageId;
+        private final BtreePage page;
+
+        public Cached(long pageId, BtreePage page) {
+            this.pageId = pageId;
+            this.page = page;
+        }
+
+        public long pageId() {
+            return pageId;
+        }
+
+        public BtreePage page() {
+            return page;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Cached)) {
+                return false;
+            }
+            Cached that = (Cached) o;
+            return pageId == that.pageId
+                    && java.util.Objects.equals(page, that.page);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(pageId, page);
+        }
+
+        @Override
+        public String toString() {
+            return "Cached[" + "pageId=" + pageId + ", " + "page=" + page + "]";
+        }
     }
 
     /**
@@ -112,7 +195,46 @@ public final class Pager {
      * conflict thrash is 2-way set associativity — two slots per index and the
      * older of the pair replaced — which does not change the accounting below.
      */
-    private record Slots(java.util.concurrent.atomic.AtomicReferenceArray<Cached> a, int mask) {
+    private static final class Slots {
+        private final java.util.concurrent.atomic.AtomicReferenceArray<Cached> a;
+        private final int mask;
+
+        public Slots(java.util.concurrent.atomic.AtomicReferenceArray<Cached> a, int mask) {
+            this.a = a;
+            this.mask = mask;
+        }
+
+        public java.util.concurrent.atomic.AtomicReferenceArray<Cached> a() {
+            return a;
+        }
+
+        public int mask() {
+            return mask;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Slots)) {
+                return false;
+            }
+            Slots that = (Slots) o;
+            return java.util.Objects.equals(a, that.a)
+                    && mask == that.mask;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(a, mask);
+        }
+
+        @Override
+        public String toString() {
+            return "Slots[" + "a=" + a + ", " + "mask=" + mask + "]";
+        }
+
         Slots(int size) {
             this(new java.util.concurrent.atomic.AtomicReferenceArray<>(size), size - 1);
         }

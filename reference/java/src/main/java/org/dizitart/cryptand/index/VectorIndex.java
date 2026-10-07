@@ -46,7 +46,45 @@ public final class VectorIndex {
     public static final String METRIC_L2 = "l2";
     public static final String METRIC_DOT = "dot";
 
-    public record Hit(long nitriteId, double distance) {
+    public static final class Hit {
+        private final long nitriteId;
+        private final double distance;
+
+        public Hit(long nitriteId, double distance) {
+            this.nitriteId = nitriteId;
+            this.distance = distance;
+        }
+
+        public long nitriteId() {
+            return nitriteId;
+        }
+
+        public double distance() {
+            return distance;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Hit)) {
+                return false;
+            }
+            Hit that = (Hit) o;
+            return nitriteId == that.nitriteId
+                    && Double.compare(distance, that.distance) == 0;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(nitriteId, distance);
+        }
+
+        @Override
+        public String toString() {
+            return "Hit[" + "nitriteId=" + nitriteId + ", " + "distance=" + distance + "]";
+        }
     }
 
     private final Database db;
@@ -370,24 +408,24 @@ public final class VectorIndex {
      * vectors check it without constructing an index.
      */
     public static double distance(String metric, float[] a, float[] b) {
-        return switch (metric) {
-            case METRIC_L2 -> {
+        switch (metric) {
+            case METRIC_L2: {
                 double sum = 0;
                 for (int i = 0; i < a.length; i++) {
                     double d = (double) a[i] - b[i];
                     sum += d * d;
                 }
-                yield Math.sqrt(sum);
+                return Math.sqrt(sum);
             }
-            case METRIC_DOT -> {
+            case METRIC_DOT: {
                 double dot = 0;
                 for (int i = 0; i < a.length; i++) {
                     dot += (double) a[i] * b[i];
                 }
                 // Nearest first, so a larger dot product must sort lower.
-                yield -dot;
+                return -dot;
             }
-            case METRIC_COSINE -> {
+            case METRIC_COSINE: {
                 double dot = 0;
                 double na = 0;
                 double nb = 0;
@@ -400,11 +438,11 @@ public final class VectorIndex {
                 // §8.1: a zero vector has no direction, so this is the
                 // orthogonal value rather than a division by zero. A NaN here
                 // propagates into a neighbour list and corrupts the ordering.
-                yield denominator == 0 ? 1 : 1 - dot / denominator;
+                return denominator == 0 ? 1 : 1 - dot / denominator;
             }
-            default -> throw new InvalidArgumentException("metric '" + metric
+            default: throw new InvalidArgumentException("metric '" + metric
                     + "' is not one of cosine, l2, dot");
-        };
+        }
     }
 
     /**
@@ -434,7 +472,8 @@ public final class VectorIndex {
             return null;
         }
         for (Value v : values) {
-            if (v instanceof Value.Vector vec) {
+            if (v instanceof Value.Vector) {
+                Value.Vector vec = ((Value.Vector) v);
                 return floats(vec);
             }
         }
@@ -445,12 +484,12 @@ public final class VectorIndex {
         ByteReader r = new ByteReader(v.payload());
         float[] out = new float[v.dim()];
         for (int i = 0; i < v.dim(); i++) {
-            out[i] = switch (v.dtype()) {
-                case Value.Vector.DTYPE_F32 -> r.f32();
-                case Value.Vector.DTYPE_F16 -> VectorRegion.Half.toFloat(r.u16());
-                case Value.Vector.DTYPE_I8 -> r.u8() - 128;
-                default -> throw new InvalidArgumentException("vector dtype " + v.dtype());
-            };
+            switch (v.dtype()) {
+                case Value.Vector.DTYPE_F32: out[i] = r.f32(); break;
+                case Value.Vector.DTYPE_F16: out[i] = VectorRegion.Half.toFloat(r.u16()); break;
+                case Value.Vector.DTYPE_I8: out[i] = r.u8() - 128; break;
+                default: throw new InvalidArgumentException("vector dtype " + v.dtype());
+            }
         }
         return out;
     }

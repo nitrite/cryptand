@@ -10,7 +10,6 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.HexFormat;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class CryptoPrimitivesTest {
 
     private static byte[] hex(String s) {
-        return HexFormat.of().parseHex(s.replaceAll("\\s", ""));
+        return org.dizitart.cryptand.util.Hex.parse(s.replaceAll("\\s", ""));
     }
 
     @Test

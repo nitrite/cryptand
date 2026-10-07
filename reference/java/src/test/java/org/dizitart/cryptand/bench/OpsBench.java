@@ -112,7 +112,52 @@ public final class OpsBench {
         return o;
     }
 
-    private record Filled(long logical, double secs, Collection.IndexBinding index) {
+    private static final class Filled {
+        private final long logical;
+        private final double secs;
+        private final Collection.IndexBinding index;
+
+        public Filled(long logical, double secs, Collection.IndexBinding index) {
+            this.logical = logical;
+            this.secs = secs;
+            this.index = index;
+        }
+
+        public long logical() {
+            return logical;
+        }
+
+        public double secs() {
+            return secs;
+        }
+
+        public Collection.IndexBinding index() {
+            return index;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Filled)) {
+                return false;
+            }
+            Filled that = (Filled) o;
+            return logical == that.logical
+                    && Double.compare(secs, that.secs) == 0
+                    && java.util.Objects.equals(index, that.index);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(logical, secs, index);
+        }
+
+        @Override
+        public String toString() {
+            return "Filled[" + "logical=" + logical + ", " + "secs=" + secs + ", " + "index=" + index + "]";
+        }
     }
 
     private static Filled fill(Database db, int n, boolean withIndex) {

@@ -215,29 +215,32 @@ public enum Profile {
      * is allocated, used and released before opening proceeds.
      */
     public int argon2TCost() {
-        return switch (this) {
-            case MOBILE, TABLET -> 3;
-            case DESKTOP, SERVER -> 4;
-            case CUSTOM -> 3;
-        };
+        switch (this) {
+            case MOBILE: case TABLET: return 3;
+            case DESKTOP: case SERVER: return 4;
+            case CUSTOM: return 3;
+            default: throw new AssertionError(this);
+        }
     }
 
     public int argon2MCostKib() {
-        return switch (this) {
-            case MOBILE -> 65536;
-            case TABLET -> 131072;
-            case DESKTOP, SERVER -> 262144;
-            case CUSTOM -> 65536;
-        };
+        switch (this) {
+            case MOBILE: return 65536;
+            case TABLET: return 131072;
+            case DESKTOP: case SERVER: return 262144;
+            case CUSTOM: return 65536;
+            default: throw new AssertionError(this);
+        }
     }
 
     public int argon2Parallelism() {
-        return switch (this) {
-            case MOBILE -> 1;
-            case TABLET -> 2;
-            case DESKTOP, SERVER -> 4;
-            case CUSTOM -> 1;
-        };
+        switch (this) {
+            case MOBILE: return 1;
+            case TABLET: return 2;
+            case DESKTOP: case SERVER: return 4;
+            case CUSTOM: return 1;
+            default: throw new AssertionError(this);
+        }
     }
 
     public static Profile byId(int id) {

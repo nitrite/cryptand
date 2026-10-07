@@ -119,7 +119,8 @@ public final class SpatialIndex {
             return;
         }
         for (Value v : values) {
-            if (v instanceof Value.Geometry g) {
+            if (v instanceof Value.Geometry) {
+                Value.Geometry g = ((Value.Geometry) v);
                 tree.insert(Wkb.envelope(g.wkb(), dimensions), nitriteId);
             }
         }
@@ -186,7 +187,45 @@ public final class SpatialIndex {
         List<Long> candidates = tree.nearest(point, Math.max(k * 4, k + 8));
         // A NitriteId never travels through a double: everything above 2^53
         // comes back changed, and a changed id resolves to no document at all.
-        record Ranked(double distance, long id) {
+        final class Ranked {
+            private final double distance;
+            private final long id;
+
+            Ranked(double distance, long id) {
+                this.distance = distance;
+                this.id = id;
+            }
+
+            public double distance() {
+                return distance;
+            }
+
+            public long id() {
+                return id;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof Ranked)) {
+                    return false;
+                }
+                Ranked that = (Ranked) o;
+                return Double.compare(distance, that.distance) == 0
+                        && id == that.id;
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Objects.hash(distance, id);
+            }
+
+            @Override
+            public String toString() {
+                return "Ranked[" + "distance=" + distance + ", " + "id=" + id + "]";
+            }
         }
         List<Ranked> ranked = new ArrayList<>();
         for (long id : candidates) {
@@ -224,7 +263,8 @@ public final class SpatialIndex {
             return null;
         }
         for (Value v : values) {
-            if (v instanceof Value.Geometry g) {
+            if (v instanceof Value.Geometry) {
+                Value.Geometry g = ((Value.Geometry) v);
                 return g.wkb();
             }
         }

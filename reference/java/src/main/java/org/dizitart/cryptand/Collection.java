@@ -87,7 +87,8 @@ public final class Collection {
 
     /** Interns any field name the document uses that the dictionary does not hold yet. */
     private void internNames(Value value, Engine.Batch batch, List<Integer> added) {
-        if (value instanceof Value.Doc doc) {
+        if (value instanceof Value.Doc) {
+            Value.Doc doc = ((Value.Doc) value);
             for (Map.Entry<String, Value> e : doc.fields().entrySet()) {
                 Integer known = names.idOf(e.getKey());
                 if (known == null) {
@@ -98,7 +99,8 @@ public final class Collection {
                 }
                 internNames(e.getValue(), batch, added);
             }
-        } else if (value instanceof Value.Array a) {
+        } else if (value instanceof Value.Array) {
+            Value.Array a = ((Value.Array) value);
             for (Value v : a.items()) {
                 internNames(v, batch, added);
             }
@@ -297,10 +299,12 @@ public final class Collection {
 
     private static long idOf(Value.Doc doc) {
         Value id = doc.field("_id");
-        if (id instanceof Value.NitriteId n) {
+        if (id instanceof Value.NitriteId) {
+            Value.NitriteId n = ((Value.NitriteId) id);
             return n.id();
         }
-        if (id instanceof Value.Int i && i.asLong() != null) {
+        if (id instanceof Value.Int && ((Value.Int) id).asLong() != null) {
+            Value.Int i = ((Value.Int) id);
             return i.asLong();
         }
         return java.util.UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
@@ -506,7 +510,7 @@ public final class Collection {
         }
         Value sparse = d.params().field("sparse");
         return new IndexBinding(indexName, d.treeId(), fields, d.unique(),
-                sparse instanceof Value.Bool b && b.value());
+                sparse instanceof Value.Bool && ((Value.Bool) sparse).value());
     }
 
     /**

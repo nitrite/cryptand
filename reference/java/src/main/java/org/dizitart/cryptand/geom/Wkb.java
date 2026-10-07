@@ -46,7 +46,40 @@ public final class Wkb {
     private static final int EWKB_SRID = 0x20000000;
 
     /** An axis-aligned bounding box in X, Y, Z, M order — the fixed order of §3. */
-    public record Box(double[] min, double[] max) {
+    public static final class Box {
+        private final double[] min;
+        private final double[] max;
+
+        public Box(double[] min, double[] max) {
+            this.min = min;
+            this.max = max;
+        }
+
+        public double[] min() {
+            return min;
+        }
+
+        public double[] max() {
+            return max;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Box)) {
+                return false;
+            }
+            Box that = (Box) o;
+            return java.util.Objects.equals(min, that.min)
+                    && java.util.Objects.equals(max, that.max);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(min, max);
+        }
 
         public int dimensions() {
             return min.length;
@@ -153,7 +186,45 @@ public final class Wkb {
     }
 
     /** Every coordinate in a geometry, flattened, with the axis count it carries. */
-    public record Coordinates(List<double[]> points, int axes) {
+    public static final class Coordinates {
+        private final List<double[]> points;
+        private final int axes;
+
+        public Coordinates(List<double[]> points, int axes) {
+            this.points = points;
+            this.axes = axes;
+        }
+
+        public List<double[]> points() {
+            return points;
+        }
+
+        public int axes() {
+            return axes;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Coordinates)) {
+                return false;
+            }
+            Coordinates that = (Coordinates) o;
+            return java.util.Objects.equals(points, that.points)
+                    && axes == that.axes;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(points, axes);
+        }
+
+        @Override
+        public String toString() {
+            return "Coordinates[" + "points=" + points + ", " + "axes=" + axes + "]";
+        }
     }
 
     /**
@@ -216,21 +287,23 @@ public final class Wkb {
         if (variant > 3) {
             throw new InvalidArgumentException("WKB type " + type + " is not an ISO geometry type");
         }
-        int axes = switch (variant) {
-            case 0 -> 2;
-            case 1, 2 -> 3;
-            default -> 4;
-        };
+        int axes;
+        switch (variant) {
+            case 0: axes = 2; break;
+            case 1: case 2: axes = 3; break;
+            default: axes = 4; break;
+        }
         switch (base) {
-            case POINT -> out.add(r.point(little, axes));
-            case LINE_STRING -> readPoints(r, little, axes, out);
-            case POLYGON -> {
+            case POINT: out.add(r.point(little, axes)); break;
+            case LINE_STRING: readPoints(r, little, axes, out); break;
+            case POLYGON: {
                 int rings = r.u32(little);
                 for (int i = 0; i < rings; i++) {
                     readPoints(r, little, axes, out);
                 }
             }
-            case MULTI_POINT, MULTI_LINE_STRING, MULTI_POLYGON, GEOMETRY_COLLECTION -> {
+                break;
+            case MULTI_POINT: case MULTI_LINE_STRING: case MULTI_POLYGON: case GEOMETRY_COLLECTION: {
                 int n = r.u32(little);
                 for (int i = 0; i < n; i++) {
                     int childAxes = readGeometry(r, out);
@@ -240,7 +313,8 @@ public final class Wkb {
                     }
                 }
             }
-            default -> throw new InvalidArgumentException("WKB geometry type " + base + " is not one of "
+                break;
+            default: throw new InvalidArgumentException("WKB geometry type " + base + " is not one of "
                     + "Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon "
                     + "or GeometryCollection");
         }

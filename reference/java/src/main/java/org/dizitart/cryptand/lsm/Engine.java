@@ -125,7 +125,52 @@ public final class Engine implements AutoCloseable {
      * read path consults with no lock at all. The committer publishes a new one
      * after every manifest edit.
      */
-    record LevelState(List<Segment> segments, int levelCount, int[] perLevel) {
+    static final class LevelState {
+        private final List<Segment> segments;
+        private final int levelCount;
+        private final int[] perLevel;
+
+        public LevelState(List<Segment> segments, int levelCount, int[] perLevel) {
+            this.segments = segments;
+            this.levelCount = levelCount;
+            this.perLevel = perLevel;
+        }
+
+        public List<Segment> segments() {
+            return segments;
+        }
+
+        public int levelCount() {
+            return levelCount;
+        }
+
+        public int[] perLevel() {
+            return perLevel;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof LevelState)) {
+                return false;
+            }
+            LevelState that = (LevelState) o;
+            return java.util.Objects.equals(segments, that.segments)
+                    && levelCount == that.levelCount
+                    && java.util.Objects.equals(perLevel, that.perLevel);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(segments, levelCount, perLevel);
+        }
+
+        @Override
+        public String toString() {
+            return "LevelState[" + "segments=" + segments + ", " + "levelCount=" + levelCount + ", " + "perLevel=" + perLevel + "]";
+        }
 
         LevelState(List<Segment> segments, int levelCount) {
             this(segments, levelCount, histogram(segments, levelCount));
@@ -1733,8 +1778,8 @@ public final class Engine implements AutoCloseable {
 
     private static String rangeOf(Segment seg) {
         SegmentMeta m = seg.meta();
-        return "segment " + m.segmentId + " [" + java.util.HexFormat.of().formatHex(m.minKey)
-                + ", " + java.util.HexFormat.of().formatHex(m.maxKey) + "]";
+        return "segment " + m.segmentId + " [" + org.dizitart.cryptand.util.Hex.format(m.minKey)
+                + ", " + org.dizitart.cryptand.util.Hex.format(m.maxKey) + "]";
     }
 
     static boolean coversUserKey(SegmentMeta m, byte[] uk) {
@@ -1748,18 +1793,18 @@ public final class Engine implements AutoCloseable {
     /** Dereferences a value: inline, one value-log read, one blob read, or an overflow chain. */
     public byte[] resolveValue(BtreePage.Leaf cell) {
         switch (cell.kind()) {
-            case BtreePage.Kind.INLINE -> {
+            case BtreePage.Kind.INLINE: {
                 return cell.value();
             }
-            case BtreePage.Kind.VLOG -> {
+            case BtreePage.Kind.VLOG: {
                 valueReads.incrementAndGet();
                 return vlog.read(VlogPointer.decode(cell.value())).value();
             }
-            case BtreePage.Kind.BLOB -> {
+            case BtreePage.Kind.BLOB: {
                 valueReads.incrementAndGet();
                 return Blob.decode(cell.value()).read(pager);
             }
-            case BtreePage.Kind.OVERFLOW -> {
+            case BtreePage.Kind.OVERFLOW: {
                 ByteWriter w = new ByteWriter(cell.value().length * 2);
                 w.bytes(cell.value());
                 long next = cell.overflowPage();
@@ -1772,7 +1817,7 @@ public final class Engine implements AutoCloseable {
                 }
                 return w.toBytes();
             }
-            default -> {
+            default: {
                 return new byte[0];
             }
         }
@@ -2687,7 +2732,59 @@ public final class Engine implements AutoCloseable {
         if (!liveSnapshots.isEmpty()) {
             return;
         }
-        record Survivor(int treeId, byte[] key, byte[] value, BtreePage.Leaf entry) {
+        final class Survivor {
+            private final int treeId;
+            private final byte[] key;
+            private final byte[] value;
+            private final BtreePage.Leaf entry;
+
+            Survivor(int treeId, byte[] key, byte[] value, BtreePage.Leaf entry) {
+                this.treeId = treeId;
+                this.key = key;
+                this.value = value;
+                this.entry = entry;
+            }
+
+            public int treeId() {
+                return treeId;
+            }
+
+            public byte[] key() {
+                return key;
+            }
+
+            public byte[] value() {
+                return value;
+            }
+
+            public BtreePage.Leaf entry() {
+                return entry;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof Survivor)) {
+                    return false;
+                }
+                Survivor that = (Survivor) o;
+                return treeId == that.treeId
+                        && java.util.Objects.equals(key, that.key)
+                        && java.util.Objects.equals(value, that.value)
+                        && java.util.Objects.equals(entry, that.entry);
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Objects.hash(treeId, key, value, entry);
+            }
+
+            @Override
+            public String toString() {
+                return "Survivor[" + "treeId=" + treeId + ", " + "key=" + key + ", " + "value=" + value + ", " + "entry=" + entry + "]";
+            }
         }
         List<Survivor> survivors = new ArrayList<>();
         List<VlogStats> merged = new ArrayList<>();
@@ -2844,7 +2941,45 @@ public final class Engine implements AutoCloseable {
     }
 
     private void collectSegment(VlogStats stats) {
-        record Survivor(VlogSegment.Record record, BtreePage.Leaf entry) {
+        final class Survivor {
+            private final VlogSegment.Record record;
+            private final BtreePage.Leaf entry;
+
+            Survivor(VlogSegment.Record record, BtreePage.Leaf entry) {
+                this.record = record;
+                this.entry = entry;
+            }
+
+            public VlogSegment.Record record() {
+                return record;
+            }
+
+            public BtreePage.Leaf entry() {
+                return entry;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof Survivor)) {
+                    return false;
+                }
+                Survivor that = (Survivor) o;
+                return java.util.Objects.equals(record, that.record)
+                        && java.util.Objects.equals(entry, that.entry);
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Objects.hash(record, entry);
+            }
+
+            @Override
+            public String toString() {
+                return "Survivor[" + "record=" + record + ", " + "entry=" + entry + "]";
+            }
         }
         List<Survivor> survivors = new ArrayList<>();
         long now = GC_NOW;
@@ -3598,7 +3733,59 @@ public final class Engine implements AutoCloseable {
     }
 
     private void relocateDown(boolean hop) {
-        record Move(long start, int pages, SegmentMeta segment, VlogStats vlogSegment) {
+        final class Move {
+            private final long start;
+            private final int pages;
+            private final SegmentMeta segment;
+            private final VlogStats vlogSegment;
+
+            Move(long start, int pages, SegmentMeta segment, VlogStats vlogSegment) {
+                this.start = start;
+                this.pages = pages;
+                this.segment = segment;
+                this.vlogSegment = vlogSegment;
+            }
+
+            public long start() {
+                return start;
+            }
+
+            public int pages() {
+                return pages;
+            }
+
+            public SegmentMeta segment() {
+                return segment;
+            }
+
+            public VlogStats vlogSegment() {
+                return vlogSegment;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof Move)) {
+                    return false;
+                }
+                Move that = (Move) o;
+                return start == that.start
+                        && pages == that.pages
+                        && java.util.Objects.equals(segment, that.segment)
+                        && java.util.Objects.equals(vlogSegment, that.vlogSegment);
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Objects.hash(start, pages, segment, vlogSegment);
+            }
+
+            @Override
+            public String toString() {
+                return "Move[" + "start=" + start + ", " + "pages=" + pages + ", " + "segment=" + segment + ", " + "vlogSegment=" + vlogSegment + "]";
+            }
         }
         List<Move> all = new ArrayList<>();
         for (SegmentMeta m : manifest.all()) {

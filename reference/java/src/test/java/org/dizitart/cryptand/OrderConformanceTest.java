@@ -38,7 +38,53 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class OrderConformanceTest {
 
-    private record Corpus(List<Value> values, List<String> notes, JsonNode doc) {}
+    private static final class Corpus {
+        private final List<Value> values;
+        private final List<String> notes;
+        private final JsonNode doc;
+
+        public Corpus(List<Value> values, List<String> notes, JsonNode doc) {
+            this.values = values;
+            this.notes = notes;
+            this.doc = doc;
+        }
+
+        public List<Value> values() {
+            return values;
+        }
+
+        public List<String> notes() {
+            return notes;
+        }
+
+        public JsonNode doc() {
+            return doc;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Corpus)) {
+                return false;
+            }
+            Corpus that = (Corpus) o;
+            return java.util.Objects.equals(values, that.values)
+                    && java.util.Objects.equals(notes, that.notes)
+                    && java.util.Objects.equals(doc, that.doc);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(values, notes, doc);
+        }
+
+        @Override
+        public String toString() {
+            return "Corpus[" + "values=" + values + ", " + "notes=" + notes + ", " + "doc=" + doc + "]";
+        }
+    }
 
     private static Corpus corpus() throws IOException {
         JsonNode doc = Vectors.load("order/values.json");

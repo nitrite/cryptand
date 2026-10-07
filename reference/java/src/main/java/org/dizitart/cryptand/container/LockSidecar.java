@@ -51,7 +51,59 @@ public final class LockSidecar implements AutoCloseable {
         NO_FREE_SLOT
     }
 
-    public record Slot(int index, long pid, long commitId, long heartbeatMs) {
+    public static final class Slot {
+        private final int index;
+        private final long pid;
+        private final long commitId;
+        private final long heartbeatMs;
+
+        public Slot(int index, long pid, long commitId, long heartbeatMs) {
+            this.index = index;
+            this.pid = pid;
+            this.commitId = commitId;
+            this.heartbeatMs = heartbeatMs;
+        }
+
+        public int index() {
+            return index;
+        }
+
+        public long pid() {
+            return pid;
+        }
+
+        public long commitId() {
+            return commitId;
+        }
+
+        public long heartbeatMs() {
+            return heartbeatMs;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Slot)) {
+                return false;
+            }
+            Slot that = (Slot) o;
+            return index == that.index
+                    && pid == that.pid
+                    && commitId == that.commitId
+                    && heartbeatMs == that.heartbeatMs;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(index, pid, commitId, heartbeatMs);
+        }
+
+        @Override
+        public String toString() {
+            return "Slot[" + "index=" + index + ", " + "pid=" + pid + ", " + "commitId=" + commitId + ", " + "heartbeatMs=" + heartbeatMs + "]";
+        }
     }
 
     private final Path path;

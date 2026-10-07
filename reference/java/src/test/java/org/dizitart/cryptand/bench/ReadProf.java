@@ -133,8 +133,8 @@ public final class ReadProf {
                     seed = next(seed);
                     int i = (int) Math.floorMod(seed, n);
                     switch (phase) {
-                        case "update" -> e.batch().put(tree, keyOf(i), v0[i]).commit();
-                        case "mixed" -> {
+                        case "update": e.batch().put(tree, keyOf(i), v0[i]).commit(); break;
+                        case "mixed": {
                             int roll = (int) Math.floorMod(next(seed), 100);
                             if (roll < 70) {
                                 e.get(tree, keyOf(i));
@@ -144,7 +144,8 @@ public final class ReadProf {
                                 e.batch().remove(tree, keyOf(i)).commit();
                             }
                         }
-                        default -> e.get(tree, keyOf(i));
+                            break;
+                        default: e.get(tree, keyOf(i)); break;
                     }
                     count++;
                 }

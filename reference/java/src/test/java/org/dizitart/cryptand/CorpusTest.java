@@ -120,13 +120,13 @@ class CorpusTest {
         Map<String, String> out = new TreeMap<>();
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         try (var files = Files.list(dir)) {
-            for (Path p : files.toList()) {
+            for (Path p : files.collect(java.util.stream.Collectors.toList())) {
                 if (!Files.isRegularFile(p)) {
                     continue;
                 }
                 md.reset();
                 out.put(p.getFileName().toString(),
-                        java.util.HexFormat.of().formatHex(md.digest(Files.readAllBytes(p))));
+                        org.dizitart.cryptand.util.Hex.format(md.digest(Files.readAllBytes(p))));
             }
         }
         return out;

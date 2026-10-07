@@ -28,7 +28,40 @@ import java.util.Set;
  */
 public final class Repair {
 
-    public record Result(List<String> repaired, List<String> unrepairable) {
+    public static final class Result {
+        private final List<String> repaired;
+        private final List<String> unrepairable;
+
+        public Result(List<String> repaired, List<String> unrepairable) {
+            this.repaired = repaired;
+            this.unrepairable = unrepairable;
+        }
+
+        public List<String> repaired() {
+            return repaired;
+        }
+
+        public List<String> unrepairable() {
+            return unrepairable;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Result)) {
+                return false;
+            }
+            Result that = (Result) o;
+            return java.util.Objects.equals(repaired, that.repaired)
+                    && java.util.Objects.equals(unrepairable, that.unrepairable);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(repaired, unrepairable);
+        }
 
         public boolean clean() {
             return repaired.isEmpty() && unrepairable.isEmpty();
@@ -43,7 +76,7 @@ public final class Repair {
             for (String u : unrepairable) {
                 sb.append("UNREPAIRABLE: ").append(u).append('\n');
             }
-            return sb.isEmpty() ? "nothing to repair" : sb.toString();
+            return sb.length() == 0 ? "nothing to repair" : sb.toString();
         }
     }
 

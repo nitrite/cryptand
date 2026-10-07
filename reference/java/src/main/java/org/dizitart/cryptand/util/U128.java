@@ -190,7 +190,7 @@ public final class U128 implements Comparable<U128> {
 
     @Override
     public boolean equals(Object o) {
-        return o instanceof U128 u && u.hi == hi && u.lo == lo;
+        return o instanceof U128 && ((U128) o).hi == hi && ((U128) o).lo == lo;
     }
 
     @Override

@@ -20,7 +20,52 @@ import org.dizitart.cryptand.util.Crc32c;
  *   u32 crc32c
  * </pre>
  */
-public record Blob(long startPage, int byteLen, int crc32c) {
+public final class Blob {
+    private final long startPage;
+    private final int byteLen;
+    private final int crc32c;
+
+    public Blob(long startPage, int byteLen, int crc32c) {
+        this.startPage = startPage;
+        this.byteLen = byteLen;
+        this.crc32c = crc32c;
+    }
+
+    public long startPage() {
+        return startPage;
+    }
+
+    public int byteLen() {
+        return byteLen;
+    }
+
+    public int crc32c() {
+        return crc32c;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof Blob)) {
+            return false;
+        }
+        Blob that = (Blob) o;
+        return startPage == that.startPage
+                && byteLen == that.byteLen
+                && crc32c == that.crc32c;
+    }
+
+    @Override
+    public int hashCode() {
+        return java.util.Objects.hash(startPage, byteLen, crc32c);
+    }
+
+    @Override
+    public String toString() {
+        return "Blob[" + "startPage=" + startPage + ", " + "byteLen=" + byteLen + ", " + "crc32c=" + crc32c + "]";
+    }
 
     public static final int POINTER_BYTES = 16;
 
@@ -42,7 +87,8 @@ public record Blob(long startPage, int byteLen, int crc32c) {
      * after its 40-byte header, and the interior pages carry no header at all.
      */
     public static Blob write(Pager pager, byte[] value) {
-        if (pager.crypto() instanceof FileCipher cipher) {
+        if (pager.crypto() instanceof FileCipher) {
+            FileCipher cipher = ((FileCipher) pager.crypto());
             return writeEncrypted(pager, cipher, value);
         }
         int pageSize = pager.pageSize();
@@ -77,7 +123,8 @@ public record Blob(long startPage, int byteLen, int crc32c) {
     }
 
     public byte[] read(Pager pager) {
-        if (pager.crypto() instanceof FileCipher cipher) {
+        if (pager.crypto() instanceof FileCipher) {
+            FileCipher cipher = ((FileCipher) pager.crypto());
             return readEncrypted(pager, cipher);
         }
         int pageSize = pager.pageSize();

@@ -84,7 +84,7 @@ public final class VlogSegment {
         byte[] magic = r.bytes(8);
         if (!Arrays.equals(magic, MAGIC)) {
             throw new CorruptionException("value-log head magic is "
-                    + java.util.HexFormat.of().formatHex(magic) + ", expected 435259 5f564c471a");
+                    + org.dizitart.cryptand.util.Hex.format(magic) + ", expected 435259 5f564c471a");
         }
         VlogSegment s = new VlogSegment();
         s.segmentId = r.u64();
@@ -109,7 +109,52 @@ public final class VlogSegment {
      * to test liveness, look the key up and check whether the live entry points
      * at this offset.
      */
-    public record Record(int treeId, byte[] key, byte[] value) {
+    public static final class Record {
+        private final int treeId;
+        private final byte[] key;
+        private final byte[] value;
+
+        public Record(int treeId, byte[] key, byte[] value) {
+            this.treeId = treeId;
+            this.key = key;
+            this.value = value;
+        }
+
+        public int treeId() {
+            return treeId;
+        }
+
+        public byte[] key() {
+            return key;
+        }
+
+        public byte[] value() {
+            return value;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Record)) {
+                return false;
+            }
+            Record that = (Record) o;
+            return treeId == that.treeId
+                    && java.util.Objects.equals(key, that.key)
+                    && java.util.Objects.equals(value, that.value);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(treeId, key, value);
+        }
+
+        @Override
+        public String toString() {
+            return "Record[" + "treeId=" + treeId + ", " + "key=" + key + ", " + "value=" + value + "]";
+        }
 
         /**
          * Encodes the record in the clear.

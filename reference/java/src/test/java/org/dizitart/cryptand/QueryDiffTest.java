@@ -39,11 +39,11 @@ class QueryDiffTest {
         if (k < 4) return new Value.Str(WORDS[r.nextInt(6)]);
         long n = r.nextInt(11) - 3; // small, so values collide across types
         NumType w = WIDTHS[r.nextInt(6)];
-        return switch (w) {
-            case U64 -> Value.integer(w, Math.abs(n));
-            case F64, F32 -> new Value.Float(w, n + (r.nextInt(3) == 0 ? 0.5 : 0.0));
-            default -> Value.integer(w, n);
-        };
+        switch (w) {
+            case U64: return Value.integer(w, Math.abs(n));
+            case F64: case F32: return new Value.Float(w, n + (r.nextInt(3) == 0 ? 0.5 : 0.0));
+            default: return Value.integer(w, n);
+        }
     }
 
     private static Value.Doc doc(SplittableRandom r) {
@@ -84,10 +84,11 @@ class QueryDiffTest {
                 String label;
                 List<Long> got;
                 Predicate<Value> pred;
-                if (k == 0 && b instanceof Value.Str s) {
+                if (k == 0 && b instanceof Value.Str) {
+                    Value.Str s = ((Value.Str) b);
                     label = "starts_with " + s;
                     got = idx.startsWith(List.of(), s.value());
-                    pred = x -> x instanceof Value.Str y && y.value().startsWith(s.value());
+                    pred = x -> x instanceof Value.Str && ((Value.Str) x).value().startsWith(s.value());
                 } else if (k <= 1) {
                     label = "eq " + b;
                     got = Compare.isNumeric(b) ? idx.findNumeric(List.of(b)) : idx.find(List.of(b));
@@ -98,12 +99,13 @@ class QueryDiffTest {
                     got = idx.range(List.of(), op, b);
                     pred = x -> {
                         int c0 = Compare.compare(x, b);
-                        return switch (op) {
-                            case GT -> c0 > 0;
-                            case GE -> c0 >= 0;
-                            case LT -> c0 < 0;
-                            case LE -> c0 <= 0;
-                        };
+                        switch (op) {
+                            case GT: return c0 > 0;
+                            case GE: return c0 >= 0;
+                            case LT: return c0 < 0;
+                            case LE: return c0 <= 0;
+                            default: throw new AssertionError(op);
+                        }
                     };
                 }
                 TreeSet<Long> want = new TreeSet<>();

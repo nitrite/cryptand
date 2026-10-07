@@ -30,7 +30,45 @@ public final class Analyzer {
     public static final int MAX_TOKEN_CODE_POINTS = 64;
 
     /** A surviving segment and its <em>pre-filter</em> index among the segments of step 3. */
-    public record Token(String text, int position) {
+    public static final class Token {
+        private final String text;
+        private final int position;
+
+        public Token(String text, int position) {
+            this.text = text;
+            this.position = position;
+        }
+
+        public String text() {
+            return text;
+        }
+
+        public int position() {
+            return position;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Token)) {
+                return false;
+            }
+            Token that = (Token) o;
+            return java.util.Objects.equals(text, that.text)
+                    && position == that.position;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(text, position);
+        }
+
+        @Override
+        public String toString() {
+            return "Token[" + "text=" + text + ", " + "position=" + position + "]";
+        }
     }
 
     private final String name;

@@ -57,12 +57,12 @@ public final class VectorRegion {
     public int pages;
 
     public static int elementBytes(int dtype) {
-        return switch (dtype) {
-            case DTYPE_F32 -> 4;
-            case DTYPE_F16 -> 2;
-            case DTYPE_I8, DTYPE_U8_PQ -> 1;
-            default -> throw new InvalidArgumentException("vector dtype " + dtype + " is not 0..3");
-        };
+        switch (dtype) {
+            case DTYPE_F32: return 4;
+            case DTYPE_F16: return 2;
+            case DTYPE_I8: case DTYPE_U8_PQ: return 1;
+            default: throw new InvalidArgumentException("vector dtype " + dtype + " is not 0..3");
+        }
     }
 
     /**
@@ -94,7 +94,7 @@ public final class VectorRegion {
         byte[] magic = r.bytes(8);
         if (!java.util.Arrays.equals(magic, MAGIC)) {
             throw new CorruptionException("vector region magic is "
-                    + java.util.HexFormat.of().formatHex(magic) + ", expected 435259 5f5645431a");
+                    + org.dizitart.cryptand.util.Hex.format(magic) + ", expected 435259 5f5645431a");
         }
         VectorRegion v = new VectorRegion();
         v.dim = r.u32();
@@ -190,9 +190,9 @@ public final class VectorRegion {
         ByteWriter w = new ByteWriter(stride);
         for (float f : vector) {
             switch (dtype) {
-                case DTYPE_F32 -> w.f32(f);
-                case DTYPE_F16 -> w.u16(Half.toBits(f));
-                default -> throw new InvalidArgumentException(
+                case DTYPE_F32: w.f32(f); break;
+                case DTYPE_F16: w.u16(Half.toBits(f)); break;
+                default: throw new InvalidArgumentException(
                         "dtype " + dtype + " needs quantized codes, not raw floats");
             }
         }
@@ -215,12 +215,12 @@ public final class VectorRegion {
         ByteReader r = new ByteReader(buf);
         float[] out = new float[dim];
         for (int i = 0; i < dim; i++) {
-            out[i] = switch (dtype) {
-                case DTYPE_F32 -> r.f32();
-                case DTYPE_F16 -> Half.toFloat(r.u16());
-                default -> throw new InvalidArgumentException(
+            switch (dtype) {
+                case DTYPE_F32: out[i] = r.f32(); break;
+                case DTYPE_F16: out[i] = Half.toFloat(r.u16()); break;
+                default: throw new InvalidArgumentException(
                         "dtype " + dtype + " holds quantized codes, not raw floats");
-            };
+            }
         }
         return out;
     }

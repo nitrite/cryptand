@@ -71,9 +71,10 @@ public final class TreeDescriptor {
 
     public static TreeDescriptor decode(byte[] cve, NameDict dict) {
         Value v = Cve.decode(cve, dict);
-        if (!(v instanceof Value.Doc d)) {
+        if (!(v instanceof Value.Doc)) {
             throw new CorruptionException("a catalog value must be a CVE document, got " + v.getClass().getSimpleName());
         }
+        Value.Doc d = ((Value.Doc) v);
         return new TreeDescriptor(d);
     }
 
@@ -118,7 +119,7 @@ public final class TreeDescriptor {
      */
     public boolean levelled() {
         Value v = document.field("levelled");
-        return v instanceof Value.Bool b && b.value();
+        return v instanceof Value.Bool && ((Value.Bool) v).value();
     }
 
     /** Tree id of this tree's field-name dictionary, absent if none. */
@@ -169,13 +170,13 @@ public final class TreeDescriptor {
      */
     public Value.Doc params() {
         Value v = document.field("params");
-        return v instanceof Value.Doc d ? d : new Value.Doc(Map.of());
+        return v instanceof Value.Doc ? ((Value.Doc) v) : new Value.Doc(Map.of());
     }
 
     /** {@code params.index_type} — the ONLY record of uniqueness. */
     public String indexType() {
         Value v = params().field("index_type");
-        return v instanceof Value.Str s ? s.value() : null;
+        return v instanceof Value.Str ? ((Value.Str) v).value() : null;
     }
 
     /**
@@ -272,9 +273,10 @@ public final class TreeDescriptor {
         if (v == null) {
             return null;
         }
-        if (!(v instanceof Value.Int i)) {
+        if (!(v instanceof Value.Int)) {
             throw new CorruptionException("tree descriptor field '" + name + "' is not an integer");
         }
+        Value.Int i = ((Value.Int) v);
         Long l = i.asLong();
         if (l == null) {
             throw new CorruptionException("tree descriptor field '" + name + "' does not fit 64 bits");
@@ -295,9 +297,10 @@ public final class TreeDescriptor {
         if (v == null) {
             return null;
         }
-        if (!(v instanceof Value.Str s)) {
+        if (!(v instanceof Value.Str)) {
             throw new CorruptionException("tree descriptor field '" + name + "' is not a string");
         }
+        Value.Str s = ((Value.Str) v);
         return s.value();
     }
 }

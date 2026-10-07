@@ -23,7 +23,52 @@ import org.dizitart.cryptand.util.ByteWriter;
  * is not a new constraint: {@code vlog_segment_bytes} is a {@code u32}
  * superblock field.
  */
-public record VlogPointer(long segmentId, long offset, long len) {
+public final class VlogPointer {
+    private final long segmentId;
+    private final long offset;
+    private final long len;
+
+    public VlogPointer(long segmentId, long offset, long len) {
+        this.segmentId = segmentId;
+        this.offset = offset;
+        this.len = len;
+    }
+
+    public long segmentId() {
+        return segmentId;
+    }
+
+    public long offset() {
+        return offset;
+    }
+
+    public long len() {
+        return len;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof VlogPointer)) {
+            return false;
+        }
+        VlogPointer that = (VlogPointer) o;
+        return segmentId == that.segmentId
+                && offset == that.offset
+                && len == that.len;
+    }
+
+    @Override
+    public int hashCode() {
+        return java.util.Objects.hash(segmentId, offset, len);
+    }
+
+    @Override
+    public String toString() {
+        return "VlogPointer[" + "segmentId=" + segmentId + ", " + "offset=" + offset + ", " + "len=" + len + "]";
+    }
 
     public static final int BYTES = 16;
 

@@ -13,10 +13,7 @@ package org.dizitart.cryptand;
  * sites can do anything about — and the alternative decorates the whole engine
  * with {@code throws} clauses that nobody reads.
  */
-public abstract sealed class CryptandException extends RuntimeException
-        permits CorruptionException, LimitException, InvalidArgumentException,
-                UnsupportedFeatureException, TamperingException, LockedException,
-                CannotUnlockException, ConflictException {
+public abstract class CryptandException extends RuntimeException {
 
     protected CryptandException(String message) {
         super(message);

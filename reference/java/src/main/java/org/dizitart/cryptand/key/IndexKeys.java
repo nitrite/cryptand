@@ -105,7 +105,8 @@ public final class IndexKeys {
     }
 
     private static List<Value> resolveFrom(Value v, List<String> path, int i) {
-        if (v instanceof Value.Array a) {
+        if (v instanceof Value.Array) {
+            Value.Array a = ((Value.Array) v);
             List<Value> out = new ArrayList<>();
             boolean any = false;
             for (Value item : a.items()) {
@@ -123,7 +124,8 @@ public final class IndexKeys {
         if (i == path.size()) {
             return List.of(v);
         }
-        if (v instanceof Value.Doc d) {
+        if (v instanceof Value.Doc) {
+            Value.Doc d = ((Value.Doc) v);
             Value child = d.field(path.get(i));
             // An unresolvable path is treated as an absent field (§5).
             return child == null ? null : resolveFrom(child, path, i + 1);
@@ -217,9 +219,10 @@ public final class IndexKeys {
     public static long idOf(byte[] indexKey) {
         List<Value> items = ((Value.Array) Cke.decode(indexKey)).items();
         Value last = items.get(items.size() - 1);
-        if (!(last instanceof Value.NitriteId id)) {
+        if (!(last instanceof Value.NitriteId)) {
             throw new CorruptionException("index key does not end in a NITRITE_ID");
         }
+        Value.NitriteId id = ((Value.NitriteId) last);
         return id.id();
     }
 
@@ -248,7 +251,45 @@ public final class IndexKeys {
      * {@link Cke#UNBOUNDED_ABOVE}; an empty {@code lower} is unbounded below,
      * which needs no sentinel because the empty byte string is below every key.
      */
-    public record Scan(byte[] lower, byte[] upper) {
+    public static final class Scan {
+        private final byte[] lower;
+        private final byte[] upper;
+
+        public Scan(byte[] lower, byte[] upper) {
+            this.lower = lower;
+            this.upper = upper;
+        }
+
+        public byte[] lower() {
+            return lower;
+        }
+
+        public byte[] upper() {
+            return upper;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Scan)) {
+                return false;
+            }
+            Scan that = (Scan) o;
+            return java.util.Objects.equals(lower, that.lower)
+                    && java.util.Objects.equals(upper, that.upper);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(lower, upper);
+        }
+
+        @Override
+        public String toString() {
+            return "Scan[" + "lower=" + lower + ", " + "upper=" + upper + "]";
+        }
 
         public boolean contains(byte[] key) {
             if (Cke.compare(key, lower) < 0) {
@@ -294,15 +335,16 @@ public final class IndexKeys {
         System.arraycopy(base, 0, at, 0, base.length);
         System.arraycopy(b, 0, at, base.length, b.length);
         byte[] allAbove = Cke.successor(base);
-        return switch (op) {
-            case GE -> new Scan(at, allAbove);
-            case GT -> {
+        switch (op) {
+            case GE: return new Scan(at, allAbove);
+            case GT: {
                 byte[] after = Cke.successor(at);
-                yield after == null ? new Scan(allAbove, allAbove) : new Scan(after, allAbove);
+                return after == null ? new Scan(allAbove, allAbove) : new Scan(after, allAbove);
             }
-            case LT -> new Scan(base, at);
-            case LE -> new Scan(base, Cke.successor(at));
-        };
+            case LT: return new Scan(base, at);
+            case LE: return new Scan(base, Cke.successor(at));
+            default: throw new AssertionError(op);
+        }
     }
 
     /** A {@code starts_with} on a string in the position after {@code prefix}. */

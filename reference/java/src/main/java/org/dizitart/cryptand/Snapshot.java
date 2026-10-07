@@ -15,10 +15,94 @@ import org.dizitart.cryptand.container.Superblock;
  * <p>Because segments are immutable and every version carries its own seq, a
  * snapshot needs no locks, no copying and no coordination with writers.
  */
-public record Snapshot(long seq, long commitId,
-                       long catalogRoot, long freelistRoot, long attributesRoot,
-                       long manifestRoot, long vlogStatsRoot,
-                       long checkpointRoot, long changefeedRoot) {
+public final class Snapshot {
+    private final long seq;
+    private final long commitId;
+    private final long catalogRoot;
+    private final long freelistRoot;
+    private final long attributesRoot;
+    private final long manifestRoot;
+    private final long vlogStatsRoot;
+    private final long checkpointRoot;
+    private final long changefeedRoot;
+
+    public Snapshot(long seq, long commitId, long catalogRoot, long freelistRoot, long attributesRoot, long manifestRoot, long vlogStatsRoot, long checkpointRoot, long changefeedRoot) {
+        this.seq = seq;
+        this.commitId = commitId;
+        this.catalogRoot = catalogRoot;
+        this.freelistRoot = freelistRoot;
+        this.attributesRoot = attributesRoot;
+        this.manifestRoot = manifestRoot;
+        this.vlogStatsRoot = vlogStatsRoot;
+        this.checkpointRoot = checkpointRoot;
+        this.changefeedRoot = changefeedRoot;
+    }
+
+    public long seq() {
+        return seq;
+    }
+
+    public long commitId() {
+        return commitId;
+    }
+
+    public long catalogRoot() {
+        return catalogRoot;
+    }
+
+    public long freelistRoot() {
+        return freelistRoot;
+    }
+
+    public long attributesRoot() {
+        return attributesRoot;
+    }
+
+    public long manifestRoot() {
+        return manifestRoot;
+    }
+
+    public long vlogStatsRoot() {
+        return vlogStatsRoot;
+    }
+
+    public long checkpointRoot() {
+        return checkpointRoot;
+    }
+
+    public long changefeedRoot() {
+        return changefeedRoot;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof Snapshot)) {
+            return false;
+        }
+        Snapshot that = (Snapshot) o;
+        return seq == that.seq
+                && commitId == that.commitId
+                && catalogRoot == that.catalogRoot
+                && freelistRoot == that.freelistRoot
+                && attributesRoot == that.attributesRoot
+                && manifestRoot == that.manifestRoot
+                && vlogStatsRoot == that.vlogStatsRoot
+                && checkpointRoot == that.checkpointRoot
+                && changefeedRoot == that.changefeedRoot;
+    }
+
+    @Override
+    public int hashCode() {
+        return java.util.Objects.hash(seq, commitId, catalogRoot, freelistRoot, attributesRoot, manifestRoot, vlogStatsRoot, checkpointRoot, changefeedRoot);
+    }
+
+    @Override
+    public String toString() {
+        return "Snapshot[" + "seq=" + seq + ", " + "commitId=" + commitId + ", " + "catalogRoot=" + catalogRoot + ", " + "freelistRoot=" + freelistRoot + ", " + "attributesRoot=" + attributesRoot + ", " + "manifestRoot=" + manifestRoot + ", " + "vlogStatsRoot=" + vlogStatsRoot + ", " + "checkpointRoot=" + checkpointRoot + ", " + "changefeedRoot=" + changefeedRoot + "]";
+    }
 
     public static Snapshot of(Superblock sb) {
         return new Snapshot(sb.visibleSeq, sb.commitId,

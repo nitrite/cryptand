@@ -189,7 +189,7 @@ class CveConformanceTest {
                 new Value.Map.Entry(Value.i32(1), new Value.Str("one")),
                 new Value.Map.Entry(Value.i32(2), new Value.Str("two"))));
         Value.Map back = (Value.Map) Cve.decode(Cve.encode(m));
-        List<Value> keys = back.entries().stream().map(Value.Map.Entry::key).toList();
+        List<Value> keys = back.entries().stream().map(Value.Map.Entry::key).collect(java.util.stream.Collectors.toList());
         assertEquals(List.of(Value.i32(1), Value.i32(2), Value.i32(3)), keys);
     }
 
@@ -222,7 +222,7 @@ class CveConformanceTest {
     @org.junit.jupiter.api.Test
     void f041AHugeInlineNameRefIsCorruptionNotAnIndexError() {
         // {"a": null} with its name ref replaced by the 10-byte uvar 2^64-1.
-        byte[] b = java.util.HexFormat.of().parseHex("221001" + "01" + "ffffffffffffffffff01" + "00016100");
+        byte[] b = org.dizitart.cryptand.util.Hex.parse("221001" + "01" + "ffffffffffffffffff01" + "00016100");
         org.junit.jupiter.api.Assertions.assertThrows(org.dizitart.cryptand.CorruptionException.class,
                 () -> org.dizitart.cryptand.value.Cve.decode(b));
     }

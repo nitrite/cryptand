@@ -139,39 +139,46 @@ public final class Compare {
         if (a instanceof Value.Null) {
             return 0; // rule 1
         }
-        if (a instanceof Value.Bool x) {
+        if (a instanceof Value.Bool) {
+            Value.Bool x = ((Value.Bool) a);
             // rule 9: FALSE < TRUE
             return Boolean.compare(x.value(), ((Value.Bool) b).value());
         }
         if (a instanceof Value.Int || a instanceof Value.Float) {
             return compareNumeric(a, b);
         }
-        if (a instanceof Value.Char x) {
+        if (a instanceof Value.Char) {
+            Value.Char x = ((Value.Char) a);
             // rule 6: CHAR is never equal to a one-character STR; the separate
             // groups already guarantee that, so here it is just the scalar.
             return Integer.compare(x.scalar(), ((Value.Char) b).scalar());
         }
-        if (a instanceof Value.Str x) {
+        if (a instanceof Value.Str) {
+            Value.Str x = ((Value.Str) a);
             // rule 4: UTF-8 byte order, which is code-point order. NOT
             // String.compareTo, which is UTF-16 code-unit order and disagrees
             // for every pair that straddles U+FFFF.
             return Arrays.compareUnsigned(Utf8.encode(x.value()),
                     Utf8.encode(((Value.Str) b).value()));
         }
-        if (a instanceof Value.Bytes x) {
+        if (a instanceof Value.Bytes) {
+            Value.Bytes x = ((Value.Bytes) a);
             // rule 5: lexicographic, shorter-is-smaller on a prefix
             return Arrays.compareUnsigned(x.value(), ((Value.Bytes) b).value());
         }
-        if (a instanceof Value.NitriteId x) {
+        if (a instanceof Value.NitriteId) {
+            Value.NitriteId x = ((Value.NitriteId) a);
             return Long.compare(x.id(), ((Value.NitriteId) b).id());
         }
-        if (a instanceof Value.Uuid x) {
+        if (a instanceof Value.Uuid) {
+            Value.Uuid x = ((Value.Uuid) a);
             return Arrays.compareUnsigned(x.bytes(), ((Value.Uuid) b).bytes());
         }
         if (isTemporal(a)) {
             return compareTemporal(a, b);
         }
-        if (a instanceof Value.Array x) {
+        if (a instanceof Value.Array) {
+            Value.Array x = ((Value.Array) a);
             // rule 8: element-wise, then by length
             List<Value> p = x.items();
             List<Value> q = ((Value.Array) b).items();
@@ -182,10 +189,12 @@ public final class Compare {
             }
             return Integer.compare(p.size(), q.size());
         }
-        if (a instanceof Value.Map x) {
+        if (a instanceof Value.Map) {
+            Value.Map x = ((Value.Map) a);
             return comparePairs(mapEntries(x), mapEntries((Value.Map) b));
         }
-        if (a instanceof Value.Doc x) {
+        if (a instanceof Value.Doc) {
+            Value.Doc x = ((Value.Doc) a);
             return comparePairs(docEntries(x), docEntries((Value.Doc) b));
         }
         throw new InvalidArgumentException(
@@ -222,17 +231,31 @@ public final class Compare {
     }
 
     private static byte[] unorderedBytes(Value v) {
-        if (v instanceof Value.Dec128 d) return d.bytes();
-        if (v instanceof Value.Regex r) return join(r.pattern(), r.flags());
-        if (v instanceof Value.Vector x) return x.payload();
-        if (v instanceof Value.Geometry g) return g.wkb();
-        if (v instanceof Value.Opaque o) {
+        if (v instanceof Value.Dec128) {
+            Value.Dec128 d = (Value.Dec128) v;
+            return d.bytes();
+        }
+        if (v instanceof Value.Regex) {
+            Value.Regex r = (Value.Regex) v;
+            return join(r.pattern(), r.flags());
+        }
+        if (v instanceof Value.Vector) {
+            Value.Vector x = (Value.Vector) v;
+            return x.payload();
+        }
+        if (v instanceof Value.Geometry) {
+            Value.Geometry g = (Value.Geometry) v;
+            return g.wkb();
+        }
+        if (v instanceof Value.Opaque) {
+            Value.Opaque o = ((Value.Opaque) v);
             byte[] head = join(o.origin(), o.typeName());
             byte[] all = Arrays.copyOf(head, head.length + 1 + o.data().length);
             System.arraycopy(o.data(), 0, all, head.length + 1, o.data().length);
             return all;
         }
-        if (v instanceof Value.Unknown u) {
+        if (v instanceof Value.Unknown) {
+            Value.Unknown u = ((Value.Unknown) v);
             byte[] all = new byte[1 + u.payload().length];
             all[0] = (byte) u.unknownTag();
             System.arraycopy(u.payload(), 0, all, 1, u.payload().length);
@@ -367,11 +390,13 @@ public final class Compare {
      * {@code (-1, 999_000_000)}.
      */
     private static long[] instantOf(Value v) {
-        if (v instanceof Value.Timestamp t) {
+        if (v instanceof Value.Timestamp) {
+            Value.Timestamp t = ((Value.Timestamp) v);
             return new long[] {Math.floorDiv(t.millis(), 1000L),
                     Math.floorMod(t.millis(), 1000L) * 1_000_000L};
         }
-        if (v instanceof Value.Zoned z) {
+        if (v instanceof Value.Zoned) {
+            Value.Zoned z = ((Value.Zoned) v);
             // rule 7: ZONED denotes an instant. The zone is display, not order.
             return new long[] {Math.floorDiv(z.millis(), 1000L),
                     Math.floorMod(z.millis(), 1000L) * 1_000_000L};
@@ -437,7 +462,7 @@ public final class Compare {
     }
 
     private static boolean isNan(Value v) {
-        return v instanceof Value.Float f && Double.isNaN(f.value());
+        return v instanceof Value.Float && Double.isNaN(((Value.Float) v).value());
     }
 
     /**
@@ -447,7 +472,8 @@ public final class Compare {
      * case below.
      */
     private static U128 decompose(Value v, int[] sign, long[] exponent) {
-        if (v instanceof Value.Int i) {
+        if (v instanceof Value.Int) {
+            Value.Int i = ((Value.Int) v);
             if (i.magnitude().isZero()) {
                 sign[0] = 0;
                 exponent[0] = 0;

@@ -114,15 +114,12 @@ class UnicodeTest {
         // The file writes Extend_FE for Extend characters that are also Format
         // or ZWJ-adjacent; both resolve to Extend for the rules.
         String s = annotated.replace("_FE", "").replace("_", "");
-        return switch (s) {
-            case "RI" -> "REGIONALINDICATOR";
-            case "ExtendNumLet" -> "EXTENDNUMLET";
-            // ExtPict is not a Word_Break value: the file annotates
-            // Extended_Pictographic characters that way, and their Word_Break
-            // is Other. WB3c reads the pictographic property separately.
-            case "ExtPict" -> "OTHER";
-            default -> s;
-        };
+        switch (s) {
+            case "RI": return "REGIONALINDICATOR";
+            case "ExtendNumLet": return "EXTENDNUMLET";
+            case "ExtPict": return "OTHER";
+            default: return s;
+        }
     }
 
     @Test
@@ -159,7 +156,7 @@ class UnicodeTest {
                 at += w.length;
                 actualBreaks.add(at);
             }
-            if (text.isEmpty()) {
+            if (text.length() == 0) {
                 continue;
             }
             if (!actualBreaks.equals(expectedBreaks) && failures.size() < 8) {

@@ -26,17 +26,71 @@ import java.util.Map;
 public final class Metrics {
 
     /** A metric value, or the explicit absence of one. */
-    public sealed interface Value {
+    public interface Value {
 
         /** Reported by name rather than guessed at. */
-        record Unavailable(String why) implements Value {
+        final class Unavailable implements Value {
+            private final String why;
+
+            public Unavailable(String why) {
+                this.why = why;
+            }
+
+            public String why() {
+                return why;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof Unavailable)) {
+                    return false;
+                }
+                Unavailable that = (Unavailable) o;
+                return java.util.Objects.equals(why, that.why);
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Objects.hash(why);
+            }
+
             @Override
             public String toString() {
                 return "unavailable (" + why + ")";
             }
         }
 
-        record Number(double value) implements Value {
+        final class Number implements Value {
+            private final double value;
+
+            public Number(double value) {
+                this.value = value;
+            }
+
+            public double value() {
+                return value;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof Number)) {
+                    return false;
+                }
+                Number that = (Number) o;
+                return Double.compare(value, that.value) == 0;
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Objects.hash(value);
+            }
+
             @Override
             public String toString() {
                 return value == Math.rint(value) && Math.abs(value) < 1e15
@@ -45,7 +99,34 @@ public final class Metrics {
             }
         }
 
-        record Text(String value) implements Value {
+        final class Text implements Value {
+            private final String value;
+
+            public Text(String value) {
+                this.value = value;
+            }
+
+            public String value() {
+                return value;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof Text)) {
+                    return false;
+                }
+                Text that = (Text) o;
+                return java.util.Objects.equals(value, that.value);
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Objects.hash(value);
+            }
+
             @Override
             public String toString() {
                 return value;
@@ -176,7 +257,7 @@ public final class Metrics {
         return values.entrySet().stream()
                 .filter(e -> e.getValue() instanceof Value.Unavailable)
                 .map(Map.Entry::getKey)
-                .toList();
+                .collect(java.util.stream.Collectors.toUnmodifiableList());
     }
 
     @Override

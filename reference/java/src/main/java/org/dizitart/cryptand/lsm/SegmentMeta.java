@@ -124,7 +124,7 @@ public final class SegmentMeta {
         byte[] magic = r.bytes(8);
         if (!java.util.Arrays.equals(magic, MAGIC)) {
             throw new CorruptionException("segment head magic is "
-                    + java.util.HexFormat.of().formatHex(magic) + ", expected 435259 5f5345471a");
+                    + org.dizitart.cryptand.util.Hex.format(magic) + ", expected 435259 5f5345471a");
         }
         SegmentMeta m = new SegmentMeta();
         m.segmentId = r.u64();
@@ -237,14 +237,15 @@ public final class SegmentMeta {
         // Absent in a manifest written strictly to §3.2's table; the head page
         // is then the authority, and the engine reads it when it opens the
         // segment.
-        if (d.field("range_deletes") instanceof Value.Bool b && b.value()) {
+        if (d.field("range_deletes") instanceof Value.Bool && ((Value.Bool) d.field("range_deletes")).value()) {
             m.flags |= HAS_RANGE_DELETES;
         }
         return m;
     }
 
     public static long longOf(Value v) {
-        if (v instanceof Value.Int i) {
+        if (v instanceof Value.Int) {
+            Value.Int i = ((Value.Int) v);
             Long l = i.asLong();
             if (l == null) {
                 throw new CorruptionException("manifest holds an integer too wide for a long");

@@ -24,7 +24,7 @@ import java.util.List;
  * "value" whose bytes a caller can mutate after it has been used as a key is
  * not a value.
  */
-public sealed interface Value {
+public interface Value {
 
     /** The CVE type tag this value encodes as. */
     int tag();
@@ -37,7 +37,27 @@ public sealed interface Value {
     Bool TRUE = new Bool(true);
     Bool FALSE = new Bool(false);
 
-    record Null() implements Value {
+    final class Null implements Value {
+
+        public Null() {
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Null)) {
+                return false;
+            }
+            return true;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash();
+        }
+
         @Override
         public int tag() {
             return Tag.NULL;
@@ -49,7 +69,34 @@ public sealed interface Value {
         }
     }
 
-    record Bool(boolean value) implements Value {
+    final class Bool implements Value {
+        private final boolean value;
+
+        public Bool(boolean value) {
+            this.value = value;
+        }
+
+        public boolean value() {
+            return value;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Bool)) {
+                return false;
+            }
+            Bool that = (Bool) o;
+            return value == that.value;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(value);
+        }
+
         @Override
         public int tag() {
             return value ? Tag.TRUE : Tag.FALSE;
@@ -69,9 +116,12 @@ public sealed interface Value {
      * works on {@code |v|}), and because {@code |i128::MIN|} is
      * 2<sup>127</sup>, which needs the unsigned width.
      */
-    record Int(NumType type, boolean negative, U128 magnitude) implements Value {
+    final class Int implements Value {
+        private final NumType type;
+        private final boolean negative;
+        private final U128 magnitude;
 
-        public Int {
+        public Int(NumType type, boolean negative, U128 magnitude) {
             if (type.isFloat() || type == NumType.DEC128) {
                 throw new InvalidArgumentException(type + " is not an integer type");
             }
@@ -82,6 +132,40 @@ public sealed interface Value {
                 throw new InvalidArgumentException("negative zero is not an integer");
             }
             checkRange(type, negative, magnitude);
+            this.type = type;
+            this.negative = negative;
+            this.magnitude = magnitude;
+        }
+
+        public NumType type() {
+            return type;
+        }
+
+        public boolean negative() {
+            return negative;
+        }
+
+        public U128 magnitude() {
+            return magnitude;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Int)) {
+                return false;
+            }
+            Int that = (Int) o;
+            return java.util.Objects.equals(type, that.type)
+                    && negative == that.negative
+                    && java.util.Objects.equals(magnitude, that.magnitude);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(type, negative, magnitude);
         }
 
         private static void checkRange(NumType type, boolean negative, U128 magnitude) {
@@ -145,14 +229,44 @@ public sealed interface Value {
      * decode change it. Dart has the same hazard from the other direction, so
      * this is a portability rule rather than a workaround for either language.
      */
-    record Float(NumType type, double value) implements Value {
+    final class Float implements Value {
+        private final NumType type;
+        private final double value;
 
-        public Float {
+        public Float(NumType type, double value) {
             if (type == NumType.F32) {
                 value = (float) value;
             } else if (type != NumType.F64) {
                 throw new InvalidArgumentException(type + " is not a float type");
             }
+            this.type = type;
+            this.value = value;
+        }
+
+        public NumType type() {
+            return type;
+        }
+
+        public double value() {
+            return value;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Float)) {
+                return false;
+            }
+            Float that = (Float) o;
+            return java.util.Objects.equals(type, that.type)
+                    && Double.compare(value, that.value) == 0;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(type, value);
         }
 
         @Override
@@ -172,16 +286,17 @@ public sealed interface Value {
      * <p>Storable, and <strong>not a key</strong>:
      * {@code spec/03-key-encoding.md} §4.4.
      */
-    record Dec128(byte[] bytes) implements Value {
+    final class Dec128 implements Value {
+        private final byte[] bytes;
 
-        public Dec128 {
+        public Dec128(byte[] bytes) {
             if (bytes.length != 16) {
                 throw new InvalidArgumentException("DEC128 is 16 bytes, got " + bytes.length);
             }
             bytes = bytes.clone();
+            this.bytes = bytes;
         }
 
-        @Override
         public byte[] bytes() {
             return bytes.clone();
         }
@@ -193,7 +308,7 @@ public sealed interface Value {
 
         @Override
         public boolean equals(Object o) {
-            return o instanceof Dec128 d && Arrays.equals(bytes, d.bytes);
+            return o instanceof Dec128 && Arrays.equals(bytes, ((Dec128) o).bytes);
         }
 
         @Override
@@ -208,12 +323,40 @@ public sealed interface Value {
     }
 
     /** A Unicode scalar value. Not equal to a one-character {@link Str} (§8 rule 6). */
-    record Char(int scalar) implements Value {
+    final class Char implements Value {
+        private final int scalar;
 
-        public Char {
+        public Char(int scalar) {
             if (scalar < 0 || scalar > 0x10FFFF || (scalar >= 0xD800 && scalar <= 0xDFFF)) {
                 throw new InvalidArgumentException("not a Unicode scalar value: " + scalar);
             }
+            this.scalar = scalar;
+        }
+
+        public int scalar() {
+            return scalar;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Char)) {
+                return false;
+            }
+            Char that = (Char) o;
+            return scalar == that.scalar;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(scalar);
+        }
+
+        @Override
+        public String toString() {
+            return "Char[" + "scalar=" + scalar + "]";
         }
 
         @Override
@@ -222,7 +365,34 @@ public sealed interface Value {
         }
     }
 
-    record Str(String value) implements Value {
+    final class Str implements Value {
+        private final String value;
+
+        public Str(String value) {
+            this.value = value;
+        }
+
+        public String value() {
+            return value;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Str)) {
+                return false;
+            }
+            Str that = (Str) o;
+            return java.util.Objects.equals(value, that.value);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(value);
+        }
+
         @Override
         public int tag() {
             return Tag.STR;
@@ -234,13 +404,19 @@ public sealed interface Value {
         }
     }
 
-    record Bytes(byte[] value) implements Value {
+    final class Bytes implements Value {
+        private final byte[] value;
 
-        public Bytes {
+        public Bytes(byte[] value) {
             value = value.clone();
+            this.value = value;
         }
 
         @Override
+        public String toString() {
+            return "Bytes[" + "value=" + value + "]";
+        }
+
         public byte[] value() {
             return value.clone();
         }
@@ -252,7 +428,7 @@ public sealed interface Value {
 
         @Override
         public boolean equals(Object o) {
-            return o instanceof Bytes b && Arrays.equals(value, b.value);
+            return o instanceof Bytes && Arrays.equals(value, ((Bytes) o).value);
         }
 
         @Override
@@ -266,7 +442,39 @@ public sealed interface Value {
     // ------------------------------------------------------------------
 
     /** Milliseconds since the Unix epoch, UTC. */
-    record Timestamp(long millis) implements Value {
+    final class Timestamp implements Value {
+        private final long millis;
+
+        public Timestamp(long millis) {
+            this.millis = millis;
+        }
+
+        public long millis() {
+            return millis;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Timestamp)) {
+                return false;
+            }
+            Timestamp that = (Timestamp) o;
+            return millis == that.millis;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(millis);
+        }
+
+        @Override
+        public String toString() {
+            return "Timestamp[" + "millis=" + millis + "]";
+        }
+
         @Override
         public int tag() {
             return Tag.TIMESTAMP;
@@ -274,12 +482,47 @@ public sealed interface Value {
     }
 
     /** Seconds since the Unix epoch plus nanoseconds, UTC. */
-    record TimestampNs(long secs, int nanos) implements Value {
+    final class TimestampNs implements Value {
+        private final long secs;
+        private final int nanos;
 
-        public TimestampNs {
+        public TimestampNs(long secs, int nanos) {
             if (nanos < 0 || nanos > 999_999_999) {
                 throw new InvalidArgumentException("nanos out of range 0..999999999: " + nanos);
             }
+            this.secs = secs;
+            this.nanos = nanos;
+        }
+
+        public long secs() {
+            return secs;
+        }
+
+        public int nanos() {
+            return nanos;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof TimestampNs)) {
+                return false;
+            }
+            TimestampNs that = (TimestampNs) o;
+            return secs == that.secs
+                    && nanos == that.nanos;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(secs, nanos);
+        }
+
+        @Override
+        public String toString() {
+            return "TimestampNs[" + "secs=" + secs + ", " + "nanos=" + nanos + "]";
         }
 
         @Override
@@ -296,7 +539,46 @@ public sealed interface Value {
      * zoned field answers instant queries, which is what applications mean
      * ({@code spec/03-key-encoding.md} §5).
      */
-    record Zoned(long millis, String zoneId) implements Value {
+    final class Zoned implements Value {
+        private final long millis;
+        private final String zoneId;
+
+        public Zoned(long millis, String zoneId) {
+            this.millis = millis;
+            this.zoneId = zoneId;
+        }
+
+        public long millis() {
+            return millis;
+        }
+
+        public String zoneId() {
+            return zoneId;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Zoned)) {
+                return false;
+            }
+            Zoned that = (Zoned) o;
+            return millis == that.millis
+                    && java.util.Objects.equals(zoneId, that.zoneId);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(millis, zoneId);
+        }
+
+        @Override
+        public String toString() {
+            return "Zoned[" + "millis=" + millis + ", " + "zoneId=" + zoneId + "]";
+        }
+
         @Override
         public int tag() {
             return Tag.ZONED;
@@ -304,7 +586,39 @@ public sealed interface Value {
     }
 
     /** Days since the Unix epoch. No time, no zone. */
-    record Date(int days) implements Value {
+    final class Date implements Value {
+        private final int days;
+
+        public Date(int days) {
+            this.days = days;
+        }
+
+        public int days() {
+            return days;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Date)) {
+                return false;
+            }
+            Date that = (Date) o;
+            return days == that.days;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(days);
+        }
+
+        @Override
+        public String toString() {
+            return "Date[" + "days=" + days + "]";
+        }
+
         @Override
         public int tag() {
             return Tag.DATE;
@@ -312,19 +626,86 @@ public sealed interface Value {
     }
 
     /** Nanoseconds since midnight. */
-    record Time(long nanos) implements Value {
+    final class Time implements Value {
+        private final long nanos;
+
+        public Time(long nanos) {
+            this.nanos = nanos;
+        }
+
+        public long nanos() {
+            return nanos;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Time)) {
+                return false;
+            }
+            Time that = (Time) o;
+            return nanos == that.nanos;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(nanos);
+        }
+
+        @Override
+        public String toString() {
+            return "Time[" + "nanos=" + nanos + "]";
+        }
+
         @Override
         public int tag() {
             return Tag.TIME;
         }
     }
 
-    record Duration(long secs, int nanos) implements Value {
+    final class Duration implements Value {
+        private final long secs;
+        private final int nanos;
 
-        public Duration {
+        public Duration(long secs, int nanos) {
             if (nanos < 0 || nanos > 999_999_999) {
                 throw new InvalidArgumentException("nanos out of range 0..999999999: " + nanos);
             }
+            this.secs = secs;
+            this.nanos = nanos;
+        }
+
+        public long secs() {
+            return secs;
+        }
+
+        public int nanos() {
+            return nanos;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Duration)) {
+                return false;
+            }
+            Duration that = (Duration) o;
+            return secs == that.secs
+                    && nanos == that.nanos;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(secs, nanos);
+        }
+
+        @Override
+        public String toString() {
+            return "Duration[" + "secs=" + secs + ", " + "nanos=" + nanos + "]";
         }
 
         @Override
@@ -333,16 +714,22 @@ public sealed interface Value {
         }
     }
 
-    record Uuid(byte[] bytes) implements Value {
+    final class Uuid implements Value {
+        private final byte[] bytes;
 
-        public Uuid {
+        public Uuid(byte[] bytes) {
             if (bytes.length != 16) {
                 throw new InvalidArgumentException("UUID is 16 bytes, got " + bytes.length);
             }
             bytes = bytes.clone();
+            this.bytes = bytes;
         }
 
         @Override
+        public String toString() {
+            return "Uuid[" + "bytes=" + bytes + "]";
+        }
+
         public byte[] bytes() {
             return bytes.clone();
         }
@@ -354,7 +741,7 @@ public sealed interface Value {
 
         @Override
         public boolean equals(Object o) {
-            return o instanceof Uuid u && Arrays.equals(bytes, u.bytes);
+            return o instanceof Uuid && Arrays.equals(bytes, ((Uuid) o).bytes);
         }
 
         @Override
@@ -371,14 +758,85 @@ public sealed interface Value {
      * caused a unique-index bug in this project
      * ({@code spec/00-conventions.md} §7).
      */
-    record NitriteId(long id) implements Value {
+    final class NitriteId implements Value {
+        private final long id;
+
+        public NitriteId(long id) {
+            this.id = id;
+        }
+
+        public long id() {
+            return id;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof NitriteId)) {
+                return false;
+            }
+            NitriteId that = (NitriteId) o;
+            return id == that.id;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(id);
+        }
+
+        @Override
+        public String toString() {
+            return "NitriteId[" + "id=" + id + "]";
+        }
+
         @Override
         public int tag() {
             return Tag.NITRITE_ID;
         }
     }
 
-    record Regex(String pattern, String flags) implements Value {
+    final class Regex implements Value {
+        private final String pattern;
+        private final String flags;
+
+        public Regex(String pattern, String flags) {
+            this.pattern = pattern;
+            this.flags = flags;
+        }
+
+        public String pattern() {
+            return pattern;
+        }
+
+        public String flags() {
+            return flags;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Regex)) {
+                return false;
+            }
+            Regex that = (Regex) o;
+            return java.util.Objects.equals(pattern, that.pattern)
+                    && java.util.Objects.equals(flags, that.flags);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(pattern, flags);
+        }
+
+        @Override
+        public String toString() {
+            return "Regex[" + "pattern=" + pattern + ", " + "flags=" + flags + "]";
+        }
+
         @Override
         public int tag() {
             return Tag.REGEX;
@@ -389,10 +847,38 @@ public sealed interface Value {
     // composites
     // ------------------------------------------------------------------
 
-    record Array(List<Value> items) implements Value {
+    final class Array implements Value {
+        private final List<Value> items;
 
-        public Array {
+        public Array(List<Value> items) {
             items = List.copyOf(items);
+            this.items = items;
+        }
+
+        public List<Value> items() {
+            return items;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Array)) {
+                return false;
+            }
+            Array that = (Array) o;
+            return java.util.Objects.equals(items, that.items);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(items);
+        }
+
+        @Override
+        public String toString() {
+            return "Array[" + "items=" + items + "]";
         }
 
         @Override
@@ -406,10 +892,38 @@ public sealed interface Value {
      * maps comparable, hashable and diffable across languages, and makes a
      * lookup a binary search. Duplicate keys are corruption.
      */
-    record Map(List<Entry> entries) implements Value {
+    final class Map implements Value {
+        private final List<Entry> entries;
 
-        public Map {
+        public Map(List<Entry> entries) {
             entries = List.copyOf(entries);
+            this.entries = entries;
+        }
+
+        public List<Entry> entries() {
+            return entries;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Map)) {
+                return false;
+            }
+            Map that = (Map) o;
+            return java.util.Objects.equals(entries, that.entries);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(entries);
+        }
+
+        @Override
+        public String toString() {
+            return "Map[" + "entries=" + entries + "]";
         }
 
         @Override
@@ -417,7 +931,45 @@ public sealed interface Value {
             return Tag.MAP;
         }
 
-        public record Entry(Value key, Value value) {
+        public static final class Entry {
+            private final Value key;
+            private final Value value;
+
+            public Entry(Value key, Value value) {
+                this.key = key;
+                this.value = value;
+            }
+
+            public Value key() {
+                return key;
+            }
+
+            public Value value() {
+                return value;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof Entry)) {
+                    return false;
+                }
+                Entry that = (Entry) o;
+                return java.util.Objects.equals(key, that.key)
+                        && java.util.Objects.equals(value, that.value);
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Objects.hash(key, value);
+            }
+
+            @Override
+            public String toString() {
+                return "Entry[" + "key=" + key + ", " + "value=" + value + "]";
+            }
         }
     }
 
@@ -428,10 +980,38 @@ public sealed interface Value {
      * bytes, which is what {@code spec/02-value-encoding.md} §5.1 requires and
      * is <em>not</em> the same as sorting by {@code name_ref}.
      */
-    record Doc(java.util.Map<String, Value> fields) implements Value {
+    final class Doc implements Value {
+        private final java.util.Map<String, Value> fields;
 
-        public Doc {
+        public Doc(java.util.Map<String, Value> fields) {
             fields = Collections.unmodifiableMap(new LinkedHashMap<>(fields));
+            this.fields = fields;
+        }
+
+        public java.util.Map<String, Value> fields() {
+            return fields;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Doc)) {
+                return false;
+            }
+            Doc that = (Doc) o;
+            return java.util.Objects.equals(fields, that.fields);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(fields);
+        }
+
+        @Override
+        public String toString() {
+            return "Doc[" + "fields=" + fields + "]";
         }
 
         public static Doc of(java.util.Map<String, Value> fields) {
@@ -455,17 +1035,37 @@ public sealed interface Value {
      *
      * <p>{@code payload} is the raw body after {@code dim}, exactly as stored.
      */
-    record Vector(int dtype, int dim, byte[] payload) implements Value {
+    final class Vector implements Value {
+        private final int dtype;
+        private final int dim;
+        private final byte[] payload;
+
+        public Vector(int dtype, int dim, byte[] payload) {
+            payload = payload.clone();
+            this.dtype = dtype;
+            this.dim = dim;
+            this.payload = payload;
+        }
+
+        public int dtype() {
+            return dtype;
+        }
+
+        public int dim() {
+            return dim;
+        }
+
+        @Override
+        public String toString() {
+            return "Vector[" + "dtype=" + dtype + ", " + "dim=" + dim + ", " + "payload=" + payload + "]";
+        }
 
         public static final int DTYPE_F32 = 0;
         public static final int DTYPE_F16 = 1;
         public static final int DTYPE_I8 = 2;
 
-        public Vector {
-            payload = payload.clone();
-        }
 
-        @Override
+
         public byte[] payload() {
             return payload.clone();
         }
@@ -477,7 +1077,7 @@ public sealed interface Value {
 
         @Override
         public boolean equals(Object o) {
-            return o instanceof Vector v && v.dtype == dtype && v.dim == dim && Arrays.equals(payload, v.payload);
+            return o instanceof Vector && ((Vector) o).dtype == dtype && ((Vector) o).dim == dim && Arrays.equals(payload, ((Vector) o).payload);
         }
 
         @Override
@@ -487,13 +1087,19 @@ public sealed interface Value {
     }
 
     /** ISO WKB geometry ({@code spec/08-spatial.md}). */
-    record Geometry(byte[] wkb) implements Value {
+    final class Geometry implements Value {
+        private final byte[] wkb;
 
-        public Geometry {
+        public Geometry(byte[] wkb) {
             wkb = wkb.clone();
+            this.wkb = wkb;
         }
 
         @Override
+        public String toString() {
+            return "Geometry[" + "wkb=" + wkb + "]";
+        }
+
         public byte[] wkb() {
             return wkb.clone();
         }
@@ -505,7 +1111,7 @@ public sealed interface Value {
 
         @Override
         public boolean equals(Object o) {
-            return o instanceof Geometry g && Arrays.equals(wkb, g.wkb);
+            return o instanceof Geometry && Arrays.equals(wkb, ((Geometry) o).wkb);
         }
 
         @Override
@@ -525,13 +1131,31 @@ public sealed interface Value {
      *
      * <p>Not comparable, and never an index key.
      */
-    record Opaque(String origin, String typeName, byte[] data) implements Value {
+    final class Opaque implements Value {
+        private final String origin;
+        private final String typeName;
+        private final byte[] data;
 
-        public Opaque {
+        public Opaque(String origin, String typeName, byte[] data) {
             data = data.clone();
+            this.origin = origin;
+            this.typeName = typeName;
+            this.data = data;
+        }
+
+        public String origin() {
+            return origin;
+        }
+
+        public String typeName() {
+            return typeName;
         }
 
         @Override
+        public String toString() {
+            return "Opaque[" + "origin=" + origin + ", " + "typeName=" + typeName + ", " + "data=" + data + "]";
+        }
+
         public byte[] data() {
             return data.clone();
         }
@@ -543,10 +1167,10 @@ public sealed interface Value {
 
         @Override
         public boolean equals(Object o) {
-            return o instanceof Opaque p
-                    && p.origin.equals(origin)
-                    && p.typeName.equals(typeName)
-                    && Arrays.equals(data, p.data);
+            return o instanceof Opaque
+                    && ((Opaque) o).origin.equals(origin)
+                    && ((Opaque) o).typeName.equals(typeName)
+                    && Arrays.equals(data, ((Opaque) o).data);
         }
 
         @Override
@@ -559,20 +1183,78 @@ public sealed interface Value {
     // indirections — storage, not data (§9)
     // ------------------------------------------------------------------
 
-    record BlobRef(long startPage, long byteLen, int crc32c) implements Value {
+    final class BlobRef implements Value {
+        private final long startPage;
+        private final long byteLen;
+        private final int crc32c;
+
+        public BlobRef(long startPage, long byteLen, int crc32c) {
+            this.startPage = startPage;
+            this.byteLen = byteLen;
+            this.crc32c = crc32c;
+        }
+
+        public long startPage() {
+            return startPage;
+        }
+
+        public long byteLen() {
+            return byteLen;
+        }
+
+        public int crc32c() {
+            return crc32c;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof BlobRef)) {
+                return false;
+            }
+            BlobRef that = (BlobRef) o;
+            return startPage == that.startPage
+                    && byteLen == that.byteLen
+                    && crc32c == that.crc32c;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(startPage, byteLen, crc32c);
+        }
+
+        @Override
+        public String toString() {
+            return "BlobRef[" + "startPage=" + startPage + ", " + "byteLen=" + byteLen + ", " + "crc32c=" + crc32c + "]";
+        }
+
         @Override
         public int tag() {
             return Tag.BLOB_REF;
         }
     }
 
-    record OverflowRef(byte[] inline, long nextPage) implements Value {
+    final class OverflowRef implements Value {
+        private final byte[] inline;
+        private final long nextPage;
 
-        public OverflowRef {
+        public OverflowRef(byte[] inline, long nextPage) {
             inline = inline.clone();
+            this.inline = inline;
+            this.nextPage = nextPage;
+        }
+
+        public long nextPage() {
+            return nextPage;
         }
 
         @Override
+        public String toString() {
+            return "OverflowRef[" + "inline=" + inline + ", " + "nextPage=" + nextPage + "]";
+        }
+
         public byte[] inline() {
             return inline.clone();
         }
@@ -584,7 +1266,7 @@ public sealed interface Value {
 
         @Override
         public boolean equals(Object o) {
-            return o instanceof OverflowRef r && r.nextPage == nextPage && Arrays.equals(inline, r.inline);
+            return o instanceof OverflowRef && ((OverflowRef) o).nextPage == nextPage && Arrays.equals(inline, ((OverflowRef) o).inline);
         }
 
         @Override
@@ -593,7 +1275,53 @@ public sealed interface Value {
         }
     }
 
-    record VlogRef(long segmentId, long offset, int len) implements Value {
+    final class VlogRef implements Value {
+        private final long segmentId;
+        private final long offset;
+        private final int len;
+
+        public VlogRef(long segmentId, long offset, int len) {
+            this.segmentId = segmentId;
+            this.offset = offset;
+            this.len = len;
+        }
+
+        public long segmentId() {
+            return segmentId;
+        }
+
+        public long offset() {
+            return offset;
+        }
+
+        public int len() {
+            return len;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof VlogRef)) {
+                return false;
+            }
+            VlogRef that = (VlogRef) o;
+            return segmentId == that.segmentId
+                    && offset == that.offset
+                    && len == that.len;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(segmentId, offset, len);
+        }
+
+        @Override
+        public String toString() {
+            return "VlogRef[" + "segmentId=" + segmentId + ", " + "offset=" + offset + ", " + "len=" + len + "]";
+        }
+
         @Override
         public int tag() {
             return Tag.VLOG_REF;
@@ -608,13 +1336,25 @@ public sealed interface Value {
      * makes that implementable — every unassigned tag is length-prefixed, so a
      * reader can find where the value ends without knowing what it means.
      */
-    record Unknown(int unknownTag, byte[] payload) implements Value {
+    final class Unknown implements Value {
+        private final int unknownTag;
+        private final byte[] payload;
 
-        public Unknown {
+        public Unknown(int unknownTag, byte[] payload) {
             payload = payload.clone();
+            this.unknownTag = unknownTag;
+            this.payload = payload;
+        }
+
+        public int unknownTag() {
+            return unknownTag;
         }
 
         @Override
+        public String toString() {
+            return "Unknown[" + "unknownTag=" + unknownTag + ", " + "payload=" + payload + "]";
+        }
+
         public byte[] payload() {
             return payload.clone();
         }
@@ -626,7 +1366,7 @@ public sealed interface Value {
 
         @Override
         public boolean equals(Object o) {
-            return o instanceof Unknown u && u.unknownTag == unknownTag && Arrays.equals(payload, u.payload);
+            return o instanceof Unknown && ((Unknown) o).unknownTag == unknownTag && Arrays.equals(payload, ((Unknown) o).payload);
         }
 
         @Override

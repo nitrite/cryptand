@@ -76,7 +76,73 @@ public final class BtreePage {
      * One leaf cell. {@code key} is the whole key, prefix included — the
      * page's prefix is a storage detail and callers never see a suffix.
      */
-    public record Leaf(byte[] key, int kind, long expiryMs, boolean hasExpiry, byte[] value, long overflowPage) {
+    public static final class Leaf {
+        private final byte[] key;
+        private final int kind;
+        private final long expiryMs;
+        private final boolean hasExpiry;
+        private final byte[] value;
+        private final long overflowPage;
+
+        public Leaf(byte[] key, int kind, long expiryMs, boolean hasExpiry, byte[] value, long overflowPage) {
+            this.key = key;
+            this.kind = kind;
+            this.expiryMs = expiryMs;
+            this.hasExpiry = hasExpiry;
+            this.value = value;
+            this.overflowPage = overflowPage;
+        }
+
+        public byte[] key() {
+            return key;
+        }
+
+        public int kind() {
+            return kind;
+        }
+
+        public long expiryMs() {
+            return expiryMs;
+        }
+
+        public boolean hasExpiry() {
+            return hasExpiry;
+        }
+
+        public byte[] value() {
+            return value;
+        }
+
+        public long overflowPage() {
+            return overflowPage;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Leaf)) {
+                return false;
+            }
+            Leaf that = (Leaf) o;
+            return java.util.Objects.equals(key, that.key)
+                    && kind == that.kind
+                    && expiryMs == that.expiryMs
+                    && hasExpiry == that.hasExpiry
+                    && java.util.Objects.equals(value, that.value)
+                    && overflowPage == that.overflowPage;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(key, kind, expiryMs, hasExpiry, value, overflowPage);
+        }
+
+        @Override
+        public String toString() {
+            return "Leaf[" + "key=" + key + ", " + "kind=" + kind + ", " + "expiryMs=" + expiryMs + ", " + "hasExpiry=" + hasExpiry + ", " + "value=" + value + ", " + "overflowPage=" + overflowPage + "]";
+        }
 
         public static Leaf inline(byte[] key, byte[] value) {
             return new Leaf(key, Kind.INLINE, 0, false, value, 0);
@@ -110,7 +176,52 @@ public final class BtreePage {
     }
 
     /** One internal cell: the least key reachable in {@code childPage}. */
-    public record Internal(byte[] separator, long childPage, long childSubtreeEntries) {
+    public static final class Internal {
+        private final byte[] separator;
+        private final long childPage;
+        private final long childSubtreeEntries;
+
+        public Internal(byte[] separator, long childPage, long childSubtreeEntries) {
+            this.separator = separator;
+            this.childPage = childPage;
+            this.childSubtreeEntries = childSubtreeEntries;
+        }
+
+        public byte[] separator() {
+            return separator;
+        }
+
+        public long childPage() {
+            return childPage;
+        }
+
+        public long childSubtreeEntries() {
+            return childSubtreeEntries;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Internal)) {
+                return false;
+            }
+            Internal that = (Internal) o;
+            return java.util.Objects.equals(separator, that.separator)
+                    && childPage == that.childPage
+                    && childSubtreeEntries == that.childSubtreeEntries;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(separator, childPage, childSubtreeEntries);
+        }
+
+        @Override
+        public String toString() {
+            return "Internal[" + "separator=" + separator + ", " + "childPage=" + childPage + ", " + "childSubtreeEntries=" + childSubtreeEntries + "]";
+        }
     }
 
     // ==================================================================
@@ -237,17 +348,19 @@ public final class BtreePage {
         byte[] value;
         long overflow = 0;
         switch (kind) {
-            case Kind.INLINE -> {
+            case Kind.INLINE: {
                 int n = (int) r.uvar();
                 value = r.bytes(n);
             }
-            case Kind.OVERFLOW -> {
+                break;
+            case Kind.OVERFLOW: {
                 int n = (int) r.uvar();
                 value = r.bytes(n);
                 overflow = r.u64();
             }
-            case Kind.VLOG, Kind.BLOB -> value = r.bytes(16);
-            default -> value = new byte[0];
+                break;
+            case Kind.VLOG: case Kind.BLOB: value = r.bytes(16); break;
+            default: value = new byte[0]; break;
         }
         return new Leaf(key, kind, expiry, hasExpiry, value, overflow);
     }
@@ -538,19 +651,22 @@ public final class BtreePage {
                 p = putU64(out, p, c.expiryMs());
             }
             switch (c.kind()) {
-                case Kind.INLINE -> {
+                case Kind.INLINE: {
                     p = putUvar(out, p, c.value().length);
                     System.arraycopy(c.value(), 0, out, p, c.value().length);
                 }
-                case Kind.OVERFLOW -> {
+                    break;
+                case Kind.OVERFLOW: {
                     p = putUvar(out, p, c.value().length);
                     System.arraycopy(c.value(), 0, out, p, c.value().length);
                     p += c.value().length;
                     putU64(out, p, c.overflowPage());
                 }
-                case Kind.VLOG, Kind.BLOB -> System.arraycopy(c.value(), 0, out, p, 16);
-                default -> {
+                    break;
+                case Kind.VLOG: case Kind.BLOB: System.arraycopy(c.value(), 0, out, p, 16); break;
+                default: {
                 }
+                    break;
             }
             putPointer(out, prefix.length, i, top);
         }
@@ -671,11 +787,12 @@ public final class BtreePage {
             n += 8;
         }
         switch (c.kind()) {
-            case Kind.INLINE -> n += varLen(c.value().length) + c.value().length;
-            case Kind.OVERFLOW -> n += varLen(c.value().length) + c.value().length + 8;
-            case Kind.VLOG, Kind.BLOB -> n += 16;
-            default -> {
+            case Kind.INLINE: n += varLen(c.value().length) + c.value().length; break;
+            case Kind.OVERFLOW: n += varLen(c.value().length) + c.value().length + 8; break;
+            case Kind.VLOG: case Kind.BLOB: n += 16; break;
+            default: {
             }
+                break;
         }
         return n;
     }

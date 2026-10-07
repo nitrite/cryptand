@@ -210,7 +210,45 @@ public final class Cke {
     // ==================================================================
 
     /** The exact pair {@code (e, m)} with {@code |v| = m × 2^e} and {@code 1 ≤ m < 2}. */
-    record Normalized(int e, U128 m) {
+    static final class Normalized {
+        private final int e;
+        private final U128 m;
+
+        public Normalized(int e, U128 m) {
+            this.e = e;
+            this.m = m;
+        }
+
+        public int e() {
+            return e;
+        }
+
+        public U128 m() {
+            return m;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Normalized)) {
+                return false;
+            }
+            Normalized that = (Normalized) o;
+            return e == that.e
+                    && java.util.Objects.equals(m, that.m);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(e, m);
+        }
+
+        @Override
+        public String toString() {
+            return "Normalized[" + "e=" + e + ", " + "m=" + m + "]";
+        }
     }
 
     /**
@@ -309,10 +347,12 @@ public final class Cke {
      * no-op.
      */
     public static boolean isKeyEncodable(Value v) {
-        if (v instanceof Value.Int i) {
+        if (v instanceof Value.Int) {
+            Value.Int i = ((Value.Int) v);
             return i.type().isKeyEncodable();
         }
-        if (v instanceof Value.Array a) {
+        if (v instanceof Value.Array) {
+            Value.Array a = ((Value.Array) v);
             return a.items().stream().allMatch(Cke::isKeyEncodable);
         }
         return v instanceof Value.Null
@@ -343,42 +383,57 @@ public final class Cke {
         }
         if (v instanceof Value.Null) {
             w.u8(Group.NULL);
-        } else if (v instanceof Value.Bool b) {
+        } else if (v instanceof Value.Bool) {
+            Value.Bool b = ((Value.Bool) v);
             w.u8(Group.BOOL).u8(b.value() ? 0x01 : 0x00);
-        } else if (v instanceof Value.Int i) {
+        } else if (v instanceof Value.Int) {
+            Value.Int i = ((Value.Int) v);
             writeInt(w, i);
-        } else if (v instanceof Value.Float f) {
+        } else if (v instanceof Value.Float) {
+            Value.Float f = ((Value.Float) v);
             writeFloat(w, f);
-        } else if (v instanceof Value.Char c) {
+        } else if (v instanceof Value.Char) {
+            Value.Char c = ((Value.Char) v);
             w.u8(Group.CHAR).u32be(c.scalar());
-        } else if (v instanceof Value.Str s) {
+        } else if (v instanceof Value.Str) {
+            Value.Str s = ((Value.Str) v);
             w.u8(Group.STRING);
             writeEsc(w, Utf8.encode(s.value()));
-        } else if (v instanceof Value.Bytes b) {
+        } else if (v instanceof Value.Bytes) {
+            Value.Bytes b = ((Value.Bytes) v);
             w.u8(Group.BYTES);
             writeEsc(w, b.value());
-        } else if (v instanceof Value.NitriteId n) {
+        } else if (v instanceof Value.NitriteId) {
+            Value.NitriteId n = ((Value.NitriteId) v);
             // The XOR flips the sign bit so a signed i64 sorts correctly as
             // unsigned bytes. Snowflake ids are positive in practice, but
             // NitriteId accepts any i64 and the format must not depend on
             // application discipline.
             w.u8(Group.NITRITE_ID).u64be(n.id() ^ SIGN_BIT_64);
-        } else if (v instanceof Value.Uuid u) {
+        } else if (v instanceof Value.Uuid) {
+            Value.Uuid u = ((Value.Uuid) v);
             w.u8(Group.UUID).bytes(u.bytes());
-        } else if (v instanceof Value.Timestamp t) {
+        } else if (v instanceof Value.Timestamp) {
+            Value.Timestamp t = ((Value.Timestamp) v);
             writeInstant(w, millisToSecs(t.millis()), millisToNanos(t.millis()));
-        } else if (v instanceof Value.TimestampNs t) {
+        } else if (v instanceof Value.TimestampNs) {
+            Value.TimestampNs t = ((Value.TimestampNs) v);
             writeInstant(w, t.secs(), t.nanos());
-        } else if (v instanceof Value.Zoned z) {
+        } else if (v instanceof Value.Zoned) {
+            Value.Zoned z = ((Value.Zoned) v);
             // §5: the zone id is not part of the key.
             writeInstant(w, millisToSecs(z.millis()), millisToNanos(z.millis()));
-        } else if (v instanceof Value.Date d) {
+        } else if (v instanceof Value.Date) {
+            Value.Date d = ((Value.Date) v);
             w.u8(Group.TEMPORAL).u8(TemporalClass.DATE).u32be(d.days() ^ 0x80000000);
-        } else if (v instanceof Value.Time t) {
+        } else if (v instanceof Value.Time) {
+            Value.Time t = ((Value.Time) v);
             w.u8(Group.TEMPORAL).u8(TemporalClass.TIME).u64be(t.nanos());
-        } else if (v instanceof Value.Duration d) {
+        } else if (v instanceof Value.Duration) {
+            Value.Duration d = ((Value.Duration) v);
             w.u8(Group.TEMPORAL).u8(TemporalClass.DURATION).u64be(d.secs() ^ SIGN_BIT_64).u32be(d.nanos());
-        } else if (v instanceof Value.Array a) {
+        } else if (v instanceof Value.Array) {
+            Value.Array a = ((Value.Array) v);
             w.u8(Group.ARRAY);
             for (Value e : a.items()) {
                 w.u8(ELEM_CONTINUE);

@@ -193,10 +193,10 @@ class CompareTest {
     @Test
     @DisplayName("CKE byte order is the §8 value order, for every encodable pair")
     void ckeAgreesWithTheValueOrder() {
-        List<Value> keyable = orderedCorpus().stream().filter(Cke::isKeyEncodable).toList();
+        List<Value> keyable = orderedCorpus().stream().filter(Cke::isKeyEncodable).collect(java.util.stream.Collectors.toList());
         assertTrue(keyable.size() > 100,
                 "the corpus must be big enough for the sweep to mean something");
-        List<byte[]> keys = keyable.stream().map(Cke::encode).toList();
+        List<byte[]> keys = keyable.stream().map(Cke::encode).collect(java.util.stream.Collectors.toList());
 
         int strict = 0;
         for (int i = 0; i < keyable.size(); i++) {
@@ -241,7 +241,7 @@ class CompareTest {
     @Test
     @DisplayName("rule 10: the cross-group order is the group tag order")
     void crossGroupOrderFollowsTheGroupTag() {
-        List<Value> keyable = orderedCorpus().stream().filter(Cke::isKeyEncodable).toList();
+        List<Value> keyable = orderedCorpus().stream().filter(Cke::isKeyEncodable).collect(java.util.stream.Collectors.toList());
         for (Value a : keyable) {
             for (Value b : keyable) {
                 int ga = Cke.encode(a)[0] & 0xFF;

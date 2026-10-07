@@ -26,7 +26,52 @@ public final class Geometry {
     }
 
     /** A geometry decomposed into the rings and paths the predicates work on. */
-    public record Shape(List<double[][]> polygons, List<double[][]> lines, List<double[]> points) {
+    public static final class Shape {
+        private final List<double[][]> polygons;
+        private final List<double[][]> lines;
+        private final List<double[]> points;
+
+        public Shape(List<double[][]> polygons, List<double[][]> lines, List<double[]> points) {
+            this.polygons = polygons;
+            this.lines = lines;
+            this.points = points;
+        }
+
+        public List<double[][]> polygons() {
+            return polygons;
+        }
+
+        public List<double[][]> lines() {
+            return lines;
+        }
+
+        public List<double[]> points() {
+            return points;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Shape)) {
+                return false;
+            }
+            Shape that = (Shape) o;
+            return java.util.Objects.equals(polygons, that.polygons)
+                    && java.util.Objects.equals(lines, that.lines)
+                    && java.util.Objects.equals(points, that.points);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(polygons, lines, points);
+        }
+
+        @Override
+        public String toString() {
+            return "Shape[" + "polygons=" + polygons + ", " + "lines=" + lines + ", " + "points=" + points + "]";
+        }
 
         boolean isEmpty() {
             return polygons.isEmpty() && lines.isEmpty() && points.isEmpty();
@@ -286,7 +331,52 @@ public final class Geometry {
     }
 
     /** A WKB geometry split into polygon rings, line paths and bare points. */
-    record Parts(List<double[][]> polygons, List<double[][]> lines, List<double[]> points) {
+    static final class Parts {
+        private final List<double[][]> polygons;
+        private final List<double[][]> lines;
+        private final List<double[]> points;
+
+        public Parts(List<double[][]> polygons, List<double[][]> lines, List<double[]> points) {
+            this.polygons = polygons;
+            this.lines = lines;
+            this.points = points;
+        }
+
+        public List<double[][]> polygons() {
+            return polygons;
+        }
+
+        public List<double[][]> lines() {
+            return lines;
+        }
+
+        public List<double[]> points() {
+            return points;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Parts)) {
+                return false;
+            }
+            Parts that = (Parts) o;
+            return java.util.Objects.equals(polygons, that.polygons)
+                    && java.util.Objects.equals(lines, that.lines)
+                    && java.util.Objects.equals(points, that.points);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(polygons, lines, points);
+        }
+
+        @Override
+        public String toString() {
+            return "Parts[" + "polygons=" + polygons + ", " + "lines=" + lines + ", " + "points=" + points + "]";
+        }
 
         static Parts of(byte[] wkb) {
             List<double[][]> polygons = new ArrayList<>();
@@ -304,29 +394,31 @@ public final class Geometry {
                 throw new InvalidArgumentException("EWKB is rejected (spec/08-spatial.md §1)");
             }
             int base = type % 1000;
-            int axes = switch (type / 1000) {
-                case 0 -> 2;
-                case 1, 2 -> 3;
-                case 3 -> 4;
-                default -> throw new InvalidArgumentException("WKB type " + type + " is not ISO");
-            };
+            int axes;
+            switch (type / 1000) {
+                case 0: axes = 2; break;
+                case 1: case 2: axes = 3; break;
+                case 3: axes = 4; break;
+                default: throw new InvalidArgumentException("WKB type " + type + " is not ISO");
+            }
             switch (base) {
-                case Wkb.POINT -> points.add(c.point(little, axes));
-                case Wkb.LINE_STRING -> lines.add(c.path(little, axes));
-                case Wkb.POLYGON -> {
+                case Wkb.POINT: points.add(c.point(little, axes)); break;
+                case Wkb.LINE_STRING: lines.add(c.path(little, axes)); break;
+                case Wkb.POLYGON: {
                     int rings = c.u32(little);
                     for (int i = 0; i < rings; i++) {
                         polygons.add(c.path(little, axes));
                     }
                 }
-                case Wkb.MULTI_POINT, Wkb.MULTI_LINE_STRING, Wkb.MULTI_POLYGON,
-                     Wkb.GEOMETRY_COLLECTION -> {
+                    break;
+                case Wkb.MULTI_POINT: case Wkb.MULTI_LINE_STRING: case Wkb.MULTI_POLYGON: case Wkb.GEOMETRY_COLLECTION: {
                     int n = c.u32(little);
                     for (int i = 0; i < n; i++) {
                         read(c, polygons, lines, points);
                     }
                 }
-                default -> throw new InvalidArgumentException("WKB geometry type " + base
+                    break;
+                default: throw new InvalidArgumentException("WKB geometry type " + base
                         + " is not one of the seven §1 supports");
             }
         }

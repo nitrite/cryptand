@@ -22,7 +22,7 @@ the spec disagree, the spec wins and this code is wrong
 </dependency>
 ```
 
-Java 17 or newer. **No runtime dependencies**: Argon2id, BLAKE2b and
+Java 11 or newer (built on JDK 17 with `--release 11`, like nitrite-java). **No runtime dependencies**: Argon2id, BLAKE2b and
 XChaCha20-Poly1305 are implemented here, because none is in the JDK.
 
 ## Usage

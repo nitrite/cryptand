@@ -158,7 +158,7 @@ class SpatialTest {
             assertFalse(index.intersects(Wkb.rectangle(0, 0, 3, 3)).contains(far));
 
             assertEquals(List.of(small), index.within(Wkb.rectangle(0, 0, 5, 5)).stream()
-                    .filter(id -> id == small).toList());
+                    .filter(id -> id == small).collect(java.util.stream.Collectors.toList()));
             assertTrue(index.contains(Wkb.point(5, 5)).contains(big));
             assertFalse(index.contains(Wkb.point(5, 5)).contains(small));
 

@@ -52,14 +52,95 @@ public final class Verify {
         POLICY
     }
 
-    public record Finding(Kind kind, String message) {
+    public static final class Finding {
+        private final Kind kind;
+        private final String message;
+
+        public Finding(Kind kind, String message) {
+            this.kind = kind;
+            this.message = message;
+        }
+
+        public Kind kind() {
+            return kind;
+        }
+
+        public String message() {
+            return message;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Finding)) {
+                return false;
+            }
+            Finding that = (Finding) o;
+            return java.util.Objects.equals(kind, that.kind)
+                    && java.util.Objects.equals(message, that.message);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(kind, message);
+        }
+
         @Override
         public String toString() {
             return kind + ": " + message;
         }
     }
 
-    public record Report(List<Finding> findings, long pagesReachable, long pagesFree, long segments) {
+    public static final class Report {
+        private final List<Finding> findings;
+        private final long pagesReachable;
+        private final long pagesFree;
+        private final long segments;
+
+        public Report(List<Finding> findings, long pagesReachable, long pagesFree, long segments) {
+            this.findings = findings;
+            this.pagesReachable = pagesReachable;
+            this.pagesFree = pagesFree;
+            this.segments = segments;
+        }
+
+        public List<Finding> findings() {
+            return findings;
+        }
+
+        public long pagesReachable() {
+            return pagesReachable;
+        }
+
+        public long pagesFree() {
+            return pagesFree;
+        }
+
+        public long segments() {
+            return segments;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Report)) {
+                return false;
+            }
+            Report that = (Report) o;
+            return java.util.Objects.equals(findings, that.findings)
+                    && pagesReachable == that.pagesReachable
+                    && pagesFree == that.pagesFree
+                    && segments == that.segments;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(findings, pagesReachable, pagesFree, segments);
+        }
 
         public boolean clean() {
             return findings.isEmpty();
@@ -366,7 +447,7 @@ public final class Verify {
 
     private void verifyValuePointer(SegmentMeta m, BtreePage.Leaf cell) {
         switch (cell.kind()) {
-            case BtreePage.Kind.VLOG -> {
+            case BtreePage.Kind.VLOG: {
                 VlogPointer p = VlogPointer.decode(cell.value());
                 try {
                     VlogSegment.Record rec = engine.vlog().read(p);
@@ -384,7 +465,8 @@ public final class Verify {
                     }
                 }
             }
-            case BtreePage.Kind.BLOB -> {
+                break;
+            case BtreePage.Kind.BLOB: {
                 Blob b = Blob.decode(cell.value());
                 claim(b.startPage(), b.extentPages(pager), "blob");
                 try {
@@ -393,8 +475,10 @@ public final class Verify {
                     report(e, "blob at page " + b.startPage());
                 }
             }
-            default -> {
+                break;
+            default: {
             }
+                break;
         }
     }
 

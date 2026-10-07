@@ -25,10 +25,108 @@ import java.util.Map;
  * not delete the other checkpoints, so a restore keeps the current
  * {@code checkpoint_root} and replaces the other eight.
  */
-public record Checkpoint(String name, long commitId, long seq, long createdUtcMs,
-                         long catalogRoot, long freelistRoot, long attributesRoot,
-                         long manifestRoot, long vlogStatsRoot, long changefeedRoot,
-                         Long expiresUtcMs) {
+public final class Checkpoint {
+    private final String name;
+    private final long commitId;
+    private final long seq;
+    private final long createdUtcMs;
+    private final long catalogRoot;
+    private final long freelistRoot;
+    private final long attributesRoot;
+    private final long manifestRoot;
+    private final long vlogStatsRoot;
+    private final long changefeedRoot;
+    private final Long expiresUtcMs;
+
+    public Checkpoint(String name, long commitId, long seq, long createdUtcMs, long catalogRoot, long freelistRoot, long attributesRoot, long manifestRoot, long vlogStatsRoot, long changefeedRoot, Long expiresUtcMs) {
+        this.name = name;
+        this.commitId = commitId;
+        this.seq = seq;
+        this.createdUtcMs = createdUtcMs;
+        this.catalogRoot = catalogRoot;
+        this.freelistRoot = freelistRoot;
+        this.attributesRoot = attributesRoot;
+        this.manifestRoot = manifestRoot;
+        this.vlogStatsRoot = vlogStatsRoot;
+        this.changefeedRoot = changefeedRoot;
+        this.expiresUtcMs = expiresUtcMs;
+    }
+
+    public String name() {
+        return name;
+    }
+
+    public long commitId() {
+        return commitId;
+    }
+
+    public long seq() {
+        return seq;
+    }
+
+    public long createdUtcMs() {
+        return createdUtcMs;
+    }
+
+    public long catalogRoot() {
+        return catalogRoot;
+    }
+
+    public long freelistRoot() {
+        return freelistRoot;
+    }
+
+    public long attributesRoot() {
+        return attributesRoot;
+    }
+
+    public long manifestRoot() {
+        return manifestRoot;
+    }
+
+    public long vlogStatsRoot() {
+        return vlogStatsRoot;
+    }
+
+    public long changefeedRoot() {
+        return changefeedRoot;
+    }
+
+    public Long expiresUtcMs() {
+        return expiresUtcMs;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof Checkpoint)) {
+            return false;
+        }
+        Checkpoint that = (Checkpoint) o;
+        return java.util.Objects.equals(name, that.name)
+                && commitId == that.commitId
+                && seq == that.seq
+                && createdUtcMs == that.createdUtcMs
+                && catalogRoot == that.catalogRoot
+                && freelistRoot == that.freelistRoot
+                && attributesRoot == that.attributesRoot
+                && manifestRoot == that.manifestRoot
+                && vlogStatsRoot == that.vlogStatsRoot
+                && changefeedRoot == that.changefeedRoot
+                && java.util.Objects.equals(expiresUtcMs, that.expiresUtcMs);
+    }
+
+    @Override
+    public int hashCode() {
+        return java.util.Objects.hash(name, commitId, seq, createdUtcMs, catalogRoot, freelistRoot, attributesRoot, manifestRoot, vlogStatsRoot, changefeedRoot, expiresUtcMs);
+    }
+
+    @Override
+    public String toString() {
+        return "Checkpoint[" + "name=" + name + ", " + "commitId=" + commitId + ", " + "seq=" + seq + ", " + "createdUtcMs=" + createdUtcMs + ", " + "catalogRoot=" + catalogRoot + ", " + "freelistRoot=" + freelistRoot + ", " + "attributesRoot=" + attributesRoot + ", " + "manifestRoot=" + manifestRoot + ", " + "vlogStatsRoot=" + vlogStatsRoot + ", " + "changefeedRoot=" + changefeedRoot + ", " + "expiresUtcMs=" + expiresUtcMs + "]";
+    }
 
     public static byte[] key(String name) {
         return Cke.encode(new Value.Str(name));

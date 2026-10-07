@@ -40,7 +40,45 @@ public final class RTree {
     /** Fixed part of the payload, before the entries. */
     public static final int HEADER = 16;
 
-    public record Entry(Wkb.Box box, long nitriteId) {
+    public static final class Entry {
+        private final Wkb.Box box;
+        private final long nitriteId;
+
+        public Entry(Wkb.Box box, long nitriteId) {
+            this.box = box;
+            this.nitriteId = nitriteId;
+        }
+
+        public Wkb.Box box() {
+            return box;
+        }
+
+        public long nitriteId() {
+            return nitriteId;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Entry)) {
+                return false;
+            }
+            Entry that = (Entry) o;
+            return java.util.Objects.equals(box, that.box)
+                    && nitriteId == that.nitriteId;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(box, nitriteId);
+        }
+
+        @Override
+        public String toString() {
+            return "Entry[" + "box=" + box + ", " + "nitriteId=" + nitriteId + "]";
+        }
     }
 
     private final Pager pager;
@@ -308,7 +346,52 @@ public final class RTree {
         }
     }
 
-    private record Node(boolean leaf, List<Wkb.Box> boxes, List<Long> payload) {
+    private static final class Node {
+        private final boolean leaf;
+        private final List<Wkb.Box> boxes;
+        private final List<Long> payload;
+
+        public Node(boolean leaf, List<Wkb.Box> boxes, List<Long> payload) {
+            this.leaf = leaf;
+            this.boxes = boxes;
+            this.payload = payload;
+        }
+
+        public boolean leaf() {
+            return leaf;
+        }
+
+        public List<Wkb.Box> boxes() {
+            return boxes;
+        }
+
+        public List<Long> payload() {
+            return payload;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Node)) {
+                return false;
+            }
+            Node that = (Node) o;
+            return leaf == that.leaf
+                    && java.util.Objects.equals(boxes, that.boxes)
+                    && java.util.Objects.equals(payload, that.payload);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(leaf, boxes, payload);
+        }
+
+        @Override
+        public String toString() {
+            return "Node[" + "leaf=" + leaf + ", " + "boxes=" + boxes + ", " + "payload=" + payload + "]";
+        }
     }
 
     private Node node(long page) {
@@ -380,6 +463,51 @@ public final class RTree {
      * above 2^53 comes back changed from a double — a silently wrong id, which
      * then resolves to no document at all.
      */
-    private record Candidate(double distance, boolean isEntry, long payload) {
+    private static final class Candidate {
+        private final double distance;
+        private final boolean isEntry;
+        private final long payload;
+
+        public Candidate(double distance, boolean isEntry, long payload) {
+            this.distance = distance;
+            this.isEntry = isEntry;
+            this.payload = payload;
+        }
+
+        public double distance() {
+            return distance;
+        }
+
+        public boolean isEntry() {
+            return isEntry;
+        }
+
+        public long payload() {
+            return payload;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Candidate)) {
+                return false;
+            }
+            Candidate that = (Candidate) o;
+            return Double.compare(distance, that.distance) == 0
+                    && isEntry == that.isEntry
+                    && payload == that.payload;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(distance, isEntry, payload);
+        }
+
+        @Override
+        public String toString() {
+            return "Candidate[" + "distance=" + distance + ", " + "isEntry=" + isEntry + ", " + "payload=" + payload + "]";
+        }
     }
 }

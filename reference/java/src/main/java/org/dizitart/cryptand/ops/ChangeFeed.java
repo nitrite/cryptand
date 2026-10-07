@@ -25,7 +25,66 @@ import java.util.Map;
  * {@code _revision} fields — is the thing every sync implementation does badly,
  * and a monotonic per-record {@code seq} is already in the format.
  */
-public record ChangeFeed(int treeId, long seq, String op, byte[] key, Long nitriteId) {
+public final class ChangeFeed {
+    private final int treeId;
+    private final long seq;
+    private final String op;
+    private final byte[] key;
+    private final Long nitriteId;
+
+    public ChangeFeed(int treeId, long seq, String op, byte[] key, Long nitriteId) {
+        this.treeId = treeId;
+        this.seq = seq;
+        this.op = op;
+        this.key = key;
+        this.nitriteId = nitriteId;
+    }
+
+    public int treeId() {
+        return treeId;
+    }
+
+    public long seq() {
+        return seq;
+    }
+
+    public String op() {
+        return op;
+    }
+
+    public byte[] key() {
+        return key;
+    }
+
+    public Long nitriteId() {
+        return nitriteId;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof ChangeFeed)) {
+            return false;
+        }
+        ChangeFeed that = (ChangeFeed) o;
+        return treeId == that.treeId
+                && seq == that.seq
+                && java.util.Objects.equals(op, that.op)
+                && java.util.Objects.equals(key, that.key)
+                && java.util.Objects.equals(nitriteId, that.nitriteId);
+    }
+
+    @Override
+    public int hashCode() {
+        return java.util.Objects.hash(treeId, seq, op, key, nitriteId);
+    }
+
+    @Override
+    public String toString() {
+        return "ChangeFeed[" + "treeId=" + treeId + ", " + "seq=" + seq + ", " + "op=" + op + ", " + "key=" + key + ", " + "nitriteId=" + nitriteId + "]";
+    }
 
     public static final String PUT = "put";
     public static final String DELETE = "delete";

@@ -93,9 +93,10 @@ public final class Database implements AutoCloseable {
         }
         List<Value> writers = new ArrayList<>();
         Value existing = store.field("writers");
-        if (existing instanceof Value.Array a) {
+        if (existing instanceof Value.Array) {
+            Value.Array a = ((Value.Array) existing);
             for (Value v : a.items()) {
-                if (v instanceof Value.Str s && s.value().equals(writerId)) {
+                if (v instanceof Value.Str && ((Value.Str) v).value().equals(writerId)) {
                     return;
                 }
                 writers.add(v);
@@ -174,7 +175,45 @@ public final class Database implements AutoCloseable {
      * <p>Immutable, and published through a {@code volatile} field, so a reader
      * that finds a current one uses it without any lock at all.
      */
-    private record CachedCatalog(long version, Map<String, TreeDescriptor> entries) {
+    private static final class CachedCatalog {
+        private final long version;
+        private final Map<String, TreeDescriptor> entries;
+
+        public CachedCatalog(long version, Map<String, TreeDescriptor> entries) {
+            this.version = version;
+            this.entries = entries;
+        }
+
+        public long version() {
+            return version;
+        }
+
+        public Map<String, TreeDescriptor> entries() {
+            return entries;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof CachedCatalog)) {
+                return false;
+            }
+            CachedCatalog that = (CachedCatalog) o;
+            return version == that.version
+                    && java.util.Objects.equals(entries, that.entries);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(version, entries);
+        }
+
+        @Override
+        public String toString() {
+            return "CachedCatalog[" + "version=" + version + ", " + "entries=" + entries + "]";
+        }
     }
 
     private volatile CachedCatalog catalogCache;
@@ -246,7 +285,7 @@ public final class Database implements AutoCloseable {
                 continue;
             }
             Value t = d.params().field("type");
-            if (!(t instanceof Value.Str s) || !s.value().equals(type)) {
+            if (!(t instanceof Value.Str) || !((Value.Str) t).value().equals(type)) {
                 continue;
             }
             if ((d.params().field("key") != null) != keyed) {
@@ -482,29 +521,33 @@ public final class Database implements AutoCloseable {
         // whether or not it supports encryption, because T5 does not require the
         // attacker to have a key".
         Value decoded = Cve.decode(raw);
-        if (!(decoded instanceof Value.Doc d)) {
+        if (!(decoded instanceof Value.Doc)) {
             throw new CorruptionException(
                     "tree 5 holds a " + decoded.getClass().getSimpleName()
                             + " for user '" + username + "', not a credential record");
         }
+        Value.Doc d = ((Value.Doc) decoded);
         // §8: "`kdf` MUST be \"argon2id\"". A record naming another KDF is not a
         // record to verify with this one; it is a record this implementation
         // cannot check. §9.2 forbids resolving the name to anything, so the only
         // conforming answer is to refuse.
-        if (!(d.field("kdf") instanceof Value.Str kdf) || !"argon2id".equals(kdf.value())) {
+        if (!(d.field("kdf") instanceof Value.Str) || !"argon2id".equals(((Value.Str) d.field("kdf")).value())) {
             throw new UnsupportedFeatureException(
                     "user '" + username + "' has kdf "
                             + (d.field("kdf") == null ? "absent" : d.field("kdf"))
                             + "; §8 requires argon2id");
         }
-        if (!(d.field("params") instanceof Value.Doc params)) {
+        if (!(d.field("params") instanceof Value.Doc)) {
             throw new CorruptionException("user '" + username + "' has no params document");
         }
-        if (!(d.field("salt") instanceof Value.Bytes saltV)
-                || !(d.field("hash") instanceof Value.Bytes hashV)) {
+        Value.Doc params = ((Value.Doc) d.field("params"));
+        if (!(d.field("salt") instanceof Value.Bytes)
+                || !(d.field("hash") instanceof Value.Bytes)) {
             throw new CorruptionException(
                     "user '" + username + "' is missing salt or hash");
         }
+        Value.Bytes saltV = ((Value.Bytes) d.field("salt"));
+        Value.Bytes hashV = ((Value.Bytes) d.field("hash"));
         long t = kdfParam(params, "t_cost", username);
         long m = kdfParam(params, "m_cost_kib", username);
         long p = kdfParam(params, "parallelism", username);

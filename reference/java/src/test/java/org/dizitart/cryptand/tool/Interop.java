@@ -76,7 +76,52 @@ public final class Interop {
     }
 
     /** One visible row, as the digest sees it. */
-    record Row(long id, String country, byte[] note) {
+    static final class Row {
+        private final long id;
+        private final String country;
+        private final byte[] note;
+
+        public Row(long id, String country, byte[] note) {
+            this.id = id;
+            this.country = country;
+            this.note = note;
+        }
+
+        public long id() {
+            return id;
+        }
+
+        public String country() {
+            return country;
+        }
+
+        public byte[] note() {
+            return note;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Row)) {
+                return false;
+            }
+            Row that = (Row) o;
+            return id == that.id
+                    && java.util.Objects.equals(country, that.country)
+                    && java.util.Objects.equals(note, that.note);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(id, country, note);
+        }
+
+        @Override
+        public String toString() {
+            return "Row[" + "id=" + id + ", " + "country=" + country + ", " + "note=" + note + "]";
+        }
     }
 
     /**
@@ -124,7 +169,7 @@ public final class Interop {
     private static byte[] keyArg(String[] args) {
         for (int i = 0; i < args.length - 1; i++) {
             if (args[i].equals("--key")) {
-                return java.util.HexFormat.of().parseHex(args[i + 1]);
+                return org.dizitart.cryptand.util.Hex.parse(args[i + 1]);
             }
         }
         return null;
@@ -223,12 +268,12 @@ public final class Interop {
                 Value note = doc.field("note");
                 // §5.4: `_id` MUST equal the tree key of the entry.
                 Value declared = doc.field("_id");
-                if (!(declared instanceof Value.NitriteId n) || n.id() != id) {
+                if (!(declared instanceof Value.NitriteId) || ((Value.NitriteId) declared).id() != id) {
                     throw new CorruptionException("document at key " + id + " carries _id " + declared);
                 }
                 out.add(new Row(id,
-                        country instanceof Value.Str s ? s.value() : "",
-                        note instanceof Value.Bytes b ? b.value() : new byte[0]));
+                        country instanceof Value.Str ? ((Value.Str) country).value() : "",
+                        note instanceof Value.Bytes ? ((Value.Bytes) note).value() : new byte[0]));
             }
         }
         out.sort(java.util.Comparator.comparingLong(Row::id));

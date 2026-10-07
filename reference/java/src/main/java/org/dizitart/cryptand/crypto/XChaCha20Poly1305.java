@@ -52,7 +52,8 @@ public final class XChaCha20Poly1305 {
         try {
             return run(Cipher.DECRYPT_MODE, key, nonce24, aad, ciphertext);
         } catch (RuntimeException e) {
-            if (e instanceof TamperingException t) {
+            if (e instanceof TamperingException) {
+                TamperingException t = ((TamperingException) e);
                 throw t;
             }
             throw new TamperingException("authentication failed for " + what

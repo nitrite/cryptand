@@ -16,7 +16,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,7 +33,7 @@ import java.util.Map;
 final class Vectors {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HexFormat HEX = HexFormat.of();
+
 
     private Vectors() {
     }
@@ -57,68 +56,68 @@ final class Vectors {
     }
 
     static byte[] hex(String s) {
-        return HEX.parseHex(s);
+        return org.dizitart.cryptand.util.Hex.parse(s);
     }
 
     static String hex(byte[] b) {
-        return HEX.formatHex(b);
+        return org.dizitart.cryptand.util.Hex.format(b);
     }
 
     /** Builds a {@link Value} from the vectors' {@code {"t": ...}} shape. */
     static Value value(JsonNode n) {
         String t = n.get("t").asText();
-        return switch (t) {
-            case "null" -> Value.NULL;
-            case "bool" -> n.get("v").asBoolean() ? Value.TRUE : Value.FALSE;
-            case "int" -> integer(NumType.byWireName(n.get("w").asText()), new BigInteger(n.get("v").asText()));
-            case "float" -> {
+        switch (t) {
+            case "null": return Value.NULL;
+            case "bool": return n.get("v").asBoolean() ? Value.TRUE : Value.FALSE;
+            case "int": return integer(NumType.byWireName(n.get("w").asText()), new BigInteger(n.get("v").asText()));
+            case "float": {
                 NumType w = NumType.byWireName(n.get("w").asText());
                 byte[] bits = hex(n.get("bits").asText());
-                yield w == NumType.F32
+                return w == NumType.F32
                         ? new Value.Float(w, Float.intBitsToFloat(beInt(bits)))
                         : new Value.Float(w, Double.longBitsToDouble(beLong(bits)));
             }
-            case "str" -> new Value.Str(new String(hex(n.get("utf8").asText()), StandardCharsets.UTF_8));
-            case "bytes" -> new Value.Bytes(hex(n.get("v").asText()));
-            case "char" -> new Value.Char(n.get("v").asInt());
-            case "nitrite_id" -> new Value.NitriteId(Long.parseLong(n.get("v").asText()));
-            case "uuid" -> new Value.Uuid(hex(n.get("v").asText()));
-            case "timestamp" -> new Value.Timestamp(n.get("millis").asLong());
-            case "timestamp_ns" -> new Value.TimestampNs(n.get("secs").asLong(), n.get("nanos").asInt());
-            case "zoned" -> new Value.Zoned(n.get("millis").asLong(), n.get("zone").asText());
-            case "date" -> new Value.Date(n.get("days").asInt());
-            case "time" -> new Value.Time(n.get("nanos").asLong());
-            case "duration" -> new Value.Duration(n.get("secs").asLong(), n.get("nanos").asInt());
-            case "regex" -> new Value.Regex(n.get("pattern").asText(), n.get("flags").asText());
-            case "array" -> {
+            case "str": return new Value.Str(new String(hex(n.get("utf8").asText()), StandardCharsets.UTF_8));
+            case "bytes": return new Value.Bytes(hex(n.get("v").asText()));
+            case "char": return new Value.Char(n.get("v").asInt());
+            case "nitrite_id": return new Value.NitriteId(Long.parseLong(n.get("v").asText()));
+            case "uuid": return new Value.Uuid(hex(n.get("v").asText()));
+            case "timestamp": return new Value.Timestamp(n.get("millis").asLong());
+            case "timestamp_ns": return new Value.TimestampNs(n.get("secs").asLong(), n.get("nanos").asInt());
+            case "zoned": return new Value.Zoned(n.get("millis").asLong(), n.get("zone").asText());
+            case "date": return new Value.Date(n.get("days").asInt());
+            case "time": return new Value.Time(n.get("nanos").asLong());
+            case "duration": return new Value.Duration(n.get("secs").asLong(), n.get("nanos").asInt());
+            case "regex": return new Value.Regex(n.get("pattern").asText(), n.get("flags").asText());
+            case "array": {
                 List<Value> items = new ArrayList<>();
                 for (JsonNode item : n.get("items")) {
                     items.add(value(item));
                 }
-                yield new Value.Array(items);
+                return new Value.Array(items);
             }
-            case "map" -> {
+            case "map": {
                 List<Value.Map.Entry> entries = new ArrayList<>();
                 for (JsonNode e : n.get("entries")) {
                     entries.add(new Value.Map.Entry(value(e.get("k")), value(e.get("v"))));
                 }
-                yield new Value.Map(entries);
+                return new Value.Map(entries);
             }
-            case "doc" -> {
+            case "doc": {
                 Map<String, Value> fields = new LinkedHashMap<>();
                 JsonNode f = n.get("fields");
                 for (Iterator<String> it = f.fieldNames(); it.hasNext(); ) {
                     String name = it.next();
                     fields.put(name, value(f.get(name)));
                 }
-                yield new Value.Doc(fields);
+                return new Value.Doc(fields);
             }
-            case "vector" -> vector(n);
-            case "opaque" -> new Value.Opaque(
+            case "vector": return vector(n);
+            case "opaque": return new Value.Opaque(
                     n.get("origin").asText(), n.get("type_name").asText(), hex(n.get("data").asText()));
-            case "unknown" -> new Value.Unknown(n.get("tag").asInt(), hex(n.get("payload").asText()));
-            default -> throw new IllegalArgumentException("unhandled vector value type: " + t);
-        };
+            case "unknown": return new Value.Unknown(n.get("tag").asInt(), hex(n.get("payload").asText()));
+            default: throw new IllegalArgumentException("unhandled vector value type: " + t);
+        }
     }
 
     private static Value vector(JsonNode n) {
@@ -126,13 +125,13 @@ final class Vectors {
         int dim = n.get("dim").asInt();
         ByteWriter w = new ByteWriter();
         switch (dtype) {
-            case "f32" -> {
+            case "f32": {
                 for (JsonNode x : n.get("f32")) {
                     w.f32((float) x.asDouble());
                 }
                 return new Value.Vector(Value.Vector.DTYPE_F32, dim, w.toBytes());
             }
-            case "i8" -> {
+            case "i8": {
                 for (JsonNode x : n.get("i8")) {
                     w.u8(x.asInt() & 0xFF);
                 }
@@ -140,7 +139,7 @@ final class Vectors {
                 w.f32((float) n.get("zero_point").asDouble());
                 return new Value.Vector(Value.Vector.DTYPE_I8, dim, w.toBytes());
             }
-            default -> throw new IllegalArgumentException("unhandled vector dtype: " + dtype);
+            default: throw new IllegalArgumentException("unhandled vector dtype: " + dtype);
         }
     }
 

@@ -196,7 +196,66 @@ public final class Vlog {
      * A reserved byte range and the bytes to put in it. The record is written
      * <strong>outside</strong> the monitor — see {@link #write}.
      */
-    private record Reservation(Open open, long offset, long end, int size, byte[] record) {
+    private static final class Reservation {
+        private final Open open;
+        private final long offset;
+        private final long end;
+        private final int size;
+        private final byte[] record;
+
+        public Reservation(Open open, long offset, long end, int size, byte[] record) {
+            this.open = open;
+            this.offset = offset;
+            this.end = end;
+            this.size = size;
+            this.record = record;
+        }
+
+        public Open open() {
+            return open;
+        }
+
+        public long offset() {
+            return offset;
+        }
+
+        public long end() {
+            return end;
+        }
+
+        public int size() {
+            return size;
+        }
+
+        public byte[] record() {
+            return record;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Reservation)) {
+                return false;
+            }
+            Reservation that = (Reservation) o;
+            return java.util.Objects.equals(open, that.open)
+                    && offset == that.offset
+                    && end == that.end
+                    && size == that.size
+                    && java.util.Objects.equals(record, that.record);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(open, offset, end, size, record);
+        }
+
+        @Override
+        public String toString() {
+            return "Reservation[" + "open=" + open + ", " + "offset=" + offset + ", " + "end=" + end + ", " + "size=" + size + ", " + "record=" + record + "]";
+        }
     }
 
     /** Appends one record to the hot tier, routed by heat class. */
@@ -404,7 +463,45 @@ public final class Vlog {
      * into one, and the pager keeps the bytes for it; this keeps the head and
      * watermark readable until {@link #pruneRetired} says no such reader is left.
      */
-    private record Retired(VlogStats stats, long commit) {
+    private static final class Retired {
+        private final VlogStats stats;
+        private final long commit;
+
+        public Retired(VlogStats stats, long commit) {
+            this.stats = stats;
+            this.commit = commit;
+        }
+
+        public VlogStats stats() {
+            return stats;
+        }
+
+        public long commit() {
+            return commit;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Retired)) {
+                return false;
+            }
+            Retired that = (Retired) o;
+            return java.util.Objects.equals(stats, that.stats)
+                    && commit == that.commit;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(stats, commit);
+        }
+
+        @Override
+        public String toString() {
+            return "Retired[" + "stats=" + stats + ", " + "commit=" + commit + "]";
+        }
     }
 
     private final Map<Long, Retired> retired = new HashMap<>();
@@ -578,7 +675,45 @@ public final class Vlog {
     }
 
     /** Records in the order asked for, and the number of physical reads it took. */
-    public record Resolved(List<VlogSegment.Record> records, int reads) {
+    public static final class Resolved {
+        private final List<VlogSegment.Record> records;
+        private final int reads;
+
+        public Resolved(List<VlogSegment.Record> records, int reads) {
+            this.records = records;
+            this.reads = reads;
+        }
+
+        public List<VlogSegment.Record> records() {
+            return records;
+        }
+
+        public int reads() {
+            return reads;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Resolved)) {
+                return false;
+            }
+            Resolved that = (Resolved) o;
+            return java.util.Objects.equals(records, that.records)
+                    && reads == that.reads;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(records, reads);
+        }
+
+        @Override
+        public String toString() {
+            return "Resolved[" + "records=" + records + ", " + "reads=" + reads + "]";
+        }
     }
 
     /** Pages a byte range starting at {@code offset} covers. */
@@ -818,7 +953,52 @@ public final class Vlog {
      * the exact version to check itself against.
      */
     /** One record of a walk: where it starts, how long it is, and what it holds. */
-    public record Walked(long offset, int length, VlogSegment.Record record) {
+    public static final class Walked {
+        private final long offset;
+        private final int length;
+        private final VlogSegment.Record record;
+
+        public Walked(long offset, int length, VlogSegment.Record record) {
+            this.offset = offset;
+            this.length = length;
+            this.record = record;
+        }
+
+        public long offset() {
+            return offset;
+        }
+
+        public int length() {
+            return length;
+        }
+
+        public VlogSegment.Record record() {
+            return record;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Walked)) {
+                return false;
+            }
+            Walked that = (Walked) o;
+            return offset == that.offset
+                    && length == that.length
+                    && java.util.Objects.equals(record, that.record);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(offset, length, record);
+        }
+
+        @Override
+        public String toString() {
+            return "Walked[" + "offset=" + offset + ", " + "length=" + length + ", " + "record=" + record + "]";
+        }
     }
 
     /**
@@ -983,7 +1163,59 @@ public final class Vlog {
      * a stall is better than silent data loss.
      */
     /** One segment's state at the moment the scan below snapshotted it. */
-    private record LivenessSnapshot(long segmentId, VlogSegment seg, long end, long records) {
+    private static final class LivenessSnapshot {
+        private final long segmentId;
+        private final VlogSegment seg;
+        private final long end;
+        private final long records;
+
+        public LivenessSnapshot(long segmentId, VlogSegment seg, long end, long records) {
+            this.segmentId = segmentId;
+            this.seg = seg;
+            this.end = end;
+            this.records = records;
+        }
+
+        public long segmentId() {
+            return segmentId;
+        }
+
+        public VlogSegment seg() {
+            return seg;
+        }
+
+        public long end() {
+            return end;
+        }
+
+        public long records() {
+            return records;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof LivenessSnapshot)) {
+                return false;
+            }
+            LivenessSnapshot that = (LivenessSnapshot) o;
+            return segmentId == that.segmentId
+                    && java.util.Objects.equals(seg, that.seg)
+                    && end == that.end
+                    && records == that.records;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(segmentId, seg, end, records);
+        }
+
+        @Override
+        public String toString() {
+            return "LivenessSnapshot[" + "segmentId=" + segmentId + ", " + "seg=" + seg + ", " + "end=" + end + ", " + "records=" + records + "]";
+        }
     }
 
     public void recomputeLiveness(Liveness live) {

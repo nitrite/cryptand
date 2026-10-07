@@ -67,10 +67,96 @@ public final class Fuzz {
     }
 
     /** A byte range a hostile file would plausibly edit. */
-    public record Target(int offset, int length, String what) {
+    public static final class Target {
+        private final int offset;
+        private final int length;
+        private final String what;
+
+        public Target(int offset, int length, String what) {
+            this.offset = offset;
+            this.length = length;
+            this.what = what;
+        }
+
+        public int offset() {
+            return offset;
+        }
+
+        public int length() {
+            return length;
+        }
+
+        public String what() {
+            return what;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Target)) {
+                return false;
+            }
+            Target that = (Target) o;
+            return offset == that.offset
+                    && length == that.length
+                    && java.util.Objects.equals(what, that.what);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(offset, length, what);
+        }
+
+        @Override
+        public String toString() {
+            return "Target[" + "offset=" + offset + ", " + "length=" + length + ", " + "what=" + what + "]";
+        }
     }
 
-    public record Finding(Outcome outcome, String detail, byte[] mutant) {
+    public static final class Finding {
+        private final Outcome outcome;
+        private final String detail;
+        private final byte[] mutant;
+
+        public Finding(Outcome outcome, String detail, byte[] mutant) {
+            this.outcome = outcome;
+            this.detail = detail;
+            this.mutant = mutant;
+        }
+
+        public Outcome outcome() {
+            return outcome;
+        }
+
+        public String detail() {
+            return detail;
+        }
+
+        public byte[] mutant() {
+            return mutant;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Finding)) {
+                return false;
+            }
+            Finding that = (Finding) o;
+            return java.util.Objects.equals(outcome, that.outcome)
+                    && java.util.Objects.equals(detail, that.detail)
+                    && java.util.Objects.equals(mutant, that.mutant);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(outcome, detail, mutant);
+        }
+
         @Override
         public String toString() {
             return outcome + ": " + detail;
@@ -219,15 +305,16 @@ public final class Fuzz {
                 continue;
             }
             switch (rng.below(4)) {
-                case 0 -> b[at] ^= (byte) (1 << rng.below(8));
-                case 1 -> b[at] = 0x00;
-                case 2 -> b[at] = (byte) 0xFF;
-                default -> {
+                case 0: b[at] ^= (byte) (1 << rng.below(8)); break;
+                case 1: b[at] = 0x00; break;
+                case 2: b[at] = (byte) 0xFF; break;
+                default: {
                     int w = 1 + rng.below(8);
                     for (int k = 0; k < w && at + k < b.length; k++) {
                         b[at + k] = (byte) 0xFF;
                     }
                 }
+                    break;
             }
             touched.add(at / pageSize);
         }

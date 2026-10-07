@@ -49,8 +49,66 @@ public final class Backup {
         PLAINTEXT
     }
 
-    public record Result(Path destination, int segmentsCopied, int vlogSegmentsCopied,
-                         long bytesCopied, boolean downgraded) {
+    public static final class Result {
+        private final Path destination;
+        private final int segmentsCopied;
+        private final int vlogSegmentsCopied;
+        private final long bytesCopied;
+        private final boolean downgraded;
+
+        public Result(Path destination, int segmentsCopied, int vlogSegmentsCopied, long bytesCopied, boolean downgraded) {
+            this.destination = destination;
+            this.segmentsCopied = segmentsCopied;
+            this.vlogSegmentsCopied = vlogSegmentsCopied;
+            this.bytesCopied = bytesCopied;
+            this.downgraded = downgraded;
+        }
+
+        public Path destination() {
+            return destination;
+        }
+
+        public int segmentsCopied() {
+            return segmentsCopied;
+        }
+
+        public int vlogSegmentsCopied() {
+            return vlogSegmentsCopied;
+        }
+
+        public long bytesCopied() {
+            return bytesCopied;
+        }
+
+        public boolean downgraded() {
+            return downgraded;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Result)) {
+                return false;
+            }
+            Result that = (Result) o;
+            return java.util.Objects.equals(destination, that.destination)
+                    && segmentsCopied == that.segmentsCopied
+                    && vlogSegmentsCopied == that.vlogSegmentsCopied
+                    && bytesCopied == that.bytesCopied
+                    && downgraded == that.downgraded;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(destination, segmentsCopied, vlogSegmentsCopied, bytesCopied, downgraded);
+        }
+
+        @Override
+        public String toString() {
+            return "Result[" + "destination=" + destination + ", " + "segmentsCopied=" + segmentsCopied + ", " + "vlogSegmentsCopied=" + vlogSegmentsCopied + ", " + "bytesCopied=" + bytesCopied + ", " + "downgraded=" + downgraded + "]";
+        }
     }
 
     private Backup() {

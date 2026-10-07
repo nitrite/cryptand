@@ -235,12 +235,12 @@ public final class BlockedBloom {
 
     @Override
     public boolean equals(Object o) {
-        return o instanceof BlockedBloom f
-                && f.blockCount == blockCount
-                && f.bitsPerKey == bitsPerKey
-                && f.probes == probes
-                && f.distinctKeys == distinctKeys
-                && Arrays.equals(f.blocks, blocks);
+        return o instanceof BlockedBloom
+                && ((BlockedBloom) o).blockCount == blockCount
+                && ((BlockedBloom) o).bitsPerKey == bitsPerKey
+                && ((BlockedBloom) o).probes == probes
+                && ((BlockedBloom) o).distinctKeys == distinctKeys
+                && Arrays.equals(((BlockedBloom) o).blocks, blocks);
     }
 
     @Override

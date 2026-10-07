@@ -111,8 +111,8 @@ public final class SegmentBuilder {
         byte[] ik = cell.key();
         if (lastKey != null && BtreePage.memcmp(lastKey, ik) >= 0) {
             throw new InvalidArgumentException("segment input is not strictly increasing: "
-                    + java.util.HexFormat.of().formatHex(lastKey) + " then "
-                    + java.util.HexFormat.of().formatHex(ik));
+                    + org.dizitart.cryptand.util.Hex.format(lastKey) + " then "
+                    + org.dizitart.cryptand.util.Hex.format(ik));
         }
         lastKey = ik;
         if (firstKey == null) {
@@ -135,10 +135,11 @@ public final class SegmentBuilder {
             minExpiry = minExpiry == 0 ? cell.expiryMs() : Math.min(minExpiry, cell.expiryMs());
         }
         switch (cell.kind()) {
-            case BtreePage.Kind.INLINE, BtreePage.Kind.OVERFLOW -> valueBytes += cell.value().length;
-            case BtreePage.Kind.VLOG -> vlogBytes += VlogPointer.decode(cell.value()).len();
-            default -> {
+            case BtreePage.Kind.INLINE: case BtreePage.Kind.OVERFLOW: valueBytes += cell.value().length; break;
+            case BtreePage.Kind.VLOG: vlogBytes += VlogPointer.decode(cell.value()).len(); break;
+            default: {
             }
+                break;
         }
         // Almost every segment holds one tree, and consecutive entries of one
         // tree are adjacent because `tree_id` leads the internal key. Counting

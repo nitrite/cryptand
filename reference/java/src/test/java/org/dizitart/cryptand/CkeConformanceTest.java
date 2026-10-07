@@ -307,7 +307,8 @@ class CkeConformanceTest {
 
     /** -1 for -Inf, 0 for finite, 1 for +Inf, 2 for NaN. Rule 3's ordering. */
     private static int numericClass(Value v) {
-        if (v instanceof Value.Float f) {
+        if (v instanceof Value.Float) {
+            Value.Float f = ((Value.Float) v);
             if (Double.isNaN(f.value())) {
                 return 2;
             }
@@ -319,11 +320,13 @@ class CkeConformanceTest {
     }
 
     private static BigDecimal exact(Value v) {
-        if (v instanceof Value.Int i) {
+        if (v instanceof Value.Int) {
+            Value.Int i = ((Value.Int) v);
             BigInteger mag = i.magnitude().toBigInteger();
             return new BigDecimal(i.negative() ? mag.negate() : mag);
         }
-        if (v instanceof Value.Float f) {
+        if (v instanceof Value.Float) {
+            Value.Float f = ((Value.Float) v);
             // BigDecimal(double) is the exact binary value, which is the point.
             return new BigDecimal(f.value());
         }

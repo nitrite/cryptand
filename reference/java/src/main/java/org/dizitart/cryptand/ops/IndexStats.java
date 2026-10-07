@@ -44,7 +44,45 @@ public final class IndexStats {
     public final List<Bucket> histogram = new ArrayList<>();
 
     /** One equi-depth bucket. The bound is a CKE key, so a planner compares it without decoding. */
-    public record Bucket(byte[] bound, long cumulative) {
+    public static final class Bucket {
+        private final byte[] bound;
+        private final long cumulative;
+
+        public Bucket(byte[] bound, long cumulative) {
+            this.bound = bound;
+            this.cumulative = cumulative;
+        }
+
+        public byte[] bound() {
+            return bound;
+        }
+
+        public long cumulative() {
+            return cumulative;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Bucket)) {
+                return false;
+            }
+            Bucket that = (Bucket) o;
+            return java.util.Objects.equals(bound, that.bound)
+                    && cumulative == that.cumulative;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(bound, cumulative);
+        }
+
+        @Override
+        public String toString() {
+            return "Bucket[" + "bound=" + bound + ", " + "cumulative=" + cumulative + "]";
+        }
     }
 
     // ------------------------------------------------------------------
@@ -93,12 +131,13 @@ public final class IndexStats {
 
         public long estimate() {
             double m = registers.length;
-            double alpha = switch (registers.length) {
-                case 16 -> 0.673;
-                case 32 -> 0.697;
-                case 64 -> 0.709;
-                default -> 0.7213 / (1.0 + 1.079 / m);
-            };
+            double alpha;
+            switch (registers.length) {
+                case 16: alpha = 0.673; break;
+                case 32: alpha = 0.697; break;
+                case 64: alpha = 0.709; break;
+                default: alpha = 0.7213 / (1.0 + 1.079 / m); break;
+            }
             double sum = 0;
             int zeros = 0;
             for (byte r : registers) {
@@ -155,18 +194,21 @@ public final class IndexStats {
      */
     public static IndexStats fromDoc(Value v) {
         IndexStats s = new IndexStats();
-        if (!(v instanceof Value.Doc d)) {
+        if (!(v instanceof Value.Doc)) {
             return s;
         }
+        Value.Doc d = ((Value.Doc) v);
         s.updatedSeq = uint(d, "updated_seq");
         s.entries = uint(d, "entries");
         s.distinctEstimate = uint(d, "distinct_estimate");
         s.nullCount = uint(d, "null_count");
         s.minKey = bytes(d, "min_key");
         s.maxKey = bytes(d, "max_key");
-        if (d.fields().get("histogram") instanceof Value.Array a) {
+        if (d.fields().get("histogram") instanceof Value.Array) {
+            Value.Array a = ((Value.Array) d.fields().get("histogram"));
             for (Value item : a.items()) {
-                if (item instanceof Value.Doc b) {
+                if (item instanceof Value.Doc) {
+                    Value.Doc b = ((Value.Doc) item);
                     s.histogram.add(new Bucket(bytes(b, "bound"), uint(b, "cumulative")));
                 }
             }
@@ -175,13 +217,13 @@ public final class IndexStats {
     }
 
     private static long uint(Value.Doc d, String name) {
-        return d.fields().get(name) instanceof Value.Int i
-                ? i.magnitude().lo()
+        return d.fields().get(name) instanceof Value.Int
+                ? ((Value.Int) d.fields().get(name)).magnitude().lo()
                 : 0L;
     }
 
     private static byte[] bytes(Value.Doc d, String name) {
-        return d.fields().get(name) instanceof Value.Bytes b ? b.value() : new byte[0];
+        return d.fields().get(name) instanceof Value.Bytes ? ((Value.Bytes) d.fields().get(name)).value() : new byte[0];
     }
 
     public int encodedLen() {

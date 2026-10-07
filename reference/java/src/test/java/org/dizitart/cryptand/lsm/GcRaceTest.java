@@ -164,7 +164,7 @@ class GcRaceTest {
         e.close();
         e = Engine.open(path, o);
         var leaks = org.dizitart.cryptand.ops.Verify.run(e).findings().stream()
-                .filter(f -> f.kind() == org.dizitart.cryptand.ops.Verify.Kind.LEAK).toList();
+                .filter(f -> f.kind() == org.dizitart.cryptand.ops.Verify.Kind.LEAK).collect(java.util.stream.Collectors.toList());
         e.close();
         assertTrue(leaks.isEmpty(), leaks.toString());
     }
