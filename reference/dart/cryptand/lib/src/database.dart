@@ -368,7 +368,7 @@ final class Collection {
       List<String> fields, CDoc doc, CValue id, bool positions) {
     final byTerm = <String, List<int>>{};
     for (final path in fields) {
-      for (final v in resolvePath(doc, path)) {
+      for (final v in resolvePath(doc, path) ?? const <CValue>[]) {
         for (final t in a.analyzeValue(v is CStr ? v.value : null)) {
           (byTerm[t.text] ??= []).add(t.position);
         }
@@ -419,7 +419,7 @@ final class Collection {
       List<String> fields, CDoc doc, CValue id) {
     final terms = <String>{};
     for (final path in fields) {
-      for (final v in resolvePath(doc, path)) {
+      for (final v in resolvePath(doc, path) ?? const <CValue>[]) {
         for (final t in a.analyzeValue(v is CStr ? v.value : null)) {
           terms.add(t.text);
         }

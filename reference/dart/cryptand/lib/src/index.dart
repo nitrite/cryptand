@@ -119,36 +119,32 @@ List<String> splitFieldPath(String path) {
 /// element and flattens the results (so `orders.items.sku` indexes every sku in
 /// every item of every order)." An empty result means the path is unresolvable,
 /// which §3 treats as an absent field.
-List<CValue> resolvePath(CDoc doc, String path) {
-  var current = <CValue>[doc];
-  for (final part in splitFieldPath(path)) {
-    final next = <CValue>[];
-    for (final v in current) {
-      if (v is CDoc) {
-        final child = v[part];
-        if (child != null) next.add(child);
-      } else if (v is CArray) {
-        for (final item in v.items) {
-          if (item is CDoc) {
-            final child = item[part];
-            if (child != null) next.add(child);
-          }
-        }
+List<CValue>? resolvePath(CDoc doc, String path) =>
+    _resolve(doc, splitFieldPath(path));
+
+/// `null` is an unresolvable path -- section 3's "field absent" -- which is
+/// not the same as an empty array: that is section 4's one entry per element,
+/// so no entries at all (F-058).
+List<CValue>? _resolve(CValue v, List<String> path) {
+  if (v is CArray) {
+    // Traversing an array applies the rest of the path to every element.
+    if (path.isEmpty) return v.items;
+    final out = <CValue>[];
+    var any = false;
+    for (final item in v.items) {
+      final sub = _resolve(item, path);
+      if (sub != null) {
+        any = true;
+        out.addAll(sub);
       }
     }
-    current = next;
-    if (current.isEmpty) return const [];
+    return any ? out : null;
   }
-  // A terminal array contributes one entry per element, §4.
-  final out = <CValue>[];
-  for (final v in current) {
-    if (v is CArray) {
-      out.addAll(v.items);
-    } else {
-      out.add(v);
-    }
-  }
-  return out;
+  if (path.isEmpty) return [v];
+  if (v is! CDoc) return null;
+  final child = v[path.first];
+  if (child == null) return null;
+  return _resolve(child, path.sublist(1));
 }
 
 /// The index keys one document produces, §3–§5.
@@ -166,7 +162,7 @@ List<Uint8List> indexKeysFor(
   final perField = <List<CValue>>[];
   for (final path in idx.fields) {
     final vs = resolvePath(doc, path);
-    if (vs.isEmpty) {
+    if (vs == null) {
       if (idx.sparse) return const [];
       perField.add(const [CNull()]);
       continue;

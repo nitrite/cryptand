@@ -44,13 +44,13 @@ void main() {
           }),
         ])
       });
-      expect(resolvePath(d, 'orders.items.sku').map((v) => (v as CStr).value),
+      expect(resolvePath(d, 'orders.items.sku')!.map((v) => (v as CStr).value),
           ['a', 'b', 'c']);
     });
 
     test('an unresolvable path is an absent field', () {
-      expect(resolvePath(doc({'a': const CStr('x')}), 'a.b.c'), isEmpty);
-      expect(resolvePath(doc({'a': const CStr('x')}), 'zzz'), isEmpty);
+      expect(resolvePath(doc({'a': const CStr('x')}), 'a.b.c'), isNull);
+      expect(resolvePath(doc({'a': const CStr('x')}), 'zzz'), isNull);
     });
   });
 
@@ -87,6 +87,23 @@ void main() {
       final absent = indexKeysFor(idx, doc({}), const CNitriteId(1));
       expect(present.single, absent.single);
       expect(indexEntryValues(absent.single, 1).single, isA<CNull>());
+    });
+
+    test('an empty array has no entries; an unresolved traversal is NULL',
+        () {
+      // F-058/F-059: section 4 gives an empty array zero entries, section 5
+      // makes a path no array element resolves an absent field.
+      expect(indexKeysFor(idx, doc({'tags': CArray([])}), const CNitriteId(1)),
+          isEmpty);
+      const nested = IndexDescriptor(
+          indexType: IndexType.nonUnique, dataTree: 20, fields: ['a.b']);
+      final keys = indexKeysFor(
+          nested,
+          doc({
+            'a': CArray([const CStr('x')])
+          }),
+          const CNitriteId(1));
+      expect(indexEntryValues(keys.single, 1).single, isA<CNull>());
     });
 
     test('sparse skips an absent field entirely', () {
