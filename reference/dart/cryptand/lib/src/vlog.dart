@@ -657,6 +657,7 @@ final class ValueLog {
     s.liveBytes -= ptr.len;
     s.liveRecords--;
     if (s.liveBytes < 0) s.liveBytes = 0;
+    if (s.liveRecords < 0) s.liveRecords = 0;
   }
 
   /// Returns a dropped segment's file extent to the page space. Set by the
