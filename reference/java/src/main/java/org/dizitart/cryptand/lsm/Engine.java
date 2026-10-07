@@ -267,6 +267,13 @@ public final class Engine implements AutoCloseable {
      */
     private volatile long completedThrough;
     /**
+     * After a restore: the end of the abandoned seq range, and the checkpoint
+     * seq to report in its place until a write completes past it (F-066).
+     * Guarded by {@link #seqLock}; {@code -1} when there is none.
+     */
+    private long restoredGapEnd = -1;
+    private long restoredSeq;
+    /**
      * Guards {@link #completedRanges} and carries {@link #visibleChanged}.
      *
      * <p>Separate from the committer's own wake-up path on purpose. An earlier
@@ -999,7 +1006,10 @@ public final class Engine implements AutoCloseable {
     private long completedThrough() {
         seqLock.lock();
         try {
-            return completedThrough;
+            // Nothing completed since a restore: the abandoned seqs are not
+            // visible, or the committer would publish them over the restored
+            // roots (F-066).
+            return completedThrough == restoredGapEnd ? restoredSeq : completedThrough;
         } finally {
             seqLock.unlock();
         }
@@ -3590,7 +3600,11 @@ public final class Engine implements AutoCloseable {
         seqLock.lock();
         try {
             completedRanges.clear();
-            completedThrough = Math.max(completedThrough, through);
+            // Counters never roll back, so the next write starts above every
+            // abandoned seq; the prefix must reach there for it to fold.
+            completedThrough = Math.max(completedThrough, nextSeq.get() - 1);
+            restoredGapEnd = completedThrough;
+            restoredSeq = through;
         } finally {
             seqLock.unlock();
         }

@@ -81,6 +81,15 @@ class OperationsTest {
             assertTrue(e.superblock().nextNonce >= nonceBefore,
                     "next_nonce must not roll back, or abandoned commits' nonces are reissued");
             assertEquals(c.seq(), e.visibleSeq());
+            // F-066: what the background committer does next must not publish
+            // the abandoned seqs over the restored roots.
+            e.commitNow();
+            assertEquals(c.seq(), e.visibleSeq());
+            // ...and a write after the restore still becomes visible.
+            e.batch().put(TREE, key(7), val("third-7")).commit();
+            e.commitNow();
+            assertArrayEquals(val("third-7"), e.get(TREE, key(7)));
+            assertTrue(e.visibleSeq() > c.seq());
         }
     }
 
