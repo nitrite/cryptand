@@ -358,6 +358,11 @@ public final class Collection {
             return scan(IndexKeys.startsWith(prefix, s));
         }
 
+        /** A range on the field after an equality on {@code prefix}. */
+        public List<Long> range(List<Value> prefix, IndexKeys.Cmp op, Value bound) {
+            return scan(IndexKeys.range(prefix, op, bound));
+        }
+
         /**
          * Recomputes {@code params.stats} for this index —
          * {@code spec/13-operations.md} §9.

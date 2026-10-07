@@ -4,6 +4,7 @@ import org.dizitart.cryptand.CorruptionException;
 import org.dizitart.cryptand.InvalidArgumentException;
 import org.dizitart.cryptand.LimitException;
 import org.dizitart.cryptand.util.ByteWriter;
+import org.dizitart.cryptand.value.Compare;
 import org.dizitart.cryptand.value.Value;
 
 import java.util.ArrayList;
@@ -106,13 +107,18 @@ public final class IndexKeys {
     private static List<Value> resolveFrom(Value v, List<String> path, int i) {
         if (v instanceof Value.Array a) {
             List<Value> out = new ArrayList<>();
+            boolean any = false;
             for (Value item : a.items()) {
                 List<Value> sub = resolveFrom(item, path, i);
                 if (sub != null) {
+                    any = true;
                     out.addAll(sub);
                 }
             }
-            return out;
+            // §5: a traversal where no element resolves is an absent field,
+            // not an empty one. A terminal array (i == size) is §4's
+            // one-entry-per-element, so an empty one has no entries (F-059).
+            return any || i == path.size() ? out : null;
         }
         if (i == path.size()) {
             return List.of(v);
@@ -269,6 +275,34 @@ public final class IndexKeys {
     public static Scan equalsPrefixNumeric(List<Value> prefix) {
         byte[] lower = Cke.arrayPrefixNumeric(prefix);
         return new Scan(lower, Cke.successor(lower));
+    }
+
+    /** The comparison of a range bound, {@code 06-indexes.md} §7. */
+    public enum Cmp { GT, GE, LT, LE }
+
+    /**
+     * A range on the element after an equality on {@code prefix}. A numeric
+     * bound is built from {@code N(v)}, never from {@code CKE(v)}
+     * ({@code 03-key-encoding.md} §8.2).
+     */
+    public static Scan range(List<Value> prefix, Cmp op, Value bound) {
+        ByteWriter w = new ByteWriter(32);
+        w.bytes(Cke.prefixOfArray(prefix)).u8(0x01);
+        byte[] base = w.toBytes();
+        byte[] b = Compare.isNumeric(bound) ? Cke.numericPrefix(bound) : Cke.encode(bound);
+        byte[] at = new byte[base.length + b.length];
+        System.arraycopy(base, 0, at, 0, base.length);
+        System.arraycopy(b, 0, at, base.length, b.length);
+        byte[] allAbove = Cke.successor(base);
+        return switch (op) {
+            case GE -> new Scan(at, allAbove);
+            case GT -> {
+                byte[] after = Cke.successor(at);
+                yield after == null ? new Scan(allAbove, allAbove) : new Scan(after, allAbove);
+            }
+            case LT -> new Scan(base, at);
+            case LE -> new Scan(base, Cke.successor(at));
+        };
     }
 
     /** A {@code starts_with} on a string in the position after {@code prefix}. */
