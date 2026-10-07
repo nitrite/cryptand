@@ -52,6 +52,19 @@ List<CValue> corpus() => <CValue>[
     ];
 
 void main() {
+  test('every NaN is written as the quiet NaN of its width (F-061)', () {
+    // spec/00-conventions.md section 3. A sign bit (x64's default NaN) and a
+    // payload are both rewritten.
+    final b = ByteData(8);
+    b.setUint64(0, 0xFFF8000000000001);
+    final f64 = encodeValue(CFloat.f64(b.getFloat64(0)));
+    expect(f64.sublist(f64.length - 8),
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x7f]);
+    b.setUint32(0, 0xFFC00001);
+    final f32 = encodeValue(CFloat.f32(b.getFloat32(0)));
+    expect(f32.sublist(f32.length - 4), [0x00, 0x00, 0xc0, 0x7f]);
+  });
+
   test('F-041: a 2^64-1 inline name ref is corruption, not a RangeError', () {
     // {"a": null} with its name ref replaced by the 10-byte uvar 2^64-1.
     final b = Uint8List.fromList([

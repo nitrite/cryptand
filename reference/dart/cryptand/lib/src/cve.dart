@@ -104,13 +104,14 @@ void writeValue(ByteWriter w, CValue v, {NameDict? dict, int depth = 0}) {
       _writeInt(w, v);
     case CFloat():
       if (v.type == NumType.f32) {
-        w
-          ..u8(Tag.f32)
-          ..f32(v.value);
+        // spec/00-conventions.md section 3: NaN is written as the quiet NaN's
+        // bits. `double.nan` is not that on x64, where it has the sign set
+        // (F-061).
+        w.u8(Tag.f32);
+        v.value.isNaN ? w.u32(0x7FC00000) : w.f32(v.value);
       } else {
-        w
-          ..u8(Tag.f64)
-          ..f64(_canonicalNan(v.value));
+        w.u8(Tag.f64);
+        v.value.isNaN ? w.u64(0x7FF8000000000000) : w.f64(v.value);
       }
     case CDec128():
       w
@@ -205,10 +206,6 @@ void writeValue(ByteWriter w, CValue v, {NameDict? dict, int depth = 0}) {
       w..u8(v.unknownTag)..uvar(v.payload.length)..bytes(v.payload);
   }
 }
-
-/// `spec/00-conventions.md` section 3: "NaN is canonicalized on encode: any NaN
-/// payload MUST be written as the quiet NaN 0x7FF8000000000000."
-double _canonicalNan(double d) => d.isNaN ? double.nan : d;
 
 void _writeLengthPrefixed(ByteWriter w, int tag, void Function(ByteWriter) body) {
   final inner = ByteWriter(64);
