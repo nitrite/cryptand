@@ -999,7 +999,7 @@ public final class Vlog {
                 Open open = openOf(s.segmentId);
                 long end = open != null ? open.watermark : seg.dataOffset + s.bytes;
                 snapshot.add(new LivenessSnapshot(s.segmentId, seg, end,
-                        open != null ? open.records : 0));
+                        open != null ? open.records : s.records));
             }
         }
 
@@ -1037,6 +1037,12 @@ public final class Vlog {
                     // walked nor credited, and this overwrite lost it for good.
                     liveBytes += Math.max(0, open.tail.get() - snap.end());
                     liveRecords += Math.max(0, open.records - snap.records());
+                } else {
+                    // F-052: sealed during the walk (a foreground append overflowed
+                    // it). Its records past the snapshot were not walked either;
+                    // the seal fixed its extent, so credit them all.
+                    liveBytes += Math.max(0, snap.seg().dataOffset + s.bytes - snap.end());
+                    liveRecords += Math.max(0, s.records - snap.records());
                 }
                 s.liveBytes = liveBytes;
                 s.liveRecords = liveRecords;

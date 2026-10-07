@@ -329,6 +329,55 @@ class EngineTest {
         }
     }
 
+    /**
+     * F-052: a foreground append that overflows the open segment seals it
+     * while {@code recomputeLiveness} walks without the lock. The records
+     * appended between the snapshot and the seal were neither walked nor
+     * credited, and the recount's overwrite understated the sealed segment.
+     */
+    @Test
+    @DisplayName("F-052: a segment sealed during the liveness recount is not understated")
+    void livenessRecountSurvivesSeal(@TempDir Path dir) {
+        Engine.Options o = options();
+        o.profile = Profile.MOBILE;
+        o.backgroundCompaction = false;
+        try (Engine e = Engine.create(dir.resolve("f052.cryptand"), o)) {
+            byte[] big = new byte[2000];
+            for (int i = 0; i < 10; i++) {
+                e.batch().put(TREE, key(i), big.clone()).commit();
+            }
+            e.commitNow();
+            java.util.Set<Long> before = new java.util.HashSet<>();
+            for (org.dizitart.cryptand.lsm.VlogStats st : e.vlog().allStats()) {
+                if (st.sealed) {
+                    before.add(st.segmentId);
+                }
+            }
+            boolean[] fired = {false};
+            // Every record counts as live, so a correct recount of a sealed
+            // segment declares all of its bytes.
+            e.vlog().recomputeLiveness((treeId, k, seg, off) -> {
+                if (!fired[0]) {
+                    fired[0] = true;
+                    // MOBILE segments are 4 MiB: 3 000 x 2 000 B overflows one.
+                    for (int i = 0; i < 3000; i++) {
+                        e.batch().put(TREE, key(1000 + i), big.clone()).commit();
+                    }
+                }
+                return true;
+            });
+            boolean checked = false;
+            for (org.dizitart.cryptand.lsm.VlogStats st : e.vlog().allStats()) {
+                if (st.sealed && !before.contains(st.segmentId)) {
+                    checked = true;
+                    assertTrue(st.liveBytes >= st.bytes, "segment " + st.segmentId
+                            + " declares " + st.liveBytes + " live of " + st.bytes);
+                }
+            }
+            assertTrue(checked, "the fixture sealed no segment during the recount");
+        }
+    }
+
     @Test
     @DisplayName("a put is readable, and survives close and reopen")
     void putGetReopen(@TempDir Path dir) {
