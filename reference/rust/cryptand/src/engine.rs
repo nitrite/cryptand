@@ -3037,9 +3037,12 @@ impl Engine {
             }
         }
         // F-019: point lookups do not see range deletes; a covering one newer
-        // than the record hides it exactly as it does for a reader.
+        // than the record hides it exactly as it does for a reader. Expiry
+        // does NOT make it dead here (F-060): the cell still exists, and a
+        // backwards clock resurrects it (04 §9), so its value is copied with
+        // its expiry. It dies when compaction drops the cell.
         if let Some(rec) = &best {
-            if self.range_delete_seq(tree, user_key, None)? > rec.seq() || self.expired(rec) {
+            if self.range_delete_seq(tree, user_key, None)? > rec.seq() {
                 return Ok(None);
             }
         }
