@@ -322,6 +322,24 @@ fn cmd_mutate(path: &str, tag: &str) -> cryptand::Result<()> {
     Ok(())
 }
 
+/// F-072/F-073: `encrypt <plaintext file> --key K [--half]` turns encryption on
+/// in place; with `--half` it stops before converting anything, leaving
+/// plaintext and encrypted pages and value-log segments side by side.
+fn cmd_encrypt(path: &str) -> cryptand::Result<()> {
+    use cryptand::convert::ConvertApi;
+    let key = key_arg().ok_or_else(|| cryptand::Error::Invalid("encrypt needs --key".into()))?;
+    let half = std::env::args().any(|a| a == "--half");
+    let mut e = Engine::open(&PathBuf::from(path), None)?;
+    e.encrypt(&key, 0, 0, 0, 0)?;
+    if !half {
+        while e.convert_step()? == cryptand::spaceapi::Step::More {}
+    }
+    let c = e.conversion()?;
+    e.close(true)?;
+    println!("encrypted {path}: converted={} remaining={}", c.converted, c.remaining);
+    Ok(())
+}
+
 fn cmd_verify(path: &str) -> cryptand::Result<ExitCode> {
     let mut e = Engine::open(&PathBuf::from(path), key_arg().as_deref())?;
     let r = e.verify()?;
@@ -509,6 +527,7 @@ fn main() -> ExitCode {
             cmd_mutate(&args[1], &args[2]).map(|_| ExitCode::SUCCESS)
         }
         Some("verify") if args.len() >= 2 => cmd_verify(&args[1]),
+        Some("encrypt") if args.len() >= 2 => cmd_encrypt(&args[1]).map(|_| ExitCode::SUCCESS),
         Some("corpus") if args.len() >= 2 => cmd_corpus(&args[1]),
         _ => {
             eprintln!(

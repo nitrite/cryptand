@@ -193,6 +193,27 @@ print("held",flush=True); time.sleep(120)' "$lf" > "$work/lock.out" &
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 fi
 
+# F-072 / F-073, `14-security.md` §8.3: a file encrypted in place reads the
+# same in every implementation, half-converted (plaintext and encrypted pages
+# and value-log segments side by side; 14 §5.2 says a reader decides per
+# object) and fully converted.
+for mode in half full; do
+  say "7. rust encrypts in place ($mode); every implementation reads and verifies"
+  ef="$work/encrypt-$mode.cryptand"
+  run_impl rust write "$ef" >/dev/null || { bad "rust could not write"; continue; }
+  want="$(field "$(run_impl rust read "$ef")" digest)"
+  KEY=0909090909090909090909090909090909090909090909090909090909090909
+  extra=(); [[ $mode == half ]] && extra=(--half)
+  run_impl rust encrypt "$ef" ${extra[@]+"${extra[@]}"} >/dev/null || { bad "rust could not encrypt"; KEY=""; continue; }
+  for impl in rust java dart; do
+    got="$(field "$(run_impl "$impl" read "$ef")" digest)"
+    v="$(run_impl "$impl" verify "$ef" 2>&1 | tail -1)"
+    if [[ "$got" == "$want" && "$v" == *" 0 findings"* ]]; then ok "$impl digest $got, $v"
+    else bad "$impl: digest '$got' want '$want'; $v"; fi
+  done
+  KEY=""
+done
+
 say "result"
 if [[ $fail -eq 0 ]]; then
   printf '   \033[32mthe round-trip gate passes in both directions\033[0m\n'
