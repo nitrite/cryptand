@@ -174,6 +174,25 @@ for impl in rust dart java; do
 done
 KEY=""
 
+# F-067 / `01-container.md` §10: every writer locks the one byte at 2^62. A
+# plain POSIX `fcntl` lock on that byte (what Java and Dart take) must keep
+# every implementation from opening for writing.
+if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]] && command -v python3 >/dev/null; then
+  say "6. a writer lock on byte 2^62 excludes every implementation"
+  lf="$work/rust-to-dart.cryptand"
+  python3 -c 'import fcntl,os,sys,time
+fd=os.open(sys.argv[1],os.O_RDWR); fcntl.lockf(fd,fcntl.LOCK_EX|fcntl.LOCK_NB,1,1<<62,0)
+print("held",flush=True); time.sleep(120)' "$lf" > "$work/lock.out" &
+  holder=$!
+  for _ in $(seq 50); do grep -q held "$work/lock.out" 2>/dev/null && break; sleep 0.1; done
+  for impl in rust dart java; do
+    out="$(run_impl "$impl" mutate "$lf" "$impl" 2>&1)"
+    if grep -qi "locked" <<<"$out"; then ok "$impl refused: $(grep -i locked <<<"$out" | head -1)"
+    else bad "$impl was not refused as locked: $(tail -1 <<<"$out")"; fi
+  done
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+fi
+
 say "result"
 if [[ $fail -eq 0 ]]; then
   printf '   \033[32mthe round-trip gate passes in both directions\033[0m\n'

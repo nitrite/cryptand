@@ -107,6 +107,7 @@ dependencies = [
  "chacha20poly1305",
  "hkdf",
  "hmac",
+ "libc",
  "lz4_flex",
  "serde_json",
  "sha2",

@@ -417,8 +417,8 @@ abstract final class DatabaseFile {
       _open(path, key, readOnly: true);
 
   /// `spec/01-container.md` §10 — "one writing **process** per database,
-  /// enforced by an exclusive advisory lock on the database file
-  /// (`flock` / `LockFileEx`) held for its writing lifetime", and "a second
+  /// enforced by an exclusive lock on the single byte at offset 2^62 of the
+  /// database file (`fcntl` / `LockFileEx`) held for its writing lifetime", and "a second
   /// process opening for writing MUST fail with a clear 'locked by another
   /// process' error and MUST NOT fall back to opening anyway".
   ///
@@ -432,9 +432,9 @@ abstract final class DatabaseFile {
     try {
       // One byte far past any data, not the whole file: on Windows a
       // LockFileEx range is mandatory, and a whole-file lock on this handle
-      // blocked every read through the data handle (errno 33). The byte still
-      // lies inside the whole-file locks Rust and Java take, so writers in
-      // different languages still exclude each other.
+      // blocked every read through the data handle (errno 33). Rust and Java
+      // take the same byte (F-067), so writers in any two languages exclude
+      // each other.
       f.lockSync(FileLock.exclusive, _lockByte, _lockByte + 1);
     } on FileSystemException catch (e) {
       f.closeSync();

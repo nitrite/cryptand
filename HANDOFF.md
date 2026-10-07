@@ -24,8 +24,9 @@
 - **F-065** from hop seed 451: COW `publish` leaked a page whenever a remove
   emptied a non-root page (Rust and Dart; Java rebuilds trees whole).
 - M1.5 index differential in all three; **hop seeds 0..1000 plain clean**.
-- Open: F-067 (one writer-lock protocol across languages, M7.1, needs a spec
-  01 §10 sentence); M5: F-035, F-038, F-048's Dart verify leak report (S3).
+- **F-067 fixed:** all three lock the one byte at 2^62 (spec 01 §10 now says
+  so); interop step 6 checks it on Unix. Rust's Windows `LockFileEx` path is
+  only checked by CI. Open: M5: F-035, F-038, F-048's Dart verify leak report (S3).
 
 ## Decisions already made (human)
 
@@ -35,15 +36,14 @@
 - 10-06: F-042 — range-delete `end_key` is `CKE(end)`, no `tree_id`.
 - 10-07: Java matches nitrite-java (`--release 11`, built on JDK 17); Java
   ships its own Unicode 15.1 tables; F-058/F-059 get conformance vectors.
+- 10-07: F-067 approved — writer lock = one byte at 2^62, in spec 01 §10.
 - 10-07: push every commit. Soak (M6.7) runs on the remote Mac
   (`anindya@207.254.39.186`) when it is free, never here. It was busy 10-07
   (llama-server at 96 % CPU) and has no Dart SDK; Rust and Java soak only.
 
 ## Open questions for the human
 
-1. **F-067:** make the writer lock one protocol in all three: an exclusive
-   lock on the single byte at offset 2^62 (fcntl on Unix, LockFileEx on
-   Windows). Adds one sentence to spec 01 §10; no bytes on disk change. OK?
+(none)
 
 ## Next action
 
@@ -61,3 +61,4 @@ Hop seeds 0..300 encrypted (`nohup tools/oplog_hop.sh 0 300 --ops 400
 - 2026-10-07 — Pushed; M0.5 CI matrix (F-061…F-064); M1.5 index differential (F-057…F-059); F-060 from hop seed 289.
 - 2026-10-07 — Own Unicode tables in Java, Java 11 target, F-058/F-059 vectors; F-062…F-064 fixed; F-065 from hop seed 451.
 - 2026-10-07 — CI 26/26 green (F-066, F-068 on the way); hop 0..1000 plain clean; M0 done.
+- 2026-10-07 — F-067: one writer-lock byte (2^62) in all three + spec 01 §10; interop lock step.

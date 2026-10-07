@@ -135,7 +135,7 @@ impl Pager {
 
     /// No writer lock: the superblock probe of `Engine::open` (which opens the
     /// same file twice before it knows the page size) and every read-only path.
-    /// `flock` is per open file description, so a second descriptor in *this*
+    /// The lock is per open file description, so a second descriptor in *this*
     /// process is refused exactly like another process's would be.
     pub fn open_shared(path: &Path, page_size: usize, page_count: u64) -> Result<Pager> {
         check_page_size(page_size)?;
@@ -881,18 +881,25 @@ impl Pager {
 }
 
 /// `01-container.md` §10 — "one writing **process** per database, enforced by
-/// an exclusive advisory lock on the database file (`flock` / `LockFileEx`)
-/// held for its writing lifetime", and "a second process opening for writing
+/// an exclusive lock on the single byte at offset 2^62 of the database file
+/// (`fcntl` / `LockFileEx`) held for its writing lifetime", and "a second process opening for writing
 /// MUST fail with a clear 'locked by another process' error and MUST NOT fall
 /// back to opening anyway".
 ///
-/// The lock lives on the open file description, so it is released when the
-/// `File` is dropped — including when the process dies, which is what makes a
-/// crashed writer's database openable again with no cleanup step.
+/// One byte, not the whole file (F-067): Java and Dart take the same byte, so
+/// writers in any two languages exclude each other, and on Windows a byte far
+/// past the data does not block a reader's reads. On Linux and macOS this is an
+/// open-file-description lock, which conflicts with Java's and Dart's
+/// process-owned `fcntl` locks and, unlike them, also refuses a second
+/// descriptor in this process and survives closing one.
+///
+/// It is released when the `File` is dropped — including when the process
+/// dies, which is what makes a crashed writer's database openable again with
+/// no cleanup step.
 fn take_writer_lock(file: &File, path: &Path) -> Result<()> {
-    match file.try_lock() {
-        Ok(()) => Ok(()),
-        Err(std::fs::TryLockError::WouldBlock) => Err(crate::error::Error::Locked(format!(
+    match lock_byte(file) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(crate::error::Error::Locked(format!(
             "{} is open for writing by another process",
             path.display()
         ))),
@@ -905,4 +912,66 @@ fn take_writer_lock(file: &File, path: &Path) -> Result<()> {
             path.display()
         ))),
     }
+}
+
+/// `01-container.md` §10 — the writer lock byte.
+const LOCK_BYTE: u64 = 1 << 62;
+
+/// `Ok(false)` when another writer holds the byte.
+#[cfg(unix)]
+fn lock_byte(file: &File) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    const CMD: libc::c_int = libc::F_OFD_SETLK;
+    // ponytail: process-owned lock elsewhere; a second descriptor in this
+    // process is not refused there.
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    const CMD: libc::c_int = libc::F_SETLK;
+    // SAFETY: zeroed `flock` is valid; OFD locks require l_pid = 0.
+    let mut fl: libc::flock = unsafe { std::mem::zeroed() };
+    fl.l_type = libc::F_WRLCK as _;
+    fl.l_whence = libc::SEEK_SET as _;
+    fl.l_start = LOCK_BYTE as _;
+    fl.l_len = 1;
+    // SAFETY: valid fd and a valid `flock` pointer.
+    if unsafe { libc::fcntl(file.as_raw_fd(), CMD, &fl) } == 0 {
+        return Ok(true);
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EAGAIN) | Some(libc::EACCES) => Ok(false),
+        _ => Err(e),
+    }
+}
+
+#[cfg(windows)]
+fn lock_byte(file: &File) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: u32,
+        offset_high: u32,
+        h_event: *mut std::ffi::c_void,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LockFileEx(h: *mut std::ffi::c_void, flags: u32, reserved: u32, lo: u32, hi: u32, ov: *mut Overlapped) -> i32;
+    }
+    const EXCLUSIVE_FAIL_IMMEDIATELY: u32 = 0x2 | 0x1;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    let mut ov = Overlapped {
+        internal: 0,
+        internal_high: 0,
+        offset: LOCK_BYTE as u32,
+        offset_high: (LOCK_BYTE >> 32) as u32,
+        h_event: std::ptr::null_mut(),
+    };
+    // SAFETY: valid handle; `ov` outlives the synchronous call.
+    if unsafe { LockFileEx(file.as_raw_handle(), EXCLUSIVE_FAIL_IMMEDIATELY, 0, 1, 0, &mut ov) } != 0 {
+        return Ok(true);
+    }
+    let e = std::io::Error::last_os_error();
+    if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION) { Ok(false) } else { Err(e) }
 }

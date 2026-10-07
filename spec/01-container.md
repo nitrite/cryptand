@@ -487,7 +487,10 @@ first-class requirement, and the format is built for it:
 Between processes:
 
 - One writing **process** per database, enforced by an exclusive advisory lock on
-  the database file (`flock` / `LockFileEx`) held for its writing lifetime.
+  the database file held for its writing lifetime. The lock MUST cover exactly
+  the one byte at offset 2⁶² (`fcntl` `F_WRLCK` on Unix, `LockFileEx` on
+  Windows), whatever the file's length, so writers in any two implementations
+  exclude each other and the lock never overlaps data a reader reads.
   Multi-threaded writing within that process is unrestricted.
 - **Multi-process *reading* is supported** under feature bit `MULTIPROC_READ`:
   one writing process, any number of reading processes, coordinated only for

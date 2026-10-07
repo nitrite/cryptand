@@ -34,6 +34,7 @@ public final class PageFile implements AutoCloseable {
     private final boolean readOnly;
     private final int requestedDurability;
     private final int achievedDurability;
+    private static final long LOCK_BYTE = 1L << 62;
     private FileLock writerLock;
 
     public PageFile(Path path, boolean readOnly, int requestedDurability) {
@@ -59,11 +60,14 @@ public final class PageFile implements AutoCloseable {
 
     /**
      * §10: one writing process per database. A second writer MUST fail with a
-     * clear error and MUST NOT fall back to opening anyway.
+     * clear error and MUST NOT fall back to opening anyway. The lock is the
+     * single byte at 2^62 (F-067), the byte Rust and Dart take, so writers in
+     * any two languages exclude each other and a Windows reader's reads are not
+     * blocked by a whole-file lock.
      */
     private void acquireWriterLock() {
         try {
-            writerLock = channel.tryLock();
+            writerLock = channel.tryLock(LOCK_BYTE, 1, false);
         } catch (OverlappingFileLockException e) {
             writerLock = null;
         } catch (IOException e) {
