@@ -38,6 +38,9 @@ fn an_encrypted_file_round_trips_and_refuses_the_wrong_key() {
 
     let mut ok = Engine::open(&t.path, Some(&[7u8; 32])).unwrap();
     assert_eq!(ok.get(T, &Value::NitriteId(3)).unwrap().unwrap(), vec![3u8; 700]);
+    // Closed first: this is about the key, not the writer lock, and on Windows
+    // a still-open writer makes the next open's first read fail as Locked.
+    ok.close(true).unwrap();
     // §3.3 and `00-conventions.md` §9: "cannot unlock", reported identically
     // for a missing keyslot and a wrong password.
     assert!(matches!(Engine::open(&t.path, Some(&[8u8; 32])), Err(Error::CannotUnlock)));
@@ -195,6 +198,7 @@ fn key_rotation_leaves_only_the_new_credential_working() {
 
     let mut ok = Engine::open(&t.path, Some(&[42u8; 32])).unwrap();
     assert_eq!(ok.get(T, &Value::NitriteId(1)).unwrap().as_deref(), Some(&b"v"[..]));
+    ok.close(true).unwrap();
     assert!(matches!(Engine::open(&t.path, Some(&[7u8; 32])), Err(Error::CannotUnlock)));
 }
 

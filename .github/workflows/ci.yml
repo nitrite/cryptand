@@ -37,8 +37,8 @@ jobs:
           workspaces: reference/rust
       # Both profiles: they test different arithmetic. An overflow that
       # panics in debug silently wraps in release.
-      - run: cargo test --workspace --features cryptand/harness
-      - run: cargo test --workspace --release --features cryptand/harness
+      - run: cargo test --workspace --no-fail-fast --features cryptand/harness
+      - run: cargo test --workspace --release --no-fail-fast --features cryptand/harness
 
   cargo-deny:
     name: cargo-deny

@@ -105,9 +105,16 @@ void main() {
       for (var i = 0; i < 4000; i++) {
         e.timedForeground('put', () => e.put(tree, CNitriteId(i), doc(dict, i)));
       }
-      printOnFailure('worst foreground put: '
-          '${e.stallSamples.map((s) => s.ms).reduce((a, b) => a > b ? a : b).toStringAsFixed(2)} ms');
-      expect(e.stallViolations, isEmpty);
+      // The mechanism, deterministically: no put flushed.
+      expect(e.refsAt(0), isEmpty);
+      // The budget at p99, like the test below and for its reason: on the
+      // GitHub macOS runner one warmed sample of 4000 still landed at 10 ms
+      // (F-064) against a steady 0.2 ms - a descheduled VM, not the engine.
+      final ms = [for (final s in e.stallSamples) s.ms]..sort();
+      final p99 = ms[((ms.length - 1) * 0.99).round()];
+      printOnFailure('foreground put: p99 ${p99.toStringAsFixed(2)} ms, '
+          'worst ${ms.last.toStringAsFixed(2)} ms');
+      expect(p99, lessThan(e.profile.maxForegroundStallMs));
     });
 
     test('no single foreground operation exceeds the budget on mobile', () {
