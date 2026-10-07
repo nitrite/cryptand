@@ -22,8 +22,12 @@
   spec 04 §2.5), F-043, F-044/F-050 BLOBs (Rust/Dart could not read Java's;
   nobody freed dropped ones), F-046, F-048 (Rust repair), F-053 (F-029 in
   Rust/Dart), F-054 (Rust shrink cut a blob), F-055 (Dart freed live segments).
-- Open: **F-052** (S1 suspect, Java `live_bytes` understated once in 300
-  seeds under heavy load, not reproduced); for M5: F-035 (Dart writer lock,
+- 10-07 pm: **F-052 fixed** (S0, Java recount lost the credit of a segment
+  sealed mid-walk; deterministic `EngineTest` control, compactor off).
+  **F-056 fixed** (Dart `live_records` < 0 → save threw; hop seed 151 vector).
+  Running (nohup, `reference/bench/runs/`): `f052-java2.log` (Java 0..300,
+  2000 ops, under load) and `hop-152-300.log`.
+- Open for M5: F-035 (Dart writer lock,
   spec 01 §10 MUST), F-038 (Dart file growth), F-048's Dart verify leak report (S3).
 
 ## Decisions already made (human)
@@ -42,11 +46,9 @@
 
 ## Next action
 
-Chase F-052: run `tools/oplog_java.sh 0 300 --ops 2000` with the machine
-loaded (e.g. alongside a hop sweep) until it recurs, keep the failing
-`-Doplog.trace` output, and compare `recomputeLiveness` with the
-publish/seal paths. Then M1.5 (query differential) and the 10 000-seed
-runs of 1.2/1.3 as `nohup` jobs.
+Read `reference/bench/runs/f052-java2.log` and `hop-152-300.log`; any
+failure is a new finding (reproduce first). If clean, F-052's sweep verify is
+done: M1.5 (query differential), then the 10 000-seed runs of 1.2/1.3.
 
 ## Log
 
@@ -55,3 +57,4 @@ runs of 1.2/1.3 as `nohup` jobs.
 - 2026-10-06 — Java clean (F-030/31/34/36/37/40), Dart checker (F-032/33/39), F-041, M1.3 hop → F-042.
 - 2026-10-07 — Hop sweeps: F-043…F-051 across all three; hop 50 plain + 20 enc clean; gate green.
 - 2026-10-07 — Final-code sweeps; F-052 (suspect), F-053 (F-029 in Rust/Dart), F-054, F-055; hop 0..150 plain + 0..40 enc clean.
+- 2026-10-07 — F-052 root-caused and fixed (S0, Java seal during recount); F-056 (Dart live_records < 0) from hop seed 151.
