@@ -27,6 +27,16 @@
 - **F-067 fixed:** all three lock the one byte at 2^62 (spec 01 §10 now says
   so); interop step 6 checks it on Unix. Rust's Windows `LockFileEx` path is
   only checked by CI. Open: M5: F-035, F-038, F-048's Dart verify leak report (S3).
+- **Hop 0..300 encrypted clean** (10-07; seed 286 re-run alone after a
+  concurrent `mvn` broke its Java leg — never build Java while hop runs).
+- **M2.1 started (Rust):** `src/fault.rs` behind feature `faults` (tests only,
+  enabled via a self dev-dependency): power cut drops/tears un-fsynced writes,
+  fsync EIO, ENOSPC. `tests/fault_test.rs`: 1000 seeds × 3 sweeps clean
+  (`CRYPTAND_FAULT_SEEDS=0..1000`, ~10 min release); lying-fsync control fails.
+  Found **F-069 (S0, fixed in all three)**: slot B looked up at 4096 when slot A
+  is bad; and F-070 (S3, Rust verify). Java and Dart fault layers not started.
+- Rust `stall_test` fails whenever another job is fsyncing on /Volumes/External;
+  run the gate on a quiet disk.
 
 ## Decisions already made (human)
 
@@ -43,12 +53,16 @@
 
 ## Open questions for the human
 
-(none)
+- F-069: spec 01 §2.1 step 1 says "read at offset `page_size`" but a reader
+  cannot know `page_size` when slot A is invalid. Proposed wording: "If slot A
+  is invalid, look for slot B at each legal page size (4096·2^k, k = 0..4) and
+  accept it only where its `page_size_log2` names that offset." Approve?
 
 ## Next action
 
-Hop seeds 0..300 encrypted (`nohup tools/oplog_hop.sh 0 300 --ops 400
---encrypted`), then the 10 000-seed runs of 1.2 (M1 Verify).
+M2.1 for Java: the same fault seam under its `PageFile` (test tree), port
+`fault_test.rs`'s sweeps. In parallel (background, no Java builds while it
+runs): the 10 000-seed runs of 1.2 (M1 Verify).
 
 ## Log
 
@@ -62,3 +76,4 @@ Hop seeds 0..300 encrypted (`nohup tools/oplog_hop.sh 0 300 --ops 400
 - 2026-10-07 — Own Unicode tables in Java, Java 11 target, F-058/F-059 vectors; F-062…F-064 fixed; F-065 from hop seed 451.
 - 2026-10-07 — CI 26/26 green (F-066, F-068 on the way); hop 0..1000 plain clean; M0 done.
 - 2026-10-07 — F-067: one writer-lock byte (2^62) in all three + spec 01 §10; interop lock step.
+- 2026-10-07 — Hop 0..300 enc clean; M2.1 Rust fault seam, 3000 fault seeds clean; F-069 (S0, all three), F-070.
