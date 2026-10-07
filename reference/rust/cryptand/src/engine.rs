@@ -1389,7 +1389,7 @@ impl Engine {
         vlog::decode_record(&raw, encrypted)
     }
 
-    /// Head byte 39 of value-log segment `id`.
+    /// Whether value-log segment `id` is encrypted: head byte 39 (F-073).
     pub fn vlog_encrypted(&mut self, id: u64) -> Result<bool> {
         if let Some(&e) = self.vlog_enc.get(&id) {
             return Ok(e);
@@ -1397,7 +1397,26 @@ impl Engine {
         let Some(start) = self.vlog_stats.get(&id).map(|s| s.start_page) else {
             return corrupt(format!("unknown value-log segment {id}"));
         };
-        let e = vlog::VlogHead::parse(&self.pager.read_page_clear(start)?)?.encrypted;
+        let mut e = vlog::VlogHead::parse(&self.pager.read_page_clear(start)?)?.encrypted;
+        if !e && self.keys.is_some() {
+            // ponytail: F-076, Dart (and the frozen `v1.0-encrypted` golden
+            // file) write byte 39 = 0 over encrypted records. A segment never
+            // mixes framings, so with a key in hand its first record decides:
+            // a clear CRC that fails means encrypted, and the AEAD tag stays
+            // the authority on every read. Drop once Dart writes the byte (M5).
+            let bytes = self.vlog_stats.get(&id).map(|s| s.bytes).unwrap_or(0);
+            if bytes > 0 {
+                let base = start * self.pager.page_size as u64 + DATA_OFFSET as u64;
+                let head = self.pager.read_at(base, (bytes as usize).min(10))?;
+                if let Ok((len, n)) = crate::varint::get_uvar(&head) {
+                    let total = n + len as usize;
+                    if total as u64 <= bytes {
+                        let raw = self.pager.read_at(base, total)?;
+                        e = vlog::decode_record(&raw, false).is_err();
+                    }
+                }
+            }
+        }
         self.vlog_enc.insert(id, e);
         Ok(e)
     }
