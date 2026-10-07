@@ -695,3 +695,25 @@ fn add_key_remove_key_and_crypto_erase() {
         assert!(area.iter().all(|&b| b == 0), "keyslot bytes left at offset {slot}");
     }
 }
+
+/// F-074: the nonce-floor publish (here the one 14 §4.1 makes at open) is an
+/// empty commit into the *other* slot. It used to rewrite the live slot in
+/// place, so a torn write fell back to an older commit whose freed pages may
+/// already have been reused.
+#[test]
+fn the_nonce_floor_publish_never_rewrites_the_live_slot() {
+    let t = TempDb::new("f074");
+    let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &[5u8; 32], 0, 0, 0, 0).unwrap();
+    e.put(16, &Value::NitriteId(1), b"x").unwrap();
+    e.close(true).unwrap();
+    let live = e.sb.commit_id;
+    drop(e);
+    let ps = 8192usize;
+    let at = if live % 2 == 1 { 0 } else { ps };
+    let before = std::fs::read(&t.path).unwrap()[at..at + 4096].to_vec();
+    let e = Engine::open(&t.path, Some(&[5u8; 32])).unwrap();
+    assert!(e.sb.commit_id > live, "the floor publish should be a new commit");
+    drop(e);
+    let after = std::fs::read(&t.path).unwrap()[at..at + 4096].to_vec();
+    assert_eq!(before, after, "the live superblock slot was rewritten in place");
+}

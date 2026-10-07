@@ -890,7 +890,14 @@ impl Engine {
             c.next = self.nonce_next;
             c.limit = self.nonce_limit;
         }
-        self.write_superblock(Durability::Sync)
+        // F-074: an empty commit — the last commit's roots and `page_count`,
+        // the new floor, the *next* commit_id. With the same commit_id it
+        // overwrote the live slot (a torn write fell back to a commit whose
+        // freed pages may be reused), and with the pager's `page_count` it
+        // published, without referencing them, every page allocated since.
+        self.sb.commit_id += 1;
+        let published = self.sb.page_count;
+        self.write_superblock_at(Durability::Sync, published)
     }
 
     /// Reserves `n` nonce values without handing any out, so a page-write loop
@@ -3359,7 +3366,12 @@ impl Engine {
     }
 
     pub fn write_superblock(&mut self, durability: Durability) -> Result<()> {
-        self.sb.page_count = self.pager.page_count;
+        let page_count = self.pager.page_count;
+        self.write_superblock_at(durability, page_count)
+    }
+
+    fn write_superblock_at(&mut self, durability: Durability, page_count: u64) -> Result<()> {
+        self.sb.page_count = page_count;
         self.sb.durability_achieved = self.durability_achieved as u8;
         // §2's alternate-slot rule: a crash during a superblock write leaves
         // the previous superblock intact.
