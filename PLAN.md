@@ -15,8 +15,8 @@ interop gate 12/12 directions plaintext+encrypted.
 
 | | milestone | track | due | status |
 |---|---|---|---|---|
-| M0 | Execution infra, gates, CI matrix | all | 10-07 | in progress (0.1–0.4 done; 0.5 todo) |
-| M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 checkers in all three; 1.3 hop built; 1.4 regress + hop in the gate; 1.5 todo) |
+| M0 | Execution infra, gates, CI matrix | all | 10-07 | in progress (0.1–0.4 done; 0.5 matrix live on push, red on F-062/F-063/F-064) |
+| M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 checkers in all three; 1.3 hop built; 1.4 regress + hop in the gate; 1.5 index differential in all three, 2000 seeds clean) |
 | M2 | Crash consistency + concurrency | A | 10-16 | todo |
 | M3 | Coverage-guided fuzzing | A | 10-16 | todo |
 | M4 | Security review + pentest | A | 10-21 | todo |
@@ -89,7 +89,7 @@ macOS locally and CI green on Linux/macOS/Windows, M6 scale table filled in.
 - [x] **0.4 [H]** Create GitHub repo `nitrite/cryptand` (it does not exist; this
   checkout has **no remote**), push `main` and `packaging/v1.0.0`.
   **Verify:** `gh repo view nitrite/cryptand` works and the existing CI runs.
-- [ ] **0.5** CI matrix in `.github/workflows/ci.yml`: `ubuntu`, `macos`,
+- [ ] **0.5** (10-07: matrix, cargo-deny, SHA pins landed; runs on `packaging/**` pushes. Open: F-062 JDK 17, F-063 Rust on Windows, F-064 Dart stall on macOS runner) CI matrix in `.github/workflows/ci.yml`: `ubuntu`, `macos`,
   `windows` × Rust stable + MSRV 1.89, JDK 17/21/25, Dart 3.5 + stable;
   interop on all three OSes. Add a `cargo-deny` job. Pin every action by SHA,
   `permissions: contents: read`.
@@ -121,7 +121,7 @@ test compares the engine against a model on random histories.
 - [ ] **1.4** (started: shrinkers in all three; 8 logs in `regress/`, replayed by all three
   in the gate) Shrink every failure to a minimal op-log, commit it under
   `oplog/regress/`, and replay the whole directory in `gate.sh quick`.
-- [ ] **1.5** Query differential: random documents + random filters (eq, range,
+- [ ] **1.5** (10-07: index eq / eq-numeric / range / starts_with vs a brute-force model, `query_diff_test` in all three, 2000 seeds each clean → F-057/58/59. The engines have no filter language, and vector search is brute force only (spec 09 §8 fallback), so text / spatial / kNN differentials remain) Query differential: random documents + random filters (eq, range,
   in, compound, text, spatial within/intersects, vector kNN) — the index answer
   against a brute-force scan; for HNSW, recall@10 against exact search.
   **Verify:** 10 000 seeds × 3 impls and 1 000 hop seeds with 0 divergences;

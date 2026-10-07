@@ -10,3 +10,6 @@ multiple-versions = "warn"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+[licenses.private]
+ignore = true
