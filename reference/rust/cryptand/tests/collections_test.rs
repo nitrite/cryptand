@@ -411,3 +411,15 @@ fn every_field_name_survives_a_reopen_after_incremental_interning() {
     }
     assert_eq!(c.scan(&mut db.engine).unwrap().len(), 40);
 }
+
+#[test]
+fn an_empty_array_has_no_entries_and_an_unresolved_traversal_is_null() {
+    // F-058/F-059: §4 gives an empty array zero entries; §5 makes a path no
+    // array element resolves an absent field, indexed as NULL.
+    let empty = doc(1, vec![("tags", Value::Array(vec![]))]);
+    assert!(index::index_keys(&empty, &["tags".into()], false, 1).unwrap().is_empty());
+    let nested = doc(1, vec![("a", Value::Array(vec![str_value("x")]))]);
+    let keys = index::index_keys(&nested, &["a.b".into()], false, 1).unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(index::entry_values(&keys[0]).unwrap().0, vec![Value::Null]);
+}

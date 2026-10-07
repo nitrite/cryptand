@@ -94,6 +94,21 @@ class IndexConformanceTest {
     }
 
     /**
+     * F-058/F-059: §4 gives an empty array zero entries; §5 makes a path that
+     * no array element resolves an absent field, indexed as {@code NULL}.
+     */
+    @Test
+    @DisplayName("an empty array has no entries; an unresolved traversal is NULL")
+    void emptyArrayAndUnresolvedTraversal() {
+        assertEquals(0, IndexKeys.forDocument(List.of("tags"),
+                new Value.Doc(java.util.Map.of("tags", new Value.Array(List.of()))), false, 1).size());
+        List<byte[]> keys = IndexKeys.forDocument(List.of("a.b"),
+                new Value.Doc(java.util.Map.of("a", new Value.Array(List.of(new Value.Str("x"))))), false, 1);
+        assertEquals(1, keys.size());
+        assertEquals(List.of(Value.NULL), IndexKeys.valuesOf(keys.get(0)));
+    }
+
+    /**
      * §1: the uniqueness check is on the {@code NitriteId} behind the matching
      * entries, not on their existence. A unique index over a multi-valued field
      * reaches the same key twice for {@code ["a", "b", "a"]}, and a rebuild or
