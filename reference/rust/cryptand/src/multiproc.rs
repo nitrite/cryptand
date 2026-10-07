@@ -18,6 +18,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
 
+/// Windows byte-range locks are mandatory: while another process's claim
+/// holds the sidecar lock (milliseconds), plain reads and writes fail with
+/// ERROR_LOCK_VIOLATION instead of waiting. Wait it out, as Unix's advisory
+/// lock never needed to (F-063).
+///
+/// ponytail: a 2 s sleep-poll; a byte-range lock outside the slots (F-067)
+/// removes the need for it.
+fn retry_locked<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut waited_ms = 0;
+    loop {
+        match f() {
+            Err(e) if cfg!(windows) && e.raw_os_error() == Some(33) && waited_ms < 2000 => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                waited_ms += 1;
+            }
+            r => return r,
+        }
+    }
+}
+
 /// `"CLK1"` little-endian.
 pub const MAGIC: u32 = 0x314B_4C43;
 pub const HEADER_BYTES: u64 = 24;
@@ -125,7 +145,7 @@ impl Sidecar {
         header[4..8].copy_from_slice(&slot_count.to_le_bytes());
         header[8..16].copy_from_slice(&(std::process::id() as u64).to_le_bytes());
         header[16..24].copy_from_slice(&now_ms().to_le_bytes());
-        file.write_all_at(&header, 0)?;
+        retry_locked(|| file.write_all_at(&header, 0))?;
         file.write_all_at(&vec![0u8; (slot_count as u64 * SLOT_BYTES) as usize], HEADER_BYTES)?;
         file.sync_data()?;
         Ok(Sidecar { file, slot_count, heartbeat_interval_ms, read_only: false })
@@ -143,7 +163,7 @@ impl Sidecar {
             Err(e) => return Err(Error::Io(e.to_string())),
         };
         let mut header = [0u8; HEADER_BYTES as usize];
-        file.read_exact_at(&mut header, 0)?;
+        retry_locked(|| file.read_exact_at(&mut header, 0))?;
         let magic = u32::from_le_bytes(header[0..4].try_into().unwrap());
         if magic != MAGIC {
             return Err(Error::Corrupt("not a cryptand lock sidecar".into()));
@@ -166,20 +186,20 @@ impl Sidecar {
 
     pub fn writer_pid(&self) -> Result<u64> {
         let mut b = [0u8; 8];
-        self.file.read_exact_at(&mut b, 8)?;
+        retry_locked(|| self.file.read_exact_at(&mut b, 8))?;
         Ok(u64::from_le_bytes(b))
     }
 
     pub fn writer_heartbeat_ms(&self) -> Result<u64> {
         let mut b = [0u8; 8];
-        self.file.read_exact_at(&mut b, 16)?;
+        retry_locked(|| self.file.read_exact_at(&mut b, 16))?;
         Ok(u64::from_le_bytes(b))
     }
 
     /// The writing process refreshes its own heartbeat on the same schedule it
     /// asks of readers.
     pub fn refresh_writer(&self, now: u64) -> Result<()> {
-        self.file.write_all_at(&now.to_le_bytes(), 16)?;
+        retry_locked(|| self.file.write_all_at(&now.to_le_bytes(), 16))?;
         Ok(())
     }
 
@@ -200,7 +220,7 @@ impl Sidecar {
 
     pub fn read_slot(&self, index: u32) -> Result<Slot> {
         let mut b = [0u8; SLOT_BYTES as usize];
-        self.file.read_exact_at(&mut b, HEADER_BYTES + index as u64 * SLOT_BYTES)?;
+        retry_locked(|| self.file.read_exact_at(&mut b, HEADER_BYTES + index as u64 * SLOT_BYTES))?;
         Ok(Slot {
             index,
             pid: u64_at(&b, 0),
@@ -218,7 +238,7 @@ impl Sidecar {
         b[0..8].copy_from_slice(&pid.to_le_bytes());
         b[8..16].copy_from_slice(&commit_id.to_le_bytes());
         b[16..24].copy_from_slice(&heartbeat_ms.to_le_bytes());
-        self.file.write_all_at(&b, HEADER_BYTES + index as u64 * SLOT_BYTES)?;
+        retry_locked(|| self.file.write_all_at(&b, HEADER_BYTES + index as u64 * SLOT_BYTES))?;
         Ok(())
     }
 
