@@ -50,7 +50,7 @@ class IndexConformanceTest {
             assertEquals(expected, actual, () -> c.path("note").asText());
             n++;
         }
-        assertEquals(9, n, "index/entries.json should hold nine cases");
+        assertEquals(12, n, "index/entries.json should hold twelve cases");
     }
 
     @Test

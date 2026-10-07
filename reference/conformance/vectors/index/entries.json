@@ -284,6 +284,96 @@
       ]
     },
     {
+      "note": "an empty array produces no entries (section 4)",
+      "fields": [
+        "tags"
+      ],
+      "index_type": "non_unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "tags": {
+            "t": "array",
+            "items": []
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "14"
+      },
+      "keys": []
+    },
+    {
+      "note": "a path no array element resolves is absent: NULL (section 5)",
+      "fields": [
+        "a.b"
+      ],
+      "index_type": "non_unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "a": {
+            "t": "array",
+            "items": [
+              {
+                "t": "str",
+                "utf8": "78"
+              },
+              {
+                "t": "int",
+                "w": "i32",
+                "v": "1"
+              }
+            ]
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "15"
+      },
+      "keys": [
+        "a001000180800000000000000f00"
+      ]
+    },
+    {
+      "note": "array elements lacking the field: absent, NULL (section 5)",
+      "fields": [
+        "a.b"
+      ],
+      "index_type": "non_unique",
+      "sparse": false,
+      "document": {
+        "t": "doc",
+        "fields": {
+          "a": {
+            "t": "array",
+            "items": [
+              {
+                "t": "doc",
+                "fields": {
+                  "c": {
+                    "t": "str",
+                    "utf8": "78"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "nitrite_id": {
+        "t": "nitrite_id",
+        "v": "16"
+      },
+      "keys": [
+        "a001000180800000000000001000"
+      ]
+    },
+    {
       "note": "\\. is a literal dot in a field path (section 5)",
       "fields": [
         "a\\.b.c"

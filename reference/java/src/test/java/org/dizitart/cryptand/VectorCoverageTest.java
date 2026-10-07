@@ -42,7 +42,7 @@ class VectorCoverageTest {
         assertCount("numbers/torture.json", "lossy_decodings", 3);
         assertCount("container/layout.json", "crc32c", 2);
         assertCount("filter/blocked_bloom.json", "cfh64_vectors", 6);
-        assertCount("index/entries.json", "cases", 9);
+        assertCount("index/entries.json", "cases", 12);
         assertCount("index/layout.json", "entries", 5);
         assertCount("catalog/trees.json", "trees", 3);
         assertCount("catalog/trees.json", "levelled_kinds", 8);

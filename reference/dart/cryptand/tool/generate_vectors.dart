@@ -849,6 +849,19 @@ void _indexEntries(String root) {
         'city': CArray([const CStr('paris'), const CStr('lyon')])
       }),
       const CNitriteId(12));
+  const through = IndexDescriptor(
+      indexType: IndexType.nonUnique, dataTree: 20, fields: ['a.b']);
+  // F-058: section 4 is one entry per element, so an empty array has none --
+  // it is not an absent field.
+  add('an empty array produces no entries (section 4)', single,
+      d({'tags': CArray([])}), const CNitriteId(14));
+  // F-059: section 5, "an unresolvable path is treated as an absent field",
+  // also when it fails inside an array traversal.
+  add('a path no array element resolves is absent: NULL (section 5)', through,
+      d({'a': CArray([const CStr('x'), CInt.i32(1)])}),
+      const CNitriteId(15));
+  add('array elements lacking the field: absent, NULL (section 5)', through,
+      d({'a': CArray([d({'c': const CStr('x')})])}), const CNitriteId(16));
   add(r'\. is a literal dot in a field path (section 5)', escaped,
       d({'a.b': d({'c': const CStr('x')})}), const CNitriteId(13));
 
