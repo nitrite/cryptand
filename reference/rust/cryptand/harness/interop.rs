@@ -357,6 +357,16 @@ fn cmd_decrypt(path: &str) -> cryptand::Result<()> {
     Ok(())
 }
 
+/// `rotate <file> <new key hex> --key K`: copy-and-swap rotation (F-072).
+fn cmd_rotate(path: &str, new_hex: &str) -> cryptand::Result<()> {
+    let new: Vec<u8> = (0..new_hex.len() / 2).map(|j| u8::from_str_radix(&new_hex[j * 2..j * 2 + 2], 16).unwrap()).collect();
+    let e = Engine::open(&PathBuf::from(path), key_arg().as_deref())?;
+    let mut e = cryptand::rotate::rotate_master_key(e, &new, 0, 0, 0, 0)?;
+    e.close(true)?;
+    println!("rotated {path}");
+    Ok(())
+}
+
 fn cmd_verify(path: &str) -> cryptand::Result<ExitCode> {
     let mut e = Engine::open(&PathBuf::from(path), key_arg().as_deref())?;
     let r = e.verify()?;
@@ -546,6 +556,7 @@ fn main() -> ExitCode {
         Some("verify") if args.len() >= 2 => cmd_verify(&args[1]),
         Some("encrypt") if args.len() >= 2 => cmd_encrypt(&args[1]).map(|_| ExitCode::SUCCESS),
         Some("decrypt") if args.len() >= 2 => cmd_decrypt(&args[1]).map(|_| ExitCode::SUCCESS),
+        Some("rotate") if args.len() >= 3 => cmd_rotate(&args[1], &args[2]).map(|_| ExitCode::SUCCESS),
         Some("corpus") if args.len() >= 2 => cmd_corpus(&args[1]),
         _ => {
             eprintln!(

@@ -59,6 +59,7 @@ pub mod rtree;
 pub mod security;
 pub mod segment;
 pub mod convert;
+pub mod rotate;
 pub mod keyapi;
 pub mod spaceapi;
 pub mod stats;

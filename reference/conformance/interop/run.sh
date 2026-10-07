@@ -232,6 +232,25 @@ for mode in half full; do
   KEY=""
 done
 
+say "9. rust rotates the master key (copy-and-swap); every implementation reads with the new key only"
+rf="$work/rotate.cryptand"
+KEY=0909090909090909090909090909090909090909090909090909090909090909
+run_impl rust write "$rf" >/dev/null || bad "rust could not write"
+want="$(field "$(run_impl rust read "$rf")" digest)"
+NEW=0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a
+run_impl rust rotate "$rf" "$NEW" >/dev/null || bad "rust could not rotate"
+for impl in rust java dart; do
+  if run_impl "$impl" read "$rf" >/dev/null 2>&1; then bad "$impl still opens with the old key"; fi
+done
+KEY=$NEW
+for impl in rust java dart; do
+  got="$(field "$(run_impl "$impl" read "$rf")" digest)"
+  v="$(run_impl "$impl" verify "$rf" 2>&1 | tail -1)"
+  if [[ "$got" == "$want" && "$v" == *" 0 findings"* ]]; then ok "$impl digest $got, $v"
+  else bad "$impl: digest '$got' want '$want'; $v"; fi
+done
+KEY=""
+
 say "result"
 if [[ $fail -eq 0 ]]; then
   printf '   \033[32mthe round-trip gate passes in both directions\033[0m\n'

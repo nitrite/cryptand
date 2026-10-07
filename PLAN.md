@@ -181,7 +181,7 @@ test compares the engine against a model on random histories.
 - [~] **d** (Rust done 10-07) `decrypt()`: the mirror. Requires explicit confirmation; `cipher`
   stays 1 and the keyslots stay until no encrypted page or record remains,
   then one superblock clears both (no 14 §6.1 downgrade window).
-- [ ] **e** `rotate_master_key()`: copy-and-swap. Stream into a sibling file
+- [~] **e** (Rust done 10-07, synchronous; refused while checkpoints exist) `rotate_master_key()`: copy-and-swap. Stream into a sibling file
   under a fresh master in bounded steps, catch up concurrent writes, fsync,
   rename over. Crash leaves the old file intact. Spec 14 §8.3/§8.4 note.
 - [ ] **f** Dart: all of the above inside M5.

@@ -3220,7 +3220,7 @@ impl Engine {
         self.checkpoint_floor.0.into_iter().collect()
     }
 
-    fn checkpoint_commits(&self) -> Vec<u64> {
+    pub(crate) fn checkpoint_commits(&self) -> Vec<u64> {
         self.checkpoint_floor.1.into_iter().collect()
     }
  pub fn oldest_snapshot_age_ms(&self) -> Option<i64> {

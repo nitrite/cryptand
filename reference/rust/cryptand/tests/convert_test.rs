@@ -127,3 +127,52 @@ fn decrypt_needs_confirmation_resumes_after_reopen_and_leaves_no_keyslots() {
         assert!(bytes[slot + 296..slot + 328].iter().all(|&b| b == 0), "sb_mac left in slot at {slot}");
     }
 }
+
+#[test]
+fn rotate_master_key_rekeys_everything_and_drops_the_old_keys() {
+    use cryptand::keyapi::KeyApi;
+    use cryptand::rotate::rotate_master_key;
+    let (k1, k2, k3) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+    let t = TempDb::new("rotate");
+    let n = 600;
+    let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &k1, 0, 0, 0, 0).unwrap();
+    for i in 0..n {
+        e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
+        if i % 150 == 149 {
+            e.flush().unwrap();
+        }
+    }
+    e.add_key(&k2, 0, 0, 0, 0, "second").unwrap();
+    let before = *e.keys.as_ref().unwrap().master_key();
+    let mut e = rotate_master_key(e, &k3, 0, 0, 0, 0).unwrap();
+    assert_ne!(*e.keys.as_ref().unwrap().master_key(), before, "the master key did not change");
+    check(&mut e, n, "rotated");
+    e.put(T, &Value::NitriteId(n), &value(n)).unwrap();
+    e.close(true).unwrap();
+    drop(e);
+    for old in [k1, k2] {
+        assert!(matches!(Engine::open(&t.path, Some(&old)), Err(cryptand::Error::CannotUnlock)));
+    }
+    let mut e = Engine::open(&t.path, Some(&k3)).unwrap();
+    check(&mut e, n + 1, "reopened after rotation");
+}
+
+#[test]
+fn rotate_a_half_encrypted_file() {
+    use cryptand::rotate::rotate_master_key;
+    let t = TempDb::new("rotate-half");
+    let n = 300;
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    for i in 0..n {
+        e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
+    }
+    e.flush().unwrap();
+    e.encrypt(&KEY, 0, 0, 0, 0).unwrap();
+    for i in n..2 * n {
+        e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
+    }
+    let mut e = rotate_master_key(e, &[4u8; 32], 0, 0, 0, 0).unwrap();
+    check(&mut e, 2 * n, "half-encrypted, rotated");
+    while e.convert_step().unwrap() == Step::More {}
+    check(&mut e, 2 * n, "then converted");
+}
