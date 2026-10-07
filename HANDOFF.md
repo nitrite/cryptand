@@ -1,56 +1,27 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-07, end of session 4)
+## State (2026-10-07, end of session 5)
 
-- Branch `packaging/v1.0.0`, pushed to `origin`. Human 10-07: push every
-  commit. Registries are set up (nitrite already publishes there).
-- Three engines, Level 4 + encryption, in `reference/`; manifests at 1.0.0,
-  nothing published, no tags. `tools/gate.sh quick` green (Maven on JDK 17).
-- **Java targets Java 11** (`maven.compiler.release` 11, as nitrite-java;
-  built on JDK 17). Records, sealed types, `instanceof` patterns and switch
-  rules were ported to Java 11 source; `HexFormat` -> `util/Hex`. 336 tests
-  pass on JDK 17, 25 and on a Java 11 JVM (`-Djvm=`). CI has a Java 11
-  runtime job.
-- **F-062:** Java's Unicode is a port of Rust's `unicode.rs` over the same
-  15.1 tables (`text/unicode-15.1.0.bin`, regenerate with
-  `tools/gen_java_unicode.py` from Rust's `unicode_tables.rs`). No JDK
-  Unicode data is used any more.
-- **Vectors:** `index/entries.json` 9 -> 12 cases (F-058 empty array, F-059
-  unresolved traversal x2); all three suites read them.
-- **CI 26/26 green** (run 37597698770): Linux/macOS/Windows × Rust stable+1.89,
-  JDK 17/21/25 + Java 11 runtime, Dart 3.5+stable, interop ×3, cargo-deny.
-  On the way: F-063 (Windows: `posio`, Dart lock byte, sidecar retry), F-064,
-  F-066 (Java restore race), F-068 (Java untyped errors on damaged input).
-- **F-065** from hop seed 451: COW `publish` leaked a page whenever a remove
-  emptied a non-root page (Rust and Dart; Java rebuilds trees whole).
-- M1.5 index differential in all three; **hop seeds 0..1000 plain clean**.
-- **F-067 fixed:** all three lock the one byte at 2^62 (spec 01 §10 now says
-  so); interop step 6 checks it on Unix. Rust's Windows `LockFileEx` path is
-  only checked by CI. Open: M5: F-035, F-038, F-048's Dart verify leak report (S3).
-- **Hop 0..300 encrypted clean** (10-07; seed 286 re-run alone after a
-  concurrent `mvn` broke its Java leg — never build Java while hop runs).
-- **M2.1 started (Rust):** `src/fault.rs` behind feature `faults` (tests only,
-  enabled via a self dev-dependency): power cut drops/tears un-fsynced writes,
-  fsync EIO, ENOSPC. `tests/fault_test.rs`: 1000 seeds × 3 sweeps clean
-  (`CRYPTAND_FAULT_SEEDS=0..1000`, ~10 min release); lying-fsync control fails.
-  Found **F-069 (S0, fixed in all three)**: slot B looked up at 4096 when slot A
-  is bad; and F-070 (S3, Rust verify).
-- **M2.1 Java:** `PageFile.Hook` (package-private) + test-tree `container.Faults`/
-  `FaultTest` (`-Dcryptand.fault.seeds=0..1000`, ~15 min): 1000 seeds × 3 clean.
-  Found **F-071 (S0)**: no barrier before Java's superblock write (fixed; one
-  more fsync per commit, re-measure in M6); Dart's whole-file `save` is the same
-  class, left to M5. Dart fault layer waits for M5.
-- **F-072 Rust done** (PLAN "F-072" a–e): `keyapi.rs` (add/remove_key,
-  crypto_erase), `convert.rs` (in-place `encrypt()`, `decrypt(ConfirmDecrypt)`,
-  resumable `convert_step()`, `conversion()` fraction, `fully_encrypted()`),
-  `rotate.rs` (copy-and-swap; synchronous; refused while checkpoints exist).
-  Interop steps 7–9 (encrypt half/full, decrypt half/full, rotate) green in all
-  three. **F-073** (readers inferred encryption from `cipher`) fixed in Rust;
-  Java/Dart read Rust's converted files fine (blobs untested). A conversion
-  crash sweep (`power_cut_during_in_place_encryption`) found and fixed a
-  conversion data-loss bug before commit (partial same-level compaction).
-- Rust `stall_test` fails whenever another job is fsyncing on /Volumes/External;
-  run the gate on a quiet disk.
+- Branch `packaging/v1.0.0`, every commit pushed (human 10-07). Manifests at
+  1.0.0, nothing published, no tags. Java targets Java 11 (built on JDK 17).
+  CI 26/26 green as of M0 (run 37597698770); not re-run since.
+- M0 done. M1: hop 0..1000 plain and 0..300 encrypted clean; index
+  differential in all three; the 10 000-seed M1.2 runs still pending.
+- **M2.1** fault layers: Rust `src/fault.rs` (feature `faults`, tests only),
+  Java `PageFile.Hook` + test-tree `container.Faults`. Sweeps: power cut,
+  fsync EIO, ENOSPC, lying-fsync control; Rust also a power cut during
+  in-place encryption. 1000 seeds × 3 clean in both (Rust ~10 min, Java ~15).
+  Dart waits for M5. Found F-069 (S0, all three, slot B lookup; spec 01 §2.1
+  amended), F-070, F-071 (S0, Java barrier; Dart's whole-file save → M5).
+- **F-072** (13 §5 MUSTs): Rust complete — `keyapi.rs`, `convert.rs`
+  (encrypt, decrypt with confirmation, resumable `convert_step`, fraction),
+  `rotate.rs` (copy-and-swap, synchronous, refused while checkpoints exist).
+  Interop steps 7–9 green in all three. Java: key ops only. Dart: M5.
+- **F-073** (readers inferred encryption from `cipher`): Rust fixed; Java and
+  Dart read Rust's converted files fine (blobs untested until Java converts).
+- Open S1/S0 outside M5: F-072 (Java, Dart). M5: F-035, F-038.
+- Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
+  never build Java while a hop or Java fault sweep runs.
 
 ## Decisions already made (human)
 
