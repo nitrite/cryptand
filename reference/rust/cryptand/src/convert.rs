@@ -163,17 +163,18 @@ impl ConvertApi for Engine {
         }
         let c = census(self)?;
         if !c.plain_segments.is_empty() {
-            // Same-level compactions: the outputs are laid out with the tag
-            // reserved and sealed; nothing moves between levels.
-            let mut by_level: std::collections::BTreeMap<u8, Vec<_>> = Default::default();
-            for r in c.plain_segments {
-                by_level.entry(r.level).or_default().push(r);
+            // Every segment, every level, into the last level in one job.
+            // Never a subset: a same-level merge of only the plaintext ones
+            // gives its output a newer id than segments holding newer versions
+            // of the same keys, and stale values win (found by the M2.1 sweep).
+            let last = self.policy.last_level();
+            let mut all = Vec::new();
+            for level in 0..=last {
+                all.extend(self.healthy_refs_at(level)?);
             }
-            for (level, inputs) in by_level {
-                if let Some(mut job) = self.begin_compaction(inputs, level)? {
-                    while self.step_compaction(&mut job, None)? {}
-                    self.finish_compaction(job)?;
-                }
+            if let Some(mut job) = self.begin_compaction(all, last)? {
+                while self.step_compaction(&mut job, None)? {}
+                self.finish_compaction(job)?;
             }
         } else if c.plain_tree_pages > 0 {
             self.relocate_trees()?;
