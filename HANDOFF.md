@@ -34,7 +34,12 @@
   fsync EIO, ENOSPC. `tests/fault_test.rs`: 1000 seeds × 3 sweeps clean
   (`CRYPTAND_FAULT_SEEDS=0..1000`, ~10 min release); lying-fsync control fails.
   Found **F-069 (S0, fixed in all three)**: slot B looked up at 4096 when slot A
-  is bad; and F-070 (S3, Rust verify). Java and Dart fault layers not started.
+  is bad; and F-070 (S3, Rust verify).
+- **M2.1 Java:** `PageFile.Hook` (package-private) + test-tree `container.Faults`/
+  `FaultTest` (`-Dcryptand.fault.seeds=0..1000`, ~15 min): 1000 seeds × 3 clean.
+  Found **F-071 (S0)**: no barrier before Java's superblock write (fixed; one
+  more fsync per commit, re-measure in M6); Dart's whole-file `save` is the same
+  class, left to M5. Dart fault layer waits for M5.
 - Rust `stall_test` fails whenever another job is fsyncing on /Volumes/External;
   run the gate on a quiet disk.
 
@@ -58,9 +63,10 @@
 
 ## Next action
 
-M2.1 for Java: the same fault seam under its `PageFile` (test tree), port
-`fault_test.rs`'s sweeps. In parallel (background, no Java builds while it
-runs): the 10 000-seed runs of 1.2 (M1 Verify).
+M2.2 kill -9 torture for Rust and Java: a child process runs random ops
+(compaction, GC, shrink, encrypt, rotate, crypto_erase, backup); the parent
+kills it at a random time, reopens, runs verify + the M1 model check. The
+10 000-seed M1.2 runs still pending (background; no Java builds meanwhile).
 
 ## Log
 
@@ -75,3 +81,4 @@ runs): the 10 000-seed runs of 1.2 (M1 Verify).
 - 2026-10-07 — CI 26/26 green (F-066, F-068 on the way); hop 0..1000 plain clean; M0 done.
 - 2026-10-07 — F-067: one writer-lock byte (2^62) in all three + spec 01 §10; interop lock step.
 - 2026-10-07 — Hop 0..300 enc clean; M2.1 Rust fault seam, 3000 fault seeds clean; F-069 (S0, all three), F-070.
+- 2026-10-07 — Spec 01 §2.1 (F-069 approved); M2.1 Java fault seam, 3000 seeds clean; F-071 (S0, Java barrier; Dart → M5).
