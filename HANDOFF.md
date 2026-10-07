@@ -17,13 +17,15 @@
   Unicode data is used any more.
 - **Vectors:** `index/entries.json` 9 -> 12 cases (F-058 empty array, F-059
   unresolved traversal x2); all three suites read them.
-- F-063 (Rust on Windows: `posio`), F-064 (Dart stall test warm-up) fixed;
-  CI is the verification for both.
+- **CI 26/26 green** (run 37597698770): Linux/macOS/Windows × Rust stable+1.89,
+  JDK 17/21/25 + Java 11 runtime, Dart 3.5+stable, interop ×3, cargo-deny.
+  On the way: F-063 (Windows: `posio`, Dart lock byte, sidecar retry), F-064,
+  F-066 (Java restore race), F-068 (Java untyped errors on damaged input).
 - **F-065** from hop seed 451: COW `publish` leaked a page whenever a remove
   emptied a non-root page (Rust and Dart; Java rebuilds trees whole).
-- M1.5 index differential in all three; hop seeds 0..450 clean.
-- Open for M5: F-035 (Dart writer lock), F-038 (Dart file growth), F-048's Dart
-  verify leak report (S3).
+- M1.5 index differential in all three; **hop seeds 0..1000 plain clean**.
+- Open: F-067 (one writer-lock protocol across languages, M7.1, needs a spec
+  01 §10 sentence); M5: F-035, F-038, F-048's Dart verify leak report (S3).
 
 ## Decisions already made (human)
 
@@ -39,13 +41,14 @@
 
 ## Open questions for the human
 
-None.
+1. **F-067:** make the writer lock one protocol in all three: an exclusive
+   lock on the single byte at offset 2^62 (fcntl on Unix, LockFileEx on
+   Windows). Adds one sentence to spec 01 §10; no bytes on disk change. OK?
 
 ## Next action
 
-Read the CI run for this push (Windows Rust/interop and the Java 11 job are
-new). Then hop seeds 452..1000 plain and 0..300 encrypted
-(`nohup tools/oplog_hop.sh 452 1000 --ops 400`), then the 10 000-seed runs of 1.2.
+Hop seeds 0..300 encrypted (`nohup tools/oplog_hop.sh 0 300 --ops 400
+--encrypted`), then the 10 000-seed runs of 1.2 (M1 Verify).
 
 ## Log
 
@@ -57,3 +60,4 @@ new). Then hop seeds 452..1000 plain and 0..300 encrypted
 - 2026-10-07 — F-052 root-caused and fixed (S0, Java seal during recount); F-056 (Dart live_records < 0) from hop seed 151.
 - 2026-10-07 — Pushed; M0.5 CI matrix (F-061…F-064); M1.5 index differential (F-057…F-059); F-060 from hop seed 289.
 - 2026-10-07 — Own Unicode tables in Java, Java 11 target, F-058/F-059 vectors; F-062…F-064 fixed; F-065 from hop seed 451.
+- 2026-10-07 — CI 26/26 green (F-066, F-068 on the way); hop 0..1000 plain clean; M0 done.

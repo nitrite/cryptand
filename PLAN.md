@@ -15,7 +15,7 @@ interop gate 12/12 directions plaintext+encrypted.
 
 | | milestone | track | due | status |
 |---|---|---|---|---|
-| M0 | Execution infra, gates, CI matrix | all | 10-07 | in progress (0.1–0.4 done; 0.5 matrix live, F-062/F-063/F-064 fixed, CI pending) |
+| M0 | Execution infra, gates, CI matrix | all | 10-07 | **done** (0.5: 26/26 jobs green, run 37597698770) |
 | M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 checkers in all three; 1.3 hop built; 1.4 regress + hop in the gate; 1.5 index differential in all three, 2000 seeds clean) |
 | M2 | Crash consistency + concurrency | A | 10-16 | todo |
 | M3 | Coverage-guided fuzzing | A | 10-16 | todo |
@@ -89,7 +89,7 @@ macOS locally and CI green on Linux/macOS/Windows, M6 scale table filled in.
 - [x] **0.4 [H]** Create GitHub repo `nitrite/cryptand` (it does not exist; this
   checkout has **no remote**), push `main` and `packaging/v1.0.0`.
   **Verify:** `gh repo view nitrite/cryptand` works and the existing CI runs.
-- [ ] **0.5** (10-07: matrix, cargo-deny, SHA pins landed; runs on `packaging/**` pushes. F-062/F-063/F-064 fixed 10-07; Java targets `--release 11` (nitrite-java's level), built on JDK 17, with a Java 11 runtime job) CI matrix in `.github/workflows/ci.yml`: `ubuntu`, `macos`,
+- [x] **0.5** (10-07: 26/26 green on run 37597698770; matrix, cargo-deny, SHA pins landed; runs on `packaging/**` pushes. F-062/F-063/F-064 fixed 10-07; Java targets `--release 11` (nitrite-java's level), built on JDK 17, with a Java 11 runtime job) CI matrix in `.github/workflows/ci.yml`: `ubuntu`, `macos`,
   `windows` × Rust stable + MSRV 1.89, JDK 17/21/25 (+ Java 11 runtime), Dart 3.5 + stable;
   interop on all three OSes. Add a `cargo-deny` job. Pin every action by SHA,
   `permissions: contents: read`.
@@ -115,7 +115,7 @@ test compares the engine against a model on random histories.
   engine **and** a sorted in-memory map; compare every read, and a full-scan
   digest at the end and after every `reopen`. Rust harness bin, Java test
   class, Dart test.
-- [ ] **1.3** (10-07: `--hop` legs in all three, `tools/oplog_hop.sh`; seeds 0..150 plain + 0..40 encrypted clean after F-042…F-055; 1 000 seeds to run)
+- [ ] **1.3** (10-07: `--hop` legs in all three, `tools/oplog_hop.sh`; seeds 0..1000 plain clean after F-060 (289) and F-065 (451); 0..40 encrypted; 300 encrypted to run)
   Cross-language hop: Rust plays ops 0..k, Java k..m, Dart m..n on
   the same file, then all three compute the digest. Plaintext and encrypted.
 - [ ] **1.4** (started: shrinkers in all three; 8 logs in `regress/`, replayed by all three
