@@ -3033,6 +3033,10 @@ impl Engine {
     /// Moves every live record out of `victims` into a fresh, sealed COLD
     /// segment (written in the current mode), and retires the victims.
     pub(crate) fn rewrite_vlog_segments(&mut self, victims: Vec<u64>) -> Result<()> {
+        // F-081: liveness is computed from segments alone, so a pointer still
+        // in the memtable read as dead and its segment was retired, then
+        // reused. Flushed first, every current pointer is in a segment.
+        self.flush()?;
         // Build the survivor set by walking the trees, which is what §6.8's
         // invariant 1 requires: a record is live only if the tree's current
         // entry for its key is a VLOG pointer to this exact (segment, offset).

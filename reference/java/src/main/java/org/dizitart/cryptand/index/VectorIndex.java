@@ -115,6 +115,9 @@ public final class VectorIndex {
         this.docToSlotTree = (int) SegmentMeta.longOf(params.field("doc_to_slot"));
         this.region = VectorRegion.open(db.engine().pager(),
                 SegmentMeta.longOf(params.field("vector_region")));
+        // F-072 g: a conversion step asks this object, which holds the region
+        // and the graph in memory, to re-lay them itself.
+        db.engine().registerOwner(descriptor.treeId(), this::convertInPlace);
         Long root = descriptor.root();
         this.adjacency = PageTree.load(db.engine().pager(), descriptor.treeId(), root == null ? 0 : root);
         loadMaps();
@@ -181,11 +184,22 @@ public final class VectorIndex {
     // not per operation — and the committer holds `structure` around the hook,
     // so this monitor is always taken after it and never before.
 
-    public synchronized void put(long nitriteId, Value.Doc document) {
+    // F-078: the batch is built under this monitor and committed after it is
+    // released. Committing inside waits (sync durability) for the committer,
+    // which holds `structure` and waits for this monitor in commit().
+    // ponytail: two concurrent puts of one document may commit their slot maps
+    // out of order; serialise per document if that is ever possible here.
+    public void put(long nitriteId, Value.Doc document) {
+        Engine.Batch b = stagePut(nitriteId, document);
+        if (b != null) {
+            b.commit();
+        }
+    }
+
+    private synchronized Engine.Batch stagePut(long nitriteId, Value.Doc document) {
         float[] vector = vectorOf(document);
         if (vector == null) {
-            remove(nitriteId);
-            return;
+            return stageRemove(nitriteId);
         }
         if (vector.length != dim) {
             throw new InvalidArgumentException("vector has " + vector.length
@@ -204,7 +218,7 @@ public final class VectorIndex {
                 Cve.encode(new Value.NitriteId(nitriteId)));
         b.put(docToSlotTree, Cke.encode(new Value.NitriteId(nitriteId)),
                 Cve.encode(Value.integer(NumType.U64, slot)));
-        b.commit();
+        return b;
     }
 
     /**
@@ -214,16 +228,42 @@ public final class VectorIndex {
      * delete correct <em>immediately</em> even though the graph is repaired
      * later.
      */
-    public synchronized void remove(long nitriteId) {
+    public void remove(long nitriteId) {
+        Engine.Batch b = stageRemove(nitriteId);
+        if (b != null) {
+            b.commit();
+        }
+    }
+
+    private synchronized Engine.Batch stageRemove(long nitriteId) {
         Long slot = docToSlot.remove(nitriteId);
         if (slot == null) {
-            return;
+            return null;
         }
         slotToDoc.remove(slot);
         Engine.Batch b = db.engine().batch();
         b.remove(slotToDocTree, Cke.encode(Value.integer(NumType.U64, slot)));
         b.remove(docToSlotTree, Cke.encode(new Value.NitriteId(nitriteId)));
-        b.commit();
+        return b;
+    }
+
+    /** {@link Engine#registerOwner}: region and graph re-laid in the pager's current mode. */
+    private synchronized void convertInPlace() {
+        Pager pager = db.engine().pager();
+        boolean seals = pager.seals() && pager.crypto() instanceof org.dizitart.cryptand.crypto.FileCipher;
+        if (region.encrypted != seals) {
+            VectorRegion old = region;
+            region = old.relocate(pager);
+            region.liveCount = old.liveCount;
+            pager.freeExtent(old.startPage, old.pages);
+            Map<String, Value> params = new LinkedHashMap<>(descriptor.params().fields());
+            params.put("vector_region", Value.integer(NumType.U64, region.startPage));
+            Map<String, Value> fields = new LinkedHashMap<>(descriptor.document().fields());
+            fields.put("params", Value.Doc.of(params));
+            descriptor = new TreeDescriptor(Value.Doc.of(fields));
+            regionDirty = true;
+        }
+        adjacency.markDirty();
     }
 
     private void growTo(long slot) {
@@ -243,8 +283,14 @@ public final class VectorIndex {
         Map<String, Value> fields = new LinkedHashMap<>(descriptor.document().fields());
         fields.put("params", Value.Doc.of(params));
         descriptor = new TreeDescriptor(Value.Doc.of(fields));
-        db.putDescriptor(name, descriptor);
+        // F-078: not db.putDescriptor here. That takes the engine's structure
+        // lock under this monitor, while the committer holds structure and
+        // waits for this monitor in commit(): a deadlock. commit() publishes it.
+        regionDirty = true;
     }
+
+    /** {@link #growTo} moved the region; {@link #commit} publishes the descriptor. */
+    private boolean regionDirty;
 
     /**
      * Rebuilds adjacency and republishes the roots. Called on the commit path,
@@ -265,7 +311,8 @@ public final class VectorIndex {
         }
         params.put("entry_points", new Value.Array(entryPoints));
         fields.put("params", Value.Doc.of(params));
-        if (changed || !entryPoints.isEmpty()) {
+        if (changed || !entryPoints.isEmpty() || regionDirty) {
+            regionDirty = false;
             descriptor = new TreeDescriptor(Value.Doc.of(fields));
             db.putDescriptor(name, descriptor);
         }

@@ -55,6 +55,11 @@ public final class VectorRegion {
 
     public long startPage;
     public int pages;
+    /**
+     * The head page's {@code flags.ENCRYPTED}: how this region's data is chunked
+     * (14 §5.4), whatever key is in hand now (14 §5.2, F-073).
+     */
+    public boolean encrypted;
 
     public static int elementBytes(int dtype) {
         switch (dtype) {
@@ -125,19 +130,26 @@ public final class VectorRegion {
                     + " bytes exceeds the u16 stride field; split it across two indexes"
                     + " (spec/09-vector.md §2)");
         }
-        VectorRegion v = new VectorRegion();
-        v.dim = dim;
-        v.dtype = dtype;
         // Round to 64 bytes so slots land on a SIMD boundary, while staying
         // inside the u16 field.
         int aligned = (natural + 63) / 64 * 64;
-        v.stride = aligned <= 0xFFFF ? aligned : natural;
+        return allocate(pager, dim, dtype, aligned <= 0xFFFF ? aligned : natural, slots);
+    }
+
+    private static VectorRegion allocate(Pager pager, int dim, int dtype, int stride, long slots) {
+        VectorRegion v = new VectorRegion();
+        v.dim = dim;
+        v.dtype = dtype;
+        v.stride = stride;
         v.slotCount = slots;
         v.liveCount = 0;
         // Page-aligned, so a region can be mapped and sliced where the host can.
         v.dataOffset = pager.pageSize();
-        long bytes = v.dataOffset + slots * (long) v.stride;
-        int pages = (int) ((bytes + pager.pageSize() - 1) / pager.pageSize());
+        // F-075, 14 §5.4: an encrypted data area is chunked at page_size - 24,
+        // so it needs more pages than ceil(len / page_size).
+        v.encrypted = pager.seals() && pager.crypto() instanceof FileCipher;
+        long chunk = v.encrypted ? FileCipher.chunkPlaintextBytes(pager.pageSize()) : pager.pageSize();
+        int pages = (int) (1 + (slots * (long) v.stride + chunk - 1) / chunk);
         v.startPage = pager.allocate(pages);
         v.pages = pages;
 
@@ -148,28 +160,65 @@ public final class VectorRegion {
         h.commitId = pager.commitId();
         byte[] header = v.encodeHeader();
         h.payloadLen = header.length;
-        byte[] head = new byte[pager.pageSize()];
-        System.arraycopy(header, 0, head, PageHeader.BYTES, header.length);
-        // The head page's checksum covers only its own header material: the
-        // slots begin at data_offset and are rewritten for the life of the
-        // region, exactly as a value-log segment's records are.
-        h.writeInto(head, PageHeader.BYTES + HEADER_BYTES);
-        pager.writeAt(pager.offsetOf(v.startPage), head);
+        // F-075: an ordinary page, sealed when the file seals (14 §5.1 exempts
+        // only the value-log head page), with 01 §3's whole-page checksum. The
+        // slots begin at data_offset = page_size, so nothing else is on it.
+        pager.writeAt(pager.offsetOf(v.startPage), pager.buildExtentPage(v.startPage, h, header));
+        // A reused extent holds whatever was there; a sealed chunk is read
+        // before it is rewritten, so a never-written one must read as blank.
+        byte[] zeros = new byte[pager.pageSize() * Math.min(128, Math.max(1, pages - 1))];
+        for (long p = 1; p < pages; p += zeros.length / pager.pageSize()) {
+            int n = (int) Math.min(zeros.length / pager.pageSize(), pages - p);
+            pager.writeAt(pager.offsetOf(v.startPage + p), n * pager.pageSize() == zeros.length
+                    ? zeros : java.util.Arrays.copyOf(zeros, n * pager.pageSize()));
+        }
         return v;
     }
 
     public static VectorRegion open(Pager pager, long startPage) {
-        byte[] page = pager.readRaw(startPage);
-        PageHeader h = PageHeader.verify(page, startPage, PageHeader.BYTES + HEADER_BYTES);
+        PageHeader h = PageHeader.parse(pager.readRaw(startPage), 0);
         if (h.pageType != PageHeader.Type.VECTOR_REGION) {
             throw new CorruptionException("page " + startPage + " has type " + h.pageType
                     + ", expected VECTOR_REGION", startPage, null);
         }
-        byte[] header = new byte[HEADER_BYTES];
-        System.arraycopy(page, PageHeader.BYTES, header, 0, HEADER_BYTES);
-        VectorRegion v = decodeHeader(header);
+        VectorRegion v = decodeHeader(java.util.Arrays.copyOf(pager.readPage(startPage), HEADER_BYTES));
         v.startPage = startPage;
         v.pages = h.extentPages;
+        v.encrypted = h.isSet(PageHeader.Flags.ENCRYPTED);
+        return v;
+    }
+
+    /**
+     * F-072 g, 14 §8.3: a copy of this region laid out for the file's current
+     * mode (sealed or clear), same header and stride. The caller frees this
+     * extent and repoints the descriptor. A chunk never written (all zero, or
+     * past the end of the file) stays unwritten.
+     */
+    public VectorRegion relocate(Pager pager) {
+        VectorRegion v = allocate(pager, dim, dtype, stride, slotCount);
+        int ps = pager.pageSize();
+        int step = encrypted ? FileCipher.chunkPlaintextBytes(ps) : ps;
+        long len = slotCount * (long) stride;
+        long base = pager.offsetOf(startPage) + dataOffset;
+        long off = 0;
+        for (int idx = 0; off < len; idx++) {
+            int take = (int) Math.min(step, len - off);
+            long at = base + (long) idx * ps;
+            if (at + ps <= pager.file().size()) {
+                byte[] raw = new byte[ps];
+                pager.file().readFully(at, raw, 0, ps);
+                boolean blank = true;
+                for (int i = 0; i < ps && blank; i++) {
+                    blank = raw[i] == 0;
+                }
+                if (!blank) {
+                    byte[] data = encrypted ? readChunk(pager, cipherOf(pager), idx, step) : raw;
+                    v.writeData(pager, off, java.util.Arrays.copyOf(data, take));
+                }
+            }
+            off += take;
+        }
+        v.liveCount = liveCount; // in memory; the head is rewritten by nobody
         return v;
     }
 
@@ -203,11 +252,8 @@ public final class VectorRegion {
 
     public void writeRaw(Pager pager, long slot, byte[] slotBytes) {
         byte[] buf = slotBytes.length == stride ? slotBytes : java.util.Arrays.copyOf(slotBytes, stride);
-        if (pager.crypto() instanceof FileCipher) {
-            writeEncrypted(pager, slot, buf);
-            return;
-        }
-        pager.writeAt(offsetOf(pager, slot), buf);
+        offsetOf(pager, slot); // bounds
+        writeData(pager, slot * (long) stride, buf);
     }
 
     public float[] read(Pager pager, long slot) {
@@ -226,7 +272,7 @@ public final class VectorRegion {
     }
 
     public byte[] readRaw(Pager pager, long slot) {
-        if (pager.crypto() instanceof FileCipher) {
+        if (encrypted) {
             return readEncrypted(pager, slot);
         }
         byte[] buf = new byte[stride];
@@ -238,18 +284,17 @@ public final class VectorRegion {
     // §5.4: an encrypted extent is chunked per page, read-modify-write
     // ==================================================================
 
-    private int chunkOf(Pager pager, long slot) {
-        long byteOffset = dataOffset + slot * (long) stride - pager.pageSize();
-        return (int) (byteOffset / FileCipher.chunkPlaintextBytes(pager.pageSize())) + 1;
-    }
-
-    private void writeEncrypted(Pager pager, long slot, byte[] buf) {
-        FileCipher cipher = (FileCipher) pager.crypto();
+    /** Writes {@code buf} at {@code logical} bytes into the data area. */
+    private void writeData(Pager pager, long logical, byte[] buf) {
+        if (!encrypted) {
+            pager.writeAt(pager.offsetOf(startPage) + dataOffset + logical, buf);
+            return;
+        }
+        FileCipher cipher = cipherOf(pager);
         int chunkBytes = FileCipher.chunkPlaintextBytes(pager.pageSize());
-        long logical = dataOffset - pager.pageSize() + slot * (long) stride;
         int written = 0;
         while (written < buf.length) {
-            int chunk = (int) ((logical + written) / chunkBytes) + 1;
+            int chunk = (int) ((logical + written) / chunkBytes);
             int within = (int) ((logical + written) % chunkBytes);
             int n = Math.min(chunkBytes - within, buf.length - written);
             byte[] plain = readChunk(pager, cipher, chunk, chunkBytes);
@@ -259,19 +304,19 @@ public final class VectorRegion {
             // counter is the same key and the same nonce over different
             // plaintext, which is the whole failure §4 exists to prevent.
             byte[] sealed = cipher.encryptChunk(startPage, chunk, plain);
-            pager.writeAt(pager.offsetOf(startPage + chunk), sealed);
+            pager.writeAt(pager.offsetOf(startPage + 1 + chunk), sealed);
             written += n;
         }
     }
 
     private byte[] readEncrypted(Pager pager, long slot) {
-        FileCipher cipher = (FileCipher) pager.crypto();
+        FileCipher cipher = cipherOf(pager);
         int chunkBytes = FileCipher.chunkPlaintextBytes(pager.pageSize());
         long logical = dataOffset - pager.pageSize() + slot * (long) stride;
         byte[] out = new byte[stride];
         int read = 0;
         while (read < stride) {
-            int chunk = (int) ((logical + read) / chunkBytes) + 1;
+            int chunk = (int) ((logical + read) / chunkBytes);
             int within = (int) ((logical + read) % chunkBytes);
             int n = Math.min(chunkBytes - within, stride - read);
             byte[] plain = readChunk(pager, cipher, chunk, chunkBytes);
@@ -281,9 +326,21 @@ public final class VectorRegion {
         return out;
     }
 
+    private FileCipher cipherOf(Pager pager) {
+        if (!(pager.crypto() instanceof FileCipher)) {
+            throw new org.dizitart.cryptand.CannotUnlockException(
+                    "vector region at page " + startPage + " is encrypted and no key is available");
+        }
+        return (FileCipher) pager.crypto();
+    }
+
     private byte[] readChunk(Pager pager, FileCipher cipher, int chunk, int chunkBytes) {
+        long at = pager.offsetOf(startPage + 1 + chunk);
+        if (at + pager.pageSize() > pager.file().size()) {
+            return new byte[chunkBytes]; // allocated, never written: past the end of the file
+        }
         byte[] page = new byte[pager.pageSize()];
-        pager.file().readFully(pager.offsetOf(startPage + chunk), page, 0, pager.pageSize());
+        pager.file().readFully(at, page, 0, pager.pageSize());
         boolean blank = true;
         for (int i = 0; i < 8 && blank; i++) {
             blank = page[i] == 0;

@@ -560,6 +560,10 @@ fn a_vector_region_slot_is_not_stored_in_the_clear() {
     r.write_slot(&mut e.pager, 2, &[9.0, 9.0, 9.0, 9.0]).unwrap();
     assert_eq!(r.read_slot(&mut e.pager, 1).unwrap(), v);
     assert_eq!(r.read_slot(&mut e.pager, 2).unwrap(), vec![9.0f32; 4]);
+    // F-075: reopened, the region is still chunked as encrypted.
+    let again = Region::open(&mut e.pager, r.start_page).unwrap();
+    assert!(again.encrypted, "an encrypted region reopens as plaintext");
+    assert_eq!(again.read_slot(&mut e.pager, 1).unwrap(), v);
     e.commit(Durability::Sync).unwrap();
     e.close(false).unwrap();
 

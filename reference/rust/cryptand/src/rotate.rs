@@ -81,6 +81,20 @@ pub fn rotate_master_key(
         t.reachable(&mut e.pager, &mut tree_pages)?;
     }
     pages.extend(tree_pages);
+    // Index trees rooted in their descriptors (F-079).
+    for (_, d) in crate::convert::index_trees(&mut e)? {
+        pages.extend(crate::convert::index_tree_pages(&mut e.pager, &d)?);
+    }
+    // Vector regions (F-072 g): the head page is an ordinary page, the data
+    // area is chunked when the head says so.
+    let mut regions = Vec::new();
+    for (_, _, start) in crate::convert::vector_regions(&mut e)? {
+        let r = crate::vector::Region::open(&mut e.pager, start)?;
+        pages.insert(start);
+        if r.encrypted {
+            regions.push((start, r.header.data_offset, r.pages as u64 - 1));
+        }
+    }
     let mut vlogs = Vec::new();
     let live: Vec<(u64, u64, u64)> = e
         .vlog_stats
@@ -179,6 +193,20 @@ pub fn rotate_master_key(
                 f.write_all_at(&raw, pos)?;
                 done += n;
                 i += 1;
+            }
+        }
+        for (start, data_offset, chunks) in regions {
+            for i in 0..chunks {
+                let pos = start * ps + data_offset + i * ps;
+                // Allocated, never written: past the end, or all zero.
+                if f.read_exact_at(&mut buf, pos).is_err() || buf.iter().all(|&b| b == 0) {
+                    continue;
+                }
+                let counter = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+                let pt = old.decrypt_chunk(start, counter, i, &buf[8..])?;
+                let ct = new.encrypt_chunk(start, counter, i, &pt)?;
+                buf[8..].copy_from_slice(&ct);
+                f.write_all_at(&buf, pos)?;
             }
         }
         // One keyslot, under the new master; both superblock slots, so the

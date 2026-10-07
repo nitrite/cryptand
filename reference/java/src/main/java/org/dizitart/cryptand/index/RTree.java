@@ -104,7 +104,17 @@ public final class RTree {
         return t;
     }
 
-    public int dimensions() {
+    /** Every page the tree occupies now. */
+    public List<Long> pages() {
+        return new ArrayList<>(oldPages);
+    }
+
+    /** The next {@link #commit} rewrites every page (F-072: conversion in place). */
+    public void markDirty() {
+        dirty = true;
+    }
+
+        public int dimensions() {
         return dimensions;
     }
 

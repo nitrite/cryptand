@@ -211,7 +211,11 @@ public final class FileCipher implements PageCrypto, AutoCloseable {
      * same key and the same nonce over different plaintext.
      */
     public byte[] encryptChunk(long headPageId, long chunkIndex, byte[] plaintext) {
-        long counter = allocateNonce();
+        return encryptChunk(headPageId, chunkIndex, plaintext, allocateNonce());
+    }
+
+    /** As above under a given counter: re-sealing under a new master key (rotation) only. */
+    public byte[] encryptChunk(long headPageId, long chunkIndex, byte[] plaintext, long counter) {
         byte[] nonce = Security.buildNonce(Security.NonceDomain.PAGE, counter, headPageId, chunkIndex);
         byte[] ct = XChaCha20Poly1305.encrypt(pageKey, nonce, chunkAad(headPageId, chunkIndex), plaintext);
         return new ByteWriter(8 + ct.length).u64(counter).bytes(ct).toBytes();

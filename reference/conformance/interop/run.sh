@@ -234,13 +234,14 @@ for mode in half full; do
 done
 done
 
-say "9. rust rotates the master key (copy-and-swap); every implementation reads with the new key only"
-rf="$work/rotate.cryptand"
+for rot in rust java; do
+say "9. $rot rotates the master key (copy-and-swap); every implementation reads with the new key only"
+rf="$work/rotate-$rot.cryptand"
 KEY=0909090909090909090909090909090909090909090909090909090909090909
-run_impl rust write "$rf" >/dev/null || bad "rust could not write"
-want="$(field "$(run_impl rust read "$rf")" digest)"
+run_impl $rot write "$rf" >/dev/null || bad "$rot could not write"
+want="$(field "$(run_impl $rot read "$rf")" digest)"
 NEW=0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a
-run_impl rust rotate "$rf" "$NEW" >/dev/null || bad "rust could not rotate"
+run_impl $rot rotate "$rf" "$NEW" >/dev/null || bad "$rot could not rotate"
 for impl in rust java dart; do
   if run_impl "$impl" read "$rf" >/dev/null 2>&1; then bad "$impl still opens with the old key"; fi
 done
@@ -252,6 +253,35 @@ for impl in rust java dart; do
   else bad "$impl: digest '$got' want '$want'; $v"; fi
 done
 KEY=""
+done
+
+# F-079: index structures rooted in descriptors (R-tree, vector graph and
+# region) survive conversion and rotation by either converter, and both Rust
+# and Java verify them clean. Dart verify waits for M5 (its index storage).
+for conv in rust java; do
+  say "12. $conv encrypts, rotates and decrypts a java file with spatial and vector indexes"
+  xf="$work/indexed-$conv.cryptand"
+  KEY=""
+  run_impl java write-indexed "$xf" >/dev/null || { bad "java could not write the indexed file"; continue; }
+  K1=0909090909090909090909090909090909090909090909090909090909090909
+  K2=0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b
+  ok_idx() {  # ok_idx <stage>
+    local q v1 v2
+    q="$(run_impl java check-indexed "$xf" 2>&1 | tail -1)"
+    v1="$(run_impl rust verify "$xf" 2>&1 | tail -1)"
+    v2="$(run_impl java verify "$xf" 2>&1 | tail -1)"
+    if [[ "$q" == "indexed: ok" && "$v1" == *" 0 findings"* && "$v2" == *" 0 findings"* ]]; then ok "$1: $q; rust $v1; java $v2"
+    else bad "$1: $q; rust $v1; java $v2"; fi
+  }
+  KEY=$K1
+  run_impl $conv encrypt "$xf" >/dev/null || bad "$conv could not encrypt"
+  ok_idx "encrypted by $conv"
+  run_impl $conv rotate "$xf" "$K2" >/dev/null || bad "$conv could not rotate"
+  KEY=$K2; ok_idx "rotated by $conv"
+  run_impl $conv decrypt "$xf" >/dev/null || bad "$conv could not decrypt"
+  # decrypted: no key needed, and none accepted
+  KEY=""; ok_idx "decrypted by $conv"
+done
 
 say "result"
 if [[ $fail -eq 0 ]]; then

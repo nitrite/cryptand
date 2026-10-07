@@ -8,7 +8,9 @@ import org.dizitart.cryptand.container.Pager;
 import org.dizitart.cryptand.container.Superblock;
 import org.dizitart.cryptand.key.Ikey;
 import org.dizitart.cryptand.lsm.BlockedBloom;
+import org.dizitart.cryptand.container.PageHeader;
 import org.dizitart.cryptand.lsm.Engine;
+import org.dizitart.cryptand.value.Value;
 import org.dizitart.cryptand.lsm.Segment;
 import org.dizitart.cryptand.lsm.SegmentMeta;
 import org.dizitart.cryptand.lsm.VlogPointer;
@@ -578,7 +580,30 @@ public final class Verify {
             TreeDescriptor d = TreeDescriptor.decode(e.getValue(), null);
             Long root = d.root();
             if (root != null && root != 0) {
-                claimTree(root, "tree " + d.treeId());
+                if (TreeDescriptor.IndexType.SPATIAL.equals(d.indexType())) {
+                    // F-079: an R-tree is not a B+tree; walk it in its own format.
+                    try {
+                        for (long p : Engine.indexTreePages(pager, d)) {
+                            claim(p, 1, "R-tree " + d.treeId());
+                        }
+                    } catch (RuntimeException ex) {
+                        report(ex, "R-tree " + d.treeId());
+                    }
+                } else {
+                    claimTree(root, "tree " + d.treeId());
+                }
+            }
+            // F-079: a vector region owns its whole extent (09-vector §2).
+            Value.Doc params = d.params();
+            Value at = params == null ? null : params.field("vector_region");
+            if (at != null && SegmentMeta.longOf(at) != 0) {
+                long start = SegmentMeta.longOf(at);
+                try {
+                    PageHeader h = PageHeader.parse(pager.readRaw(start), 0);
+                    claim(start, Math.max(1, h.extentPages), "vector region of tree " + d.treeId());
+                } catch (RuntimeException ex) {
+                    report(ex, "vector region at page " + start);
+                }
             }
         }
         // Trees 3, 4 and 5 are reached through their catalog descriptors above,

@@ -769,7 +769,7 @@ public final class Vlog {
             return VlogSegment.decodeEncryptedRecord(buf, 0, buf.length, seg.segmentId, offset, cipher);
         }
         if (cipher != null) {
-            // ponytail: F-075, Dart writes head byte 0 on encrypted segments,
+            // ponytail: F-076, Dart writes head byte 0 on encrypted segments,
             // so with a key in hand a byte-0 segment may be either. A clear
             // record whose CRC fails is tried as encrypted, whose tag is the
             // authority. Drop the fallback once Dart writes the byte (M5).

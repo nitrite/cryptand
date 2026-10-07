@@ -176,3 +176,82 @@ fn rotate_a_half_encrypted_file() {
     while e.convert_step().unwrap() == Step::More {}
     check(&mut e, 2 * n, "then converted");
 }
+
+/// F-072 g: a vector region is found through its descriptor, re-laid by
+/// conversion both ways and re-sealed by rotation.
+#[test]
+fn vector_regions_convert_and_rotate() {
+    use cryptand::catalog::TreeDescriptor;
+    use cryptand::convert::ConfirmDecrypt;
+    use cryptand::rotate::rotate_master_key;
+    use cryptand::value::NumType;
+    use cryptand::vector::{DType, Region};
+    let t = TempDb::new("region-convert");
+    let slots = 3000u64; // > 170 chunks at 4 KiB: the chunked layout needs more pages
+    let vec_of = |s: u64| vec![s as f32, -(s as f32), 0.5, 1.0];
+    let region_of = |e: &mut Engine| {
+        let d = e.catalog.get(&mut e.pager, "idx:c:v:vector").unwrap().unwrap();
+        Region::open(&mut e.pager, d.param_u64("vector_region").unwrap()).unwrap()
+    };
+    let read_all = |e: &mut Engine, what: &str, encrypted: bool| {
+        let r = region_of(e);
+        assert_eq!(r.encrypted, encrypted, "{what}");
+        for s in (1..slots).step_by(7) {
+            assert_eq!(r.read_slot(&mut e.pager, s).unwrap(), vec_of(s), "{what}: slot {s}");
+        }
+    };
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    for i in 0..100 {
+        e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
+    }
+    let mut r = Region::create(&mut e.pager, 4, DType::F32, slots).unwrap();
+    for s in (1..slots).step_by(7) {
+        r.write_slot(&mut e.pager, s, &vec_of(s)).unwrap();
+    }
+    let params = vec![("vector_region".to_string(), Value::int(NumType::U64, r.start_page as i128))];
+    let d = TreeDescriptor::create(T + 1, "index", Some("c"), None, None, 0, params, 0);
+    e.catalog.put(&mut e.pager, "idx:c:v:vector", &d).unwrap();
+    e.commit(Durability::Sync).unwrap();
+
+    e.encrypt(&KEY, 0, 0, 0, 0).unwrap();
+    assert!(e.conversion().unwrap().remaining > 0);
+    while e.convert_step().unwrap() == Step::More {}
+    assert!(e.fully_encrypted().unwrap(), "{:?}", e.conversion().unwrap());
+    read_all(&mut e, "encrypted", true);
+
+    let mut e = rotate_master_key(e, &[5u8; 32], 0, 0, 0, 0).unwrap();
+    read_all(&mut e, "rotated", true);
+
+    e.decrypt(ConfirmDecrypt::RemoveEncryption).unwrap();
+    while e.convert_step().unwrap() == Step::More {}
+    read_all(&mut e, "decrypted", false);
+    check(&mut e, 100, "decrypted");
+}
+
+/// F-081: values whose pointers are still in the memtable (no flush before
+/// `encrypt()`) survive the conversion, a rotation and a decrypt. The value-log
+/// rewrite judged liveness from segments alone and retired their segment.
+#[test]
+fn memtable_held_values_survive_encrypt_rotate_decrypt() {
+    use cryptand::convert::ConfirmDecrypt;
+    use cryptand::rotate::rotate_master_key;
+    let t = TempDb::new("memtable-convert");
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    for i in 0..100 {
+        e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
+    }
+    e.commit(Durability::Sync).unwrap();
+    e.encrypt(&KEY, 0, 0, 0, 0).unwrap();
+    while e.convert_step().unwrap() == Step::More {}
+    // More writes reuse the space a wrongly retired segment gave back.
+    for i in 100..200 {
+        e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
+    }
+    e.flush().unwrap();
+    check(&mut e, 200, "encrypted");
+    let mut e = rotate_master_key(e, &[5u8; 32], 0, 0, 0, 0).unwrap();
+    check(&mut e, 200, "rotated");
+    e.decrypt(ConfirmDecrypt::RemoveEncryption).unwrap();
+    while e.convert_step().unwrap() == Step::More {}
+    check(&mut e, 200, "decrypted");
+}

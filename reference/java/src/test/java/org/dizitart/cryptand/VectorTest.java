@@ -242,4 +242,122 @@ class VectorTest {
             assertEquals(expected[i], actual[i], 1e-6, "element " + i);
         }
     }
+
+    /**
+     * F-075, 14 §5.4: an encrypted region's head page is sealed like any page,
+     * chunk i of the data area is page head+1+i under AAD index i (the layout
+     * Rust reads), and the extent is sized for page_size - 24 per chunk.
+     */
+    @Test
+    void anEncryptedRegionHasTheLayoutEveryImplementationReads(@TempDir Path dir) {
+        Engine.Options o = new Engine.Options();
+        o.profile = Profile.DESKTOP;
+        o.rawKey = new byte[32];
+        o.encrypt = true;
+        try (Engine e = Engine.create(dir.resolve("region.cryptand"), o)) {
+            org.dizitart.cryptand.container.Pager pager = e.pager();
+            int ps = pager.pageSize();
+            int chunk = org.dizitart.cryptand.crypto.FileCipher.chunkPlaintextBytes(ps);
+            long slots = 8000;
+            VectorRegion r = VectorRegion.create(pager, 64, VectorRegion.DTYPE_F32, slots);
+            assertTrue(r.pages >= 1 + (slots * r.stride + chunk - 1) / chunk,
+                    "extent of " + r.pages + " pages is too small for " + slots + " slots");
+            byte[] head = pager.readRaw(r.startPage);
+            assertTrue(org.dizitart.cryptand.container.PageHeader.parse(head, 0)
+                    .isSet(org.dizitart.cryptand.container.PageHeader.Flags.ENCRYPTED), "head page in the clear");
+            float[] v = new float[64];
+            v[0] = 1.5f;
+            r.write(pager, 1, v);
+            r.write(pager, slots - 1, v);
+            assertEquals(1.5f, VectorRegion.open(pager, r.startPage).read(pager, slots - 1)[0]);
+            // Slot 1 is in chunk 0 at plain offset stride, on page head + 1.
+            byte[] page = new byte[ps];
+            pager.file().readFully(pager.offsetOf(r.startPage + 1), page, 0, ps);
+            byte[] pt = ((org.dizitart.cryptand.crypto.FileCipher) pager.crypto())
+                    .decryptChunk(r.startPage, 0, java.util.Arrays.copyOf(page, ps));
+            assertEquals(Float.floatToIntBits(1.5f), new org.dizitart.cryptand.util.ByteReader(pt, r.stride, 4).u32());
+        }
+    }
+
+    /**
+     * F-072 g: a live vector index survives encrypt-in-place, a master-key
+     * rotation and decrypt-in-place, its region re-laid or re-sealed each time.
+     */
+    @Test
+    void aVectorIndexSurvivesConversionAndRotation(@TempDir Path dir) {
+        Path f = dir.resolve("vec-convert.cryptand");
+        int n = 600;
+        byte[] k1 = new byte[32];
+        byte[] k2 = new byte[32];
+        java.util.Arrays.fill(k2, (byte) 2);
+        long[] ids = new long[n + 1];
+        try (Database db = Database.create(f, options())) {
+            Collection c = db.collection("docs");
+            c.createVectorIndex("embedding", 4, VectorIndex.METRIC_L2, 16);
+            for (int i = 0; i < n; i++) {
+                ids[i] = c.insert(doc("d" + i, vec(i, -i, i * 0.5f, 1)));
+            }
+            Engine e = db.engine();
+            e.commitNow();
+            e.encrypt(null, k1);
+            int steps = 0;
+            while (e.convertStep()) {
+                assertTrue(++steps < 20, "conversion does not converge: " + e.conversion());
+            }
+            assertTrue(e.fullyEncrypted(), e.conversion().toString());
+            // Written after the move: the index follows its relocated region.
+            ids[n] = c.insert(doc("late", vec(n, -n, n * 0.5f, 1)));
+            searchAll(c.vectorIndexes().get(0), ids, "converted, same session");
+        }
+        Engine.Options o = options();
+        o.rawKey = k1;
+        Engine.rotateMasterKey(Engine.open(f, o), null, k2).close();
+        o.rawKey = k2;
+        try (Database db = Database.open(f, o)) {
+            searchAll(db.collection("docs").vectorIndexes().get(0), ids, "rotated");
+            db.engine().decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
+            while (db.engine().convertStep()) {
+                // until nothing encrypted remains
+            }
+            searchAll(db.collection("docs").vectorIndexes().get(0), ids, "decrypted");
+        }
+        try (Database db = Database.open(f, options())) {
+            searchAll(db.collection("docs").vectorIndexes().get(0), ids, "decrypted, reopened");
+        }
+    }
+
+    private static void searchAll(VectorIndex index, long[] ids, String what) {
+        for (int i = 0; i < ids.length; i += 37) {
+            List<VectorIndex.Hit> hits = index.search(new float[] {i, -i, i * 0.5f, 1}, 1);
+            assertEquals(ids[i], hits.get(0).nitriteId(), what + ": vector " + i);
+        }
+        int last = ids.length - 1;
+        List<VectorIndex.Hit> hits = index.search(new float[] {last, -last, last * 0.5f, 1}, 1);
+        assertEquals(ids[last], hits.get(0).nitriteId(), what + ": last vector");
+    }
+
+    /**
+     * F-078: under the default {@code sync} durability an insert waits for the
+     * committer, whose hook takes the index monitor; the index must not hold
+     * that monitor while it waits. Every other test here runs {@code os}.
+     */
+    @Test
+    @org.junit.jupiter.api.Timeout(60)
+    void aVectorIndexUnderSyncDurabilityDoesNotDeadlock(@TempDir Path dir) {
+        Path f = dir.resolve("sync.cryptand");
+        Engine.Options o = options();
+        o.durability = Superblock.Durability.SYNC;
+        long[] ids = new long[40];
+        try (Database db = Database.create(f, o)) {
+            Collection c = db.collection("docs");
+            // 2 initial slots, so the region grows (growTo) under the same load.
+            c.createVectorIndex("embedding", 4, VectorIndex.METRIC_L2, 2);
+            for (int i = 0; i < ids.length; i++) {
+                ids[i] = c.insert(doc("d" + i, vec(i, -i, i * 0.5f, 1)));
+            }
+        }
+        try (Database db = Database.open(f, o)) {
+            searchAll(db.collection("docs").vectorIndexes().get(0), ids, "reopened");
+        }
+    }
 }

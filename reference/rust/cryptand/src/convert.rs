@@ -20,6 +20,11 @@ use crate::engine::Engine;
 use crate::error::{invalid, Result};
 use crate::security::{keyslot, make_keyslot, random_bytes, KeyRing};
 use crate::spaceapi::Step;
+use crate::catalog::TreeDescriptor;
+use crate::value::{NumType, Value};
+use crate::vector::Region;
+use crate::cow::CowTree;
+use crate::rtree::{RTreeNode, SpatialEntry};
 
 /// 14 §8.3: "an implementation MUST expose the fraction converted". Counted
 /// in objects, each rewritten whole: segments, tree pages, value-log segments.
@@ -70,13 +75,80 @@ struct Census {
     plain_segments: Vec<crate::manifest::SegmentRef>,
     plain_tree_pages: u64,
     plain_vlog: Vec<u64>,
+    /// Vector regions (F-072 g), by the descriptor that names them.
+    plain_regions: Vec<(String, TreeDescriptor, u64)>,
+    plain_index_trees: Vec<(String, TreeDescriptor)>,
     converted: u64,
+}
+
+/// Every index tree: a descriptor with a root that is not levelled (an R-tree,
+/// a vector graph, Java's and Dart's trees 4 and 5). Tree 3 is the engine's
+/// own `catalog.by_id`, handled with the superblock's trees (F-079).
+pub(crate) fn index_trees(e: &mut Engine) -> Result<Vec<(String, TreeDescriptor)>> {
+    Ok(e.catalog
+        .all(&mut e.pager)?
+        .into_iter()
+        .filter(|(_, d)| d.root().unwrap_or(0) != 0 && !d.levelled() && d.tree_id() != crate::catalog::tree_id::TREE_INDEX)
+        .collect())
+}
+
+fn spatial_dims(d: &TreeDescriptor) -> u8 {
+    d.param_u64("dimensions").unwrap_or(2) as u8
+}
+
+fn is_spatial(d: &TreeDescriptor) -> bool {
+    d.param_str("index_type") == Some(crate::catalog::index_type::SPATIAL)
+}
+
+/// One R-tree's pages and its leaf rows, walked from the root.
+fn rtree_walk(pager: &mut crate::pager::Pager, d: &TreeDescriptor) -> Result<(Vec<u64>, Vec<SpatialEntry>)> {
+    let (mut pages, mut rows, mut stack) = (Vec::new(), Vec::new(), vec![d.root().unwrap_or(0)]);
+    while let Some(p) = stack.pop() {
+        let (_h, raw) = pager.read_verified(p)?;
+        let n = RTreeNode::parse(&raw, spatial_dims(d))?;
+        pages.push(p);
+        for x in n.entries {
+            if n.is_leaf {
+                rows.push(SpatialEntry { bbox: x.bbox, id: x.payload });
+            } else {
+                stack.push(x.payload as u64);
+            }
+        }
+    }
+    Ok((pages, rows))
+}
+
+/// The pages of one index tree, walked in its own format.
+pub(crate) fn index_tree_pages(pager: &mut crate::pager::Pager, d: &TreeDescriptor) -> Result<Vec<u64>> {
+    if is_spatial(d) {
+        return Ok(rtree_walk(pager, d)?.0);
+    }
+    let mut out = Vec::new();
+    CowTree::new(d.tree_id(), d.root().unwrap_or(0)).reachable(pager, &mut out)?;
+    Ok(out)
+}
+
+/// Every vector region in the file, found through the descriptors that name
+/// them (`09-vector.md` §5's `params.vector_region`): the engine keeps no list.
+pub(crate) fn vector_regions(e: &mut Engine) -> Result<Vec<(String, TreeDescriptor, u64)>> {
+    Ok(e.catalog
+        .all(&mut e.pager)?
+        .into_iter()
+        .filter_map(|(name, d)| d.param_u64("vector_region").filter(|&p| p != 0).map(|p| (name, d, p)))
+        .collect())
 }
 
 fn census(e: &mut Engine) -> Result<Census> {
     // The target: encrypted, unless `decrypt()` is under way.
     let want = !e.pager.write_clear;
-    let mut c = Census { plain_segments: Vec::new(), plain_tree_pages: 0, plain_vlog: Vec::new(), converted: 0 };
+    let mut c = Census {
+        plain_segments: Vec::new(),
+        plain_tree_pages: 0,
+        plain_vlog: Vec::new(),
+        plain_regions: Vec::new(),
+        plain_index_trees: Vec::new(),
+        converted: 0,
+    };
     for r in e.all_refs()? {
         if page_encrypted(e, r.start_page)? == want {
             c.converted += 1;
@@ -109,6 +181,26 @@ fn census(e: &mut Engine) -> Result<Census> {
             c.converted += 1;
         } else {
             c.plain_vlog.push(id);
+        }
+    }
+    for r in vector_regions(e)? {
+        if page_encrypted(e, r.2)? == want {
+            c.converted += 1;
+        } else {
+            c.plain_regions.push(r);
+        }
+    }
+    for (name, d) in index_trees(e)? {
+        let mut plain = false;
+        for p in index_tree_pages(&mut e.pager, &d)? {
+            if page_encrypted(e, p)? == want {
+                c.converted += 1;
+            } else {
+                plain = true;
+            }
+        }
+        if plain {
+            c.plain_index_trees.push((name, d));
         }
     }
     Ok(c)
@@ -176,6 +268,42 @@ impl ConvertApi for Engine {
                 while self.step_compaction(&mut job, None)? {}
                 self.finish_compaction(job)?;
             }
+        } else if !c.plain_regions.is_empty() {
+            // Re-laid, never re-sealed in place: the chunk size differs.
+            for (name, d, start) in c.plain_regions {
+                let old = Region::open(&mut self.pager, start)?;
+                let new = old.relocate(&mut self.pager)?;
+                self.pager.free_extent(old.start_page, old.pages, self.sb.commit_id);
+                let d = d.with_param("vector_region", Some(Value::int(NumType::U64, new.start_page as i128)));
+                self.catalog.put(&mut self.pager, &name, &d)?;
+            }
+        } else if !c.plain_index_trees.is_empty() {
+            // Rebuilt, never re-sealed in place: a full plaintext page has no
+            // room for the tag.
+            let commit_id = self.sb.commit_id;
+            for (name, d) in c.plain_index_trees {
+                let root = if is_spatial(&d) {
+                    let (old, rows) = rtree_walk(&mut self.pager, &d)?;
+                    for p in old {
+                        self.pager.free_extent(p, 1, commit_id);
+                    }
+                    let dims = spatial_dims(&d);
+                    let leaf = (self.pager.payload_cap() - 16) / crate::rtree::entry_stride(dims, false);
+                    let mut t = crate::rtree::RTree::new(d.tree_id(), dims, leaf);
+                    t.build(&mut self.pager, rows)?;
+                    t.root
+                } else {
+                    let mut t = CowTree::new(d.tree_id(), d.root().unwrap_or(0));
+                    t.commit_id = commit_id;
+                    t.relocate(&mut self.pager)?;
+                    for p in std::mem::take(&mut t.freed) {
+                        self.pager.free_extent(p, 1, commit_id);
+                    }
+                    t.root
+                };
+                let d = d.with(vec![("root", Some(Value::int(NumType::U64, root as i128)))]);
+                self.catalog.put(&mut self.pager, &name, &d)?;
+            }
         } else if c.plain_tree_pages > 0 {
             self.relocate_trees()?;
         } else if !c.plain_vlog.is_empty() {
@@ -208,7 +336,11 @@ impl ConvertApi for Engine {
 
     fn conversion(&mut self) -> Result<Conversion> {
         let c = census(self)?;
-        let remaining = c.plain_segments.len() as u64 + c.plain_tree_pages + c.plain_vlog.len() as u64;
+        let remaining = c.plain_segments.len() as u64
+            + c.plain_tree_pages
+            + c.plain_vlog.len() as u64
+            + c.plain_regions.len() as u64
+            + c.plain_index_trees.len() as u64;
         Ok(Conversion { converted: c.converted, remaining })
     }
 

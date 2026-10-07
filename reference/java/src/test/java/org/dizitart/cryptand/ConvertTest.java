@@ -145,4 +145,89 @@ class ConvertTest {
             }
         }
     }
+
+    private static byte[] k(int b) {
+        byte[] k = new byte[32];
+        Arrays.fill(k, (byte) b);
+        return k;
+    }
+
+    @Test
+    void rotateMasterKeyRekeysEverythingAndDropsTheOldKeys(@TempDir Path dir) {
+        Path f = dir.resolve("rotate.cryptand");
+        Engine e = Engine.create(f, opts(k(1)));
+        fill(e);
+        e.addKey(null, k(2), "second");
+        e = Engine.rotateMasterKey(e, null, k(3));
+        try {
+            check(e, N, "rotated");
+            e.batch().put(T, key(N), value(N)).commit();
+        } finally {
+            e.close();
+        }
+        assertFalse(Files.exists(dir.resolve("rotate.cryptand.rotate")));
+        for (int old : new int[] {1, 2}) {
+            assertThrows(CannotUnlockException.class, () -> Engine.open(f, reopen(k(old))).close(),
+                    "the old key " + old + " still opens the file");
+        }
+        try (Engine r = Engine.open(f, reopen(k(3)))) {
+            check(r, N + 1, "reopened after rotation");
+        }
+    }
+
+    @Test
+    void rotateAHalfEncryptedFile(@TempDir Path dir) {
+        Path f = dir.resolve("rotate-half.cryptand");
+        Engine e = Engine.create(f, opts(null));
+        fill(e);
+        e.encrypt(null, k(1));
+        e.batch().put(T, key(N), value(N)).commit();
+        e = Engine.rotateMasterKey(e, null, k(4));
+        try {
+            check(e, N + 1, "half-encrypted, rotated");
+            int steps = 0;
+            while (e.convertStep()) {
+                assertTrue(++steps < 20, "conversion does not converge: " + e.conversion());
+            }
+            check(e, N + 1, "then converted");
+        } finally {
+            e.close();
+        }
+    }
+
+    /**
+     * F-081: values whose pointers are still in the memtable (no flush before
+     * encrypt()) survive the conversion, later writes, a rotation and a decrypt.
+     */
+    @Test
+    void memtableHeldValuesSurviveEncryptRotateDecrypt(@TempDir Path dir) {
+        Path f = dir.resolve("memtable.cryptand");
+        Engine.Options o = opts(null);
+        o.memtableEntries = 100_000; // nothing flushes on its own
+        Engine e = Engine.create(f, o);
+        for (int i = 0; i < 100; i++) {
+            e.batch().put(T, key(i), value(i)).commit();
+        }
+        e.encrypt(null, k(1));
+        int steps = 0;
+        while (e.convertStep()) {
+            assertTrue(++steps < 20, "conversion does not converge: " + e.conversion());
+        }
+        for (int i = 100; i < 200; i++) {
+            e.batch().put(T, key(i), value(i)).commit();
+        }
+        e.commitNow(true);
+        check(e, 200, "encrypted");
+        e = Engine.rotateMasterKey(e, null, k(5));
+        try {
+            check(e, 200, "rotated");
+            e.decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
+            while (e.convertStep()) {
+                // until nothing encrypted remains
+            }
+            check(e, 200, "decrypted");
+        } finally {
+            e.close();
+        }
+    }
 }

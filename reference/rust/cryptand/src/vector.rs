@@ -189,7 +189,44 @@ impl Region {
     pub fn open(pager: &mut Pager, start_page: u64) -> Result<Region> {
         let (h, raw) = pager.read_verified(start_page)?;
         let header = RegionHeader::parse(&raw)?;
-        Ok(Region { start_page, pages: h.extent_pages.max(1), header, encrypted: h.encrypted() })
+        // The flag as stored: the page read_verified returns is decrypted and
+        // no longer carries it (F-075).
+        let encrypted = PageHeader::parse(&pager.read_page_clear(start_page)?)?.encrypted();
+        Ok(Region { start_page, pages: h.extent_pages.max(1), header, encrypted })
+    }
+
+    /// F-072 g, 14 §8.3: a copy of this region laid out for the file's current
+    /// mode (sealed or clear), same header and stride. The caller frees this
+    /// extent and repoints the descriptor. A chunk never written (all zero, or
+    /// past the end of the file) stays unwritten.
+    pub fn relocate(&self, pager: &mut Pager) -> Result<Region> {
+        let encrypted = pager.seals();
+        let len = self.header.slot_count * self.header.stride as u64;
+        let pages = (1 + len.div_ceil(pager.chunk_bytes(encrypted) as u64)) as u32;
+        let start = pager.alloc_extent(pages)?;
+        pager.write_page(start, &self.header.encode(pager.page_size, pages))?;
+        let out = Region { start_page: start, pages, header: self.header.clone(), encrypted };
+        let ps = pager.page_size as u64;
+        let step = pager.chunk_bytes(self.encrypted) as u64;
+        let base = self.start_page * ps + self.header.data_offset;
+        let mut off = 0u64;
+        for idx in 0..len.div_ceil(step) {
+            let take = step.min(len - off) as usize;
+            if let Ok(raw) = pager.read_at(base + idx * ps, ps as usize) {
+                if raw.iter().any(|&b| b != 0) {
+                    let data = if self.encrypted {
+                        let Some(c) = &pager.crypto else { return Err(crate::error::Error::CannotUnlock) };
+                        let counter = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+                        c.ring.decrypt_chunk(self.start_page, counter, idx, &raw[8..])?
+                    } else {
+                        raw
+                    };
+                    pager.write_extent_data(start, out.header.data_offset, off, &data[..take], encrypted)?;
+                }
+            }
+            off += take as u64;
+        }
+        Ok(out)
     }
 
     pub fn write_slot(&mut self, pager: &mut Pager, slot: u64, v: &[f32]) -> Result<()> {

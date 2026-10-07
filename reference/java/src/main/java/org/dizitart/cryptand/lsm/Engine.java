@@ -4109,7 +4109,7 @@ public final class Engine implements AutoCloseable {
      */
     // ponytail: one step is one whole kind of object, not a slice bounded by
     // 12 §4's stall budget; slice each phase if a large file's conversion
-    // stalls a foreground caller. Vector regions are not converted (F-072 g).
+    // stalls a foreground caller.
     public boolean convertStep() {
         requireEncrypted();
         structure.lock();
@@ -4118,6 +4118,21 @@ public final class Engine implements AutoCloseable {
             if (!c.plainSegments.isEmpty() || c.plainBlobs > 0) {
                 int last = lastLevel();
                 compactLevels(0, last - 1, true);
+            } else if (!c.plainRegions.isEmpty() || !c.plainIndexTrees.isEmpty()) {
+                // Re-laid, never re-sealed in place: a full plaintext page has
+                // no room for a tag, and a region's chunk size differs.
+                Set<Integer> ids = new java.util.TreeSet<>();
+                c.plainRegions.forEach(r -> ids.add(r.descriptor.treeId()));
+                c.plainIndexTrees.forEach(t -> ids.add(t.descriptor.treeId()));
+                for (int id : ids) {
+                    Runnable owner = owners.get(id);
+                    if (owner != null) {
+                        owner.run();
+                    } else {
+                        convertUnowned(id, c.plainRegions, c.plainIndexTrees);
+                    }
+                }
+                publishSuperblock(visibleSeq);
             } else if (c.plainTreePages > 0) {
                 relocateTrees();
                 // Tree 1 is rewritten by every publish; once more so the
@@ -4170,7 +4185,8 @@ public final class Engine implements AutoCloseable {
         try {
             Census c = census();
             return new Conversion(c.converted,
-                    c.plainSegments.size() + c.plainTreePages + c.plainVlog.size() + c.plainBlobs);
+                    c.plainSegments.size() + c.plainTreePages + c.plainVlog.size() + c.plainBlobs
+                            + c.plainRegions.size() + c.plainIndexTrees.size());
         } finally {
             structure.unlock();
         }
@@ -4181,7 +4197,138 @@ public final class Engine implements AutoCloseable {
         return sb.cipher != Superblock.Cipher.NONE && pager.seals() && conversion().done();
     }
 
+    /** A vector region and the catalog entry that names it (F-072 g). */
+    private static final class RegionRef {
+        final byte[] catalogKey;
+        final TreeDescriptor descriptor;
+        final long startPage;
+
+        RegionRef(byte[] catalogKey, TreeDescriptor descriptor, long startPage) {
+            this.catalogKey = catalogKey;
+            this.descriptor = descriptor;
+            this.startPage = startPage;
+        }
+    }
+
+    /**
+     * Every vector region, found through the descriptors that name them
+     * ({@code 09-vector.md} §5's {@code params.vector_region}): the engine keeps
+     * no list. Requires {@link #structure}.
+     */
+    private List<RegionRef> vectorRegions() {
+        List<RegionRef> out = new ArrayList<>();
+        for (Map.Entry<byte[], byte[]> en : catalogTree.map().entrySet()) {
+            TreeDescriptor d = TreeDescriptor.decode(en.getValue(), null);
+            Value.Doc params = d.params();
+            Value at = params == null ? null : params.field("vector_region");
+            if (at != null && SegmentMeta.longOf(at) != 0) {
+                out.add(new RegionRef(en.getKey(), d, SegmentMeta.longOf(at)));
+            }
+        }
+        return out;
+    }
+
+    /** An index tree: a tree rooted in its catalog descriptor rather than the superblock (F-079). */
+    private static final class IndexTree {
+        final byte[] catalogKey;
+        final TreeDescriptor descriptor;
+
+        IndexTree(byte[] catalogKey, TreeDescriptor descriptor) {
+            this.catalogKey = catalogKey;
+            this.descriptor = descriptor;
+        }
+    }
+
+    /**
+     * Every index tree: a descriptor with a root that is not levelled. Trees
+     * 3, 4 and 5 are descriptor-rooted too but are the engine's own and handled
+     * with the superblock's. Requires {@link #structure}.
+     */
+    private List<IndexTree> indexTrees() {
+        List<IndexTree> out = new ArrayList<>();
+        for (Map.Entry<byte[], byte[]> en : catalogTree.map().entrySet()) {
+            TreeDescriptor d = TreeDescriptor.decode(en.getValue(), null);
+            Long root = d.root();
+            int id = d.treeId();
+            if (root != null && root != 0 && !d.levelled()
+                    && id != TreeId.TREE_INDEX && id != TreeId.REPAIR_LOG && id != TreeId.USERS) {
+                out.add(new IndexTree(en.getKey(), d));
+            }
+        }
+        return out;
+    }
+
+    /** The pages of one index tree, walked in its own format: an R-tree or a B+tree. */
+    public static List<Long> indexTreePages(Pager pager, TreeDescriptor d) {
+        if (TreeDescriptor.IndexType.SPATIAL.equals(d.indexType())) {
+            Value dv = d.params().field("dimensions");
+            int dims = dv == null ? 2 : (int) SegmentMeta.longOf(dv);
+            return org.dizitart.cryptand.index.RTree.load(pager, d.treeId(), dims, d.root()).pages();
+        }
+        return PageTree.load(pager, d.treeId(), d.root()).pages();
+    }
+
+    private final Map<Integer, Runnable> owners = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * F-072/F-079: a live index object that owns the tree (and vector region)
+     * of descriptor {@code treeId}. A conversion step calls {@code convert}
+     * under {@link #structure} instead of rewriting them itself, since the
+     * owner holds them in memory: it re-lays them in the pager's current mode
+     * (sealed or clear) and publishes the new roots from its commit hook.
+     */
+    public void registerOwner(int treeId, Runnable convert) {
+        owners.put(treeId, convert);
+    }
+
+    /** {@link #registerOwner}'s work, done by the engine for a tree nobody holds. */
+    private void convertUnowned(int treeId, List<RegionRef> regions, List<IndexTree> trees) {
+        for (RegionRef r : regions) {
+            if (r.descriptor.treeId() != treeId) {
+                continue;
+            }
+            org.dizitart.cryptand.index.VectorRegion old =
+                    org.dizitart.cryptand.index.VectorRegion.open(pager, r.startPage);
+            org.dizitart.cryptand.index.VectorRegion moved = old.relocate(pager);
+            pager.freeExtent(old.startPage, old.pages);
+            putParam(r.catalogKey, "vector_region", moved.startPage);
+        }
+        for (IndexTree t : trees) {
+            if (t.descriptor.treeId() != treeId) {
+                continue;
+            }
+            TreeDescriptor d = TreeDescriptor.decode(catalogTree.get(t.catalogKey), null);
+            long root;
+            if (TreeDescriptor.IndexType.SPATIAL.equals(d.indexType())) {
+                Value dv = d.params().field("dimensions");
+            int dims = dv == null ? 2 : (int) SegmentMeta.longOf(dv);
+                org.dizitart.cryptand.index.RTree rt =
+                        org.dizitart.cryptand.index.RTree.load(pager, treeId, dims, d.root());
+                rt.markDirty();
+                root = rt.commit();
+            } else {
+                PageTree pt = PageTree.load(pager, treeId, d.root());
+                pt.markDirty();
+                root = pt.commit();
+            }
+            Map<String, Value> fields = new java.util.LinkedHashMap<>(d.document().fields());
+            fields.put("root", Value.integer(NumType.U64, root));
+            catalogTree.put(t.catalogKey, new TreeDescriptor(Value.Doc.of(fields)).encode(null));
+        }
+    }
+
+    private void putParam(byte[] catalogKey, String name, long value) {
+        TreeDescriptor d = TreeDescriptor.decode(catalogTree.get(catalogKey), null);
+        Map<String, Value> params = new java.util.LinkedHashMap<>(d.params().fields());
+        params.put(name, Value.integer(NumType.U64, value));
+        Map<String, Value> fields = new java.util.LinkedHashMap<>(d.document().fields());
+        fields.put("params", Value.Doc.of(params));
+        catalogTree.put(catalogKey, new TreeDescriptor(Value.Doc.of(fields)).encode(null));
+    }
+
     private static final class Census {
+        final List<RegionRef> plainRegions = new ArrayList<>();
+        final List<IndexTree> plainIndexTrees = new ArrayList<>();
         final List<SegmentMeta> plainSegments = new ArrayList<>();
         long plainTreePages;
         final List<VlogStats> plainVlog = new ArrayList<>();
@@ -4233,7 +4380,295 @@ public final class Engine implements AutoCloseable {
                 c.plainVlog.add(st);
             }
         }
+        for (RegionRef r : vectorRegions()) {
+            if (pageEncrypted(r.startPage) == want) {
+                c.converted++;
+            } else {
+                c.plainRegions.add(r);
+            }
+        }
+        for (IndexTree t : indexTrees()) {
+            boolean plain = false;
+            for (long p : indexTreePages(pager, t.descriptor)) {
+                if (pageEncrypted(p) == want) {
+                    c.converted++;
+                } else {
+                    plain = true;
+                }
+            }
+            if (plain) {
+                c.plainIndexTrees.add(t);
+            }
+        }
         return c;
+    }
+
+    // ==================================================================
+    // F-072: 13 §5 rotate_master_key(), by copy-and-swap (human 10-07)
+    // ==================================================================
+
+    /**
+     * Rotates {@code e}'s master key and returns the database reopened under the
+     * new credential (exactly one of {@code password}, {@code rawKey}). CFF v1.0
+     * cannot say which master sealed a page, so a file is never half-rotated:
+     * the file is copied to a {@code .rotate} sibling, every encrypted object in
+     * the copy is re-sealed under a fresh master (same counters, offsets and
+     * lengths), both superblock slots get one new keyslot, and the sibling is
+     * renamed over the original. A crash before the rename leaves the original
+     * intact. Every other keyslot is dropped: they wrap the old master. The
+     * caller must not write to {@code e} concurrently; {@code e} is closed.
+     */
+    // ponytail: one synchronous pass with 2x the file on disk, refused while
+    // checkpoints exist, as in Rust's rotate.rs; step it when large files need
+    // rotating online.
+    public static Engine rotateMasterKey(Engine e, byte[] password, byte[] rawKey) {
+        if ((password == null) == (rawKey == null)) {
+            throw new InvalidArgumentException("rotateMasterKey() takes a password or a raw key, not both or neither");
+        }
+        e.requireEncrypted();
+        if (!e.pager.seals()) {
+            throw new InvalidArgumentException("rotateMasterKey() refuses a file being decrypted");
+        }
+        if (!e.checkpointTree.map().isEmpty()) {
+            throw new InvalidArgumentException("rotateMasterKey() refuses while checkpoints exist; drop them first");
+        }
+        Path path = e.file.path();
+        Path tmp = path.resolveSibling(path.getFileName() + ".rotate");
+        int ps = e.pager.pageSize();
+        Set<Long> pages = new java.util.TreeSet<>();
+        Set<Long> free = new java.util.TreeSet<>();
+        List<long[]> blobs = new ArrayList<>();
+        List<long[]> regions = new ArrayList<>();
+        List<VlogStats> vlogs = new ArrayList<>();
+        Set<Long> sealedVlogs = new HashSet<>();
+        byte[] oldMaster;
+        e.commitNow(true);
+        e.structure.lock();
+        try {
+            // A quiet, durable state: every value-log segment sealed.
+            e.vlog.sealAll();
+            e.publishSuperblock(e.visibleSeq);
+            for (SegmentMeta m : e.manifest.all()) {
+                for (long p = m.startPage; p < m.startPage + m.pages; p++) {
+                    pages.add(p);
+                }
+                Segment seg = Segment.open(e.pager, m.startPage);
+                for (EntrySource.OfSegment it = new EntrySource.OfSegment(seg); it.isValid(); it.next()) {
+                    if (it.entry().kind() == BtreePage.Kind.BLOB) {
+                        Blob b = Blob.decode(it.entry().value());
+                        blobs.add(new long[] {b.startPage(), b.byteLen()});
+                    }
+                }
+            }
+            for (PageTree t : List.of(e.catalogTree, e.freeTree, e.attributesTree, e.treeIndexTree,
+                    e.repairTree, e.usersTree, e.manifestTree, e.vlogStatsTree, e.checkpointTree,
+                    e.changefeedTree)) {
+                pages.addAll(t.pages());
+            }
+            for (IndexTree t : e.indexTrees()) {
+                pages.addAll(indexTreePages(e.pager, t.descriptor));
+            }
+            for (RegionRef r : e.vectorRegions()) {
+                org.dizitart.cryptand.index.VectorRegion v =
+                        org.dizitart.cryptand.index.VectorRegion.open(e.pager, r.startPage);
+                pages.add(r.startPage);
+                if (v.encrypted) {
+                    regions.add(new long[] {r.startPage, v.dataOffset, v.pages - 1L});
+                }
+            }
+            for (Pager.FreeExtent x : e.pager.freeList()) {
+                for (long p = x.startPage(); p < x.startPage() + x.pages(); p++) {
+                    free.add(p);
+                }
+            }
+            for (VlogStats st : e.vlog.allStats()) {
+                if (st.pages > 0 && st.bytes > 0) {
+                    vlogs.add(st);
+                    if (e.vlog.segment(st.segmentId).encrypted != 0) {
+                        sealedVlogs.add(st.segmentId);
+                    }
+                }
+            }
+            oldMaster = e.currentMasterKey();
+            // The copy under the lock, so it is the commit just published.
+            Files.copy(path, tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.io.IOException x) {
+            throw new java.io.UncheckedIOException(x);
+        } finally {
+            e.structure.unlock();
+        }
+        Superblock sb = e.sb;
+        Options options = e.options;
+        e.abandon();
+
+        byte[] master = FileCipher.randomMasterKey();
+        try (FileCipher old = FileCipher.of(oldMaster, sb.databaseUuid, sb.nextNonce);
+             FileCipher neu = FileCipher.of(master, sb.databaseUuid, sb.nextNonce);
+             java.nio.channels.FileChannel f = java.nio.channels.FileChannel.open(tmp,
+                     java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.WRITE)) {
+            byte[] buf = new byte[ps];
+            // Free extents too: a retained one is still readable by the commit
+            // before. Its bytes may be anything, so only a page that opens
+            // under the old key is re-sealed.
+            free.removeAll(pages);
+            for (long p : free) {
+                readAt(f, buf, p * ps);
+                try {
+                    resealPage(buf, p, old, neu);
+                } catch (RuntimeException notAPage) {
+                    continue;
+                }
+                writeAt(f, buf, p * ps);
+            }
+            for (long p : pages) {
+                readAt(f, buf, p * ps);
+                if (resealPage(buf, p, old, neu)) {
+                    writeAt(f, buf, p * ps);
+                }
+            }
+            for (VlogStats st : vlogs) {
+                long base = st.startPage * ps;
+                long off = VlogSegment.DATA_OFFSET;
+                long end = VlogSegment.DATA_OFFSET + st.bytes;
+                while (off < end) {
+                    byte[] head = new byte[(int) Math.min(10, end - off)];
+                    readAt(f, head, base + off);
+                    ByteReader r = new ByteReader(head);
+                    long len = r.uvar();
+                    byte[] raw = new byte[r.position() + (int) len];
+                    readAt(f, raw, base + off);
+                    VlogSegment.Record rec;
+                    if (!sealedVlogs.contains(st.segmentId)) {
+                        try {
+                            // A clear record (a converting file) stays as it is;
+                            // a byte-0 head may still be sealed (Dart, F-076).
+                            VlogSegment.decodeRecord(raw, 0, raw.length);
+                            off += raw.length;
+                            continue;
+                        } catch (RuntimeException sealed) {
+                            // falls through
+                        }
+                    }
+                    rec = VlogSegment.decodeEncryptedRecord(raw, 0, raw.length, st.segmentId, off, old);
+                    long counter = new ByteReader(raw, r.position(), 8).u64();
+                    byte[] out = VlogSegment.encodeEncrypted(rec, st.segmentId, off, neu, counter);
+                    if (out.length != raw.length) {
+                        throw new CorruptionException("value-log record at " + st.segmentId + "+" + off
+                                + " re-sealed to a different length");
+                    }
+                    writeAt(f, out, base + off);
+                    off += raw.length;
+                }
+            }
+            int chunk = FileCipher.chunkPlaintextBytes(ps);
+            for (long[] b : blobs) {
+                long start = b[0];
+                long len = b[1];
+                readAt(f, buf, start * ps);
+                if (!PageHeader.parse(buf, 0).isSet(PageHeader.Flags.ENCRYPTED)) {
+                    continue;
+                }
+                long done = 0;
+                for (long i = 0; done < len; i++) {
+                    int at = i == 0 ? PageHeader.BYTES : 0;
+                    long n = Math.min(len - done, chunk - at);
+                    long pos = (start + i) * ps + at;
+                    byte[] raw = new byte[8 + (int) n + 16];
+                    readAt(f, raw, pos);
+                    long counter = new ByteReader(raw).u64();
+                    byte[] pt = old.decryptChunk(start, i, raw);
+                    writeAt(f, neu.encryptChunk(start, i, pt, counter), pos);
+                    done += n;
+                }
+            }
+            for (long[] r : regions) {
+                for (long i = 0; i < r[2]; i++) {
+                    long pos = r[0] * ps + r[1] + i * ps;
+                    // Allocated, never written: past the end, or all zero.
+                    if (pos + ps > f.size()) {
+                        continue;
+                    }
+                    readAt(f, buf, pos);
+                    boolean blank = true;
+                    for (int j = 0; j < ps && blank; j++) {
+                        blank = buf[j] == 0;
+                    }
+                    if (blank) {
+                        continue;
+                    }
+                    long counter = new ByteReader(buf).u64();
+                    writeAt(f, neu.encryptChunk(r[0], i, old.decryptChunk(r[0], i, buf), counter), pos);
+                }
+            }
+            // One keyslot under the new master, in both slots, so the fallback
+            // cannot carry a keyslot for the old one.
+            Keyslot[] slots = new Keyslot[Keyslot.COUNT];
+            Arrays.setAll(slots, i -> new Keyslot());
+            slots[0] = password != null
+                    ? FileCipher.wrapWithPassword(master, sb.databaseUuid, 0, password, "keyslot 0",
+                            options.profile.argon2TCost(), options.profile.argon2MCostKib(),
+                            options.profile.argon2Parallelism())
+                    : FileCipher.wrapWithRawKey(master, sb.databaseUuid, 0, rawKey, "keyslot 0");
+            sb.keyslots = Keyslot.encodeAll(slots);
+            sb.commitId += 1;
+            byte[] macKey = neu.macKey();
+            byte[] image = sb.encodeSealed(macKey);
+            Arrays.fill(macKey, (byte) 0);
+            writeAt(f, image, 0);
+            writeAt(f, image, ps);
+            f.force(true);
+        } catch (java.io.IOException x) {
+            throw new java.io.UncheckedIOException(x);
+        } finally {
+            Arrays.fill(master, (byte) 0);
+            Arrays.fill(oldMaster, (byte) 0);
+        }
+        try {
+            Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            // The rename itself, durable (not possible on every platform).
+            try (java.nio.channels.FileChannel d = java.nio.channels.FileChannel.open(path.toAbsolutePath().getParent())) {
+                d.force(true);
+            } catch (java.io.IOException notOnThisPlatform) {
+                // ignored
+            }
+        } catch (java.io.IOException x) {
+            throw new java.io.UncheckedIOException(x);
+        }
+        options.password = password;
+        options.rawKey = rawKey;
+        options.encrypt = false;
+        return open(path, options);
+    }
+
+    /** Re-seals one headed page in place; false for a plaintext page, which stays as it is. */
+    private static boolean resealPage(byte[] buf, long p, FileCipher old, FileCipher neu) {
+        PageHeader h = PageHeader.parse(buf, 0);
+        if (!h.isSet(PageHeader.Flags.ENCRYPTED)) {
+            return false;
+        }
+        int n = h.storedBytes();
+        byte[] pt = old.decryptPage(Arrays.copyOfRange(buf, PageHeader.BYTES, PageHeader.BYTES + n), h, p);
+        byte[] ct = neu.encryptPage(pt, h, p);
+        System.arraycopy(ct, 0, buf, PageHeader.BYTES, n);
+        h.writeInto(buf); // the checksum covers the payload as stored
+        return true;
+    }
+
+    private static void readAt(java.nio.channels.FileChannel f, byte[] dst, long pos) throws java.io.IOException {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(dst);
+        while (b.hasRemaining()) {
+            if (f.read(b, pos + b.position()) < 0) {
+                throw new CorruptionException("short read at " + pos);
+            }
+        }
+    }
+
+    private static void writeAt(java.nio.channels.FileChannel f, byte[] src, long pos) throws java.io.IOException {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(src);
+        while (b.hasRemaining()) {
+            f.write(b, pos + b.position());
+        }
     }
 
     private boolean pageEncrypted(long page) {

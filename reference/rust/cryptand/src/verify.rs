@@ -98,9 +98,18 @@ impl EngineVerify for Engine {
         }
         // Step 8 — with a key, `sb_mac` is verified. Without one, steps 1–7
         // still run: that is the point of leaving headers in the clear.
-        if let Some(ring) = &self.keys {
-            if let Err(e) = ring.verify_superblock(&self.sb) {
-                r.add(Class::Tampering, e.to_string());
+        // F-081: the slot on disk, not `self.sb`: between commits the
+        // in-memory copy has moved on and its `sb_mac` is the last commit's.
+        if self.keys.is_some() {
+            let slot = if self.sb.commit_id % 2 == 1 { 0 } else { 1 };
+            let on_disk = self.pager.read_slot(slot).and_then(|b| crate::container::Superblock::parse(&b));
+            match on_disk {
+                Ok(sb) => {
+                    if let Err(e) = self.keys.as_ref().unwrap().verify_superblock(&sb) {
+                        r.add(Class::Tampering, e.to_string());
+                    }
+                }
+                Err(e) => r.add(Class::Corruption, format!("superblock slot {slot}: {e}")),
             }
         }
 
@@ -212,7 +221,10 @@ impl EngineVerify for Engine {
                 // §9 step 4 and §11 invariant 8.
                 if rec.value_kind == crate::segment::value_kind::VLOG {
                     let p = VlogPointer::parse(&rec.value)?;
-                    match self.vlog_stats.get(&p.segment_id).cloned() {
+                    // F-081: a retired segment's stats stay in memory for older
+                    // snapshots after its pages are reused; it is as gone as
+                    // one whose tree-7 entry was dropped.
+                    match self.vlog_stats.get(&p.segment_id).filter(|s| !s.retired()).cloned() {
                         // F-048: GC frees a segment once no reader resolves into it
                         // (§6.8) and F-043 drops its tree-7 entry, so a superseded,
                         // deleted, range-deleted or expired cell may name it. It
@@ -234,7 +246,10 @@ impl EngineVerify for Engine {
                                     Err(e) => r.add(Class::Corruption, e.to_string()),
                                     Ok(vr) => {
                                         let want = &user_part(&rec.internal_key)[4..];
-                                        if self.sb.cipher == 0 && vr.key != want {
+                                        // F-081: the segment's own framing (F-073), not
+                                        // `cipher`: an encrypted record's key is
+                                        // ciphertext, and decode leaves it empty.
+                                        if !self.vlog_encrypted(p.segment_id)? && vr.key != want {
                                             r.add(
                                                 Class::Corruption,
                                                 format!(
@@ -416,6 +431,34 @@ impl EngineVerify for Engine {
                 if let Some(other) = reachable.insert(p, u64::MAX - 2) {
                     if other != u64::MAX - 2 {
                         r.add(Class::Corruption, format!("page {p} is double-allocated"));
+                    }
+                }
+            }
+        }
+        // F-079: trees rooted in their descriptors (R-trees, vector graphs,
+        // Java's and Dart's trees 4 and 5) and vector regions. Unclaimed, they
+        // read as leaks and `repair` freed them.
+        let mut claims: Vec<(u64, u64, String)> = Vec::new();
+        for (name, d) in crate::convert::index_trees(self)? {
+            match crate::convert::index_tree_pages(&mut self.pager, &d) {
+                Ok(pages) => claims.extend(pages.into_iter().map(|p| (p, 1, name.clone()))),
+                Err(e) => r.add(Class::Corruption, format!("index tree {name}: {e}")),
+            }
+        }
+        for (name, _, start) in crate::convert::vector_regions(self)? {
+            match self.pager.read_page_clear(start).and_then(|b| PageHeader::parse(&b)) {
+                Ok(h) => claims.push((start, h.extent_pages.max(1) as u64, format!("vector region of {name}"))),
+                Err(e) => r.add(Class::Corruption, format!("vector region of {name} at page {start}: {e}")),
+            }
+        }
+        for (start, pages, what) in claims {
+            match extent_pages(start, pages, self.pager.page_count) {
+                None => r.add(Class::Corruption, format!("{what} claims {pages} pages from {start}, past the file")),
+                Some(range) => {
+                    for p in range {
+                        if reachable.insert(p, u64::MAX - 4).is_some() {
+                            r.add(Class::Corruption, format!("page {p} is double-allocated ({what})"));
+                        }
                     }
                 }
             }

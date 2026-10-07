@@ -54,6 +54,13 @@ public final class SpatialIndex {
         Long root = descriptor.root();
         this.tree = RTree.load(db.engine().pager(), descriptor.treeId(), dimensions,
                 root == null ? 0 : root);
+        // F-072: a conversion step asks this object, which holds the tree in
+        // memory, to rewrite it; commit() publishes the new root.
+        db.engine().registerOwner(descriptor.treeId(), () -> {
+            synchronized (this) {
+                tree.markDirty();
+            }
+        });
     }
 
     public String name() {

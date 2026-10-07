@@ -445,6 +445,63 @@ public final class Interop {
         }
     }
 
+    private static final int INDEXED = 400;
+
+    /**
+     * F-079: a file whose indexes keep their own structures (an R-tree, a
+     * vector graph and region), for the conversion and rotation steps.
+     * {@code os} durability: {@code sync} grows the file per commit (F-080).
+     */
+    private static void writeIndexed(String path, byte[] key) {
+        Engine.Options o = options(key);
+        o.durability = Superblock.Durability.OS;
+        o.encrypt = key != null;
+        try (Database db = Database.create(Path.of(path), o)) {
+            org.dizitart.cryptand.Collection c = db.collection("places");
+            c.createSpatialIndex("at", 2, null);
+            c.createVectorIndex("embedding", 4, org.dizitart.cryptand.index.VectorIndex.METRIC_L2, 16);
+            for (int i = 0; i < INDEXED; i++) {
+                ByteWriter v = new ByteWriter(16);
+                v.f32(i).f32(-i).f32(i * 0.5f).f32(1);
+                Map<String, Value> f = new LinkedHashMap<>();
+                f.put("n", Value.i64(i));
+                f.put("at", new Value.Geometry(new ByteWriter(21).u8(1).u32(1).f64(i).f64(-i).toBytes()));
+                f.put("embedding", new Value.Vector(Value.Vector.DTYPE_F32, 4, v.toBytes()));
+                c.insert(Value.Doc.of(f));
+            }
+        }
+        System.out.println("wrote " + INDEXED + " indexed documents to " + path);
+    }
+
+    /** Every 7th document found again through both indexes. */
+    private static int checkIndexed(String path, byte[] key) {
+        Engine.Options o = options(key);
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.open(Path.of(path), o)) {
+            org.dizitart.cryptand.Collection c = db.collection("places");
+            int bad = 0;
+            for (int i = 0; i < INDEXED; i += 7) {
+                long viaVector = c.vectorIndexes().get(0).search(new float[] {i, -i, i * 0.5f, 1}, 1).get(0).nitriteId();
+                long viaSpatial = c.spatialIndexes().get(0).nearestK(i, -i, 1).get(0);
+                for (long id : new long[] {viaVector, viaSpatial}) {
+                    Value n = c.get(id).field("n");
+                    if (n == null || SegmentMeta.longOf(n) != i) {
+                        bad++;
+                    }
+                }
+            }
+            System.out.println("indexed: " + (bad == 0 ? "ok" : bad + " wrong answers"));
+            return bad == 0 ? 0 : 1;
+        }
+    }
+
+    /** F-072: {@code rotate <encrypted file> <new key hex> --key K}, copy-and-swap. */
+    private static void rotate(String path, byte[] key, byte[] newKey) {
+        Engine e = Engine.rotateMasterKey(Engine.open(Path.of(path), options(key)), null, newKey);
+        e.close();
+        System.out.println("rotated " + path);
+    }
+
     private static int verify(String path, byte[] key) {
         try (Engine e = Engine.open(Path.of(path), options(key))) {
             Verify.Report r = Verify.run(e);
@@ -660,11 +717,17 @@ public final class Interop {
                 encrypt(args[1], key, java.util.Arrays.asList(args).contains("--half"));
             } else if (args.length >= 2 && args[0].equals("decrypt")) {
                 decrypt(args[1], key, java.util.Arrays.asList(args).contains("--half"));
+            } else if (args.length >= 2 && args[0].equals("write-indexed")) {
+                writeIndexed(args[1], key);
+            } else if (args.length >= 2 && args[0].equals("check-indexed")) {
+                System.exit(checkIndexed(args[1], key));
+            } else if (args.length >= 3 && args[0].equals("rotate")) {
+                rotate(args[1], key, org.dizitart.cryptand.util.Hex.parse(args[2]));
             } else if (args.length >= 2 && args[0].equals("corpus")) {
                 System.exit(corpus(args[1]));
             } else {
                 System.err.println(
-                        "interop write|read|mutate <tag>|verify|encrypt|decrypt <file>|corpus <dir> [--key <hex>] [--half]");
+                        "interop write|read|mutate <tag>|verify|encrypt|decrypt <file>|rotate <file> <new key hex>|corpus <dir> [--key <hex>] [--half]");
                 System.exit(2);
             }
         } catch (Exception e) {
