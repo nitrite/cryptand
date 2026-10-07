@@ -10,9 +10,10 @@
 - **M2.1** fault layers: Rust `src/fault.rs` (feature `faults`, tests only),
   Java `PageFile.Hook` + test-tree `container.Faults`. Sweeps: power cut,
   fsync EIO, ENOSPC, lying-fsync control; Rust also a power cut during
-  in-place encryption. 1000 seeds × 3 clean in both (Rust ~10 min, Java ~15).
+  in-place encryption. 1000 seeds clean in every sweep, both languages (Rust ~10 min, Java ~15).
   Dart waits for M5. Found F-069 (S0, all three, slot B lookup; spec 01 §2.1
-  amended), F-070, F-071 (S0, Java barrier; Dart's whole-file save → M5).
+  amended), F-070, F-071 (S0, Java barrier; Dart's whole-file save → M5),
+  F-074 (Rust nonce-floor publish overwrote the live slot; Dart → M5).
 - **F-072** (13 §5 MUSTs): Rust complete — `keyapi.rs`, `convert.rs`
   (encrypt, decrypt with confirmation, resumable `convert_step`, fraction),
   `rotate.rs` (copy-and-swap, synchronous, refused while checkpoints exist).
@@ -47,8 +48,7 @@
 
 ## Next action
 
-Check `reference/bench/runs/fault_rust_convert_0_1000.log` (1000-seed Rust
-sweeps incl. conversion). Then F-072 for Java: port `convert.rs` (encrypt,
+F-072 for Java: port `convert.rs` (encrypt,
 decrypt, convert_step, conversion) and `rotate.rs`; Java already has the key
 ops. Java-written blobs give Rust's blob reader its first mixed-file test.
 Then M2.2 kill -9 torture.
@@ -69,3 +69,4 @@ Then M2.2 kill -9 torture.
 - 2026-10-07 — Spec 01 §2.1 (F-069 approved); M2.1 Java fault seam, 3000 seeds clean; F-071 (S0, Java barrier; Dart → M5).
 - 2026-10-07 — F-072 (S1) found scoping M2.2: 13 §5 MUSTs missing; human: implement all; Rust key ops done; design in PLAN.
 - 2026-10-07 — F-072 Rust: encrypt/decrypt/convert/rotate + interop 7–9; F-073 (Rust readers); conversion crash sweep.
+- 2026-10-07 — F-074 from the 1000-seed conversion sweep (fixed in Rust); rerun 1000 × 6 sweeps clean.
