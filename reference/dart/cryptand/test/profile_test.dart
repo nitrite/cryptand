@@ -70,17 +70,6 @@ void main() {
   });
 
   group('MANDATORY: the foreground-stall test (section 4)', () {
-    test('a put that does not trigger a flush stays far inside the budget', () {
-      // The part of the write path that IS decomposed: buffering into the
-      // memtable is O(1) and nowhere near 8 ms.
-      final e = Engine(memtableEntries: 100000, vlogMin: 1024)
-        ..setProfile(Profile.mobile);
-      for (var i = 0; i < 4000; i++) {
-        e.timedForeground('put', () => e.put(tree, CNitriteId(i), doc(dict, i)));
-      }
-      expect(e.stallViolations, isEmpty);
-    });
-
     /// Runs a throwaway workload so the code paths are compiled.
     ///
     /// **Not a way of making the number look good.** Dart's JIT compiles a
@@ -100,6 +89,26 @@ void main() {
       }
       w.drainCompaction();
     }
+
+    test('a put that does not trigger a flush stays far inside the budget', () {
+      // The part of the write path that IS decomposed: buffering into the
+      // memtable is O(1) and nowhere near 8 ms.
+      //
+      // Warmed first, like the test below and for the reason warmUp gives: the
+      // first put of a cold process pays for JIT-compiling the write path
+      // (4 ms on an M2 Pro, over 8 on the GitHub macOS runner, F-064), while
+      // every later one measures 0.4-1.1 ms. With the path compiled, every
+      // sample must still be inside the budget.
+      warmUp();
+      final e = Engine(memtableEntries: 100000, vlogMin: 1024)
+        ..setProfile(Profile.mobile);
+      for (var i = 0; i < 4000; i++) {
+        e.timedForeground('put', () => e.put(tree, CNitriteId(i), doc(dict, i)));
+      }
+      printOnFailure('worst foreground put: '
+          '${e.stallSamples.map((s) => s.ms).reduce((a, b) => a > b ? a : b).toStringAsFixed(2)} ms');
+      expect(e.stallViolations, isEmpty);
+    });
 
     test('no single foreground operation exceeds the budget on mobile', () {
       // spec/11-conformance.md section 6: "under sustained write and compaction
