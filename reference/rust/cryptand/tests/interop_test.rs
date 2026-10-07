@@ -34,7 +34,7 @@ fn rust_interop() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
     p.pop();
-    p.push("interop");
+    p.push(format!("interop{}", std::env::consts::EXE_SUFFIX));
     p
 }
 

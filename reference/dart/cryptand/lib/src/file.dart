@@ -425,10 +425,17 @@ abstract final class DatabaseFile {
   /// The lock rides the open file handle, so it is released when the handle
   /// closes — including when the process dies, which is what makes a crashed
   /// writer's database openable again with no cleanup step.
+  static const int _lockByte = 1 << 62;
+
   static RandomAccessFile _takeWriterLock(String path) {
     final f = File(path).openSync(mode: FileMode.append);
     try {
-      f.lockSync(FileLock.exclusive);
+      // One byte far past any data, not the whole file: on Windows a
+      // LockFileEx range is mandatory, and a whole-file lock on this handle
+      // blocked every read through the data handle (errno 33). The byte still
+      // lies inside the whole-file locks Rust and Java take, so writers in
+      // different languages still exclude each other.
+      f.lockSync(FileLock.exclusive, _lockByte, _lockByte + 1);
     } on FileSystemException catch (e) {
       f.closeSync();
       throw LockedException('$path is open for writing by another process, '
