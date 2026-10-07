@@ -162,6 +162,33 @@ test compares the engine against a model on random histories.
   Miri clean; Java mixed phase 200/200; the ownership audit is on in test
   builds and green; ENOSPC recovers.
 
+## F-072 — 13 §5 maintenance MUSTs (human 10-07: all of them, all three)
+
+- [x] **a** Rust `add_key`/`remove_key`/`crypto_erase` (`keyapi.rs`); Java had them.
+- [ ] **b** In-place `encrypt()` (Rust, then Java). Set `cipher`, keyslot 0,
+  seal the open value-log segments, commit; new pages and new value-log
+  segments are encrypted (head byte 39). Then a resumable `convert_step()`
+  until nothing plaintext remains: full compaction (segments re-laid with the
+  tag reserved), every copy-on-write tree rebuilt, every value-log segment
+  rewritten by GC, every blob/vector extent re-chunked. A plaintext page can be
+  full to `page_size − 40`, so pages are re-laid, never just re-sealed.
+  Expose the fraction converted; never report "encrypted" while plaintext
+  remains (14 §8.3).
+- [ ] **c** Readers decide per page (`flags.ENCRYPTED`), per value-log segment
+  (head byte 39) and per extent, never from `cipher` (14 §5.2). Known suspect:
+  Rust `read_vlog_record` and `verify` use `sb.cipher` / `false`. Driven by a
+  half-converted file in all three readers and through interop.
+- [ ] **d** `decrypt()`: the mirror. Requires explicit confirmation; `cipher`
+  stays 1 and the keyslots stay until no encrypted page or record remains,
+  then one superblock clears both (no 14 §6.1 downgrade window).
+- [ ] **e** `rotate_master_key()`: copy-and-swap. Stream into a sibling file
+  under a fresh master in bounded steps, catch up concurrent writes, fsync,
+  rename over. Crash leaves the old file intact. Spec 14 §8.3/§8.4 note.
+- [ ] **f** Dart: all of the above inside M5.
+  **Verify:** each op has a crash test (M2.1 fault sweep over a conversion,
+  1000 seeds) and an interop step (a half-converted Rust file read by Java and
+  Dart and vice versa); `verify` clean after each; 14 §8.3's fraction reported.
+
 ## M3 — Coverage-guided fuzzing (track A, 10-08 → 10-16, mostly background)
 
 Today's fuzzing is 600 seeded mutants plus the field-boundary sweep. That is

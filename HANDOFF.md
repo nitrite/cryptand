@@ -57,6 +57,8 @@
   (llama-server at 96 % CPU) and has no Dart SDK; Rust and Java soak only.
 - 10-07: F-072 — implement all of 13 §5 (encrypt/decrypt, rotate_master_key,
   add/remove_key, crypto_erase, cluster) in all three for 1.0; Dart's in M5.
+  Rotation = copy-and-swap (fresh master into a sibling file, rename over);
+  no format change; spec 14 §8.3/§8.4 get a note.
 - 10-07: F-069 approved — spec 01 §2.1 step 1 probes slot B at every legal page size.
 
 ## Open questions for the human
@@ -65,10 +67,9 @@
 
 ## Next action
 
-M2.2 kill -9 torture for Rust and Java: a child process runs random ops
-(compaction, GC, shrink, encrypt, rotate, crypto_erase, backup); the parent
-kills it at a random time, reopens, runs verify + the M1 model check. The
-10 000-seed M1.2 runs still pending (background; no Java builds meanwhile).
+F-072 b (PLAN "F-072" section): Rust in-place `encrypt()` + `convert_step()`,
+with a half-converted-file test that drives c. Then M2.2 kill -9 torture
+(its op list now includes these). The 10 000-seed M1.2 runs still pending.
 
 ## Log
 
@@ -84,3 +85,4 @@ kills it at a random time, reopens, runs verify + the M1 model check. The
 - 2026-10-07 — F-067: one writer-lock byte (2^62) in all three + spec 01 §10; interop lock step.
 - 2026-10-07 — Hop 0..300 enc clean; M2.1 Rust fault seam, 3000 fault seeds clean; F-069 (S0, all three), F-070.
 - 2026-10-07 — Spec 01 §2.1 (F-069 approved); M2.1 Java fault seam, 3000 seeds clean; F-071 (S0, Java barrier; Dart → M5).
+- 2026-10-07 — F-072 (S1) found scoping M2.2: 13 §5 MUSTs missing; human: implement all; Rust key ops done; design in PLAN.
