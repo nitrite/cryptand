@@ -56,6 +56,12 @@ impl std::error::Error for Error {}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
+        // Windows byte-range locks are mandatory: another process's writer
+        // lock fails a read with ERROR_LOCK_VIOLATION (33). That is §10's
+        // "locked by another process", not an I/O fault (F-063).
+        if cfg!(windows) && e.raw_os_error() == Some(33) {
+            return Error::Locked(format!("the database is open for writing by another process ({e})"));
+        }
         Error::Io(e.to_string())
     }
 }
