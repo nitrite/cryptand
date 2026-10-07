@@ -29,6 +29,8 @@ libc = "0.2"
 
 [dev-dependencies]
 serde_json = "1"
+# The tests see the fault-injection seam (PLAN M2.1); the library does not.
+cryptand = { path = ".", features = ["faults"] }
 
 # **Harness, not library.** The benchmarks and the interop conformance tool are
 # part of how this crate is developed and verified, not of what it is, and a
@@ -49,6 +51,8 @@ serde_json = "1"
 [features]
 default = []
 harness = ["dep:serde_json"]
+# PLAN M2.1: `src/fault.rs` under the pager. Tests only.
+faults = []
 
 [[bin]]
 name = "cryptand"

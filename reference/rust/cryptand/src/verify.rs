@@ -81,8 +81,15 @@ impl EngineVerify for Engine {
                     if let Err(e) = crate::container::Superblock::parse(&b) {
                         // One invalid slot is normal on a fresh file: slots are
                         // written alternately, so slot B is empty until commit 2.
+                        // F-070: the open slot is valid by construction, so
+                        // this is the fallback, and a power cut during a
+                        // superblock write leaves exactly this (01 §2's
+                        // alternate-slot rule). The next commit rewrites it.
                         if self.sb.commit_id > 2 {
-                            r.add(Class::Corruption, format!("superblock slot {slot}: {e}"));
+                            r.add(
+                                Class::Warning,
+                                format!("superblock slot {slot} (the fallback, rewritten by the next commit): {e}"),
+                            );
                         }
                     }
                 }

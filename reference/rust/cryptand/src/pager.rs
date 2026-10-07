@@ -360,6 +360,10 @@ impl Pager {
         };
         let bytes = target as usize * self.page_size;
         if let Some(f) = &mut self.file {
+            #[cfg(feature = "faults")]
+            if let Some(p) = &self.path {
+                crate::fault::check_alive(p)?;
+            }
             if f.metadata()?.len() < bytes as u64 {
                 f.set_len(bytes as u64)?;
             }
@@ -403,6 +407,10 @@ impl Pager {
         self.bytes_written_device += data.len() as u64;
         match &mut self.file {
             Some(f) => {
+                #[cfg(feature = "faults")]
+                if let Some(p) = &self.path {
+                    crate::fault::before_write(p, f, offset, data)?;
+                }
                 f.seek(SeekFrom::Start(offset))?;
                 f.write_all(data)?;
             }
@@ -843,6 +851,10 @@ impl Pager {
             // mode not reached is the silent failure §7 exists to prevent.
             return Ok(Durability::None);
         };
+        #[cfg(feature = "faults")]
+        if let (Some(p), Durability::Sync | Durability::Full) = (&self.path, requested) {
+            crate::fault::before_sync(p)?;
+        }
         Ok(match requested {
             Durability::None | Durability::Os => requested,
             Durability::Sync => {
@@ -869,7 +881,13 @@ impl Pager {
     pub fn truncate_to_page_count(&mut self) -> Result<()> {
         let bytes = self.page_count * self.page_size as u64;
         match &mut self.file {
-            Some(f) => f.set_len(bytes)?,
+            Some(f) => {
+                #[cfg(feature = "faults")]
+                if let Some(p) = &self.path {
+                    crate::fault::check_alive(p)?;
+                }
+                f.set_len(bytes)?
+            }
             None => self.memory.truncate(bytes as usize),
         }
         Ok(())

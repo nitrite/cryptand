@@ -50,6 +50,8 @@ pub mod metrics;
 pub mod multiproc;
 pub mod pager;
 pub mod posio;
+#[cfg(feature = "faults")]
+pub mod fault;
 pub mod porter2;
 pub mod profile;
 pub mod repair;
