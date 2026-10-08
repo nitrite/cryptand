@@ -1,29 +1,22 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-08, end of session 7)
+## State (2026-10-08, end of session 8)
 
 - Branch `packaging/v1.0.0`. Manifests at 1.0.0, nothing published, no tags.
-  Java targets Java 11 (built on JDK 17). Gate quick green 10-08 (see Log).
+  Java targets Java 11 (built on JDK 17). Java `mvn verify` 360 green, Rust
+  `cargo test --workspace` (debug) green 10-08; Rust `--release` not re-run
+  (it would replace the binary the running M2.2 job uses).
 - M0 done. M1: hop 0..1000 plain and 0..300 encrypted clean; 10 000-seed
   M1.2 runs still pending. M2.1: fault sweeps 1000 seeds clean (Rust, Java).
-- CI run 37760766268 (Java 21 macOS) failed on a POLICY finding after
-  decrypt: Java conversion now clusters (F-088).
-- **Conversion under a live snapshot** (human 10-08: Java matches Rust): Java's
-  refusal removed. Both keep the dropped key(s) read-only while a snapshot may
-  read a retired encrypted segment; Rust used to panic there (F-087).
-- M2.2: the first ~110 kills per language found F-085 (Java backup resolved
-  range-deleted values), F-086 (Java rotate raced its own background publish),
-  F-087, and harness bugs (plain replay ran past `erase`; a kill inside
-  `create()`; `os.remove` race), all fixed. Both kill runs were stopped; the
-  5 000-kill runs need restarting on this build.
-- M2.3: `tools/enospc.sh` (200 MB image, mobile profile). Rust passes plain and
-  encrypted after F-090 (S0: every encrypted value-log rollover lost one
-  value) and F-091 (S0: compaction ENOSPC mid manifest edit). Java: F-089,
-  F-092 fixed; **F-093 open (S0)**: after ENOSPC, intermittently a pointer to a
-  segment with no tree-7 entry on reopen, and work does not resume after
-  freeing space.
-- Open S1/S0 outside M5: **F-093**. M5: F-035, F-038, Dart halves of F-072,
-  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088.
+- M2.3 `tools/enospc.sh`: **Rust and Java green, plain + encrypted** (Java 3/3)
+  after F-093 (GC freed a batch mid-commit), F-094 (cold segments sized to
+  content; open tolerates a full device), F-095 (failed publish skipped a
+  commit id; Rust also kept an unpublished nonce limit). Dart halves are M5.
+- M2.2: Rust run `rust 1000 3500` restarted on the pre-F-093 build, 2000 kills,
+  0 failures at 20:57 (log `reference/bench/runs/m22-rust.log`, encrypted
+  3500–6000 queued after it). Java 5 000-kill run not yet restarted.
+- Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
+  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094, F-095.
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
   never build Java while a hop or Java torture runs, nor edit sources
   while `tools/gate.sh` runs (its interop stage rebuilds Java).
@@ -48,20 +41,19 @@
 
 ## Open questions for the human
 
-- Commits this session bundle several findings each (shared files); the
-  "one finding per commit" rule was bent. Fine, or split before the RC?
-- F-093 (b): Java `desktop` cannot resume on a 200 MB device, because a
-  reopened engine opens hot and cold 64 MiB value-log extents (spec 12 sizes
-  desktop for 100 MB–100 GB). Accept as the profile's floor, or make Java
-  extend value-log extents lazily as Rust does?
+- Commits bundle several findings each (shared files); the "one finding per
+  commit" rule was bent. Fine, or split before the RC?
+- Rust has the same fresh-full-extent cold segment per promotion as Java's
+  F-094 but passes enospc. Port the sizing to Rust for parity, or leave it?
+- Java `desktop` on a 200 MB device: hot 64 MiB extents still preallocate.
+  Accept as the profile's floor, or extend value-log extents lazily?
 
 ## Next action
 
-Root-cause F-093 with `ENOSPC_JAVA_ONLY=1 tools/enospc.sh` (instrument
-`PageFile.write` failures and tail allocations; both helped this session).
-Then restart the M2.2 runs:
-`nohup sh -c 'tools/torture.py rust 1000 3500 --ops 400 --maint 1; tools/torture.py rust 3500 6000 --ops 400 --maint 1 --encrypted' > reference/bench/runs/m22-rust.log 2>&1 &`
-(and Java 101000–106000 likewise), shrink any failure, record numbers.
+When the Rust M2.2 job ends: `cargo test --workspace --release` and
+`tools/gate.sh quick`, then start Java:
+`nohup sh -c 'tools/torture.py java 101000 103500 --ops 400 --maint 1; tools/torture.py java 103500 106000 --ops 400 --maint 1 --encrypted' > reference/bench/runs/m22-java.log 2>&1 &`
+Shrink any failure, record numbers. Then M1.2 10 000-seed runs, M3 fuzzing.
 
 ## Log
 
@@ -71,3 +63,4 @@ Then restart the M2.2 runs:
 - 2026-10-08 — F-080 (S1) fixed in Rust + Java; gate quick green.
 - 2026-10-08 — F-080 follow-up (Rust Database compaction), F-082/F-083/F-084 (S0) fixed; M2.2 harness; 5000-kill runs started.
 - 2026-10-08 — CI fix (F-088); Java converts under snapshots (F-087); F-085, F-086 from M2.2; M2.3 harness: F-089–F-092 fixed, F-093 open.
+- 2026-10-08 — F-093 (GC vs in-flight batch), F-094 (cold extent sizing), F-095 (failed publish numbering, Rust nonce limit); M2.3 green in Rust and Java.

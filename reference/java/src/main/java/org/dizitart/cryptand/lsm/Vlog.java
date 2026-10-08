@@ -140,6 +140,8 @@ public final class Vlog {
     private final AtomicLong nextSegmentId;
     private final Map<Integer, Open> hot = new HashMap<>();
     private Open cold;
+    /** F-094: record bytes the next fresh cold segment is sized for; 0 is a full extent. */
+    private long nextColdBytes;
     private final Map<Long, VlogSegment> known = new HashMap<>();
     private long createdSeq;
     /** Whether anything has been appended since the committer's last barrier. */
@@ -450,7 +452,16 @@ public final class Vlog {
 
     private Open allocate(int tier, int heatClass) {
         int pageSize = pager.pageSize();
-        int pages = Math.max(2, (int) (((long) segmentBytes + pageSize - 1) / pageSize));
+        long want = segmentBytes;
+        if (tier == VlogSegment.TIER_COLD && nextColdBytes > 0) {
+            // F-094: a promotion or merge that moves 36 KB held a whole 4 MiB
+            // extent; on a small device those emptied it. `capacity` is per
+            // segment (04 §6.2) and `vlog_segment_bytes` only a target. Too
+            // small just rolls over into a full one.
+            want = Math.min(want, VlogSegment.DATA_OFFSET + nextColdBytes);
+            nextColdBytes = 0;
+        }
+        int pages = Math.max(2, (int) ((want + pageSize - 1) / pageSize));
         long start = pager.allocate(pages);
         VlogSegment s = new VlogSegment();
         s.segmentId = nextSegmentId.getAndIncrement();
@@ -1445,10 +1456,33 @@ public final class Vlog {
      * database above §6.9's bound for no reason a collection could fix.
      */
     public synchronized void sealCold() {
+        nextColdBytes = 0;
         if (cold != null) {
             seal(cold);
             cold = null;
         }
+    }
+
+    /**
+     * Sizes the next fresh cold segment for {@code bytes} of records (F-094);
+     * used once. Ignored while a cold segment is open.
+     */
+    public synchronized void sizeNextCold(long bytes) {
+        nextColdBytes = cold == null ? Math.max(0, bytes) : 0;
+    }
+
+    /** Live record bytes in the hot tier: an upper bound on what one promotion moves. */
+    public synchronized long hotLiveBytes() {
+        long n = 0;
+        for (VlogStats st : allStats()) {
+            if (st.tier == VlogSegment.TIER_HOT && openOf(st.segmentId) == null) {
+                n += st.liveBytes;
+            }
+        }
+        for (Open o : hot.values()) {
+            n += o.liveBytes;
+        }
+        return n;
     }
 
     /** Seals every open segment — {@code 10-transactions.md} §10 step 2. */

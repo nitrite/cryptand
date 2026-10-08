@@ -241,3 +241,38 @@ fn crash_before_the_first_close_reopens() {
         assert!(e.verify().unwrap().ok());
     }
 }
+
+/// F-095: a commit whose superblock write fails must not keep its number.
+/// Slots alternate by `commit_id`, so the retry, numbered one too high,
+/// overwrote the last durable superblock; and an unpublished nonce floor
+/// left allocation running above what a crash would reissue.
+#[test]
+fn a_failed_publish_keeps_its_commit_id_and_nonce_floor() {
+    for encrypted in [false, true] {
+        let t = TempDb::new("f095");
+        let mut e = create(&t.path, encrypted);
+        e.put(T, &Value::NitriteId(1), b"x").unwrap();
+        e.commit(Durability::Sync).unwrap();
+        let (before, floor) = (e.sb.commit_id, e.sb.next_nonce);
+        // The first sync of a commit is the barrier in front of the superblock,
+        // after the commit is numbered.
+        fault::arm(&t.path, Plan { eio_at_sync: Some(0), ..Plan::default() });
+        e.put(T, &Value::NitriteId(2), b"y").unwrap();
+        assert!(e.commit(Durability::Sync).is_err());
+        fault::disarm(&t.path);
+        assert_eq!(e.sb.commit_id, before, "encrypted={encrypted}");
+        assert_eq!(e.sb.next_nonce, floor, "encrypted={encrypted}");
+        e.commit(Durability::Sync).unwrap();
+        assert_eq!(e.sb.commit_id, before + 1, "encrypted={encrypted}");
+        if encrypted {
+            // A failed floor publish leaves the limit where the durable floor is.
+            let durable_floor = e.sb.next_nonce;
+            fault::arm(&t.path, Plan { eio_at_sync: Some(0), ..Plan::default() });
+            let r = e.ensure_nonces(u64::MAX / 4);
+            fault::disarm(&t.path);
+            assert!(r.is_err());
+            assert_eq!(e.sb.next_nonce, durable_floor);
+            assert!(e.pager.crypto.as_ref().unwrap().limit <= durable_floor, "limit above the durable floor");
+        }
+    }
+}

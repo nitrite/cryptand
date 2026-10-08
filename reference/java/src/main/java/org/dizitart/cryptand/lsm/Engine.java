@@ -553,7 +553,12 @@ public final class Engine implements AutoCloseable {
             if (e.cipher != null) {
                 e.cipher.attach(e::publishNonceFloor);
             }
-            e.commitNow();
+            try {
+                e.commitNow();
+            } catch (java.io.UncheckedIOException full) {
+                // F-094: housekeeping (sealed orphans), not data. On a full
+                // device the committer publishes it once there is room.
+            }
         }
         return e;
     }
@@ -565,12 +570,19 @@ public final class Engine implements AutoCloseable {
     private void publishNonceFloor(long floor) {
         structure.lock();
         try {
+            long durableNonce = sb.nextNonce;
             sb.nextNonce = floor;
             sb.commitId += 1;
-            long offset = Superblock.slotOffsetFor(sb.commitId, sb.pageSize());
-            file.write(offset, sealSuperblock());
+            try {
+                long offset = Superblock.slotOffsetFor(sb.commitId, sb.pageSize());
+                file.write(offset, sealSuperblock());
+                pager.sync();
+            } catch (RuntimeException x) {
+                sb.commitId -= 1; // F-095, as in publishSuperblock
+                sb.nextNonce = durableNonce;
+                throw x;
+            }
             pager.setCommitId(sb.commitId);
-            pager.sync();
         } finally {
             structure.unlock();
         }
@@ -1302,39 +1314,53 @@ public final class Engine implements AutoCloseable {
         freeTree.releaseOldPages();
         sb.freelistRoot = commitFreeTree();
 
-        sb.commitId += 1;
-        sb.visibleSeq = published;
-        sb.nextSeq = nextSeq.get();
-        sb.nextVlogSegmentId = vlog.nextSegmentId();
-        sb.pageCount = pager.pageCount();
-        sb.levelCount = Math.max(sb.levelCount, levels.levelCount());
-        sb.modifiedUtcMs = options.clock.getAsLong();
-        // 10 §8: with no live snapshot the retention floor is visible_seq, and
-        // that watermark has to keep moving or retention is unbounded -
-        // compaction could never satisfy §5's condition 2 and the key index
-        // would grow without bound while the value side looked healthy.
-        sb.minRetainedSeq = oldestLiveSnapshot(published);
-        sb.minRetainedCommit = minRetainedCommit();
-        lastLocalityDebt = vlog.localityDebt();
-        pager.setCommitId(sb.commitId);
-        pager.setMinRetainedCommit(sb.minRetainedCommit);
+        // F-095: a publish that fails is not a commit. Left numbered, the
+        // retry skipped an id and, slots alternating by id, overwrote the last
+        // durable superblock; and the raised retention floor let this
+        // commit's frees be reused before any superblock dropped them.
+        long durableCommit = sb.commitId;
+        long durableMinRetained = sb.minRetainedCommit;
+        try {
+            sb.commitId += 1;
+            sb.visibleSeq = published;
+            sb.nextSeq = nextSeq.get();
+            sb.nextVlogSegmentId = vlog.nextSegmentId();
+            sb.pageCount = pager.pageCount();
+            sb.levelCount = Math.max(sb.levelCount, levels.levelCount());
+            sb.modifiedUtcMs = options.clock.getAsLong();
+            // 10 §8: with no live snapshot the retention floor is visible_seq, and
+            // that watermark has to keep moving or retention is unbounded -
+            // compaction could never satisfy §5's condition 2 and the key index
+            // would grow without bound while the value side looked healthy.
+            sb.minRetainedSeq = oldestLiveSnapshot(published);
+            sb.minRetainedCommit = minRetainedCommit();
+            lastLocalityDebt = vlog.localityDebt();
+            pager.setCommitId(sb.commitId);
+            pager.setMinRetainedCommit(sb.minRetainedCommit);
 
-        sb.nextNonce = cipher == null ? 0 : cipher.nextNonceWatermark();
-        long offset = Superblock.slotOffsetFor(sb.commitId, sb.pageSize());
-        // F-080: 01 §2 lets the file be longer than `page_count`, never
-        // shorter. A free tail that was allocated and never written left it
-        // short once tree 1 stopped being written last at the end, and the
-        // Dart reader takes `page_count` from the file's length.
-        long end = sb.pageCount * sb.pageSize();
-        if (file.size() < end) {
-            file.write(end - 1, new byte[1]);
+            sb.nextNonce = cipher == null ? 0 : cipher.nextNonceWatermark();
+            long offset = Superblock.slotOffsetFor(sb.commitId, sb.pageSize());
+            // F-080: 01 §2 lets the file be longer than `page_count`, never
+            // shorter. A free tail that was allocated and never written left it
+            // short once tree 1 stopped being written last at the end, and the
+            // Dart reader takes `page_count` from the file's length.
+            long end = sb.pageCount * sb.pageSize();
+            if (file.size() < end) {
+                file.write(end - 1, new byte[1]);
+            }
+            // F-071: a barrier over the tree pages written just above, before the
+            // superblock that names them. Without it a power cut before the sync
+            // below could land the superblock and not its pages.
+            pager.sync();
+            file.write(offset, sealSuperblock());
+            pager.sync();
+        } catch (RuntimeException x) {
+            sb.commitId = durableCommit;
+            sb.minRetainedCommit = durableMinRetained;
+            pager.setCommitId(durableCommit);
+            pager.setMinRetainedCommit(durableMinRetained);
+            throw x;
         }
-        // F-071: a barrier over the tree pages written just above, before the
-        // superblock that names them. Without it a power cut before the sync
-        // below could land the superblock and not its pages.
-        pager.sync();
-        file.write(offset, sealSuperblock());
-        pager.sync();
         pager.publishFrees();
         visibleSeq = published;
     }
@@ -2397,6 +2423,9 @@ public final class Engine implements AutoCloseable {
             sources.add(new EntrySource.OfSegment(s));
         }
         EntrySource.Merge merge = new EntrySource.Merge(sources);
+        if (target >= last) {
+            vlog.sizeNextCold(vlog.hotLiveBytes()); // F-094: what this promotion can move at most
+        }
 
         long floor = sb.minRetainedSeq;
         long nowMs = options.clock.getAsLong();
@@ -2954,6 +2983,11 @@ public final class Engine implements AutoCloseable {
         survivors.sort(java.util.Comparator
                 .comparingInt(Survivor::treeId)
                 .thenComparing(Survivor::key, BtreePage::memcmp));
+        long need = 0;
+        for (Survivor s : survivors) {
+            need += VlogSegment.encryptedRecordSize(s.key(), s.value()); // the larger framing
+        }
+        vlog.sizeNextCold(need); // F-094
         long lastRewriteSeq = 0;
         for (Survivor s : survivors) {
             VlogPointer moved = vlog.appendCold(s.treeId(), s.key(), s.value());

@@ -890,6 +890,8 @@ impl Engine {
     /// panics, hands out nonces from a floor that was never published — which
     /// is precisely the crash-reuse hole §4.1 exists to close.
     fn publish_nonce_floor(&mut self) -> Result<()> {
+        let durable = (self.sb.next_nonce, self.sb.commit_id, self.nonce_next, self.nonce_limit);
+        let crypto = self.pager.crypto.as_ref().map(|c| (c.next, c.limit));
         self.nonce_next = self.sb.next_nonce;
         self.sb.next_nonce = self.sb.next_nonce.saturating_add(crate::security::NONCE_GAP);
         self.nonce_limit = self.sb.next_nonce;
@@ -904,7 +906,18 @@ impl Engine {
         // published, without referencing them, every page allocated since.
         self.sb.commit_id += 1;
         let published = self.sb.page_count;
-        self.write_superblock_at(Durability::Sync, published)
+        let r = self.write_superblock_at(Durability::Sync, published);
+        if r.is_err() {
+            // F-095: an unpublished floor is no floor. Left raised, the next
+            // `arm` allocated above what a crash would reissue; and a skipped
+            // commit_id overwrites the last durable slot.
+            (self.sb.next_nonce, self.sb.commit_id, self.nonce_next, self.nonce_limit) = durable;
+            if let (Some(c), Some((next, limit))) = (&mut self.pager.crypto, crypto) {
+                c.next = next;
+                c.limit = limit;
+            }
+        }
+        r
     }
 
     /// Reserves `n` nonce values without handing any out, so a page-write loop
@@ -3371,6 +3384,7 @@ impl Engine {
         }
         // Trees the commit itself edits, published as roots below.
         self.persist_freelist()?;
+        let durable = (self.sb.commit_id, self.sb.min_retained_commit, self.pager.min_retained_commit);
         let new_commit = self.sb.commit_id + 1;
         self.sb.commit_id = new_commit;
         self.sb.visible_seq = self.visible_seq;
@@ -3387,7 +3401,13 @@ impl Engine {
         self.sb.min_retained_seq = self.min_retained_seq();
         self.sb.modified_utc_ms = now_millis();
         self.pager.min_retained_commit = self.sb.min_retained_commit;
-        self.write_superblock(durability)?;
+        if let Err(e) = self.write_superblock(durability) {
+            // F-095: not a commit. Left numbered, the retry skipped an id and,
+            // slots alternating by id, overwrote the last durable superblock;
+            // the raised floor let this commit's frees be reused early.
+            (self.sb.commit_id, self.sb.min_retained_commit, self.pager.min_retained_commit) = durable;
+            return Err(e);
+        }
         self.prune_written_at();
         self.events.push(StoreEvent::Commit {
             commit_id: new_commit,

@@ -275,6 +275,50 @@ class FaultTest {
         });
     }
 
+    /**
+     * F-095: a publish that fails after numbering its commit must not skip a
+     * number. Slots alternate by commit id, so the skipped retry overwrote the
+     * last durable superblock; torn, the fallback was an older commit whose
+     * freed pages were already reused.
+     */
+    @Test
+    void aFailedPublishDoesNotSkipACommitId(@TempDir Path dir) throws Exception {
+        Path path = dir.resolve("db.cff");
+        Engine e = Engine.create(path, options(false, true));
+        try {
+            e.batch().put(TREE, KEY, new byte[8]).commit();
+            long before = e.superblock().commitId;
+            Faults.Plan p = new Faults.Plan();
+            p.eioAtSync = 1; // #0 is the flush (step E); #1 the barrier after the commit is numbered
+            Faults.arm(path, p);
+            try {
+                e.batch().put(TREE, KEY, new byte[9]).commit();
+            } catch (RuntimeException expected) {
+                // the commit failed; the committer retries on its own
+            }
+            long[] slots = new long[2];
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            do {
+                Thread.sleep(20);
+                slots = slotCommitIds(path, e.superblock().pageSize());
+            } while (Math.max(slots[0], slots[1]) <= before && System.nanoTime() < deadline);
+            Faults.disarm(path);
+            assertTrue(Math.max(slots[0], slots[1]) > before, "the committer never retried");
+            org.junit.jupiter.api.Assertions.assertEquals(1, Math.abs(slots[0] - slots[1]),
+                    "slots hold commits " + slots[0] + " and " + slots[1]);
+        } finally {
+            e.close();
+        }
+    }
+
+    private static long[] slotCommitIds(Path path, int pageSize) throws java.io.IOException {
+        byte[] all = java.nio.file.Files.readAllBytes(path);
+        return new long[] {
+            Superblock.decode(Arrays.copyOfRange(all, 0, pageSize)).commitId,
+            Superblock.decode(Arrays.copyOfRange(all, pageSize, 2 * pageSize)).commitId,
+        };
+    }
+
     /** The control (PLAN rule 5): when fsync lies, acknowledged batches are lost, and the checks must say so. */
     @Test
     @DisplayName("control: a lying fsync is caught")
