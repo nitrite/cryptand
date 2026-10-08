@@ -33,6 +33,9 @@ use crate::vlog::{
 };
 
 /// One memtable entry, before it becomes a segment cell.
+/// F-096: a heat class's first hot segment; each next one doubles, up to `vlog_segment_bytes`.
+const FIRST_HOT_BYTES: u64 = 256 << 10;
+
 #[derive(Clone, Debug)]
 pub struct MemEntry {
     pub value_kind: u8,
@@ -302,6 +305,10 @@ pub struct Engine {
     /// Value-log segments: open ones by heat class, and every one's stats.
     pub vlog_open: BTreeMap<u8, u64>,
     pub vlog_cold_open: Option<u64>,
+    /// F-096: bytes the next fresh hot segment of each heat class asks for.
+    next_hot_bytes: BTreeMap<u8, u64>,
+    /// F-094: record bytes the next fresh cold segment is sized for; 0 is a full extent.
+    next_cold_bytes: u64,
     pub vlog_stats: BTreeMap<u64, VlogStats>,
     vlog_tail: BTreeMap<u64, u64>,
     /// Head byte 39 per value-log segment (04 §6.2), read once. A reader
@@ -478,6 +485,8 @@ impl Engine {
             quarantined: IdMap::default(),
             vlog_open: BTreeMap::new(),
             vlog_cold_open: None,
+            next_hot_bytes: BTreeMap::new(),
+            next_cold_bytes: 0,
             vlog_stats: BTreeMap::new(),
             vlog_tail: BTreeMap::new(),
             vlog_enc: HashMap::new(),
@@ -687,6 +696,8 @@ impl Engine {
             quarantined: IdMap::default(),
             vlog_open: BTreeMap::new(),
             vlog_cold_open: None,
+            next_hot_bytes: BTreeMap::new(),
+            next_cold_bytes: 0,
             vlog_stats: BTreeMap::new(),
             vlog_tail: BTreeMap::new(),
             vlog_enc: HashMap::new(),
@@ -1194,9 +1205,24 @@ impl Engine {
     // §6 — the value log
     // ---------------------------------------------------------------
 
-    fn open_vlog_segment(&mut self, tier: Tier, heat: Heat) -> Result<u64> {
+    fn open_vlog_segment(&mut self, tier: Tier, heat: Heat, need: u64) -> Result<u64> {
         let page_size = self.pager.page_size as u64;
-        let want = self.sb.vlog_segment_bytes as u64;
+        let full = self.sb.vlog_segment_bytes as u64;
+        let mut want = full;
+        if tier == Tier::Hot {
+            // F-096: a full extent per new hot segment made every encrypt,
+            // decrypt and compaction of a small database cost 64 MiB per heat
+            // class. Grow geometrically instead, from 256 KiB, starting over
+            // at open. `capacity` is per segment (04 §6.2).
+            let next = *self.next_hot_bytes.get(&(heat as u8)).unwrap_or(&FIRST_HOT_BYTES);
+            want = want.min(next.max(DATA_OFFSET as u64 + need));
+            self.next_hot_bytes.insert(heat as u8, full.min(2 * next));
+        } else if self.next_cold_bytes > 0 {
+            // F-094: sized for what the promotion or merge will move; too
+            // small just rolls over into a full one.
+            want = want.min(DATA_OFFSET as u64 + self.next_cold_bytes.max(need));
+            self.next_cold_bytes = 0;
+        }
         let pages = (want + DATA_OFFSET as u64).div_ceil(page_size).max(2) as u32;
         let start = self.pager.alloc_extent(pages)?;
         let id = self.sb.next_vlog_segment_id;
@@ -1283,11 +1309,11 @@ impl Engine {
             };
             let s = &self.vlog_stats[&seg];
             let room = s.pages as u64 * self.pager.page_size as u64 - DATA_OFFSET as u64;
-            if s.bytes + record.len() as u64 <= room || s.bytes == 0 {
+            if s.bytes + record.len() as u64 <= room {
                 break record;
             }
             self.seal_vlog(seg)?;
-            seg = self.open_vlog_segment(tier, heat)?;
+            seg = self.open_vlog_segment(tier, heat, record.len() as u64)?;
         };
         let stats = self.vlog_stats.get(&seg).unwrap();
         let start_page = stats.start_page;
@@ -1335,7 +1361,7 @@ impl Engine {
         };
         match existing {
             Some(id) => Ok(id),
-            None => self.open_vlog_segment(tier, heat),
+            None => self.open_vlog_segment(tier, heat, 0),
         }
     }
 
@@ -2614,6 +2640,9 @@ impl Engine {
             if let Some(open) = self.vlog_cold_open {
                 self.seal_vlog(open)?;
             }
+            // F-094: what this promotion can move at most.
+            self.next_cold_bytes =
+                self.vlog_stats.values().filter(|s| s.tier == Tier::Hot as u8).map(|s| s.live_bytes).sum();
         }
         let per_output = self.segment_entries_at(target);
         Ok(Some(CompactionJob {
@@ -3173,7 +3202,8 @@ impl Engine {
         // Nothing live: the victims are retired all the same, or a dead
         // segment would never leave (and a conversion never finish).
         if !live.is_empty() {
-            let dest = self.open_vlog_segment(Tier::Cold, Heat::First)?;
+            self.next_cold_bytes = live.values().map(|(_, p, _)| p.len as u64).sum(); // F-094
+            let dest = self.open_vlog_segment(Tier::Cold, Heat::First, 0)?;
             let mut rewrites: Vec<(Vec<u8>, VlogPointer, Option<u64>)> = Vec::new();
             for (uk, (tree, p, expiry)) in &live {
                 let value = self.read_vlog(p)?;

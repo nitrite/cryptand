@@ -1,6 +1,6 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-08, end of session 8)
+## State (2026-10-09, end of session 9)
 
 - Branch `packaging/v1.0.0`. Manifests at 1.0.0, nothing published, no tags.
   Java targets Java 11 (built on JDK 17). Java `mvn verify` 360 green, Rust
@@ -12,11 +12,13 @@
   after F-093 (GC freed a batch mid-commit), F-094 (cold segments sized to
   content; open tolerates a full device), F-095 (failed publish skipped a
   commit id; Rust also kept an unpublished nonce limit). Dart halves are M5.
-- M2.2: Rust run `rust 1000 3500` restarted on the pre-F-093 build, 2000 kills,
-  0 failures at 20:57 (log `reference/bench/runs/m22-rust.log`, encrypted
-  3500–6000 queued after it). Java 5 000-kill run not yet restarted.
+- M2.2: Rust run on the pre-F-093 build: seeds 1000..4356 0 engine failures,
+  then 11 ENOSPC FAILs and a crash (host disk full from leaked `.bak`s,
+  F-096). Java run not yet started.
+- F-096 (S1): hot value-log segments grow geometrically from 256 KiB (Rust +
+  Java); F-094's cold sizing ported to Rust. `torture.py` cleans `.bak`.
 - Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
-  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094, F-095.
+  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094, F-095, F-096, F-097 (Dart check).
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
   never build Java while a hop or Java torture runs, nor edit sources
   while `tools/gate.sh` runs (its interop stage rebuilds Java).
@@ -39,19 +41,20 @@
   no format change; spec 14 §8.3/§8.4 get a note.
 - 10-07: F-069 approved — spec 01 §2.1 step 1 probes slot B at every legal page size.
 
+- 10-09: bundled multi-finding commits stay (pushed); one finding per commit
+  from now unless files are shared.
+- 10-09: port F-094 cold sizing to Rust; F-096 hot segments grow
+  geometrically (256 KiB doubling to `vlog_segment_bytes`) in all three.
+
 ## Open questions for the human
 
-- Commits bundle several findings each (shared files); the "one finding per
-  commit" rule was bent. Fine, or split before the RC?
-- Rust has the same fresh-full-extent cold segment per promotion as Java's
-  F-094 but passes enospc. Port the sizing to Rust for parity, or leave it?
-- Java `desktop` on a 200 MB device: hot 64 MiB extents still preallocate.
-  Accept as the profile's floor, or extend value-log extents lazily?
+- none.
 
 ## Next action
 
-When the Rust M2.2 job ends: `cargo test --workspace --release` and
-`tools/gate.sh quick`, then start Java:
+Rerun `tools/enospc.sh` (F-096 changes sizing), restart Rust M2.2 on the new
+build (`tools/torture.py rust 1000 3500 --ops 400 --maint 1`, then encrypted
+3500..6000), then Java:
 `nohup sh -c 'tools/torture.py java 101000 103500 --ops 400 --maint 1; tools/torture.py java 103500 106000 --ops 400 --maint 1 --encrypted' > reference/bench/runs/m22-java.log 2>&1 &`
 Shrink any failure, record numbers. Then M1.2 10 000-seed runs, M3 fuzzing.
 
@@ -64,3 +67,4 @@ Shrink any failure, record numbers. Then M1.2 10 000-seed runs, M3 fuzzing.
 - 2026-10-08 — F-080 follow-up (Rust Database compaction), F-082/F-083/F-084 (S0) fixed; M2.2 harness; 5000-kill runs started.
 - 2026-10-08 — CI fix (F-088); Java converts under snapshots (F-087); F-085, F-086 from M2.2; M2.3 harness: F-089–F-092 fixed, F-093 open.
 - 2026-10-08 — F-093 (GC vs in-flight batch), F-094 (cold extent sizing), F-095 (failed publish numbering, Rust nonce limit); M2.3 green in Rust and Java.
+- 2026-10-09 — Decisions on F-094 parity, profile floor, bundled commits; F-096 (hot extents, harness `.bak` leak filled the disk) fixed in Rust + Java; F-097 (Java double rollover orphaned a segment) fixed.

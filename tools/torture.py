@@ -75,7 +75,8 @@ def one(cmd, seed, knobs):
     res = (r.stdout + r.stderr).strip().splitlines()
     ok = r.returncode == 0 and res and res[-1].startswith("ok")
     if ok:
-        for p in (log, db):  # an erase may have removed the file already
+        # The backup op writes s<seed>.bak (Rust) or s<seed>.cff.bak (Java).
+        for p in (log, db, db[:-4] + ".bak", db + ".bak"):  # an erase may have removed the file already
             if os.path.exists(p):
                 os.remove(p)
     return ok, f"seed {seed}: killed after ack {seen}/{acks} (line {last}): {res[-1] if res else 'no output'}"

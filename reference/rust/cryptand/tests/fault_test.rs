@@ -276,3 +276,18 @@ fn a_failed_publish_keeps_its_commit_id_and_nonce_floor() {
         }
     }
 }
+
+/// F-096: every reopen opens a fresh hot segment; each one was a full 64 MiB
+/// extent, so ten reopens of a 40 KB database made a 640 MB file.
+#[test]
+fn a_fresh_hot_segment_is_not_a_full_extent() {
+    let t = TempDb::new("f096");
+    drop(create(&t.path, false));
+    for i in 0..10 {
+        let mut e = Engine::open(&t.path, None).unwrap();
+        e.put(T, &Value::NitriteId(i), &[i as u8; 4096]).unwrap();
+        e.commit(Durability::Sync).unwrap();
+    }
+    let len = std::fs::metadata(&t.path).unwrap().len();
+    assert!(len < 16 << 20, "file is {len} bytes");
+}

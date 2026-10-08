@@ -142,6 +142,10 @@ public final class Vlog {
     private Open cold;
     /** F-094: record bytes the next fresh cold segment is sized for; 0 is a full extent. */
     private long nextColdBytes;
+    /** F-096: bytes the next fresh hot segment of each heat class asks for. */
+    private final Map<Integer, Long> nextHotBytes = new HashMap<>();
+    /** F-096: a new heat class's first hot segment; each next one doubles, up to {@code segmentBytes}. */
+    static final long FIRST_HOT_BYTES = 256 << 10;
     private final Map<Long, VlogSegment> known = new HashMap<>();
     private long createdSeq;
     /** Whether anything has been appended since the committer's last barrier. */
@@ -380,11 +384,17 @@ public final class Vlog {
             // contiguous watermark exists to tolerate.
             open.tail.addAndGet(-size);
             seal(open);
+            // F-097: `seal` drains, and draining waits, which lets a second
+            // writer that overflowed the same segment seal it too. Only the
+            // first replaces it: a second fresh segment would orphan the
+            // first one's records, never published to tree 7.
             boolean cold = open.seg.tier == VlogSegment.TIER_COLD;
             if (cold) {
-                openCold(true);
-            } else {
-                openHot(open.seg.heatClass, true);
+                if (this.cold == open) {
+                    openCold(true);
+                }
+            } else if (hot.get(open.seg.heatClass) == open) {
+                openHot(open.seg.heatClass, true, size);
             }
             return reserve(!cold, open.seg.heatClass, treeId, cke, value);
         }
@@ -427,13 +437,13 @@ public final class Vlog {
     }
 
     private Open openHot(int heatClass) {
-        return openHot(heatClass, false);
+        return openHot(heatClass, false, 0);
     }
 
-    private Open openHot(int heatClass, boolean fresh) {
+    private Open openHot(int heatClass, boolean fresh, long need) {
         Open o = hot.get(heatClass);
         if (o == null || fresh) {
-            o = allocate(VlogSegment.TIER_HOT, heatClass);
+            o = allocate(VlogSegment.TIER_HOT, heatClass, need);
             hot.put(heatClass, o);
         }
         return o;
@@ -445,14 +455,23 @@ public final class Vlog {
 
     private Open openCold(boolean fresh) {
         if (cold == null || fresh) {
-            cold = allocate(VlogSegment.TIER_COLD, VlogSegment.HEAT_FIRST);
+            cold = allocate(VlogSegment.TIER_COLD, VlogSegment.HEAT_FIRST, 0);
         }
         return cold;
     }
 
-    private Open allocate(int tier, int heatClass) {
+    private Open allocate(int tier, int heatClass, long need) {
         int pageSize = pager.pageSize();
         long want = segmentBytes;
+        if (tier == VlogSegment.TIER_HOT) {
+            // F-096: a full extent per new hot segment made every encrypt,
+            // decrypt and compaction of a small database cost 64 MiB per heat
+            // class. Grow geometrically instead, from 256 KiB, starting over
+            // at open. At least the record that rolled over, so it fits.
+            long next = nextHotBytes.getOrDefault(heatClass, FIRST_HOT_BYTES);
+            want = Math.min(want, Math.max(next, VlogSegment.DATA_OFFSET + need));
+            nextHotBytes.put(heatClass, Math.min(segmentBytes, 2 * next));
+        }
         if (tier == VlogSegment.TIER_COLD && nextColdBytes > 0) {
             // F-094: a promotion or merge that moves 36 KB held a whole 4 MiB
             // extent; on a small device those emptied it. `capacity` is per

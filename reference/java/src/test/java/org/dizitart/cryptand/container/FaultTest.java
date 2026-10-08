@@ -332,4 +332,24 @@ class FaultTest {
         });
         assertTrue(!failures.isEmpty(), "a lying fsync went unnoticed in 20 seeds");
     }
+
+    /**
+     * F-096: every reopen opens a fresh hot segment; each one was a full
+     * 64 MiB extent, so ten reopens of a 40 KB database made a 640 MB file.
+     */
+    @Test
+    void aFreshHotSegmentIsNotAFullExtent(@TempDir Path dir) throws Exception {
+        Path path = dir.resolve("db.cff");
+        Engine.create(path, options(false, true)).close();
+        for (int i = 0; i < 10; i++) {
+            Engine e = Engine.open(path, options(false, false));
+            try {
+                e.batch().put(TREE, filled(8, (byte) i), filled(4096, (byte) i)).commit();
+            } finally {
+                e.close();
+            }
+        }
+        long len = java.nio.file.Files.size(path);
+        assertTrue(len < 16 << 20, "file is " + len + " bytes");
+    }
 }
