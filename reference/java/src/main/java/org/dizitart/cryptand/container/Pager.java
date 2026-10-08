@@ -505,6 +505,36 @@ public final class Pager {
         return e.startPage();
     }
 
+    /**
+     * F-080: takes {@code pages} pages for tree 1 from the low end of the
+     * lowest-addressed reclaimable extent <em>strictly</em> larger (lowest, not
+     * best fit, so tree 1 never sits in the tail {@code shrink()} cuts), so the list keeps
+     * its entry count and the tree its size; {@code null} when there is none.
+     * Returns the extent as it was, for {@link #giveBack}.
+     */
+    public synchronized FreeExtent takeForFreeTree(int pages) {
+        int best = -1;
+        for (int i = 0; i < free.size(); i++) {
+            FreeExtent e = free.get(i);
+            if (e.commitId() <= minRetainedCommit && e.pages() > pages
+                    && (best < 0 || e.startPage() < free.get(best).startPage())) {
+                best = i;
+            }
+        }
+        if (best < 0) {
+            return null;
+        }
+        FreeExtent e = free.remove(best);
+        free.add(new FreeExtent(e.commitId(), e.startPage() + pages, e.pages() - pages));
+        return e;
+    }
+
+    /** Undoes {@link #takeForFreeTree}. */
+    public synchronized void giveBack(FreeExtent taken, int pages) {
+        free.removeIf(e -> e.startPage() == taken.startPage() + pages && e.commitId() == taken.commitId());
+        free.add(taken);
+    }
+
     /** Whether a reclaimable extent ends exactly at {@code page}. */
     public synchronized boolean freeEndsAt(long page) {
         for (FreeExtent e : free) {

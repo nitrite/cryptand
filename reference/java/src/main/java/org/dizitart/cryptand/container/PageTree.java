@@ -209,6 +209,49 @@ public final class PageTree {
         return root;
     }
 
+    /** Pages {@link #commitInto} will write, counted without writing them. */
+    public int pagesNeeded() {
+        if (entries.isEmpty()) {
+            return 0;
+        }
+        counting = true;
+        counted = 0;
+        try {
+            build(true);
+        } finally {
+            counting = false;
+        }
+        return counted;
+    }
+
+    /**
+     * Rebuilds into the pages from {@code start} on, which the caller has
+     * already taken off the free list ({@link #pagesNeeded} of them) - F-080:
+     * tree 1 written fresh every commit grows the file by its own size each
+     * time, and it grows with the fragments that growth leaves behind.
+     */
+    public long commitInto(long start) {
+        next = start;
+        try {
+            root = entries.isEmpty() ? 0 : build(true);
+        } finally {
+            next = -1;
+        }
+        dirty = false;
+        return root;
+    }
+
+    private long next = -1;
+    private boolean counting;
+    private int counted;
+
+    private long place(boolean fresh) {
+        if (next >= 0) {
+            return next++;
+        }
+        return fresh ? pager.allocateFresh(1) : pager.allocate(1);
+    }
+
     private long build(boolean fresh) {
         int payloadSize = pager.payloadSize();
 
@@ -258,7 +301,11 @@ public final class PageTree {
 
     private BtreePage.Internal emitLeaf(List<BtreePage.Leaf> cells, boolean fresh) {
         byte[] payload = BtreePage.encodeLeaves(cells, pager.payloadSize(), cells.size());
-        long page = fresh ? pager.allocateFresh(1) : pager.allocate(1);
+        if (counting) {
+            counted++;
+            return new BtreePage.Internal(cells.get(0).key(), 0, cells.size());
+        }
+        long page = place(fresh);
         // Remembered so the NEXT commit frees it. Without this the tree's
         // current generation is invisible to `releaseOldPages`, and every
         // generation but the first leaks - a page neither reachable nor free,
@@ -273,7 +320,11 @@ public final class PageTree {
 
     private BtreePage.Internal emitInternal(List<BtreePage.Internal> cells, boolean fresh) {
         byte[] payload = BtreePage.encodeInternals(cells, pager.payloadSize());
-        long page = fresh ? pager.allocateFresh(1) : pager.allocate(1);
+        if (counting) {
+            counted++;
+            return new BtreePage.Internal(cells.get(0).separator(), 0, 0);
+        }
+        long page = place(fresh);
         oldPages.add(page);
         PageHeader h = new PageHeader();
         h.pageType = PageHeader.Type.BTREE_INTERNAL;

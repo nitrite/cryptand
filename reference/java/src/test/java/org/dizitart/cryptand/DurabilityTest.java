@@ -181,4 +181,25 @@ class DurabilityTest {
             assertTrue(Verify.run(e).findings().isEmpty(), "verify: " + Verify.run(e).findings());
         }
     }
+
+    /**
+     * F-080: tree 1 is rebuilt into end-of-file pages every commit, and the
+     * pages it leaves behind must come back, or a sync file grows with every
+     * commit rather than with its data.
+     */
+    @Test
+    @DisplayName("F-080: 1000 single-put sync commits keep the file bounded")
+    void syncCommitsDoNotGrowTheFile(@TempDir Path dir) throws Exception {
+        Path p = dir.resolve("g.cryptand");
+        long pages;
+        try (Engine e = Engine.create(p, sync())) {
+            for (int i = 0; i < 1000; i++) {
+                e.batch().put(TREE, key(i), val("v" + i)).commit();
+            }
+            pages = e.superblock().pageCount;
+            assertTrue(Verify.run(e).findings().isEmpty(), "verify: " + Verify.run(e).findings());
+        }
+        System.out.println("F-080 java pages=" + pages + " bytes=" + java.nio.file.Files.size(p));
+        assertTrue(pages < 200, "1000 commits of ~10 bytes made " + pages + " pages");
+    }
 }

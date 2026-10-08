@@ -1274,8 +1274,7 @@ public final class Engine implements AutoCloseable {
         // yields a page that is both free and in use, and 01 §9 calls a double
         // allocation corruption rather than a repairable leak.
         freeTree.releaseOldPages();
-        writeFreeTree();
-        sb.freelistRoot = freeTree.commitFresh();
+        sb.freelistRoot = commitFreeTree();
 
         sb.commitId += 1;
         sb.visibleSeq = published;
@@ -1296,6 +1295,14 @@ public final class Engine implements AutoCloseable {
 
         sb.nextNonce = cipher == null ? 0 : cipher.nextNonceWatermark();
         long offset = Superblock.slotOffsetFor(sb.commitId, sb.pageSize());
+        // F-080: 01 §2 lets the file be longer than `page_count`, never
+        // shorter. A free tail that was allocated and never written left it
+        // short once tree 1 stopped being written last at the end, and the
+        // Dart reader takes `page_count` from the file's length.
+        long end = sb.pageCount * sb.pageSize();
+        if (file.size() < end) {
+            file.write(end - 1, new byte[1]);
+        }
         // F-071: a barrier over the tree pages written just above, before the
         // superblock that names them. Without it a power cut before the sync
         // below could land the superblock and not its pages.
@@ -1378,6 +1385,29 @@ public final class Engine implements AutoCloseable {
                 .keyKind(keyKind)
                 .build()
                 .encode(null));
+    }
+
+    /**
+     * F-080: tree 1 goes into a reclaimable extent when one fits, taken off the
+     * list <em>before</em> the list is snapshotted, so no page is both free and
+     * in use. Written fresh at the end every commit, as it was, a sync file
+     * grew by tree 1's size per commit and tree 1 grew with the fragments:
+     * 1000 one-put commits made 684 MB. Coalescing keeps it a page or two.
+     */
+    private long commitFreeTree() {
+        pager.coalesceReclaimable();
+        writeFreeTree();
+        int need = freeTree.pagesNeeded();
+        Pager.FreeExtent taken = need == 0 ? null : pager.takeForFreeTree(need);
+        if (taken != null) {
+            writeFreeTree();
+            if (freeTree.pagesNeeded() == need) {
+                return freeTree.commitInto(taken.startPage());
+            }
+            pager.giveBack(taken, need);
+            writeFreeTree();
+        }
+        return freeTree.commitFresh();
     }
 
     private void writeFreeTree() {

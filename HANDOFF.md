@@ -19,11 +19,14 @@
   leaks by verify, so `repair` freed them; skipped by rotate/convert), F-081
   (S0, Rust: in-place conversion retired value-log segments the memtable
   still pointed into; plus three false positives in Rust verify).
-- Open: F-080 (Java file grows superlinearly under `sync`: tree 1 rebuilt
-  into fresh pages every commit; 3000 one-doc inserts with a vector index →
-  2.3 GB). Suspect until measured in Rust/Dart; M6.
+- F-080 fixed in Rust + Java (S1, both had it): tree 1 written fresh at EOF
+  every commit + never-coalesced 1-page extents → 1000 tiny sync commits made
+  684 MB (Java) / 114 431 pages (Rust). Now coalesced and placed in the lowest
+  reclaimable extent; 76 / 516 pages. Java also extends the file to
+  `page_count` at publish (a free tail left it short; Dart sizes its store
+  from the file length). Dart halves → M5.
 - Open S1/S0 outside M5: none new. M5: F-035, F-038, Dart halves of F-072,
-  F-075 (no region storage), F-079, F-081.
+  F-080 (fresh tree 1; `fromBytes` page count), F-075 (no region storage), F-079, F-081.
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
   never build Java while a hop or Java fault sweep runs, nor edit sources
   while `tools/gate.sh` runs (its interop stage rebuilds Java).
@@ -52,12 +55,12 @@
 
 ## Next action
 
-F-080: measure file growth under `sync` in all three (1000 single-put
-commits, with and without a vector index), then fix tree 1's per-commit
-fresh rebuild in Java. Then M2.2 kill -9 torture.
+M2.2 kill -9 torture (Rust + Java). Optional first: re-measure the 10-08
+vector-index case (3000 one-doc inserts, was 2.3 GB) to confirm F-080 covers it.
 
 ## Log
 
 - 2026-10-06 — Survey, scope, M0.2 gate, M1.1–M1.3 (F-018…F-042). Details in git.
 - 2026-10-07 — Hop sweeps, CI 26/26, F-043…F-077; M0 done; M2.1 fault seams; F-072 Rust + Java encrypt/decrypt. Details in git.
 - 2026-10-08 — Java rotate; F-072 g in Rust+Java + interop step 12; F-075, F-077, F-078, F-079 (S0), F-081 (S0) fixed; F-080 found.
+- 2026-10-08 — F-080 (S1) fixed in Rust + Java; gate quick green.

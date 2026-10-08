@@ -594,3 +594,21 @@ fn a_bounded_scan_examines_the_range_and_not_the_tree() {
         e.scan_records_examined()
     );
 }
+
+/// F-080: tree 1 is rebuilt into end-of-file pages every commit; the pages it
+/// leaves behind must come back, or a file grows with its commit count.
+#[test]
+fn a_thousand_tiny_sync_commits_keep_the_file_bounded() {
+    let (_t, mut e) = engine("f080", Profile::Desktop);
+    for i in 0..1000i64 {
+        e.put(T, &Value::NitriteId(i), format!("v{i}").as_bytes()).unwrap();
+        e.flush().unwrap();
+        if i % 100 == 99 {
+            e.compact().unwrap();
+        }
+        e.commit(Durability::Sync).unwrap();
+    }
+    let pages = e.sb.page_count;
+    eprintln!("F-080 rust pages={pages}");
+    assert!(pages < 1000, "1000 commits of ~10 bytes made {pages} pages");
+}

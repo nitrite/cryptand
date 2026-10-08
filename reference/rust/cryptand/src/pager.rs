@@ -306,6 +306,29 @@ impl Pager {
         self.free.insert((commit_id, start_page), pages);
     }
 
+    /// F-080: `pages` pages for tree 1 from the low end of the lowest-addressed
+    /// reclaimable extent *strictly* larger (lowest, not best fit, so tree 1
+    /// never sits in the tail `shrink()` cuts), so the list keeps its entry count
+    /// and the tree its size. Returns the extent as it was, for
+    /// [`Self::give_back`].
+    pub fn take_for_free_tree(&mut self, pages: u64) -> Option<FreeExtent> {
+        let (k, n) = self
+            .free
+            .range(..=(self.min_retained_commit, u64::MAX))
+            .filter(|(_, n)| **n as u64 > pages)
+            .min_by_key(|(k, _)| k.1)
+            .map(|(k, n)| (*k, *n))?;
+        self.free.remove(&k);
+        self.free.insert((k.0, k.1 + pages), n - pages as u32);
+        Some(FreeExtent { commit_id: k.0, start_page: k.1, pages: n })
+    }
+
+    /// Undoes [`Self::take_for_free_tree`].
+    pub fn give_back(&mut self, taken: FreeExtent, pages: u64) {
+        self.free.remove(&(taken.commit_id, taken.start_page + pages));
+        self.free.insert((taken.commit_id, taken.start_page), taken.pages);
+    }
+
     /// Whether a reclaimable extent ends exactly at `page`.
     pub fn free_ends_at(&self, page: u64) -> bool {
         self.free.range(..=(self.min_retained_commit, u64::MAX)).any(|(k, n)| k.1 + *n as u64 == page)

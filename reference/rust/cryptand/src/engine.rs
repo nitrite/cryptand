@@ -3319,11 +3319,11 @@ impl Engine {
     /// its page count per commit, whatever changed, and a commit where nothing
     /// changed writes nothing.
     ///
-    /// ponytail: the released pages are single-page extents only the other
-    /// copy-on-write trees can reuse, so a commit that changes the list grows
-    /// the file by tree 1's size (one page, typically) when they don't. Taking
-    /// tree 1's pages out of the list *before* snapshotting it, to a fixed
-    /// point, removes that; Java has the same ceiling.
+    /// F-080: written fresh, that churn grew the file by tree 1's size every
+    /// commit, and tree 1 grew with the single-page fragments it left: 1000
+    /// one-put sync commits made 50 252 pages. Now the reclaimable list is
+    /// coalesced and tree 1 goes into a reclaimable extent taken out of the
+    /// list *before* the snapshot, when the page count holds; fresh otherwise.
     fn persist_freelist(&mut self) -> Result<()> {
         let mut freed: Vec<u64> = Vec::new();
         for t in [
@@ -3366,24 +3366,22 @@ impl Engine {
         for p in old {
             self.pager.free_extent(p, 1, self.sb.commit_id);
         }
-        let extents = self.pager.free_list();
-        let mut entries = Vec::with_capacity(extents.len());
-        for e in &extents {
-            let k = cke::encode(&Value::Array(vec![
-                Value::Int { w: NumType::U64, neg: false, mag: e.commit_id as u128 },
-                Value::Int { w: NumType::U64, neg: false, mag: e.start_page as u128 },
-            ]))?;
-            let v = cve::encode(&Value::Doc(vec![(
-                "pages".into(),
-                Value::Int { w: NumType::U32, neg: false, mag: e.pages as u128 },
-            )]));
-            entries.push((k, v));
-        }
-        // CKE preserves the numeric order the list is kept in; sorted anyway,
-        // because the build requires it and the sort is the proof.
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        self.pager.coalesce_reclaimable();
         self.freelist.commit_id = self.sb.commit_id;
-        self.freelist.rebuild_fresh(&mut self.pager, entries)?;
+        let entries = free_entries(&self.pager.free_list())?;
+        let need = self.freelist.pages_needed(&mut self.pager, entries)?;
+        if let Some(taken) = if need == 0 { None } else { self.pager.take_for_free_tree(need) } {
+            let extents = self.pager.free_list();
+            let entries = free_entries(&extents)?;
+            if self.freelist.pages_needed(&mut self.pager, entries.clone())? == need {
+                self.freelist.rebuild_into(&mut self.pager, entries, taken.start_page)?;
+                self.persisted_free = (self.freelist.root, extents);
+                return Ok(());
+            }
+            self.pager.give_back(taken, need);
+        }
+        let extents = self.pager.free_list();
+        self.freelist.rebuild_fresh(&mut self.pager, free_entries(&extents)?)?;
         self.persisted_free = (self.freelist.root, extents);
         Ok(())
     }
@@ -3606,3 +3604,23 @@ pub fn decode_data_page(page: &[u8], page_id: u64) -> Result<Vec<u8>> {
 
 pub const _PAGE_TYPES: [u8; 3] =
     [page_type::BTREE_LEAF, page_type::BTREE_INTERNAL, page_type::OVERFLOW];
+
+/// Tree 1's entries for `extents` (`01-container.md` §6).
+fn free_entries(extents: &[FreeExtent]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut entries = Vec::with_capacity(extents.len());
+    for e in extents {
+        let k = cke::encode(&Value::Array(vec![
+            Value::Int { w: NumType::U64, neg: false, mag: e.commit_id as u128 },
+            Value::Int { w: NumType::U64, neg: false, mag: e.start_page as u128 },
+        ]))?;
+        let v = cve::encode(&Value::Doc(vec![(
+            "pages".into(),
+            Value::Int { w: NumType::U32, neg: false, mag: e.pages as u128 },
+        )]));
+        entries.push((k, v));
+    }
+    // CKE preserves the numeric order the list is kept in; sorted anyway,
+    // because the build requires it and the sort is the proof.
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
+}

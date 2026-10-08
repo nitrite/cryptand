@@ -401,7 +401,20 @@ impl CowTree {
     /// out of the list it is recording would make a page both free and in use,
     /// which `01-container.md` §9 calls a double allocation.
     pub fn rebuild_fresh(&mut self, pager: &mut Pager, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<()> {
-        self.build(pager, entries, true)
+        self.build(pager, entries, Place::Fresh).map(|_| ())
+    }
+
+    /// Pages [`Self::rebuild_into`] writes for `entries`, counted without
+    /// writing (child pointers are fixed-width, so the count is id-free).
+    pub fn pages_needed(&mut self, pager: &mut Pager, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<u64> {
+        self.build(pager, entries, Place::Count)
+    }
+
+    /// F-080: tree 1 into the pages from `start` on, which the caller took off
+    /// the free list before snapshotting it -- written fresh every commit, it
+    /// grew the file by its own size per commit, and grew with the fragments.
+    pub fn rebuild_into(&mut self, pager: &mut Pager, entries: Vec<(Vec<u8>, Vec<u8>)>, start: u64) -> Result<()> {
+        self.build(pager, entries, Place::At(start)).map(|_| ())
     }
 
     /// `13-operations.md` §5's `shrink()`: every page rewritten through the
@@ -413,16 +426,20 @@ impl CowTree {
         let entries = self.scan(pager, None, None)?;
         let mut old = Vec::new();
         self.reachable(pager, &mut old)?;
-        self.build(pager, entries, false)?;
+        self.build(pager, entries, Place::Alloc)?;
         self.freed.extend(old);
         Ok(())
     }
 
-    fn build(&mut self, pager: &mut Pager, entries: Vec<(Vec<u8>, Vec<u8>)>, fresh: bool) -> Result<()> {
+    /// Returns the number of pages written (or, for `Place::Count`, needed).
+    fn build(&mut self, pager: &mut Pager, entries: Vec<(Vec<u8>, Vec<u8>)>, mut place: Place) -> Result<u64> {
         if entries.is_empty() {
-            self.root = 0;
-            return Ok(());
+            if !matches!(place, Place::Count) {
+                self.root = 0;
+            }
+            return Ok(0);
         }
+        let mut written = 0u64;
         let cap = pager.payload_cap() + crate::container::PAGE_HEADER_BYTES;
         let (keys, payloads) = entries.into_iter().map(|(k, v)| (k, leaf_payload(&v))).unzip();
         let mut level = self.split(cap, CowNode { is_leaf: true, keys, payloads })?;
@@ -430,14 +447,27 @@ impl CowTree {
             let mut keys = Vec::with_capacity(level.len());
             let mut payloads = Vec::with_capacity(level.len());
             for n in &level {
-                let id = if fresh { pager.alloc_fresh(1)? } else { pager.alloc_extent(1)? };
-                self.write_at(pager, id, n)?;
+                written += 1;
+                let id = match &mut place {
+                    Place::Fresh => pager.alloc_fresh(1)?,
+                    Place::Alloc => pager.alloc_extent(1)?,
+                    Place::At(next) => {
+                        *next += 1;
+                        *next - 1
+                    }
+                    Place::Count => 0,
+                };
+                if !matches!(place, Place::Count) {
+                    self.write_at(pager, id, n)?;
+                }
                 keys.push(n.keys[0].clone());
                 payloads.push(child_payload(id, n.subtree_entries()));
             }
             if level.len() == 1 {
-                self.root = child_of(&payloads[0])?.0;
-                return Ok(());
+                if !matches!(place, Place::Count) {
+                    self.root = child_of(&payloads[0])?.0;
+                }
+                return Ok(written);
             }
             level = self.split(cap, CowNode { is_leaf: false, keys, payloads })?;
         }
@@ -481,6 +511,14 @@ impl CowTree {
         }
         Ok(h)
     }
+}
+
+/// Where [`CowTree::build`] puts each page.
+enum Place {
+    Fresh,
+    Alloc,
+    At(u64),
+    Count,
 }
 
 fn find(keys: &[Vec<u8>], key: &[u8]) -> Option<usize> {
