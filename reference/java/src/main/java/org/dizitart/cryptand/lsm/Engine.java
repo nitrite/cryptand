@@ -839,13 +839,8 @@ public final class Engine implements AutoCloseable {
         return Cfh64.hash(cke, 0, cke.length) ^ (treeId * 0xC2B2AE3D27D4EB4FL);
     }
 
-    private long commitBatch(List<Staged> staged) {
-        checkCommitter();
-        if (staged.isEmpty()) {
-            return visibleSeq;
-        }
-        applyBackpressure();
-
+    /** Step 3 of {@link #commitBatch}: every value to its final location. */
+    private void resolveValues(List<Staged> staged) {
         // Step 3: values. Every record is written to its final location before
         // any sequence number is taken, so a batch that dies here leaves debris
         // that nothing points at - never a dangling pointer.
@@ -873,10 +868,32 @@ public final class Engine implements AutoCloseable {
                 e.kind = BtreePage.Kind.INLINE;
             }
         }
+    }
+
+    private long commitBatch(List<Staged> staged) {
+        checkCommitter();
+        if (staged.isEmpty()) {
+            return visibleSeq;
+        }
+        applyBackpressure();
+
+        // F-093: held from the first value-log append to the memtable publish.
+        // A collection walks under the exclusive side, so it never sees a
+        // record whose entry is not in the memtable yet and calls it dead.
+        writeGate.readLock().lock();
+        try {
+            resolveValues(staged);
+        } catch (RuntimeException x) {
+            writeGate.readLock().unlock();
+            throw x;
+        }
+        Runnable hook = afterValuesHook;
+        if (hook != null) {
+            hook.run();
+        }
 
         // Step 4: one fetch_add on next_seq. The only serialization point on
         // the write path.
-        writeGate.readLock().lock();
         long base = nextSeq.getAndAdd(staged.size());
         boolean filled = false;
 
@@ -2965,6 +2982,8 @@ public final class Engine implements AutoCloseable {
      */
     /** Test hook: widens the check-to-rewrite window so {@code GcRaceTest} can fail without the gate. */
     static volatile long rewriteDelayNanos;
+    /** Test seam (F-093): runs between a batch's value-log appends and its memtable publish. */
+    static volatile Runnable afterValuesHook;
 
     private long rewriteIfCurrent(int treeId, byte[] key, VlogPointer was, BtreePage.Leaf old,
                                   VlogPointer moved, long now) {
@@ -3097,32 +3116,41 @@ public final class Engine implements AutoCloseable {
         // collected, and its still-live pointer then failed on the next read
         // with "value-log segment N has no entry in tree 7".
         // F-027: with no snapshot live (collect0), that is the current seq.
-        long[] seqs = {nextSeq.get()};
-        boolean complete = vlog.walk(stats, w -> {
-            // **No yieldStructure here.** Vlog.walk is synchronized, so this
-            // callback runs holding the value-log monitor, and releasing
-            // `structure` under it inverts the lock order every other path
-            // uses -- `structure` first, then the monitor. It deadlocks, and
-            // the JVM named the cycle exactly:
-            //
-            //   main       waits for `structure`, held by the committer
-            //   committer  waits for the Vlog monitor, held by the compactor
-            //   compactor  waits for `structure`, held by the committer
-            //
-            // The liveness scan may yield because it walks *outside* the
-            // monitor; this one may not. A lock released in the wrong order
-            // is not a smaller critical section, it is a different bug.
-            for (long at : seqs) {
-                BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), at, now, false);
-                if (live != null && live.kind() == BtreePage.Kind.VLOG) {
-                    VlogPointer p = VlogPointer.decode(live.value());
-                    if (p.segmentId() == stats.segmentId && p.offset() == w.offset()) {
-                        survivors.add(new Survivor(w.record(), live));
-                        return;
+        // F-093: exclusive, so no batch is between its value-log appends and
+        // its memtable publish while liveness is decided, and read under it,
+        // or a batch published while this waited is past the lookup seq.
+        writeGate.writeLock().lock();
+        boolean complete;
+        try {
+            long[] seqs = {nextSeq.get()};
+            complete = vlog.walk(stats, w -> {
+                // **No yieldStructure here.** Vlog.walk is synchronized, so this
+                // callback runs holding the value-log monitor, and releasing
+                // `structure` under it inverts the lock order every other path
+                // uses -- `structure` first, then the monitor. It deadlocks, and
+                // the JVM named the cycle exactly:
+                //
+                //   main       waits for `structure`, held by the committer
+                //   committer  waits for the Vlog monitor, held by the compactor
+                //   compactor  waits for `structure`, held by the committer
+                //
+                // The liveness scan may yield because it walks *outside* the
+                // monitor; this one may not. A lock released in the wrong order
+                // is not a smaller critical section, it is a different bug.
+                for (long at : seqs) {
+                    BtreePage.Leaf live = lookup(w.record().treeId(), w.record().key(), at, now, false);
+                    if (live != null && live.kind() == BtreePage.Kind.VLOG) {
+                        VlogPointer p = VlogPointer.decode(live.value());
+                        if (p.segmentId() == stats.segmentId && p.offset() == w.offset()) {
+                            survivors.add(new Survivor(w.record(), live));
+                            return;
+                        }
                     }
                 }
-            }
-        });
+            });
+        } finally {
+            writeGate.writeLock().unlock();
+        }
         if (!complete) {
             // The walk stopped early, so records past that point were never
             // examined. Freeing the extent would drop whatever they held:
