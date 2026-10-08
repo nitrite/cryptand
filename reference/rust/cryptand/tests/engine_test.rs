@@ -612,3 +612,26 @@ fn a_thousand_tiny_sync_commits_keep_the_file_bounded() {
     eprintln!("F-080 rust pages={pages}");
     assert!(pages < 1000, "1000 commits of ~10 bytes made {pages} pages");
 }
+
+/// §3.1: groups of a tiered level stay disjoint even when another writer
+/// sized its runs differently. Three one-segment L1 runs over the same keys,
+/// as Dart writes them: the third has no free group (`overlap_bound` 2).
+#[test]
+fn a_third_run_into_a_full_tiered_level_keeps_its_group_disjoint() {
+    let (_t, mut e) = engine("groups", Profile::Desktop);
+    assert!(e.policy.last_level() > 1, "level 1 must be tiered");
+    for run in 0..3u8 {
+        for i in 0..10i64 {
+            e.put(T, &Value::NitriteId(i), &[run]).unwrap();
+        }
+        e.flush().unwrap();
+        let l0 = e.healthy_refs_at(0).unwrap();
+        let mut job = e.begin_compaction(l0, 1).unwrap().unwrap();
+        while e.step_compaction(&mut job, None).unwrap() {}
+        e.finish_compaction(job).unwrap();
+        e.commit(Durability::Sync).unwrap();
+    }
+    let r = e.verify().unwrap();
+    assert!(r.findings.iter().all(|f| f.class != Class::Corruption), "{:?}", r.findings);
+    assert_eq!(e.get(T, &Value::NitriteId(3)).unwrap().as_deref(), Some(&[2u8][..]));
+}

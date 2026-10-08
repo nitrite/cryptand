@@ -2438,6 +2438,29 @@ impl Engine {
                 }
             }
         }
+        // §3.1: a tiered level's group is mutually disjoint. With no group
+        // free, the output joins a used one, so that group's segments under
+        // the inputs' span join the inputs. Rust's own runs never get here --
+        // two of them fill `tier_width` and the level compacts down first --
+        // but a file another writer sized differently does: the F-080 hop
+        // found Dart's one-segment L1 runs, a third run put into group 0 over
+        // its segment, and verify calling the overlap corruption. Group
+        // segments are disjoint, so nothing left in the group meets the span.
+        let group = if target == last { 0 } else { self.free_group(target)? };
+        if target != last && self.groups_at(target)?.contains(&group) {
+            let have: HashSet<u64> = inputs.iter().map(|r| r.segment_id).collect();
+            let lo = inputs.iter().map(|r| user_part(&r.min_key).to_vec()).min().unwrap_or_default();
+            let hi = inputs.iter().map(|r| user_part(&r.max_key).to_vec()).max().unwrap_or_default();
+            for r in self.healthy_refs_at(target)? {
+                if r.group == group
+                    && !have.contains(&r.segment_id)
+                    && user_part(&r.max_key) >= &lo[..]
+                    && user_part(&r.min_key) <= &hi[..]
+                {
+                    inputs.push(r);
+                }
+            }
+        }
         // §5 condition 3: the compaction must include every segment that could
         // hold an older version, i.e. it reaches the last level, or no lower
         // level overlaps the key.
@@ -2560,7 +2583,6 @@ impl Engine {
                 self.seal_vlog(open)?;
             }
         }
-        let group = if target == last { 0 } else { self.free_group(target)? };
         let per_output = self.segment_entries_at(target);
         Ok(Some(CompactionJob {
             inputs,
