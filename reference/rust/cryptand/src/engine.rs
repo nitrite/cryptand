@@ -3109,6 +3109,12 @@ impl Engine {
                 self.rewrite_pointer(&uk, np, expiry)?;
             }
         }
+        // ... and into a segment, before the victims leave tree 7 below. Held
+        // only in the memtable, the next commit -- `Engine::commit` does not
+        // flush -- published the retirement with every on-disk pointer still
+        // naming a victim: after a reopen, "VLOG pointer names unknown
+        // segment". Found by M2.2's torture harness.
+        self.flush()?;
         for v in victims {
             if let Some(s) = self.vlog_stats.get_mut(&v) {
                 s.live_bytes = 0;

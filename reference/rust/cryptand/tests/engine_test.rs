@@ -651,3 +651,36 @@ fn a_third_run_into_a_full_tiered_level_keeps_its_group_disjoint() {
     assert_eq!(e.get(T, &Value::NitriteId(3)).unwrap().as_deref(), Some(&[2u8][..]));
 }
 
+/// `collect()` rewrites pointers into the memtable and frees its victims at
+/// the next commit; `Engine::commit` does not flush, so unless `collect`
+/// publishes the rewrites itself the on-disk pointers name freed pages.
+#[test]
+fn collected_values_survive_a_commit_without_flush_and_reuse() {
+    let t = TempDb::new("collect-commit");
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    e.auto_collect = false; // three cold segments for collect() to merge
+    let big = |i: i64, g: u8| vec![g.wrapping_add(i as u8); 5000];
+    for g in 0..3u8 {
+        for i in 0..40i64 {
+            let k = g as i64 * 40 + i;
+            e.put(T, &Value::NitriteId(k), &big(k, g)).unwrap();
+        }
+        e.flush().unwrap();
+        e.compact().unwrap();
+    }
+    let before = e.vlog_stats.len();
+    e.collect().unwrap();
+    assert!(e.vlog_stats.len() > before, "collect() did nothing");
+    // Commits with nothing flushed: each rewrites tree 1, which since F-080
+    // lands in reclaimable extents -- the victims, once they are reclaimable.
+    for _ in 0..4 {
+        e.commit(Durability::Sync).unwrap();
+    }
+    e.close(false).unwrap();
+    let mut e = Engine::open(&t.path, None).unwrap();
+    for k in 0..120i64 {
+        assert_eq!(e.get(T, &Value::NitriteId(k)).unwrap(), Some(big(k, (k / 40) as u8)), "key {k}");
+    }
+    let r = e.verify().unwrap();
+    assert!(r.of(Class::Corruption).is_empty(), "{:?}", r.findings);
+}
