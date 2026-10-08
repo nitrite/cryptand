@@ -19,14 +19,20 @@
   leaks by verify, so `repair` freed them; skipped by rotate/convert), F-081
   (S0, Rust: in-place conversion retired value-log segments the memtable
   still pointed into; plus three false positives in Rust verify).
-- F-080 fixed in Rust + Java (S1, both had it): tree 1 written fresh at EOF
-  every commit + never-coalesced 1-page extents → 1000 tiny sync commits made
-  684 MB (Java) / 114 431 pages (Rust). Now coalesced and placed in the lowest
-  reclaimable extent; 76 / 516 pages. Java also extends the file to
-  `page_count` at publish (a free tail left it short; Dart sizes its store
-  from the file length). Dart halves → M5.
-- Open S1/S0 outside M5: none new. M5: F-035, F-038, Dart halves of F-072,
-  F-080 (fresh tree 1; `fromBytes` page count), F-075 (no region storage), F-079, F-081.
+- F-080 fixed in Rust + Java (tree 1 reuse; Java file ≥ page_count; Rust
+  `Database`/`Transaction` commits now run one compaction step). Same
+  workload: Rust `Store` 98 pages, Java 76 — Rust is not worse.
+- M2.2 harness landed (`tools/torture.py`, `--child`/`--after-kill` in both
+  checkers, `--maint W` for gc/encrypt/decrypt/rotate/backup/erase). Control
+  `TORTURE_FAULT=1` is caught. It already found F-082 (S0 Rust tiered group
+  overlap on a Dart-shaped file), F-083 (S0 Java backup restored the OLDER
+  version), F-084 (S0 Rust `collect()` lost values after commit-without-flush).
+- Running (10-08, nohup): 5 000 kills each, half encrypted, `--ops 400
+  --maint 1`; logs `reference/bench/runs/m22-{rust,java}.log`, failing
+  seeds kept in `reference/bench/runs/torture/`. Rust seeds 1000–6000,
+  Java 101000–106000.
+- Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
+  F-080 (fresh tree 1; `fromBytes` page count), F-084 check, M2.2 Dart, F-075 (no region storage), F-079, F-081.
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
   never build Java while a hop or Java fault sweep runs, nor edit sources
   while `tools/gate.sh` runs (its interop stage rebuilds Java).
@@ -51,12 +57,17 @@
 
 ## Open questions for the human
 
-(none)
+- Java `convertStep()` refuses under a live snapshot ("close them first");
+  Rust converts. Spec 14 §8.3 is silent. Keep Java's refusal (documented
+  precondition), or make Java match Rust? The torture harness skips Java
+  conversion under snapshots meanwhile.
 
 ## Next action
 
-M2.2 kill -9 torture (Rust + Java). Optional first: re-measure the 10-08
-vector-index case (3000 one-doc inserts, was 2.3 GB) to confirm F-080 covers it.
+Read `reference/bench/runs/m22-{rust,java}.log` (last line per run:
+"N kills, F failures"). Shrink and fix any failure (one F-row each, all three
+checked), then record the numbers in PLAN M2.2 and tick it. Then M2.3 (disk
+full, `hdiutil` 200 MB image).
 
 ## Log
 
@@ -64,3 +75,4 @@ vector-index case (3000 one-doc inserts, was 2.3 GB) to confirm F-080 covers it.
 - 2026-10-07 — Hop sweeps, CI 26/26, F-043…F-077; M0 done; M2.1 fault seams; F-072 Rust + Java encrypt/decrypt. Details in git.
 - 2026-10-08 — Java rotate; F-072 g in Rust+Java + interop step 12; F-075, F-077, F-078, F-079 (S0), F-081 (S0) fixed; F-080 found.
 - 2026-10-08 — F-080 (S1) fixed in Rust + Java; gate quick green.
+- 2026-10-08 — F-080 follow-up (Rust Database compaction), F-082/F-083/F-084 (S0) fixed; M2.2 harness; 5000-kill runs started.
