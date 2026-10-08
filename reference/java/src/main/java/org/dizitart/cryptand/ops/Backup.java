@@ -188,14 +188,36 @@ public final class Backup {
                         .u64be(fresh.getMostSignificantBits())
                         .u64be(fresh.getLeastSignificantBits()).toBytes();
             }
-            Engine.Batch batch = dest.batch();
-            int staged = 0;
+            // Newest version of each key only, applied oldest seq first. Replayed
+            // segment by segment in internal-key order -- newest version of a
+            // key first -- the backup kept the OLDEST value of every key with
+            // two versions on disk, and resolved superseded value-log pointers
+            // into segments collection had already retired (M2.2 torture seed
+            // 106: a pointer into a segment still encrypted after decrypt()).
+            // 13 §2.1 lets a backup compact as it copies; range deletes are all
+            // kept, in seq order, so they cover exactly the puts older than them.
+            java.util.Map<java.nio.ByteBuffer, BtreePage.Leaf> newest = new java.util.HashMap<>();
+            List<BtreePage.Leaf> cells = new java.util.ArrayList<>();
             for (Segment seg : source.segments()) {
                 if (skip.contains(seg.meta().segmentId)) {
                     continue;
                 }
                 segments++;
                 for (BtreePage.Leaf cell : seg.readAll()) {
+                    if (Ikey.opOf(cell.key()) == BtreePage.Op.RANGE_DELETE) {
+                        cells.add(cell);
+                        continue;
+                    }
+                    newest.merge(java.nio.ByteBuffer.wrap(Ikey.userKeyOf(cell.key())), cell,
+                            (a, b) -> Ikey.seqOf(a.key()) >= Ikey.seqOf(b.key()) ? a : b);
+                }
+            }
+            cells.addAll(newest.values());
+            cells.sort(java.util.Comparator.comparingLong(c -> Ikey.seqOf(c.key())));
+            Engine.Batch batch = dest.batch();
+            int staged = 0;
+            {
+                for (BtreePage.Leaf cell : cells) {
                     byte[] ik = cell.key();
                     int treeId = Ikey.treeIdOf(ik);
                     byte[] cke = Ikey.ckeOf(ik);

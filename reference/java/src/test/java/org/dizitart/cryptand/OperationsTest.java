@@ -157,6 +157,30 @@ class OperationsTest {
      * downgrade. It is refused unless the caller asks for it by name, and
      * reported in the result when they do.
      */
+    /**
+     * M2.2: the backup replayed each segment in internal-key order, newest
+     * version of a key first, so a key with two versions on disk came back
+     * with the older one.
+     */
+    @Test
+    @DisplayName("a backup keeps the newest version of a key with two on disk")
+    void backupKeepsTheNewestVersion(@TempDir Path dir) {
+        Engine.Options o = options();
+        o.memtableEntries = 100_000;
+        try (Engine e = Engine.create(dir.resolve("v.cryptand"), o)) {
+            e.batch().put(TREE, key(1), val("old")).commit();
+            e.batch().put(TREE, key(1), val("new")).commit();
+            e.batch().put(TREE, key(2), val("gone")).commit();
+            e.batch().remove(TREE, key(2)).commit();
+            e.commitNow();
+            Backup.full(e, dir.resolve("v.bak"), Backup.Mode.PLAINTEXT, false);
+        }
+        try (Engine back = Engine.open(dir.resolve("v.bak"), options())) {
+            assertArrayEquals(val("new"), back.get(TREE, key(1)));
+            assertNull(back.get(TREE, key(2)));
+        }
+    }
+
     @Test
     @DisplayName("an unencrypted backup of an encrypted database must be asked for by name")
     void downgradeMustBeNamed(@TempDir Path dir) {

@@ -230,4 +230,36 @@ class ConvertTest {
             e.close();
         }
     }
+
+    /**
+     * M2.2 torture seed 106: a value written under encryption and still held
+     * by the memtable when decrypt() runs; then a plaintext backup reads it.
+     */
+    @Test
+    void memtableHeldValueSurvivesDecryptThenBackup(@TempDir Path dir) {
+        Path f = dir.resolve("dec.cryptand");
+        Engine.Options o = opts(new byte[32]);
+        o.durability = Superblock.Durability.NONE; // as the op-log harness runs
+        byte[] big = new byte[6044];
+        Arrays.fill(big, (byte) 7);
+        Engine e = Engine.create(f, o);
+        try {
+            e.batch().put(T, key(1), big).commit();
+            e.decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
+            while (e.convertStep()) {
+                // until nothing encrypted remains
+            }
+            assertArrayEquals(big, e.get(T, key(1)));
+            org.dizitart.cryptand.ops.Backup.full(e, dir.resolve("dec.bak"),
+                    org.dizitart.cryptand.ops.Backup.Mode.PLAINTEXT, false);
+            e.commitNow(true);
+            assertArrayEquals(big, e.get(T, key(1)));
+        } finally {
+            e.close();
+        }
+        try (Engine back = Engine.open(dir.resolve("dec.bak"), opts(null))) {
+            assertArrayEquals(big, back.get(T, key(1)));
+        }
+    }
+
 }
