@@ -135,7 +135,10 @@ class OplogCheckTest {
 
     static final class Run {
         final Path path;
-        final boolean encrypted;
+        /** Changes with M2.2's encrypt/decrypt ops; the next reopen needs it. */
+        boolean encrypted;
+        /** After {@code erase} nothing can unlock the file; the replay stops there. */
+        boolean erased;
         final Profile profile;
         final int trees;
         Engine e;
@@ -370,6 +373,52 @@ class OplogCheckTest {
                     break;
                 case "shrink": e.shrink(); break;
                 case "ttl_advance": clock += j.get("ms").asLong(); break;
+                // M2.2's maintenance ops: no model effect; skipped where they do
+                // not apply, as an application would not call them.
+                case "gc":
+                    if (snaps.isEmpty()) { // collect() refuses under a live snapshot
+                        e.collect();
+                    }
+                    break;
+                // Java's convertStep() refuses under a live snapshot (Rust's does
+                // not); both skip conversion there.
+                case "encrypt":
+                    if (!encrypted && snaps.isEmpty()) {
+                        e.encrypt(null, KEY.clone());
+                        while (e.convertStep()) {
+                            // until nothing plaintext remains
+                        }
+                        encrypted = true;
+                    }
+                    break;
+                case "decrypt":
+                    if (encrypted && snaps.isEmpty()) {
+                        e.decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
+                        while (e.convertStep()) {
+                            // until nothing encrypted remains
+                        }
+                        encrypted = false;
+                    }
+                    break;
+                case "rotate":
+                    if (encrypted && snaps.isEmpty()) {
+                        e = Engine.rotateMasterKey(e, null, KEY.clone());
+                    }
+                    break;
+                case "backup": {
+                    Path dest = path.resolveSibling(path.getFileName() + ".bak");
+                    Files.deleteIfExists(dest);
+                    org.dizitart.cryptand.ops.Backup.full(e, dest, encrypted
+                            ? org.dizitart.cryptand.ops.Backup.Mode.CIPHERTEXT_COPY
+                            : org.dizitart.cryptand.ops.Backup.Mode.PLAINTEXT, false);
+                }
+                    break;
+                case "erase":
+                    if (encrypted) {
+                        e.cryptoErase();
+                        erased = true;
+                    }
+                    break;
                 case "reopen": {
                     if (!snaps.isEmpty()) {
                         throw new IllegalArgumentException("invalid log");
@@ -522,6 +571,107 @@ class OplogCheckTest {
         }
     }
 
+    static Run torturedRun(List<String> lines, Path db) throws Exception {
+        JsonNode h = JSON.readTree(lines.get(0));
+        Profile profile;
+        switch (h.path("profile").asText("desktop")) {
+            case "mobile": profile = Profile.MOBILE; break;
+            case "tablet": profile = Profile.TABLET; break;
+            case "server": profile = Profile.SERVER; break;
+            default: profile = Profile.DESKTOP; break;
+        }
+        return new Run(db, h.path("encrypted").asBoolean(), profile, h.path("trees").asInt(1));
+    }
+
+    /** Whether an op returns only once it is durable: what the torture parent may count as acknowledged. */
+    static boolean durable(JsonNode j) {
+        switch (j.get("op").asText()) {
+            case "commit": return j.get("d").asText().equals("sync") || j.get("d").asText().equals("full");
+            case "checkpoint": case "reopen": return true;
+            default: return false;
+        }
+    }
+
+    /** M2.2 child, as Rust's {@code oplog_check --child}: replay, printing {@code ack N} after each durable op. */
+    static void tortureChild(List<String> lines, Path db) throws Exception {
+        Run r = torturedRun(lines, db);
+        r.e = Engine.create(db, r.options());
+        r.history.put(0L, new Model());
+        // The harness's own control: acknowledge a commit that never ran.
+        boolean fault = System.getenv("TORTURE_FAULT") != null;
+        for (int n = 1; n < lines.size(); n++) {
+            JsonNode j = JSON.readTree(lines.get(n));
+            if (!(fault && j.get("op").asText().equals("commit"))) {
+                r.step(j);
+            }
+            if (durable(j) || r.erased) {
+                System.out.println("ack " + (n + 1));
+                System.out.flush();
+            }
+            if (r.erased) {
+                return;
+            }
+        }
+        r.e.close();
+    }
+
+    /**
+     * M2.2 check after the kill: {@code db} opens, verify finds nothing but
+     * policy notes, and its data equals the model after some line at or past
+     * {@code ack}. Returns that line.
+     */
+    static int tortureCheck(List<String> lines, Path db, int ack) throws Exception {
+        Run r = torturedRun(lines, db);
+        // A conversion may be cut anywhere, so the file may be either; and from
+        // an acknowledged-or-later `erase` on, nothing may unlock it.
+        r.encrypted = false;
+        try {
+            r.e = Engine.open(db, r.options());
+        } catch (RuntimeException plain) {
+            r.encrypted = true;
+            try {
+                r.e = Engine.open(db, r.options());
+            } catch (RuntimeException x) {
+                // The child stops at the erase it runs, so it is the one at or past `ack`.
+                for (int n = ack; n <= lines.size(); n++) {
+                    if (lines.get(n - 1).contains("\"op\":\"erase\"")) {
+                        return n;
+                    }
+                }
+                throw new Diverged("open: " + x);
+            }
+        }
+        try {
+            for (var f : org.dizitart.cryptand.ops.Verify.run(r.e).findings()) {
+                if (f.kind() != org.dizitart.cryptand.ops.Verify.Kind.POLICY) {
+                    throw new Diverged("verify: " + f.kind() + " " + f.message());
+                }
+            }
+            Model m = new Model();
+            long clock = 0;
+            String last = "";
+            for (int p = 1; p <= lines.size(); p++) {
+                if (p > 1) {
+                    clock = modelApply(m, clock, JSON.readTree(lines.get(p - 1)));
+                }
+                if (p < ack) {
+                    continue;
+                }
+                r.model = m.copy();
+                r.clock = clock;
+                try {
+                    r.digestCheck();
+                    return p;
+                } catch (RuntimeException x) {
+                    last = x.getMessage();
+                }
+            }
+            throw new Diverged("matches no state at or after line " + ack + "; last: " + last);
+        } finally {
+            r.e.close();
+        }
+    }
+
     static List<Path> logs(Path dir) throws Exception {
         try (Stream<Path> s = Files.list(dir)) {
             return s.filter(p -> p.toString().endsWith(".jsonl")).sorted().collect(java.util.stream.Collectors.toList());
@@ -552,6 +702,21 @@ class OplogCheckTest {
                 System.out.println("ok digest " + hop(Files.readAllLines(Path.of(args[1])), Path.of(args[2]),
                         Integer.parseInt(args[3]), Integer.parseInt(args[4])));
             } catch (Diverged x) {
+                System.out.println("FAIL " + x.getMessage());
+                System.exit(1);
+            }
+            return;
+        }
+        if (args[0].equals("--child")) {
+            tortureChild(Files.readAllLines(Path.of(args[1])), Path.of(args[2]));
+            System.out.println("done");
+            return;
+        }
+        if (args[0].equals("--after-kill")) {
+            try {
+                System.out.println("ok state after line " + tortureCheck(Files.readAllLines(Path.of(args[1])),
+                        Path.of(args[2]), Integer.parseInt(args[3])));
+            } catch (RuntimeException x) {
                 System.out.println("FAIL " + x.getMessage());
                 System.exit(1);
             }

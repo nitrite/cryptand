@@ -5,6 +5,8 @@
 //!        --skew 0..1 (0 uniform) --big 0..1 (value-log fraction) --prefix N (shared key prefix bytes)
 //!        --mix put=40,del=8,range_del=1,batch=4,get=25,scan=6,snapshot=2,release=2,commit=3,
 //!              reopen=1,compact=1,shrink=1,checkpoint=1,ttl_advance=2
+//!        --maint W   weight W for each maintenance op (gc, encrypt, decrypt,
+//!                    rotate, backup, erase; 0 by default, so seeds are unchanged)
 use std::fmt::Write as _;
 use std::io::Write as _;
 
@@ -37,11 +39,13 @@ pub fn value_bytes(n: usize, seed: u64) -> Vec<u8> {
     v
 }
 
-const OPS: [&str; 14] = [
+const OPS: [&str; 20] = [
     "put", "del", "range_del", "batch", "get", "scan", "snapshot", "release", "commit", "reopen",
-    "compact", "shrink", "checkpoint", "ttl_advance",
+    "compact", "shrink", "checkpoint", "ttl_advance", "gc", "encrypt", "decrypt", "rotate", "backup", "erase",
 ];
-const MIX: [u32; 14] = [40, 8, 1, 4, 25, 6, 2, 2, 3, 1, 1, 1, 1, 2];
+// The maintenance ops (M2.2) come last at weight 0: a pick over these weights
+// is the pick over the first 14, so every existing seed generates as before.
+const MIX: [u32; 20] = [40, 8, 1, 4, 25, 6, 2, 2, 3, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0];
 
 struct Cfg {
     seed: u64,
@@ -53,7 +57,7 @@ struct Cfg {
     skew: f64,
     big: f64,
     prefix: usize,
-    mix: [u32; 14],
+    mix: [u32; 20],
 }
 
 struct Gen {
@@ -203,7 +207,7 @@ impl Gen {
                 self.clock += ms;
                 format!(r#"{{"op":"ttl_advance","ms":{ms}}}"#)
             }
-            op => format!(r#"{{"op":"{op}"}}"#), // compact, shrink, checkpoint
+            op => format!(r#"{{"op":"{op}"}}"#), // compact, shrink, checkpoint, maintenance
         }
     }
 
@@ -253,8 +257,12 @@ fn parse(args: &[String]) -> Result<Cfg, String> {
             "--skew" => c.skew = val()?.parse().map_err(|e| bad(&e))?,
             "--big" => c.big = val()?.parse().map_err(|e| bad(&e))?,
             "--prefix" => c.prefix = val()?.parse().map_err(|e| bad(&e))?,
+            "--maint" => {
+                let w = val()?.parse().map_err(|e| bad(&e))?;
+                c.mix[14..].fill(w);
+            }
             "--mix" => {
-                c.mix = [0; 14];
+                c.mix = [0; 20];
                 for kv in val()?.split(',') {
                     let (k, w) = kv.split_once('=').ok_or(bad(&"want op=weight"))?;
                     let i = OPS.iter().position(|o| *o == k).ok_or(bad(&format!("unknown op {k}")))?;
@@ -303,7 +311,7 @@ mod tests {
 
     #[test]
     fn every_op_appears_and_lines_are_well_formed() {
-        let log = gen("--seed 3 --ops 20000 --big 0.2 --prefix 3");
+        let log = gen("--seed 3 --ops 20000 --big 0.2 --prefix 3 --maint 1");
         let mut lines = log.lines();
         let h: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(h["oplog"], 1);

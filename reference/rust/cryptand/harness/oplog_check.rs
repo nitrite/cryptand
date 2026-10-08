@@ -60,6 +60,8 @@ struct Run {
     clock: u64,
     trees: u32,
     seen_visible: u64,
+    /// After `erase` nothing can unlock the file; the replay stops there.
+    erased: bool,
 }
 
 impl Run {
@@ -208,6 +210,42 @@ impl Run {
                 self.clock += j["ms"].as_u64().unwrap();
                 self.e.now_ms = self.clock;
             }
+            // M2.2's maintenance ops: no model effect; skipped where they do
+            // not apply, as an application would not call them.
+            // Java's collect() refuses under a live snapshot; both skip it there.
+            "gc" if self.snaps.is_empty() => self.e.collect().map_err(|e| format!("gc: {e}"))?,
+            "gc" => {}
+            // Java refuses conversion under a live snapshot (its harness skips it); Rust does not.
+            "encrypt" if !self.encrypted => {
+                use cryptand::convert::ConvertApi;
+                self.e.encrypt(&KEY, 0, 0, 0, 0).map_err(|e| format!("encrypt: {e}"))?;
+                while self.e.convert_step().map_err(|e| format!("convert: {e}"))? == cryptand::spaceapi::Step::More {}
+                self.encrypted = true;
+            }
+            "decrypt" if self.encrypted => {
+                use cryptand::convert::{ConfirmDecrypt, ConvertApi};
+                self.e.decrypt(ConfirmDecrypt::RemoveEncryption).map_err(|e| format!("decrypt: {e}"))?;
+                while self.e.convert_step().map_err(|e| format!("convert: {e}"))? == cryptand::spaceapi::Step::More {}
+                self.encrypted = false;
+            }
+            "rotate" if self.encrypted && self.snaps.is_empty() => {
+                let e = std::mem::replace(&mut self.e, Engine::create_in_memory(Profile::Desktop).map_err(|e| e.to_string())?);
+                self.e = cryptand::rotate::rotate_master_key(e, &KEY, 0, 0, 0, 0).map_err(|e| format!("rotate: {e}"))?;
+                self.e.now_ms = self.clock;
+            }
+            "backup" => {
+                use cryptand::backup::{Backup, BackupMode};
+                let dest = self.path.with_extension("bak");
+                let _ = std::fs::remove_file(&dest);
+                let mode = if self.encrypted { BackupMode::CiphertextCopy } else { BackupMode::Plain };
+                self.e.backup(&dest, mode).map_err(|e| format!("backup: {e}"))?;
+            }
+            "erase" if self.encrypted => {
+                use cryptand::keyapi::KeyApi;
+                self.e.crypto_erase().map_err(|e| format!("erase: {e}"))?;
+                self.erased = true;
+            }
+            "encrypt" | "decrypt" | "rotate" | "erase" => {}
             "reopen" => {
                 if !self.snaps.is_empty() {
                     return Err(INVALID.into());
@@ -271,7 +309,7 @@ fn replay(log: &str, dir: &Path) -> Result<String, String> {
     .map_err(|e| format!("create: {e}"))?;
     let trees = h["trees"].as_u64().unwrap_or(1) as u32;
     let seen_visible = e.visible_seq;
-    let mut r = Run { path: path.clone(), encrypted, e, model: Model::new(), committed: Model::new(), snaps: HashMap::new(), clock: 0, trees, seen_visible };
+    let mut r = Run { path: path.clone(), encrypted, e, model: Model::new(), committed: Model::new(), snaps: HashMap::new(), clock: 0, trees, seen_visible, erased: false };
     let out = (|| {
         for (n, l) in lines.enumerate() {
             let j: J = serde_json::from_str(l).map_err(|e| format!("line {}: {e}", n + 2))?;
@@ -333,7 +371,7 @@ fn hop(log: &str, db: &Path, from: usize, to: usize) -> Result<String, String> {
     e.now_ms = clock;
     let trees = h["trees"].as_u64().unwrap_or(1) as u32;
     let seen_visible = e.visible_seq;
-    let mut r = Run { path: db.to_path_buf(), encrypted, e, committed: model.clone(), model, snaps: HashMap::new(), clock, trees, seen_visible };
+    let mut r = Run { path: db.to_path_buf(), encrypted, e, committed: model.clone(), model, snaps: HashMap::new(), clock, trees, seen_visible, erased: false };
     let out = (|| {
         r.digest_check().map_err(|e| format!("at open: {e}"))?;
         for (n, l) in lines.iter().enumerate().take(to - 1).skip(from - 1) {
@@ -346,6 +384,99 @@ fn hop(log: &str, db: &Path, from: usize, to: usize) -> Result<String, String> {
     })();
     let _ = r.e.close(true);
     out
+}
+
+fn header(log: &str) -> Result<(Profile, bool, u32), String> {
+    let h: J = serde_json::from_str(log.lines().next().ok_or("empty log")?).map_err(|e| format!("line 1: {e}"))?;
+    let profile = match h["profile"].as_str().unwrap_or("desktop") {
+        "mobile" => Profile::Mobile,
+        "tablet" => Profile::Tablet,
+        "server" => Profile::Server,
+        _ => Profile::Desktop,
+    };
+    Ok((profile, h["encrypted"] == true, h["trees"].as_u64().unwrap_or(1) as u32))
+}
+
+/// Whether an op returns only once it is durable: what the torture parent
+/// may count as acknowledged.
+fn durable(j: &J) -> bool {
+    match j["op"].as_str() {
+        Some("commit") => matches!(j["d"].as_str(), Some("sync" | "full")),
+        Some("checkpoint" | "reopen") => true,
+        _ => false,
+    }
+}
+
+/// M2.2 child: replays the whole log on `db`, printing `ack N` (N the 1-based
+/// line) after every durable op. The parent kills it with SIGKILL.
+fn torture_child(log: &str, db: &Path) -> Result<(), String> {
+    let (profile, encrypted, trees) = header(log)?;
+    let e = if encrypted { Engine::create_encrypted(db, profile, &KEY, 0, 0, 0, 0) } else { Engine::create(db, profile) }
+        .map_err(|e| format!("create: {e}"))?;
+    let seen_visible = e.visible_seq;
+    let mut r = Run { path: db.to_path_buf(), encrypted, e, model: Model::new(), committed: Model::new(), snaps: HashMap::new(), clock: 0, trees, seen_visible, erased: false };
+    for (n, l) in log.lines().enumerate().skip(1) {
+        let j: J = serde_json::from_str(l).map_err(|e| format!("line {}: {e}", n + 1))?;
+        // The harness's own control (PLAN rule 5): acknowledge a commit that
+        // never ran, and the check must report the acknowledged writes lost.
+        let skip = j["op"] == "commit" && std::env::var_os("TORTURE_FAULT").is_some();
+        if !skip {
+            r.step(&j).map_err(|e| format!("line {}: {} — {e}", n + 1, j["op"]))?;
+        }
+        if durable(&j) || r.erased {
+            println!("ack {}", n + 1);
+        }
+        if r.erased {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// M2.2 check after the kill: `db` opens, verify finds nothing, and its data
+/// equals the model after some line at or past `ack` -- nothing acknowledged
+/// is lost and no op is half applied. Ok(the matching line).
+fn torture_check(log: &str, db: &Path, ack: usize) -> Result<usize, String> {
+    use cryptand::verify::{Class, EngineVerify};
+    let (_, _, trees) = header(log)?;
+    let lines: Vec<&str> = log.lines().collect();
+    // A conversion may be cut anywhere, so the file may be either; and from
+    // an acknowledged-or-later `erase` on, nothing may unlock it.
+    let (mut e, encrypted) = match Engine::open(db, None) {
+        Ok(e) => (e, false),
+        Err(_) => match Engine::open(db, Some(&KEY[..])) {
+            Ok(e) => (e, true),
+            Err(x) => {
+                // The child stops at the erase it runs, so it is the one at or past `ack`.
+                let erase = (ack..=lines.len()).find(|&n| lines[n - 1].contains(r#""op":"erase""#));
+                return erase.ok_or(format!("open: {x}"));
+            }
+        },
+    };
+    let bad: Vec<_> = e.verify().map_err(|e| format!("verify: {e}"))?.findings.into_iter().filter(|f| f.class != Class::Warning).collect();
+    if !bad.is_empty() {
+        return Err(format!("verify: {bad:?}"));
+    }
+    let (mut model, mut clock) = (Model::new(), 0);
+    let seen_visible = e.visible_seq;
+    let mut r = Run { path: db.to_path_buf(), encrypted, e, model: Model::new(), committed: Model::new(), snaps: HashMap::new(), clock: 0, trees, seen_visible, erased: false };
+    let mut last_err = String::new();
+    for p in 1..=lines.len() {
+        if p > 1 {
+            model_apply(&mut model, &mut clock, &serde_json::from_str(lines[p - 1]).map_err(|e| e.to_string())?);
+        }
+        if p < ack {
+            continue;
+        }
+        r.model = model.clone();
+        r.clock = clock;
+        r.e.now_ms = clock;
+        match r.digest_check() {
+            Ok(_) => return Ok(p),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(format!("matches no state at or after line {ack}; last: {last_err}"))
 }
 
 /// Greedy delta debugging over the op lines: drop chunks while the log still
@@ -425,6 +556,19 @@ fn main() {
         let n = |i: usize| args[i].parse::<usize>().expect("--hop LOG DB FROM TO");
         match hop(&log, Path::new(&args[2]), n(3), n(4)) {
             Ok(d) => { println!("ok digest {d}"); 0 }
+            Err(e) => { println!("FAIL {e}"); 1 }
+        }
+    } else if args.first().map(String::as_str) == Some("--child") {
+        let log = std::fs::read_to_string(&args[1]).expect("read log");
+        match torture_child(&log, Path::new(&args[2])) {
+            Ok(()) => { println!("done"); 0 }
+            Err(e) => { println!("FAIL {e}"); 1 }
+        }
+    } else if args.first().map(String::as_str) == Some("--after-kill") {
+        // --after-kill LOG DB ACK
+        let log = std::fs::read_to_string(&args[1]).expect("read log");
+        match torture_check(&log, Path::new(&args[2]), args[3].parse().expect("ACK")) {
+            Ok(p) => { println!("ok state after line {p}"); 0 }
             Err(e) => { println!("FAIL {e}"); 1 }
         }
     } else if args.first().map(String::as_str) == Some("--shrink") {
