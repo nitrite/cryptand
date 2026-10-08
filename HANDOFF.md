@@ -1,40 +1,31 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-08, end of session 6)
+## State (2026-10-08, end of session 7)
 
 - Branch `packaging/v1.0.0`. Manifests at 1.0.0, nothing published, no tags.
   Java targets Java 11 (built on JDK 17). Gate quick green 10-08 (see Log).
 - M0 done. M1: hop 0..1000 plain and 0..300 encrypted clean; 10 000-seed
   M1.2 runs still pending. M2.1: fault sweeps 1000 seeds clean (Rust, Java).
-- **F-072 done in Rust and Java** (Dart: M5): encrypt/decrypt/convertStep,
-  key ops, and rotate (Java `Engine.rotateMasterKey`, port of `rotate.rs`).
-  Vector regions and descriptor-rooted index trees (R-tree, vector graph) are
-  re-laid by conversion and re-sealed by rotation (PLAN F-072 g). Java live
-  indexes convert their own structures via `Engine.registerOwner`. Interop:
-  steps 7–9 and the new step 12 (indexed Java file; Rust and Java each
-  encrypt, rotate and decrypt it; Java queries both indexes; both verify).
-- Fixed this session: F-075 (encrypted vector-region layout, Rust + Java),
-  F-077 (flaky containment test: 11/400 under load → 0/400), F-078 (Java
-  vector-index deadlocks under `sync`), F-079 (S0: index structures read as
-  leaks by verify, so `repair` freed them; skipped by rotate/convert), F-081
-  (S0, Rust: in-place conversion retired value-log segments the memtable
-  still pointed into; plus three false positives in Rust verify).
-- F-080 fixed in Rust + Java (tree 1 reuse; Java file ≥ page_count; Rust
-  `Database`/`Transaction` commits now run one compaction step). Same
-  workload: Rust `Store` 98 pages, Java 76 — Rust is not worse.
-- M2.2 harness landed (`tools/torture.py`, `--child`/`--after-kill` in both
-  checkers, `--maint W` for gc/encrypt/decrypt/rotate/backup/erase). Control
-  `TORTURE_FAULT=1` is caught. It already found F-082 (S0 Rust tiered group
-  overlap on a Dart-shaped file), F-083 (S0 Java backup restored the OLDER
-  version), F-084 (S0 Rust `collect()` lost values after commit-without-flush).
-- Running (10-08, nohup): 5 000 kills each, half encrypted, `--ops 400
-  --maint 1`; logs `reference/bench/runs/m22-{rust,java}.log`, failing
-  seeds kept in `reference/bench/runs/torture/`. Rust seeds 1000–6000,
-  Java 101000–106000.
-- Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
-  F-080 (fresh tree 1; `fromBytes` page count), F-084 check, M2.2 Dart, F-075 (no region storage), F-079, F-081.
+- CI run 37760766268 (Java 21 macOS) failed on a POLICY finding after
+  decrypt: Java conversion now clusters (F-088).
+- **Conversion under a live snapshot** (human 10-08: Java matches Rust): Java's
+  refusal removed. Both keep the dropped key(s) read-only while a snapshot may
+  read a retired encrypted segment; Rust used to panic there (F-087).
+- M2.2: the first ~110 kills per language found F-085 (Java backup resolved
+  range-deleted values), F-086 (Java rotate raced its own background publish),
+  F-087, and harness bugs (plain replay ran past `erase`; a kill inside
+  `create()`; `os.remove` race), all fixed. Both kill runs were stopped; the
+  5 000-kill runs need restarting on this build.
+- M2.3: `tools/enospc.sh` (200 MB image, mobile profile). Rust passes plain and
+  encrypted after F-090 (S0: every encrypted value-log rollover lost one
+  value) and F-091 (S0: compaction ENOSPC mid manifest edit). Java: F-089,
+  F-092 fixed; **F-093 open (S0)**: after ENOSPC, intermittently a pointer to a
+  segment with no tree-7 entry on reopen, and work does not resume after
+  freeing space.
+- Open S1/S0 outside M5: **F-093**. M5: F-035, F-038, Dart halves of F-072,
+  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088.
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
-  never build Java while a hop or Java fault sweep runs, nor edit sources
+  never build Java while a hop or Java torture runs, nor edit sources
   while `tools/gate.sh` runs (its interop stage rebuilds Java).
 
 ## Decisions already made (human)
@@ -57,17 +48,20 @@
 
 ## Open questions for the human
 
-- Java `convertStep()` refuses under a live snapshot ("close them first");
-  Rust converts. Spec 14 §8.3 is silent. Keep Java's refusal (documented
-  precondition), or make Java match Rust? The torture harness skips Java
-  conversion under snapshots meanwhile.
+- Commits this session bundle several findings each (shared files); the
+  "one finding per commit" rule was bent. Fine, or split before the RC?
+- F-093 (b): Java `desktop` cannot resume on a 200 MB device, because a
+  reopened engine opens hot and cold 64 MiB value-log extents (spec 12 sizes
+  desktop for 100 MB–100 GB). Accept as the profile's floor, or make Java
+  extend value-log extents lazily as Rust does?
 
 ## Next action
 
-Read `reference/bench/runs/m22-{rust,java}.log` (last line per run:
-"N kills, F failures"). Shrink and fix any failure (one F-row each, all three
-checked), then record the numbers in PLAN M2.2 and tick it. Then M2.3 (disk
-full, `hdiutil` 200 MB image).
+Root-cause F-093 with `ENOSPC_JAVA_ONLY=1 tools/enospc.sh` (instrument
+`PageFile.write` failures and tail allocations; both helped this session).
+Then restart the M2.2 runs:
+`nohup sh -c 'tools/torture.py rust 1000 3500 --ops 400 --maint 1; tools/torture.py rust 3500 6000 --ops 400 --maint 1 --encrypted' > reference/bench/runs/m22-rust.log 2>&1 &`
+(and Java 101000–106000 likewise), shrink any failure, record numbers.
 
 ## Log
 
@@ -76,3 +70,4 @@ full, `hdiutil` 200 MB image).
 - 2026-10-08 — Java rotate; F-072 g in Rust+Java + interop step 12; F-075, F-077, F-078, F-079 (S0), F-081 (S0) fixed; F-080 found.
 - 2026-10-08 — F-080 (S1) fixed in Rust + Java; gate quick green.
 - 2026-10-08 — F-080 follow-up (Rust Database compaction), F-082/F-083/F-084 (S0) fixed; M2.2 harness; 5000-kill runs started.
+- 2026-10-08 — CI fix (F-088); Java converts under snapshots (F-087); F-085, F-086 from M2.2; M2.3 harness: F-089–F-092 fixed, F-093 open.

@@ -380,10 +380,8 @@ class OplogCheckTest {
                         e.collect();
                     }
                     break;
-                // Java's convertStep() refuses under a live snapshot (Rust's does
-                // not); both skip conversion there.
                 case "encrypt":
-                    if (!encrypted && snaps.isEmpty()) {
+                    if (!encrypted) {
                         e.encrypt(null, KEY.clone());
                         while (e.convertStep()) {
                             // until nothing plaintext remains
@@ -392,7 +390,7 @@ class OplogCheckTest {
                     }
                     break;
                 case "decrypt":
-                    if (encrypted && snaps.isEmpty()) {
+                    if (encrypted) {
                         e.decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
                         while (e.convertStep()) {
                             // until nothing encrypted remains
@@ -483,6 +481,9 @@ class OplogCheckTest {
                         x.printStackTrace();
                     }
                     throw new Diverged("line " + (n + 1) + ": " + j.get("op") + " — " + x);
+                }
+                if (r.erased) {
+                    return "erased"; // nothing readable remains
                 }
             }
             try {
@@ -596,6 +597,8 @@ class OplogCheckTest {
     static void tortureChild(List<String> lines, Path db) throws Exception {
         Run r = torturedRun(lines, db);
         r.e = Engine.create(db, r.options());
+        System.out.println("created"); // before this, a kill may leave a file that is not yet a database
+        System.out.flush();
         r.history.put(0L, new Model());
         // The harness's own control: acknowledge a commit that never ran.
         boolean fault = System.getenv("TORTURE_FAULT") != null;

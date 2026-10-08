@@ -47,8 +47,10 @@ def one(cmd, seed, knobs):
         time.sleep(delay)
         child.send_signal(signal.SIGKILL)
         killed = True
+    created = False
     for line in child.stdout:
-        if not line.startswith("ack "):
+        created = created or line.startswith("created")
+        if not line.startswith("ack ") and not line.startswith("created"):
             said = line.strip() or said
         if line.startswith("ack "):
             last, seen = int(line.split()[1]), seen + 1
@@ -58,6 +60,13 @@ def one(cmd, seed, knobs):
                 killed = True
     child.wait()
     err.close()
+    if not created and killed:
+        # Killed inside create(): nothing was promised, the file may be anything.
+        os.remove(log)
+        for p in (db, db + ".lock", f"{out}/s{seed}.err"):
+            if os.path.exists(p):
+                os.remove(p)
+        return True, f"seed {seed}: killed before create() returned"
     if not killed and child.returncode != 0:
         tail = open(f"{out}/s{seed}.err").read().strip().splitlines()
         return False, f"seed {seed}: child failed on its own after ack {seen}: {said or (tail[0] if tail else child.returncode)}"
@@ -66,8 +75,9 @@ def one(cmd, seed, knobs):
     res = (r.stdout + r.stderr).strip().splitlines()
     ok = r.returncode == 0 and res and res[-1].startswith("ok")
     if ok:
-        os.remove(log)
-        os.remove(db)
+        for p in (log, db):  # an erase may have removed the file already
+            if os.path.exists(p):
+                os.remove(p)
     return ok, f"seed {seed}: killed after ack {seen}/{acks} (line {last}): {res[-1] if res else 'no output'}"
 
 

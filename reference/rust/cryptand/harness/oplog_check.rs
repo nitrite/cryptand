@@ -215,7 +215,7 @@ impl Run {
             // Java's collect() refuses under a live snapshot; both skip it there.
             "gc" if self.snaps.is_empty() => self.e.collect().map_err(|e| format!("gc: {e}"))?,
             "gc" => {}
-            // Java refuses conversion under a live snapshot (its harness skips it); Rust does not.
+            // Conversion runs under a live snapshot in both Rust and Java.
             "encrypt" if !self.encrypted => {
                 use cryptand::convert::ConvertApi;
                 self.e.encrypt(&KEY, 0, 0, 0, 0).map_err(|e| format!("encrypt: {e}"))?;
@@ -314,6 +314,9 @@ fn replay(log: &str, dir: &Path) -> Result<String, String> {
         for (n, l) in lines.enumerate() {
             let j: J = serde_json::from_str(l).map_err(|e| format!("line {}: {e}", n + 2))?;
             r.step(&j).map_err(|e| format!("line {}: {} — {e}", n + 2, j["op"]))?;
+            if r.erased {
+                return Ok(String::from("erased")); // nothing readable remains
+            }
         }
         r.digest_check().map_err(|e| format!("end: {e}"))
     })();
@@ -413,6 +416,7 @@ fn torture_child(log: &str, db: &Path) -> Result<(), String> {
     let (profile, encrypted, trees) = header(log)?;
     let e = if encrypted { Engine::create_encrypted(db, profile, &KEY, 0, 0, 0, 0) } else { Engine::create(db, profile) }
         .map_err(|e| format!("create: {e}"))?;
+    println!("created"); // before this, a kill may leave a file that is not yet a database
     let seen_visible = e.visible_seq;
     let mut r = Run { path: db.to_path_buf(), encrypted, e, model: Model::new(), committed: Model::new(), snaps: HashMap::new(), clock: 0, trees, seen_visible, erased: false };
     for (n, l) in log.lines().enumerate().skip(1) {

@@ -17,7 +17,7 @@ interop gate 12/12 directions plaintext+encrypted.
 |---|---|---|---|---|
 | M0 | Execution infra, gates, CI matrix | all | 10-07 | **done** (0.5: 26/26 jobs green, run 37597698770) |
 | M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 checkers in all three; 1.3 hop built; 1.4 regress + hop in the gate; 1.5 index differential in all three, 2000 seeds clean) |
-| M2 | Crash consistency + concurrency | A | 10-16 | in progress (2.1 Rust+Java: 3000 fault seeds each clean, Dart after M5; F-069, F-071; 2.2 harness built, 5000-kill runs going; F-082–F-084) |
+| M2 | Crash consistency + concurrency | A | 10-16 | in progress (2.1 Rust+Java: 3000 fault seeds each clean, Dart after M5; F-069, F-071; 2.2 harness built, first ~110 kills/lang found F-085–F-087, restart pending; 2.3 `tools/enospc.sh`: Rust green plain+encrypted, Java open F-093; F-082–F-093) |
 | M3 | Coverage-guided fuzzing | A | 10-16 | todo |
 | M4 | Security review + pentest | A | 10-21 | todo |
 | M5 | Dart storage rewrite | B | 10-23 gate | todo |
@@ -143,6 +143,8 @@ test compares the engine against a model on random histories.
   reopens and runs `verify` plus the model check of M1.
 - [ ] **2.3** Disk full: a 200 MB `hdiutil` image. Filling it must give a clean
   error, the file must still open, and work must resume once space is freed.
+  `tools/enospc.sh` (mobile profile, 100 MB ballast). 10-08: Rust passes plain
+  and encrypted (after F-090, F-091); Java open (F-093).
 - [ ] **2.4** Rust: ThreadSanitizer (nightly `-Zsanitizer=thread`) over
   `cryptand` and `cryptand-write` tests; Miri over `compare.rs`, `hash.rs`,
   `security.rs` and the codec unit tests. Java: the `CrudBench` mixed phase
