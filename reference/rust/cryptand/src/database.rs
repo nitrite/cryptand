@@ -85,7 +85,13 @@ impl Database {
 
     pub fn commit(&mut self, d: Durability) -> Result<u64> {
         self.engine.flush()?;
-        self.engine.commit(d)
+        let id = self.engine.commit(d)?;
+        // F-080: one L0 segment per commit and nothing ever compacting them
+        // grew a one-put-per-commit file linearly (1000 commits, 3 267
+        // pages). One bounded step, as `Store`'s committer runs; the commit
+        // above is already durable, so a compaction error is not its error.
+        let _ = self.engine.maybe_compact(None);
+        Ok(id)
     }
 
     pub fn close(&mut self) -> Result<()> {

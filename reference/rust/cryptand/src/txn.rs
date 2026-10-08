@@ -167,6 +167,8 @@ impl Transaction {
         engine.flush()?;
         let id = engine.commit(durability)?;
         engine.release(&self.snapshot);
+        // F-080: as `Database::commit` -- one bounded compaction step.
+        let _ = engine.maybe_compact(None);
         self.committed = true;
         // After the writes, not before: this transaction's own writes have to
         // be recorded for any *other* live transaction to conflict against.

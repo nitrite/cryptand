@@ -613,6 +613,21 @@ fn a_thousand_tiny_sync_commits_keep_the_file_bounded() {
     assert!(pages < 1000, "1000 commits of ~10 bytes made {pages} pages");
 }
 
+/// F-080: `Database::commit` flushes a segment every commit; without a
+/// compaction step after it, L0 and the file grew with the commit count.
+#[test]
+fn a_thousand_database_commits_keep_the_file_bounded() {
+    let (_t, mut db) = db("f080d", Profile::Desktop);
+    for i in 0..1000i64 {
+        db.engine.put(T, &Value::NitriteId(i), format!("v{i}").as_bytes()).unwrap();
+        db.commit(Durability::Sync).unwrap();
+    }
+    let pages = db.engine.sb.page_count;
+    eprintln!("F-080 rust database pages={pages}");
+    assert!(pages < 300, "1000 one-put commits made {pages} pages");
+    assert_eq!(db.engine.get(T, &Value::NitriteId(777)).unwrap().as_deref(), Some(&b"v777"[..]));
+}
+
 /// §3.1: groups of a tiered level stay disjoint even when another writer
 /// sized its runs differently. Three one-segment L1 runs over the same keys,
 /// as Dart writes them: the third has no free group (`overlap_bound` 2).
@@ -635,3 +650,4 @@ fn a_third_run_into_a_full_tiered_level_keeps_its_group_disjoint() {
     assert!(r.findings.iter().all(|f| f.class != Class::Corruption), "{:?}", r.findings);
     assert_eq!(e.get(T, &Value::NitriteId(3)).unwrap().as_deref(), Some(&[2u8][..]));
 }
+
