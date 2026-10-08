@@ -684,3 +684,31 @@ fn collected_values_survive_a_commit_without_flush_and_reuse() {
     let r = e.verify().unwrap();
     assert!(r.of(Class::Corruption).is_empty(), "{:?}", r.findings);
 }
+
+/// F-090: an encrypted value-log record was sealed to the open segment and
+/// offset before the rollover check, so the record that crossed a segment
+/// boundary landed in the next segment under the old binding and never read
+/// back (AEAD tag mismatch). Mobile's 4 MiB segments roll after ~464 of these.
+#[test]
+fn an_encrypted_record_that_rolls_the_value_log_segment_reads_back() {
+    let t = TempDb::new("enc-rollover");
+    let key = [9u8; 32];
+    let value = |i: i64| {
+        let mut v = format!("value-{i}-").into_bytes();
+        v.resize(9000, b'x');
+        v
+    };
+    let mut e = Engine::create_encrypted(&t.path, Profile::Mobile, &key, 0, 0, 0, 0).unwrap();
+    for i in 0..1000 {
+        e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
+    }
+    for i in 0..1000 {
+        assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap(), Some(value(i)), "key {i}");
+    }
+    e.close(true).unwrap();
+    drop(e);
+    let mut e = Engine::open(&t.path, Some(&key)).unwrap();
+    for i in 0..1000 {
+        assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap(), Some(value(i)), "reopened: key {i}");
+    }
+}

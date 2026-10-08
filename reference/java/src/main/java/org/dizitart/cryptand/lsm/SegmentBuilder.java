@@ -369,7 +369,13 @@ public final class SegmentBuilder {
             index++;
         }
 
-        pager.writeAt(pager.offsetOf(start), extent);
+        try {
+            pager.writeAt(pager.offsetOf(start), extent);
+        } catch (RuntimeException x) {
+            // ENOSPC (M2.3): owned by nothing, the extent would leak.
+            pager.abandonExtent(start, pages);
+            throw x;
+        }
         // The write invalidated every page it covered; put the tree pages back,
         // parsed, because the read path is about to ask for them. See
         // `Pager.admitTreePage`.

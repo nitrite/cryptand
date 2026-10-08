@@ -612,6 +612,27 @@ public final class Pager {
     }
 
     /**
+     * Gives back an extent that was allocated and never published (its write
+     * failed, M2.3): no reader can hold it, so it is reusable at once, and at
+     * the tail it comes off {@code page_count}. A failed write queued as an
+     * ordinary free stayed unusable until a publish succeeded, so each retry
+     * on a full device allocated past the end again and grew the file.
+     */
+    public synchronized void abandonExtent(long startPage, int pages) {
+        if (pages < 1 || startPage >= pageCount) {
+            return;
+        }
+        for (long p = startPage; p < startPage + pages; p++) {
+            invalidate(p);
+        }
+        if (startPage + pages == pageCount) {
+            pageCount = startPage;
+        } else {
+            free.add(new FreeExtent(0, startPage, pages));
+        }
+    }
+
+    /**
      * Returns an extent to the free tree at the committing {@code commit_id}.
      *
      * <p>It does not become allocatable until {@code min_retained_commit}

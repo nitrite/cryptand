@@ -1104,6 +1104,15 @@ public final class Engine implements AutoCloseable {
             }
             try {
                 commitNow(options.durability >= Superblock.Durability.SYNC);
+            } catch (java.io.UncheckedIOException e) {
+                // A full or failing device (M2.3): the writers waiting now get
+                // the error, which outlasts their 20 ms poll; then the committer
+                // tries again, so work resumes once space is freed.
+                committerFailure = e;
+                signalVisible();
+                vlog.abandonEmptyOpen();
+                java.util.concurrent.locks.LockSupport.parkNanos(100_000_000L);
+                committerFailure = null;
             } catch (RuntimeException e) {
                 committerFailure = e;
                 signalVisible();
@@ -2196,6 +2205,13 @@ public final class Engine implements AutoCloseable {
         while (!closing) {
             try {
                 maintain();
+            } catch (java.io.UncheckedIOException e) {
+                // A full or failing device is not a broken database (M2.3):
+                // back off and try again, so work resumes once space is freed.
+                // Every structure is as the last publish left it.
+                vlog.abandonEmptyOpen();
+                java.util.concurrent.locks.LockSupport.parkNanos(1_000_000_000L);
+                continue;
             } catch (RuntimeException e) {
                 committerFailure = e;
                 return;
@@ -2379,135 +2395,144 @@ public final class Engine implements AutoCloseable {
         List<Blob> deadBlobs = new ArrayList<>();
         byte[] maxUserKey = Ikey.userKeyOf(hi);
 
-        while (merge.isValid()) {
-            byte[] ik = merge.key();
-            BtreePage.Leaf cell = merge.entry();
-            merge.next();
-            byte[] uk = Ikey.userKeyOf(ik);
-            long seq = Ikey.seqOf(ik);
-            int op = Ikey.opOf(ik);
+        try {
+            while (merge.isValid()) {
+                byte[] ik = merge.key();
+                BtreePage.Leaf cell = merge.entry();
+                merge.next();
+                byte[] uk = Ikey.userKeyOf(ik);
+                long seq = Ikey.seqOf(ik);
+                int op = Ikey.opOf(ik);
 
-            boolean newUserKey = lastUserKey == null || BtreePage.memcmp(lastUserKey, uk) != 0;
-            if (newUserKey) {
-                sawNewerVisible = false;
-                lastUserKey = uk;
-            }
+                boolean newUserKey = lastUserKey == null || BtreePage.memcmp(lastUserKey, uk) != 0;
+                if (newUserKey) {
+                    sawNewerVisible = false;
+                    lastUserKey = uk;
+                }
 
-            if (op == BtreePage.Op.RANGE_DELETE) {
-                activeDeletes.add(RangeDelete.fromCell(cell));
-            }
+                if (op == BtreePage.Op.RANGE_DELETE) {
+                    activeDeletes.add(RangeDelete.fromCell(cell));
+                }
 
-            boolean drop = false;
-            if (!newUserKey && sawNewerVisible && bottommost) {
-                // Conditions 1 and 2: a newer version exists in this compaction
-                // and its seq is at or below the oldest live snapshot.
-                drop = true;
-            }
-            if (!drop && bottommost && op != BtreePage.Op.RANGE_DELETE) {
-                // A range delete makes an entry at a lower seq invisible to
-                // every live snapshot, so the entry may be dropped - and it MUST
-                // be dropped before the tombstone is, or the tombstone's
-                // removal resurrects it. The versions a RANGE_DELETE hides live
-                // under OTHER user keys, so `sawNewerVisible` never reaches
-                // them: each is the newest version of its own key.
-                long cover = greatestRangeDelete(activeDeletes, Ikey.treeIdOf(ik),
-                        Ikey.ckeOf(ik), floor);
-                if (cover > seq) {
+                boolean drop = false;
+                if (!newUserKey && sawNewerVisible && bottommost) {
+                    // Conditions 1 and 2: a newer version exists in this compaction
+                    // and its seq is at or below the oldest live snapshot.
                     drop = true;
                 }
-            }
-            if (!drop && bottommost && cell.hasExpiry() && cell.expiryMs() <= nowMs && seq <= floor) {
-                drop = true;
-            }
-            if (!drop && bottommost && seq <= floor && op == BtreePage.Op.DELETE) {
-                // A tombstone may be dropped only when its own seq is at or
-                // below the floor. The second half is not optional: if a
-                // snapshot older than the tombstone is live, the versions it
-                // hides cannot be dropped either, so dropping it alone would
-                // resurrect them for every reader at or after the delete.
-                drop = true;
-            }
-            if (!drop && bottommost && seq <= floor && op == BtreePage.Op.RANGE_DELETE) {
-                // And a RANGE_DELETE only once its whole interval is inside
-                // what this compaction merged. An interval reaching past the
-                // inputs' key range hides entries in segments that were not
-                // inputs, and dropping it would bring every one of them back.
-                RangeDelete rd = RangeDelete.fromCell(cell);
-                byte[] end = Ikey.userKey(Ikey.treeIdOf(ik), rd.end());
-                drop = BtreePage.memcmp(end, maxUserKey) <= 0;
-            }
-            if (seq <= floor) {
-                sawNewerVisible = true;
-            }
-            if (drop) {
-                liveBytes.add(-(Ikey.ckeOf(ik).length + cell.value().length));
-                if (cell.kind() == BtreePage.Kind.BLOB) {
-                    deadBlobs.add(Blob.decode(cell.value()));
+                if (!drop && bottommost && op != BtreePage.Op.RANGE_DELETE) {
+                    // A range delete makes an entry at a lower seq invisible to
+                    // every live snapshot, so the entry may be dropped - and it MUST
+                    // be dropped before the tombstone is, or the tombstone's
+                    // removal resurrects it. The versions a RANGE_DELETE hides live
+                    // under OTHER user keys, so `sawNewerVisible` never reaches
+                    // them: each is the newest version of its own key.
+                    long cover = greatestRangeDelete(activeDeletes, Ikey.treeIdOf(ik),
+                            Ikey.ckeOf(ik), floor);
+                    if (cover > seq) {
+                        drop = true;
+                    }
                 }
-                continue;
-            }
-            if (!newUserKey && !bottommost) {
-                // Kept solely because §5's condition 2 or 3 was not met: this is
-                // what `pinned_by_snapshots` counts, and the only place the fact
-                // is visible.
-                pinnedBySnapshots.addAndGet(Ikey.ckeOf(ik).length + cell.value().length);
-            }
+                if (!drop && bottommost && cell.hasExpiry() && cell.expiryMs() <= nowMs && seq <= floor) {
+                    drop = true;
+                }
+                if (!drop && bottommost && seq <= floor && op == BtreePage.Op.DELETE) {
+                    // A tombstone may be dropped only when its own seq is at or
+                    // below the floor. The second half is not optional: if a
+                    // snapshot older than the tombstone is live, the versions it
+                    // hides cannot be dropped either, so dropping it alone would
+                    // resurrect them for every reader at or after the delete.
+                    drop = true;
+                }
+                if (!drop && bottommost && seq <= floor && op == BtreePage.Op.RANGE_DELETE) {
+                    // And a RANGE_DELETE only once its whole interval is inside
+                    // what this compaction merged. An interval reaching past the
+                    // inputs' key range hides entries in segments that were not
+                    // inputs, and dropping it would bring every one of them back.
+                    RangeDelete rd = RangeDelete.fromCell(cell);
+                    byte[] end = Ikey.userKey(Ikey.treeIdOf(ik), rd.end());
+                    drop = BtreePage.memcmp(end, maxUserKey) <= 0;
+                }
+                if (seq <= floor) {
+                    sawNewerVisible = true;
+                }
+                if (drop) {
+                    liveBytes.add(-(Ikey.ckeOf(ik).length + cell.value().length));
+                    if (cell.kind() == BtreePage.Kind.BLOB) {
+                        deadBlobs.add(Blob.decode(cell.value()));
+                    }
+                    continue;
+                }
+                if (!newUserKey && !bottommost) {
+                    // Kept solely because §5's condition 2 or 3 was not met: this is
+                    // what `pinned_by_snapshots` counts, and the only place the fact
+                    // is visible.
+                    pinnedBySnapshots.addAndGet(Ikey.ckeOf(ik).length + cell.value().length);
+                }
 
-            BtreePage.Leaf out = cell;
-            if (everything && cell.kind() == BtreePage.Kind.BLOB) {
-                // 14 §8.3: a blob is re-chunked in the write mode, and its
-                // old extent goes with the inputs.
-                Blob b = Blob.decode(cell.value());
-                if (b.encrypted(pager) != pager.seals()) {
-                    Blob moved = Blob.write(pager, b.read(pager));
-                    deadBlobs.add(b);
-                    out = new BtreePage.Leaf(ik, BtreePage.Kind.BLOB, cell.expiryMs(),
-                            cell.hasExpiry(), moved.encode(), 0);
+                BtreePage.Leaf out = cell;
+                if (everything && cell.kind() == BtreePage.Kind.BLOB) {
+                    // 14 §8.3: a blob is re-chunked in the write mode, and its
+                    // old extent goes with the inputs.
+                    Blob b = Blob.decode(cell.value());
+                    if (b.encrypted(pager) != pager.seals()) {
+                        Blob moved = Blob.write(pager, b.read(pager));
+                        deadBlobs.add(b);
+                        out = new BtreePage.Leaf(ik, BtreePage.Kind.BLOB, cell.expiryMs(),
+                                cell.hasExpiry(), moved.encode(), 0);
+                    }
                 }
-            }
-            if (target >= last && cell.kind() == BtreePage.Kind.VLOG) {
-                // §6.3: during a compaction that outputs the last level, a
-                // surviving HOT-tier value MUST be promoted into a COLD segment
-                // or re-inlined. Because the merge emits entries in
-                // internal-key order, appending them in that order yields a
-                // cold segment that is key-clustered BY CONSTRUCTION, at no
-                // extra cost - the sort had to happen anyway.
-                VlogPointer p = VlogPointer.decode(cell.value());
-                // F-034: GC retires a segment once no *current* entry points
-                // into it, so a superseded, expired or range-deleted cell kept
-                // here may point at a retired one. No reader resolves to it;
-                // it stays as it is (as Rust's), and reading it would fail.
-                VlogSegment src = vlog.exists(p.segmentId()) ? vlog.segment(p.segmentId()) : null;
-                if (src != null && src.tier == VlogSegment.TIER_HOT) {
-                    VlogSegment.Record rec = vlog.read(p);
-                    VlogPointer moved = vlog.appendCold(rec.treeId(), rec.key(), rec.value());
-                    bytesValue.add(p.len());
-                    bytesDevice.addAndGet(p.len());
-                    out = new BtreePage.Leaf(ik, BtreePage.Kind.VLOG, cell.expiryMs(),
-                            cell.hasExpiry(), moved.encode(), 0);
+                if (target >= last && cell.kind() == BtreePage.Kind.VLOG) {
+                    // §6.3: during a compaction that outputs the last level, a
+                    // surviving HOT-tier value MUST be promoted into a COLD segment
+                    // or re-inlined. Because the merge emits entries in
+                    // internal-key order, appending them in that order yields a
+                    // cold segment that is key-clustered BY CONSTRUCTION, at no
+                    // extra cost - the sort had to happen anyway.
+                    VlogPointer p = VlogPointer.decode(cell.value());
+                    // F-034: GC retires a segment once no *current* entry points
+                    // into it, so a superseded, expired or range-deleted cell kept
+                    // here may point at a retired one. No reader resolves to it;
+                    // it stays as it is (as Rust's), and reading it would fail.
+                    VlogSegment src = vlog.exists(p.segmentId()) ? vlog.segment(p.segmentId()) : null;
+                    if (src != null && src.tier == VlogSegment.TIER_HOT) {
+                        VlogSegment.Record rec = vlog.read(p);
+                        VlogPointer moved = vlog.appendCold(rec.treeId(), rec.key(), rec.value());
+                        bytesValue.add(p.len());
+                        bytesDevice.addAndGet(p.len());
+                        out = new BtreePage.Leaf(ik, BtreePage.Kind.VLOG, cell.expiryMs(),
+                                cell.hasExpiry(), moved.encode(), 0);
+                    }
                 }
-            }
 
-            // §3.1.1: a levelled level's segments must not overlap in USER
-            // keys, and an output boundary in the middle of a key's versions
-            // breaks that while every checksum, key range and subtree count
-            // stays perfectly valid. The consequence is a wrong answer - §4's
-            // early exit stops at whichever of the two it reaches first - and it
-            // is invisible until a live snapshot keeps versions the compaction
-            // would otherwise have collapsed, which is exactly what the
-            // concurrency test creates. So a segment rolls over only on a user
-            // key boundary.
-            if (builder != null && newUserKey && builder.entryCount() >= targetEntries) {
+                // §3.1.1: a levelled level's segments must not overlap in USER
+                // keys, and an output boundary in the middle of a key's versions
+                // breaks that while every checksum, key range and subtree count
+                // stays perfectly valid. The consequence is a wrong answer - §4's
+                // early exit stops at whichever of the two it reaches first - and it
+                // is invisible until a live snapshot keeps versions the compaction
+                // would otherwise have collapsed, which is exactly what the
+                // concurrency test creates. So a segment rolls over only on a user
+                // key boundary.
+                if (builder != null && newUserKey && builder.entryCount() >= targetEntries) {
+                    outputs.add(builder.finish());
+                    builder = null;
+                }
+                if (builder == null) {
+                    builder = newBuilder(target, group);
+                }
+                builder.add(out);
+            }
+            if (builder != null) {
                 outputs.add(builder.finish());
-                builder = null;
             }
-            if (builder == null) {
-                builder = newBuilder(target, group);
+        } catch (RuntimeException x) {
+            // ENOSPC (M2.3): outputs written before the failure are owned by
+            // nothing, and the next publish would leak them for good.
+            for (int i = outputs.size() - 1; i >= 0; i--) { // newest first, so the tail unwinds
+                pager.abandonExtent(outputs.get(i).startPage, outputs.get(i).pages);
             }
-            builder.add(out);
-        }
-        if (builder != null) {
-            outputs.add(builder.finish());
+            throw x;
         }
 
         if (target >= last) {
@@ -3525,16 +3550,22 @@ public final class Engine implements AutoCloseable {
      * durability setting, is produce a structurally invalid database.
      */
     public void abandon() {
+        stopBackground();
+        if (cipher != null) {
+            cipher.close();
+        }
+        vlog.readOnlyCiphers.forEach(FileCipher::close);
+        file.close();
+    }
+
+    /** Stops the committer and compactor; nothing but the caller writes after. */
+    private void stopBackground() {
         closing = true;
         signalVisible();
         wake(committer);
         wake(compactor);
         join(committer);
         join(compactor);
-        if (cipher != null) {
-            cipher.close();
-        }
-        file.close();
     }
 
     public long compactionCount() {
@@ -4169,16 +4200,18 @@ public final class Engine implements AutoCloseable {
                 // pages the last one freed are not the ones it lands on.
                 publishSuperblock(visibleSeq);
             } else if (!c.plainVlog.isEmpty()) {
-                if (!liveSnapshots.isEmpty()) {
-                    throw new InvalidArgumentException(
-                            "a value-log segment cannot be rewritten under a live snapshot; close them first");
-                }
+                // Under a live snapshot too, as Rust does: only current
+                // versions move, and a retired segment stays readable and its
+                // extent unfreed until no snapshot predates it (F-037).
                 for (VlogStats st : c.plainVlog) {
                     collectSegment(st);
                 }
                 republishLevels();
                 publishSuperblock(visibleSeq);
                 retireCollectedSegments();
+                // The rewrite leaves cold runs unclustered; Rust's merges them
+                // into one. Without this §6.9's bound waited on the compactor.
+                clusterIfNeeded();
             } else if (pager.crypto() != null && !pager.seals()) {
                 // Nothing encrypted remains: one superblock drops the cipher
                 // and the keyslots together, so no file ever says cipher = 0
@@ -4198,7 +4231,11 @@ public final class Engine implements AutoCloseable {
                 options.rawKey = null;
                 publishSuperblock(visibleSeq);
                 publishSuperblock(visibleSeq);
-                was.close();
+                if (liveSnapshots.isEmpty()) {
+                    was.close();
+                } else {
+                    vlog.readOnlyCiphers.add(was); // a snapshot may read a retired encrypted segment
+                }
                 return false;
             } else {
                 return false;
@@ -4473,6 +4510,10 @@ public final class Engine implements AutoCloseable {
         Set<Long> sealedVlogs = new HashSet<>();
         byte[] oldMaster;
         e.commitNow(true);
+        // A background publish between the page census and the copy below
+        // named tree pages the census never re-sealed (torture seeds 101051,
+        // 101067, 101069, 101112).
+        e.stopBackground();
         e.structure.lock();
         try {
             // A quiet, durable state: every value-log segment sealed.
@@ -4731,21 +4772,27 @@ public final class Engine implements AutoCloseable {
         wake(compactor);
         join(committer);
         join(compactor);
-        if (!file.readOnly()) {
-            structure.lock();
-            try {
-                long target = Math.max(visibleSeq, completedThrough());
-                flushShards(target);
-                vlog.sealAll();
-                publishSuperblock(target);
-            } finally {
-                structure.unlock();
+        try {
+            if (!file.readOnly()) {
+                structure.lock();
+                try {
+                    long target = Math.max(visibleSeq, completedThrough());
+                    flushShards(target);
+                    vlog.sealAll();
+                    publishSuperblock(target);
+                } finally {
+                    structure.unlock();
+                }
             }
+        } finally {
+            // A final publish that fails (ENOSPC, M2.3) still releases the
+            // file and its writer lock, or nothing could reopen it.
+            if (cipher != null) {
+                cipher.close();
+            }
+            vlog.readOnlyCiphers.forEach(FileCipher::close);
+            file.close();
         }
-        if (cipher != null) {
-            cipher.close();
-        }
-        file.close();
     }
 
     private static void join(Thread t) {

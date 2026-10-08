@@ -255,3 +255,48 @@ fn memtable_held_values_survive_encrypt_rotate_decrypt() {
     while e.convert_step().unwrap() == Step::More {}
     check(&mut e, 200, "decrypted");
 }
+
+/// Conversion runs under a live snapshot: it keeps reading the versions it
+/// pinned through encrypt and decrypt (Java matches since 10-08).
+#[test]
+fn converts_under_live_snapshot() {
+    use cryptand::convert::ConfirmDecrypt;
+    let t = TempDb::new("snapshot-convert");
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    for i in 0..300 {
+        e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
+    }
+    e.flush().unwrap(); // what advances `visible_seq`
+    let snap = e.snapshot();
+    for i in (0..300).step_by(2) {
+        e.put(T, &Value::NitriteId(i), &value(i + 300)).unwrap();
+    }
+    e.commit(Durability::Sync).unwrap();
+    for i in 0..300 {
+        assert_eq!(e.get_at(T, &Value::NitriteId(i), Some(&snap)).unwrap(), Some(value(i)), "plain, snapshot: key {i}");
+    }
+    e.encrypt(&KEY, 0, 0, 0, 0).unwrap();
+    while e.convert_step().unwrap() == Step::More {}
+    assert!(e.fully_encrypted().unwrap());
+    for i in 0..300 {
+        assert_eq!(e.get_at(T, &Value::NitriteId(i), Some(&snap)).unwrap(), Some(value(i)), "encrypted, snapshot: key {i}");
+    }
+    e.decrypt(ConfirmDecrypt::RemoveEncryption).unwrap();
+    while e.convert_step().unwrap() == Step::More {}
+    for i in 0..300 {
+        assert_eq!(e.get_at(T, &Value::NitriteId(i), Some(&snap)).unwrap(), Some(value(i)), "decrypted, snapshot: key {i}");
+        let now = if i % 2 == 0 { i + 300 } else { i };
+        assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap(), Some(value(now)), "decrypted: key {i}");
+    }
+    // Torture seeds 3505, 1094: encrypted again under a fresh master, and
+    // decrypted again; the snapshot's segments are sealed under older ones.
+    for round in 0..2 {
+        e.encrypt(&KEY, 0, 0, 0, 0).unwrap();
+        while e.convert_step().unwrap() == Step::More {}
+        e.decrypt(ConfirmDecrypt::RemoveEncryption).unwrap();
+        while e.convert_step().unwrap() == Step::More {}
+        for i in 0..300 {
+            assert_eq!(e.get_at(T, &Value::NitriteId(i), Some(&snap)).unwrap(), Some(value(i)), "round {round}, snapshot: key {i}");
+        }
+    }
+}

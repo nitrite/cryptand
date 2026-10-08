@@ -488,6 +488,15 @@ public final class Verify {
      * §9 steps 4 and 5, plus {@code 04-segments.md} §11 invariants 8b, 9 and 10.
      */
     private void verifyValueLog() {
+        java.util.Set<Long> named = new java.util.HashSet<>();
+        for (VlogStats s : engine.vlog().allStats()) {
+            named.add(s.segmentId);
+        }
+        for (VlogSegment open : engine.vlog().openSegments()) {
+            if (!named.contains(open.segmentId)) { // live engine: not yet published
+                claim(open.startPage, open.pages, "open value-log segment " + open.segmentId);
+            }
+        }
         for (VlogStats s : engine.vlog().allStats()) {
             claim(s.startPage, s.pages, "value-log segment " + s.segmentId);
             VlogSegment head;

@@ -145,6 +145,13 @@ public final class Vlog {
     /** Whether anything has been appended since the committer's last barrier. */
     private volatile boolean appendedSinceBarrier;
     private volatile FileCipher cipher;
+    /**
+     * The ciphers decrypts dropped, kept while a snapshot may still read a
+     * retired encrypted segment. Never used to write.
+     */
+    // ponytail: held until the engine closes; release it once pruneRetired
+    // empties the retired set if key lifetime after decrypt matters.
+    final List<FileCipher> readOnlyCiphers = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     /** Installs the record cipher. Null means the value log is written in the clear. */
     public synchronized void setCipher(FileCipher cipher) {
@@ -310,9 +317,30 @@ public final class Vlog {
      * in-flight one was rejected by its own reader.
      */
     private VlogPointer write(Reservation r) {
-        pager.writeAt(pager.offsetOf(r.open().seg.startPage) + r.offset(), r.record());
+        try {
+            pager.writeAt(pager.offsetOf(r.open().seg.startPage) + r.offset(), r.record());
+        } catch (RuntimeException x) {
+            abandon(r);
+            throw x;
+        }
         completeWrite(r);
         return new VlogPointer(r.open().seg.segmentId, r.offset(), r.size());
+    }
+
+    /**
+     * Takes back a reservation whose write failed (ENOSPC, M2.3) while it is
+     * still the tail; left in flight, the next seal refused the segment as
+     * corrupt. One behind a later reservation cannot be taken back.
+     */
+    // ponytail: tail-only rollback; mark mid-segment debris if concurrent
+    // writers ever meet a full device.
+    private synchronized void abandon(Reservation r) {
+        Open o = r.open();
+        if (o.tail.compareAndSet(r.end(), r.offset())) {
+            o.records--;
+            o.liveBytes -= r.size();
+            o.liveRecords--;
+        }
     }
 
     /**
@@ -436,7 +464,13 @@ public final class Vlog {
         s.startPage = start;
         s.pages = pages;
 
-        writeHead(pager, start, pages, s);
+        try {
+            writeHead(pager, start, pages, s);
+        } catch (RuntimeException x) {
+            // ENOSPC (M2.3): owned by nothing, the extent would leak.
+            pager.abandonExtent(start, pages);
+            throw x;
+        }
         known.put(s.segmentId, s);
         return new Open(s);
     }
@@ -761,12 +795,31 @@ public final class Vlog {
      * undecrypted without also leaving it unauthenticated.
      */
     public VlogSegment.Record decodeAt(VlogSegment seg, byte[] buf, long offset, boolean keysOnly) {
+        if (seg.encrypted != 0 && cipher != null && readOnlyCiphers.isEmpty()) {
+            return VlogSegment.decodeEncryptedRecord(buf, 0, buf.length, seg.segmentId, offset, cipher);
+        }
         if (seg.encrypted != 0) {
-            if (cipher == null) {
+            List<FileCipher> rings = new ArrayList<>();
+            if (cipher != null) {
+                rings.add(cipher);
+            }
+            rings.addAll(readOnlyCiphers);
+            if (rings.isEmpty()) {
                 throw new org.dizitart.cryptand.CannotUnlockException(
                         "value-log segment " + seg.segmentId + " is encrypted and no key is available");
             }
-            return VlogSegment.decodeEncryptedRecord(buf, 0, buf.length, seg.segmentId, offset, cipher);
+            // Re-encrypted after a decrypt that a snapshot outlived: the
+            // segment may be sealed under a retained master. The tag decides,
+            // so trying each is safe.
+            org.dizitart.cryptand.TamperingException first = null;
+            for (FileCipher c : rings) {
+                try {
+                    return VlogSegment.decodeEncryptedRecord(buf, 0, buf.length, seg.segmentId, offset, c);
+                } catch (org.dizitart.cryptand.TamperingException x) {
+                    first = first == null ? x : first;
+                }
+            }
+            throw first;
         }
         if (cipher != null) {
             // ponytail: F-076, Dart writes head byte 0 on encrypted segments,
@@ -955,6 +1008,48 @@ public final class Vlog {
     }
 
     /** The tree-7 view of every segment the database knows about. */
+    /**
+     * Gives back every open segment that holds no record and that tree 7 never
+     * named (M2.3). Its extent is reserved in full at allocation, and on a
+     * full device the next publish, which extends the file to
+     * {@code page_count}, can then never succeed: the engine stayed wedged
+     * after space was freed. The next append opens a fresh one.
+     */
+    public synchronized void abandonEmptyOpen() {
+        List<Open> empty = new ArrayList<>();
+        for (Open o : hot.values()) {
+            if (o.tail.get() == o.seg.dataOffset && statsTree.get(VlogStats.key(o.seg.segmentId)) == null) {
+                empty.add(o);
+            }
+        }
+        if (cold != null && cold.tail.get() == cold.seg.dataOffset
+                && statsTree.get(VlogStats.key(cold.seg.segmentId)) == null) {
+            empty.add(cold);
+        }
+        empty.sort((a, b) -> Long.compare(b.seg.startPage, a.seg.startPage)); // the tail unwinds
+        for (Open o : empty) {
+            hot.values().remove(o);
+            if (cold == o) {
+                cold = null;
+            }
+            known.remove(o.seg.segmentId);
+            pager.abandonExtent(o.seg.startPage, o.seg.pages);
+        }
+    }
+
+    /**
+     * Open segments: owned since allocation, though tree 7 names them only from
+     * the next publish (and on a full device that publish may keep failing).
+     */
+    public synchronized List<VlogSegment> openSegments() {
+        List<VlogSegment> out = new ArrayList<>();
+        hot.values().forEach(o -> out.add(o.seg));
+        if (cold != null) {
+            out.add(cold.seg);
+        }
+        return out;
+    }
+
     public synchronized List<VlogStats> allStats() {
         List<VlogStats> out = new ArrayList<>();
         for (Map.Entry<byte[], byte[]> e : statsTree.map().entrySet()) {

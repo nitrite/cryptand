@@ -318,7 +318,7 @@ pub struct Engine {
 
     pub visible_seq: u64,
     pub next_seq: u64,
-    live_snapshots: Vec<Snapshot>,
+    pub(crate) live_snapshots: Vec<Snapshot>,
     written_at: HashMap<Vec<u8>, u64>,
     /// Transactions that have begun and not yet committed or rolled back.
     ///
@@ -336,6 +336,11 @@ pub struct Engine {
     pub durability_achieved: Durability,
     pub counters: Counters,
     pub keys: Option<KeyRing>,
+    /// The rings decrypts dropped, kept while a snapshot may still read a
+    /// retired encrypted value-log segment. Never used to write.
+    // ponytail: held until the engine is dropped; release it once no retired
+    // segment remains if key lifetime after decrypt matters.
+    pub(crate) read_only_keys: Vec<KeyRing>,
     /// `(min seq, min commit_id)` over tree 8, cached; see
     /// [`Engine::refresh_checkpoint_floors`].
     checkpoint_floor: (Option<u64>, Option<u64>),
@@ -487,6 +492,7 @@ impl Engine {
             durability_achieved: Durability::None,
             counters: Counters::default(),
             keys: None,
+            read_only_keys: Vec::new(),
             checkpoint_floor: (None, None),
             persisted_free: (0, Vec::new()),
             changefeed_trees: HashSet::new(),
@@ -695,6 +701,7 @@ impl Engine {
             durability_achieved: Durability::from_code(sb.durability_achieved),
             counters: Counters::default(),
             keys,
+            read_only_keys: Vec::new(),
             checkpoint_floor: (None, None),
             persisted_free: (0, Vec::new()),
             changefeed_trees: HashSet::new(),
@@ -1245,22 +1252,30 @@ impl Engine {
     }
 
     fn append_into(&mut self, tier: Tier, heat: Heat, tree: u32, cke_key: &[u8], value: &[u8]) -> Result<VlogPointer> {
-        let seg0 = self.current_vlog(tier, heat)?;
-        let record = if self.vlog_encrypted(seg0)? {
-            let counter = self.allocate_nonce()?;
-            let seg = self.current_vlog(tier, heat)?;
-            let offset = *self.vlog_tail.get(&seg).unwrap();
-            let ring = self.keys.as_ref().unwrap();
-            let ct = ring.encrypt_vlog(seg, DATA_OFFSET as u64 + offset, tree, counter, cke_key, value)?;
-            vlog::encode_record_encrypted(tree, counter, &ct)
-        } else {
-            encode_record(tree, cke_key, value)
-        };
+        // The segment is settled before the record is sealed: an encrypted
+        // record's tag binds (segment, offset), and sealing first then rolling
+        // over wrote it into the next segment under the old binding -- every
+        // record that crossed a segment boundary was unreadable (M2.3, mobile's
+        // 4 MiB segments). A record's length does not depend on where it lands.
         let mut seg = self.current_vlog(tier, heat)?;
-        if self.vlog_stats[&seg].bytes + record.len() as u64 > self.vlog_stats[&seg].pages as u64 * self.pager.page_size as u64 - DATA_OFFSET as u64 {
+        let record = loop {
+            let record = if self.vlog_encrypted(seg)? {
+                let counter = self.allocate_nonce()?;
+                let offset = *self.vlog_tail.get(&seg).unwrap();
+                let ring = self.keys.as_ref().unwrap();
+                let ct = ring.encrypt_vlog(seg, DATA_OFFSET as u64 + offset, tree, counter, cke_key, value)?;
+                vlog::encode_record_encrypted(tree, counter, &ct)
+            } else {
+                encode_record(tree, cke_key, value)
+            };
+            let s = &self.vlog_stats[&seg];
+            let room = s.pages as u64 * self.pager.page_size as u64 - DATA_OFFSET as u64;
+            if s.bytes + record.len() as u64 <= room || s.bytes == 0 {
+                break record;
+            }
             self.seal_vlog(seg)?;
             seg = self.open_vlog_segment(tier, heat)?;
-        }
+        };
         let stats = self.vlog_stats.get(&seg).unwrap();
         let start_page = stats.start_page;
         let offset = *self.vlog_tail.get(&seg).unwrap();
@@ -1365,15 +1380,19 @@ impl Engine {
         let encrypted = self.vlog_encrypted(p.segment_id)?;
         let rec = vlog::decode_record(&raw, encrypted)?;
         if encrypted {
-            let ring = self.keys.as_ref().unwrap();
-            let (_k, v) = ring.decrypt_vlog(
-                p.segment_id,
-                p.offset as u64,
-                rec.tree_id,
-                rec.nonce.unwrap_or(0),
-                &raw,
-            )?;
-            Ok(v)
+            let open = |ring: &KeyRing| {
+                ring.decrypt_vlog(p.segment_id, p.offset as u64, rec.tree_id, rec.nonce.unwrap_or(0), &raw)
+            };
+            // Re-encrypted after a decrypt that a snapshot outlived: the
+            // segment may be sealed under a retained ring. The tag decides,
+            // so trying each is safe.
+            let mut rings = self.keys.iter().chain(self.read_only_keys.iter());
+            let Some(first) = rings.next() else { return Err(Error::CannotUnlock) };
+            let r = rings.fold(open(first), |r, k| match r {
+                Err(Error::Tamper(_)) => open(k),
+                r => r,
+            });
+            Ok(r?.1)
         } else {
             Ok(rec.value)
         }
@@ -2676,48 +2695,87 @@ impl Engine {
         let extent = b.build()?;
         let pages = (extent.len() / self.pager.page_size) as u32;
         let start = self.pager.alloc_extent(pages)?;
-        self.pager.write_extent(start, &extent)?;
+        if let Err(e) = self.pager.write_extent(start, &extent) {
+            self.pager.free_extent(start, pages, 0); // ENOSPC (M2.3): owned by nothing
+            return Err(e);
+        }
         self.counters.write_amp_key_index += extent.len() as u64;
         job.outputs.push((extent, start));
         Ok(())
+    }
+
+    /// Gives back a failed job's outputs: never published, so no reader holds
+    /// them, and dropped with the job they leaked (M2.3).
+    fn abandon_compaction(&mut self, job: CompactionJob) {
+        for (extent, start) in &job.outputs {
+            self.pager.free_extent(*start, (extent.len() / self.pager.page_size) as u32, 0);
+        }
     }
 
     /// `10-transactions.md` §5 — publishing the manifest edit is the only
     /// place concurrent compactions serialize, and it is microseconds.
     pub fn finish_compaction(&mut self, mut job: CompactionJob) -> Result<()> {
         self.arm()?;
-        self.rotate_output(&mut job)?;
+        if let Err(e) = self.rotate_output(&mut job) {
+            self.abandon_compaction(job);
+            return Err(e);
+        }
         let mut m = std::mem::replace(&mut self.manifest, Manifest::new(0));
         m.tree.commit_id = self.sb.commit_id;
+        // M2.3: an edit below can fail (ENOSPC writing a tree page) with the
+        // inputs already removed; the manifest then named neither inputs nor
+        // outputs and the next commit published the loss. Copy-on-write leaves
+        // the old root intact, so a failure restores it.
+        let (root, freed) = (m.tree.root, m.tree.freed.len());
+        self.pager.alloc_log = Some(Vec::new());
         let mut err = None;
         // Inputs are removed **before** outputs are added: a compaction whose
         // output shares a `min_internal_key` with one of its own inputs — which
         // is the normal case for a last-level merge — would otherwise collide
         // with itself in the manifest key space.
         for r in &job.inputs {
-            // Not `?`: that returned with the empty placeholder in place of the
-            // manifest.
             if let Err(e) = m.remove(&mut self.pager, r) {
-                self.manifest = m;
-                return Err(e);
+                err = Some(e);
+                break;
             }
         }
-        for (extent, start) in std::mem::take(&mut job.outputs) {
-            match Segment::open(extent, self.pager.page_size) {
-                Ok(seg) => {
-                    let r = SegmentRef::of(&seg, job.target_level, job.target_group, start);
-                    self.admit(r.segment_id, Arc::new(seg));
-                    if let Err(e) = m.add(&mut self.pager, &r) {
+        let outputs = std::mem::take(&mut job.outputs);
+        if err.is_none() {
+            for (extent, start) in &outputs {
+                match Segment::open(extent.clone(), self.pager.page_size) {
+                    Ok(seg) => {
+                        let r = SegmentRef::of(&seg, job.target_level, job.target_group, *start);
+                        self.admit(r.segment_id, Arc::new(seg));
+                        if let Err(e) = m.add(&mut self.pager, &r) {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
                         err = Some(e);
+                        break;
                     }
                 }
-                Err(e) => err = Some(e),
             }
         }
-        self.manifest = m;
+        let taken = self.pager.alloc_log.take().unwrap_or_default();
         if let Some(e) = err {
+            // Path copies the failed edits wrote: never published.
+            for (start, pages) in taken {
+                self.pager.free_extent(start, pages, 0);
+            }
+            let mut back = Manifest::new(root);
+            back.tree.commit_id = m.tree.commit_id;
+            m.tree.freed.truncate(freed);
+            back.tree.freed = std::mem::take(&mut m.tree.freed);
+            self.manifest = back;
+            // Never published, so no reader holds them.
+            for (extent, start) in &outputs {
+                self.pager.free_extent(*start, (extent.len() / self.pager.page_size) as u32, 0);
+            }
             return Err(e);
         }
+        self.manifest = m;
         // Input segments removed from the manifest are added to the free tree
         // at the publishing commit_id (`01-container.md` §6).
         for r in &job.inputs {
@@ -2792,7 +2850,16 @@ impl Engine {
                 break;
             }
             let Some(mut job) = self.begin_compaction(all, last)? else { break };
-            while self.step_compaction(&mut job, Some(u64::MAX))? {}
+            loop {
+                match self.step_compaction(&mut job, Some(u64::MAX)) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => {
+                        self.abandon_compaction(job);
+                        return Err(e);
+                    }
+                }
+            }
             self.finish_compaction(job)?;
             compacted = true;
         }

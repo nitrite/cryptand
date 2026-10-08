@@ -5,6 +5,7 @@ import org.dizitart.cryptand.container.Superblock;
 import org.dizitart.cryptand.container.TreeId;
 import org.dizitart.cryptand.key.Cke;
 import org.dizitart.cryptand.lsm.Engine;
+import org.dizitart.cryptand.Snapshot;
 import org.dizitart.cryptand.ops.Verify;
 import org.dizitart.cryptand.value.Value;
 
@@ -196,6 +197,57 @@ class ConvertTest {
     }
 
     /**
+     * Conversion runs under a live snapshot, as in Rust: the snapshot keeps
+     * reading the versions it pinned through encrypt and decrypt.
+     */
+    @Test
+    void convertsUnderLiveSnapshot(@TempDir Path dir) {
+        Engine e = Engine.create(dir.resolve("snap.cryptand"), opts(null));
+        try {
+            fill(e);
+            Snapshot snap = e.pin();
+            for (int i = 0; i < N; i += 2) {
+                e.batch().put(T, key(i), value(i + N)).commit();
+            }
+            e.commitNow(true);
+            e.encrypt(null, k(1));
+            while (e.convertStep()) {
+                // until nothing plaintext remains
+            }
+            assertTrue(e.fullyEncrypted());
+            for (int i = 0; i < N; i++) {
+                assertArrayEquals(value(i), e.get(T, key(i), snap.seq(), 0), "encrypted, snapshot: key " + i);
+            }
+            e.decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
+            while (e.convertStep()) {
+                // until nothing encrypted remains
+            }
+            for (int i = 0; i < N; i++) {
+                assertArrayEquals(value(i), e.get(T, key(i), snap.seq(), 0), "decrypted, snapshot: key " + i);
+                assertArrayEquals(value(i % 2 == 0 ? i + N : i), e.get(T, key(i)), "decrypted: key " + i);
+            }
+            // Torture seeds 3505, 1094: encrypted again under a fresh master, and
+            // decrypted again; the snapshot's segments are sealed under older ones.
+            for (int round = 0; round < 2; round++) {
+                e.encrypt(null, k(1));
+                while (e.convertStep()) {
+                    // until nothing plaintext remains
+                }
+                e.decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
+                while (e.convertStep()) {
+                    // until nothing encrypted remains
+                }
+                for (int i = 0; i < N; i++) {
+                    assertArrayEquals(value(i), e.get(T, key(i), snap.seq(), 0), "round " + round + ", snapshot: key " + i);
+                }
+            }
+            e.unpin(snap);
+        } finally {
+            e.close();
+        }
+    }
+
+    /**
      * F-081: values whose pointers are still in the memtable (no flush before
      * encrypt()) survive the conversion, later writes, a rotation and a decrypt.
      */
@@ -226,6 +278,38 @@ class ConvertTest {
                 // until nothing encrypted remains
             }
             check(e, 200, "decrypted");
+        } finally {
+            e.close();
+        }
+    }
+
+    /**
+     * F-085, M2.2 torture seed 101100: a value written under encryption, then
+     * range-deleted, so decrypt() leaves its segment retired; a backup resolved
+     * the shadowed value and found no key.
+     */
+    @Test
+    void rangeDeletedValueIsNotResolvedByBackup(@TempDir Path dir) {
+        Engine.Options o = opts(null);
+        o.durability = Superblock.Durability.NONE; // as the op-log harness runs
+        o.backgroundCompaction = false;
+        byte[] big = new byte[7315];
+        Arrays.fill(big, (byte) 7);
+        Engine e = Engine.create(dir.resolve("rd.cryptand"), o);
+        try {
+            e.encrypt(null, k(1));
+            while (e.convertStep()) {
+                // until nothing plaintext remains
+            }
+            e.batch().put(T, key(1), big).commit();
+            e.batch().removeRange(T, key(0), key(5)).commit();
+            e.decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
+            while (e.convertStep()) {
+                // until nothing encrypted remains
+            }
+            org.dizitart.cryptand.ops.Backup.full(e, dir.resolve("rd.bak"),
+                    org.dizitart.cryptand.ops.Backup.Mode.PLAINTEXT, false);
+            assertEquals(null, e.get(T, key(1)));
         } finally {
             e.close();
         }

@@ -56,6 +56,9 @@ impl PageCrypto {
 }
 
 pub struct Pager {
+    /// While set, every extent `alloc_extent` hands out, so an edit that
+    /// fails part-way can give back what it took (M2.3).
+    pub alloc_log: Option<Vec<(u64, u32)>>,
     file: Option<File>,
     pub path: Option<PathBuf>,
     /// The in-memory mode the tests and the vector generator use. A `Pager`
@@ -159,6 +162,7 @@ impl Pager {
 
     fn new_common(page_size: usize) -> Pager {
         Pager {
+            alloc_log: None,
             file: None,
             path: None,
             memory: Vec::new(),
@@ -235,6 +239,14 @@ impl Pager {
     /// reallocated once `N <= min_retained_commit`. Allocation order is
     /// best-fit among those, then extend the file at `page_count`.
     pub fn alloc_extent(&mut self, pages: u32) -> Result<u64> {
+        let start = self.alloc_extent_unlogged(pages)?;
+        if let Some(log) = self.alloc_log.as_mut() {
+            log.push((start, pages));
+        }
+        Ok(start)
+    }
+
+    fn alloc_extent_unlogged(&mut self, pages: u32) -> Result<u64> {
         if pages == 0 {
             return invalid("an extent of zero pages");
         }

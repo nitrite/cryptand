@@ -320,7 +320,11 @@ impl ConvertApi for Engine {
             self.sb.features_optional &= !feature::bit(feature::CIPHER);
             // Key dropped first: with `cipher = 0`, `sb_mac` is written as
             // zero (14 §6.2), and Dart refuses a plaintext superblock with one.
-            self.keys = None;
+            let ring = self.keys.take();
+            if !self.live_snapshots.is_empty() {
+                // A snapshot may still read a retired encrypted segment.
+                self.read_only_keys.extend(ring);
+            }
             self.sb.sb_mac = [0; 32];
             self.pager.crypto = None;
             self.pager.write_clear = false;

@@ -212,7 +212,21 @@ public final class Backup {
                             (a, b) -> Ikey.seqOf(a.key()) >= Ikey.seqOf(b.key()) ? a : b);
                 }
             }
-            cells.addAll(newest.values());
+            // A put a newer range delete covers is dead: its value-log record
+            // may sit in a retired segment (torture seeds 101042, 101100), so
+            // it is dropped, never resolved.
+            List<RangeDelete> ranges = new java.util.ArrayList<>();
+            for (BtreePage.Leaf rd : cells) {
+                ranges.add(RangeDelete.fromCell(rd));
+            }
+            for (BtreePage.Leaf cell : newest.values()) {
+                long seq = Ikey.seqOf(cell.key());
+                int tree = Ikey.treeIdOf(cell.key());
+                byte[] cke = Ikey.ckeOf(cell.key());
+                if (ranges.stream().noneMatch(rd -> rd.seq() > seq && rd.covers(tree, cke))) {
+                    cells.add(cell);
+                }
+            }
             cells.sort(java.util.Comparator.comparingLong(c -> Ikey.seqOf(c.key())));
             Engine.Batch batch = dest.batch();
             int staged = 0;
