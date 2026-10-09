@@ -17,6 +17,7 @@ import 'cke.dart';
 import 'container.dart';
 import 'cow.dart';
 import 'cve.dart';
+import 'errors.dart';
 import 'segment.dart';
 import 'value.dart';
 
@@ -150,7 +151,19 @@ final class SegmentRef {
         'trees': CArray([for (final t in trees) CInt.of(NumType.u32, t)]),
       }));
 
+  /// 14 §9.1 (F-110): a manifest entry of the wrong shape is corruption,
+  /// not a `TypeError`.
   static SegmentRef decode(Uint8List key, Uint8List value) {
+    try {
+      return _decode(key, value);
+    } on TypeError catch (e) {
+      throw CorruptionException('manifest entry has the wrong shape: $e');
+    } on RangeError catch (e) {
+      throw CorruptionException('manifest entry has the wrong shape: $e');
+    }
+  }
+
+  static SegmentRef _decode(Uint8List key, Uint8List value) {
     final k = decodeKey(key) as CArray;
     final d = decodeValue(value) as CDoc;
     int u(String f) => ((d[f]! as CInt).magnitude).lo;

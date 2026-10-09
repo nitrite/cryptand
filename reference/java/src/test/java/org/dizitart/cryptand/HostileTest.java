@@ -80,6 +80,13 @@ class HostileTest {
         }
     }
 
+    /** F-106 (M3 Jazzer superblockKeyslot): a short keyslot is a typed error, not an index error. */
+    @Test
+    void aShortKeyslotIsATypedError() {
+        org.junit.jupiter.api.Assertions.assertThrows(CryptandException.class,
+                () -> org.dizitart.cryptand.crypto.Keyslot.decode(new byte[150], 100));
+    }
+
     /** PLAN M3.5: every minimized fuzz file (page CRCs repaired) is a typed refusal or a clean read. */
     @Test
     void everyFuzzRegressFileIsRefusedOrRead(@org.junit.jupiter.api.io.TempDir Path tmp) throws IOException {

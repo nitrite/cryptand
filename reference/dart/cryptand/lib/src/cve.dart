@@ -806,7 +806,7 @@ CValue readValue(ByteReader r, {NameDict? dict, int depth = 0}) {
       final end = r.position + len;
       final inner = ByteReader(r.data, r.position, end);
       final count = inner.uvar();
-      if (count > len) {
+      if (count < 0 || count > len) {
         throw CorruptionException('ARRAY count $count exceeds its $len bytes');
       }
       final items = <CValue>[];
@@ -820,7 +820,7 @@ CValue readValue(ByteReader r, {NameDict? dict, int depth = 0}) {
       final end = r.position + len;
       final inner = ByteReader(r.data, r.position, end);
       final count = inner.uvar();
-      if (count > len) {
+      if (count < 0 || count > len) {
         throw CorruptionException('MAP count $count exceeds its $len bytes');
       }
       final entries = <(CValue, CValue)>[];

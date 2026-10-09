@@ -440,7 +440,7 @@ public final class Cve {
                 ByteReader body = new ByteReader(r.bytesView(), r.position(), byteLen);
                 r.skip(byteLen);
                 long count = body.uvar();
-                if (count > byteLen) {
+                if (count < 0 || count > byteLen) {
                     throw new LimitException("ARRAY declares " + count + " items in " + byteLen + " byte(s)");
                 }
                 List<Value> items = new ArrayList<>((int) count);
@@ -454,7 +454,7 @@ public final class Cve {
                 ByteReader body = new ByteReader(r.bytesView(), r.position(), byteLen);
                 r.skip(byteLen);
                 long count = body.uvar();
-                if (count > byteLen) {
+                if (count < 0 || count > byteLen) {
                     throw new LimitException("MAP declares " + count + " entries in " + byteLen + " byte(s)");
                 }
                 List<Value.Map.Entry> entries = new ArrayList<>((int) count);

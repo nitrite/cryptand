@@ -164,4 +164,12 @@ void main() {
     k[k.length - 1] = NumType.i8.cke;
     expect(() => decodeKey(k), throwsA(isA<CorruptionException>()));
   });
+
+  // F-110 (M3 Jazzer cveDecode): an ARRAY count above 2^63 read as negative
+  // and decoded as an empty array instead of corruption.
+  test('an array count above 2^63 is refused', () {
+    final b = Uint8List.fromList([0x20, 0x0c, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0x01, 0xff, 0xff, 0xfd, 0xff, 0x32, 0xff, 0xff]);
+    expect(() => decodeValue(b), throwsA(isA<CryptandException>()));
+  });
 }

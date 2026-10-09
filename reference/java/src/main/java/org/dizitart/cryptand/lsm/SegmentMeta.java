@@ -211,7 +211,16 @@ public final class SegmentMeta {
         return Value.Doc.of(f);
     }
 
+    /** 14 §9.1 (F-110): a manifest entry of the wrong shape is corruption, not a {@code ClassCastException}. */
     public static SegmentMeta fromManifest(byte[] key, Value value) {
+        try {
+            return decodeManifest(key, value);
+        } catch (ClassCastException | NullPointerException | IndexOutOfBoundsException e) {
+            throw new CorruptionException("manifest entry has the wrong shape: " + e);
+        }
+    }
+
+    private static SegmentMeta decodeManifest(byte[] key, Value value) {
         Value.Array k = (Value.Array) Cke.decode(key);
         SegmentMeta m = new SegmentMeta();
         m.level = (int) longOf(k.items().get(0));

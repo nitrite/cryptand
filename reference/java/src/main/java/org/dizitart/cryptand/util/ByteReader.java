@@ -29,7 +29,9 @@ public final class ByteReader {
     public ByteReader(byte[] buf, int offset, int length) {
         this.buf = buf;
         this.start = offset;
-        this.limit = offset + length;
+        // A window past the array (a short keyslot, F-106) ends at the array,
+        // so reading past it is a typed truncation error, not an index error.
+        this.limit = (int) Math.min((long) offset + length, buf.length);
         this.pos = offset;
     }
 

@@ -82,6 +82,11 @@ class JazzerTest {
         repairCrcs(b);
         Path f = TMP.resolve("fuzz.cryptand");
         Files.write(f, b);
+        // Saves the file as the reader sees it, for `conformance/files/fuzz-regress/`.
+        String dump = System.getenv("CRYPTAND_FUZZ_DUMP");
+        if (dump != null) {
+            Files.write(Path.of(dump), b);
+        }
         Engine.Options o = new Engine.Options();
         o.readOnly = true;
         o.rawKey = key;
