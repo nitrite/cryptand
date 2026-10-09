@@ -4237,6 +4237,12 @@ public final class Engine implements AutoCloseable {
         requireEncrypted();
         structure.lock();
         try {
+            // F-098: the census reads segments only; a blob still held by the
+            // memtable would be missed and the cipher dropped with it sealed.
+            long visible = Math.max(visibleSeq, completedThrough());
+            if (flushShards(visible)) {
+                makeVisible(visible);
+            }
             Census c = census();
             if (!c.plainSegments.isEmpty() || c.plainBlobs > 0) {
                 int last = lastLevel();

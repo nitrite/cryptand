@@ -316,6 +316,30 @@ class ConvertTest {
     }
 
     /**
+     * F-098, M2.2 torture seed 103375: a blob written under encryption and
+     * still held by the memtable when decrypt() runs; the census saw only
+     * segments, so the cipher was dropped with the blob still sealed.
+     */
+    @Test
+    void memtableHeldBlobSurvivesDecrypt(@TempDir Path dir) {
+        Engine.Options o = opts(new byte[32]);
+        o.durability = Superblock.Durability.NONE; // as the op-log harness runs
+        byte[] big = new byte[300_000];
+        Arrays.fill(big, (byte) 7);
+        Engine e = Engine.create(dir.resolve("blob.cryptand"), o);
+        try {
+            e.batch().put(T, key(1), big).commit();
+            e.decrypt(Engine.ConfirmDecrypt.REMOVE_ENCRYPTION);
+            while (e.convertStep()) {
+                // until nothing encrypted remains
+            }
+            assertArrayEquals(big, e.get(T, key(1)));
+        } finally {
+            e.close();
+        }
+    }
+
+    /**
      * M2.2 torture seed 106: a value written under encryption and still held
      * by the memtable when decrypt() runs; then a plaintext backup reads it.
      */
