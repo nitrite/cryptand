@@ -44,4 +44,6 @@ for f in manifest["files"]:
     if not f["key"]:
         ps = f["page_size"]
         for p in range(2, len(b) // ps):
-            put("segment", b[p * ps:(p + 1) * ps])
+            if b[p * ps + 4] == 5:  # SEGMENT_HEADER: the whole extent it heads
+                n = int.from_bytes(b[p * ps + 12:p * ps + 16], "little")
+                put("segment", b[p * ps:(p + n) * ps])
