@@ -196,6 +196,34 @@ class ConvertTest {
         }
     }
 
+    /** F-104: a free page's bytes may be anything; a garbage stored length must not size an allocation. */
+    @Test
+    void rotateSkipsAFreePageWithAHugeStoredLength(@TempDir Path dir) throws Exception {
+        Path f = dir.resolve("rotate-free.cryptand");
+        Engine e = Engine.create(f, opts(k(1)));
+        fill(e);
+        e.batch().removeRange(T, key(0), key(N)).commit();
+        e.compact();
+        e.commitNow(true);
+        assertFalse(e.pager().freeList().isEmpty(), "no free page to plant garbage in");
+        int ps = e.pager().pageSize();
+        byte[] junk = new byte[ps];
+        org.dizitart.cryptand.container.PageHeader h = new org.dizitart.cryptand.container.PageHeader();
+        h.flags = org.dizitart.cryptand.container.PageHeader.Flags.ENCRYPTED;
+        h.storedLen = 0x7FFF_FFF0;
+        h.writeInto(junk);
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f.toFile(), "rw")) {
+            for (org.dizitart.cryptand.container.Pager.FreeExtent x : e.pager().freeList()) {
+                for (long p = x.startPage(); p < x.startPage() + x.pages(); p++) {
+                    raf.seek(p * ps);
+                    raf.write(junk);
+                }
+            }
+        }
+        e = Engine.rotateMasterKey(e, null, k(3));
+        e.close();
+    }
+
     /**
      * Conversion runs under a live snapshot, as in Rust: the snapshot keeps
      * reading the versions it pinned through encrypt and decrypt.

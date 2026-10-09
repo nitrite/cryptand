@@ -4873,6 +4873,10 @@ public final class Engine implements AutoCloseable {
             return false;
         }
         int n = h.storedBytes();
+        if (n < 0 || n > buf.length - PageHeader.BYTES) {
+            // A free page's bytes may be anything (F-104): never allocate from them.
+            throw new CorruptionException("page " + p + " stored length " + n + " exceeds the page");
+        }
         byte[] pt = old.decryptPage(Arrays.copyOfRange(buf, PageHeader.BYTES, PageHeader.BYTES + n), h, p);
         byte[] ct = neu.encryptPage(pt, h, p);
         System.arraycopy(ct, 0, buf, PageHeader.BYTES, n);
