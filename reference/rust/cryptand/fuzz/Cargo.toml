@@ -1,0 +1,71 @@
+[package]
+name = "cryptand-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cryptand = { path = ".." }
+
+# Not a member of the parent workspace: it needs nightly and sanitizers.
+[workspace]
+
+[[bin]]
+name = "open_file"
+path = "fuzz_targets/open_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "open_encrypted"
+path = "fuzz_targets/open_encrypted.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cve_decode"
+path = "fuzz_targets/cve_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cke_roundtrip"
+path = "fuzz_targets/cke_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wkb"
+path = "fuzz_targets/wkb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "analyzer"
+path = "fuzz_targets/analyzer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "segment"
+path = "fuzz_targets/segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "superblock_keyslot"
+path = "fuzz_targets/superblock_keyslot.rs"
+test = false
+doc = false
+bench = false
