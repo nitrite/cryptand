@@ -80,6 +80,20 @@ class HostileTest {
         }
     }
 
+    /** F-112 (M3 fuzz open_file): a blob length the file cannot hold is a typed error before any allocation. */
+    @Test
+    void aBlobLongerThanTheFileIsATypedError() throws IOException {
+        Engine.Options o = new Engine.Options();
+        o.readOnly = true;
+        try (Database db = Database.open(corpusFile(), o)) {
+            org.dizitart.cryptand.container.Pager pager = db.engine().pager();
+            for (int len : new int[] {0x7FFF0000, 0xFFFF0000}) {
+                org.dizitart.cryptand.container.Blob b = new org.dizitart.cryptand.container.Blob(2, len, 0);
+                org.junit.jupiter.api.Assertions.assertThrows(CryptandException.class, () -> b.read(pager));
+            }
+        }
+    }
+
     /** F-106 (M3 Jazzer superblockKeyslot): a short keyslot is a typed error, not an index error. */
     @Test
     void aShortKeyslotIsATypedError() {

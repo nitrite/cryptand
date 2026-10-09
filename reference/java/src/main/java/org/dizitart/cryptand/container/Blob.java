@@ -123,6 +123,14 @@ public final class Blob {
     }
 
     public byte[] read(Pager pager) {
+        // F-112: `byteLen` is the file's word (a u32, negative here above
+        // 2^31); the bytes must exist before a buffer for them does (14 §9.1).
+        long len = Integer.toUnsignedLong(byteLen);
+        if (len > Integer.MAX_VALUE - 64 || startPage < 0
+                || pager.offsetOf(startPage) + len + PageHeader.BYTES > pager.file().size()) {
+            throw new CorruptionException("blob at page " + startPage + " of " + len
+                    + " bytes runs past the end of the file");
+        }
         if (encrypted(pager)) {
             if (!(pager.crypto() instanceof FileCipher)) {
                 throw new org.dizitart.cryptand.CannotUnlockException(

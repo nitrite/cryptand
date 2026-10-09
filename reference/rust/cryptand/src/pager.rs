@@ -429,18 +429,25 @@ impl Pager {
     // Raw I/O
     // ---------------------------------------------------------------------
 
+    /// 14 §9.1: a span the file names lies inside the file, checked before a
+    /// buffer for it exists (F-107, F-112).
+    pub fn ensure_within(&self, offset: u64, len: u64) -> Result<()> {
+        let size = match &self.file {
+            Some(f) => f.metadata()?.len(),
+            None => self.memory.len() as u64,
+        };
+        if offset.checked_add(len).is_none_or(|end| end > size) {
+            return corrupt(format!("read past the end of the file: {offset}+{len} > {size}"));
+        }
+        Ok(())
+    }
+
     pub fn read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
         // 14 §9.1: a length read from the file never sizes an allocation past
         // the file's end. ponytail: checked for reads over 1 MiB only, so the
         // per-page path pays no extra syscall.
         if len > 1 << 20 {
-            let size = match &self.file {
-                Some(f) => f.metadata()?.len(),
-                None => self.memory.len() as u64,
-            };
-            if offset.checked_add(len as u64).is_none_or(|end| end > size) {
-                return corrupt(format!("read past the end of the file: {offset}+{len} > {size}"));
-            }
+            self.ensure_within(offset, len as u64)?;
         }
         let mut buf = vec![0u8; len];
         match &mut self.file {
@@ -818,6 +825,8 @@ impl Pager {
             return Err(crate::error::Error::CannotUnlock);
         }
         let cps = self.chunk_bytes(true) as u64;
+        // Each `cps` plaintext bytes occupy a page, so the span is bounded by pages.
+        self.ensure_within(base, (plain_off + len as u64).div_ceil(cps) * self.page_size as u64)?;
         let mut out = Vec::with_capacity(len);
         let mut off = plain_off;
         while out.len() < len {

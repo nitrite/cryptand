@@ -426,3 +426,16 @@ fn make_f111_segment_cycle() {
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/files/fuzz-regress/f111-segment-cycle.cryptand");
     std::fs::write(out, &b).unwrap();
 }
+
+/// F-112 (M3 fuzz `open_file`): a BLOB pointer's length is checked against
+/// the file before the buffer exists (4 GiB here aborted the fuzzer).
+#[test]
+fn a_blob_longer_than_the_file_is_refused_before_allocating() {
+    let mut e = Engine::open_read_only(&corpus(), None).unwrap();
+    let mut ptr = [0u8; 16];
+    ptr[0..8].copy_from_slice(&2u64.to_le_bytes());
+    ptr[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(e.read_blob(&ptr).is_err());
+    ptr[0..8].copy_from_slice(&(u64::MAX / 2).to_le_bytes());
+    assert!(e.read_blob(&ptr).is_err());
+}

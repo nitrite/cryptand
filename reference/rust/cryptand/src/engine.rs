@@ -1990,6 +1990,12 @@ impl Engine {
         let ps = self.pager.page_size;
         let encrypted = self.blob_encrypted(start);
         let chunk = if encrypted { ps - 24 } else { ps };
+        // F-112: `len` is the file's word; its pages must exist before the buffer does.
+        let pages = (len as u64 + crate::container::PAGE_HEADER_BYTES as u64).div_ceil(chunk as u64);
+        match start.checked_mul(ps as u64) {
+            Some(at) => self.pager.ensure_within(at, pages * ps as u64)?,
+            None => return corrupt(format!("blob at page {start} is past any file")),
+        }
         let mut out = Vec::with_capacity(len);
         let mut i = 0u64;
         while out.len() < len {
