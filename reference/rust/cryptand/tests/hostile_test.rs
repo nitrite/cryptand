@@ -338,3 +338,39 @@ fn a_document_declaring_huge_field_count_is_refused_without_allocating() {
 fn a_short_keyslot_is_refused_not_a_panic() {
     assert!(cryptand::security::Keyslot::parse(&[]).is_err());
 }
+
+/// F-108 (M3 fuzz `cve_decode`): a reserved tag's length near 2^64 wrapped
+/// the bounds check and panicked on the slice.
+#[test]
+fn a_length_that_wraps_usize_is_refused_not_a_panic() {
+    let crash = [
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x02, 0x01, 0x80, 0x00, 0x00,
+    ];
+    assert!(cryptand::cve::decode_all(&crash, &|_| None).is_err());
+}
+
+/// PLAN M3.5: every minimized fuzz file (page CRCs already repaired, as an
+/// attacker would) opens to a typed error or a clean read — never a panic or
+/// an allocation past the file (F-107: a segment ref asked for 66 GB).
+#[test]
+fn every_fuzz_regress_file_is_refused_or_read() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/files/fuzz-regress");
+    let mut n = 0;
+    for f in std::fs::read_dir(dir).unwrap() {
+        let p = f.unwrap().path();
+        let tmp = std::env::temp_dir().join(format!("cryptand-regress-{}.cryptand", std::process::id()));
+        std::fs::copy(&p, &tmp).unwrap();
+        let _ = exercise(&tmp);
+        n += 1;
+    }
+    assert!(n > 0, "the fuzz-regress corpus is empty");
+}
+
+/// F-107: an extent length from the file is checked against the file before
+/// the buffer exists (16 TB here; without the check the allocation aborts).
+#[test]
+fn an_extent_past_the_end_of_the_file_is_refused_before_allocating() {
+    let mut e = Engine::open_read_only(&corpus(), None).unwrap();
+    assert!(e.pager.read_extent(2, u32::MAX).is_err());
+    assert!(e.pager.read_extent(u64::MAX / 2, 1).is_err());
+}

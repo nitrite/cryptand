@@ -287,7 +287,7 @@ pub fn decode_all(b: &[u8], dict: &dyn Fn(u32) -> Option<String>) -> Result<Valu
 }
 
 fn need(b: &[u8], at: usize, n: usize) -> Result<()> {
-    if b.len() < at + n {
+    if at.checked_add(n).is_none_or(|end| b.len() < end) {
         return corrupt("value truncated");
     }
     Ok(())

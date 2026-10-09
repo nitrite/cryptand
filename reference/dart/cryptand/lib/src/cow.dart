@@ -281,7 +281,17 @@ final class PageStore {
     }
   }
 
+  /// 14 §9.1 (F-107): an extent named by the file never sizes an allocation
+  /// past the page space.
+  void _checkExtent(int startPage, int pages) {
+    if (startPage < 0 || pages < 0 || startPage + pages > _pageCount) {
+      throw CorruptionException(
+          'extent $startPage+$pages is past the $_pageCount-page file');
+    }
+  }
+
   Uint8List readExtentClear(int startPage, int pages) {
+    _checkExtent(startPage, pages);
     final out = Uint8List(pages * pageSize);
     for (var i = 0; i < pages; i++) {
       out.setRange(i * pageSize, (i + 1) * pageSize, readClear(startPage + i));
@@ -290,6 +300,7 @@ final class PageStore {
   }
 
   Uint8List readExtent(int startPage, int pages) {
+    _checkExtent(startPage, pages);
     final out = Uint8List(pages * pageSize);
     for (var i = 0; i < pages; i++) {
       out.setRange(i * pageSize, (i + 1) * pageSize, read(startPage + i));

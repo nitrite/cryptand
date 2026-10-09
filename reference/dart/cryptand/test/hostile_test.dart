@@ -140,4 +140,20 @@ void main() {
     expect(refused, greaterThan(0),
         reason: 'no mutation was refused — the sweep reaches no decoder');
   }, timeout: const Timeout(Duration(minutes: 10)));
+
+  // PLAN M3.5: every minimized fuzz file (page CRCs already repaired) is a
+  // typed refusal or a clean read in Dart too. F-107: a segment ref asked for
+  // a 66 GB extent.
+  test('every fuzz-regress file is refused or read', () {
+    final dir = Directory('${Directory.current.path}/../../conformance/files/fuzz-regress');
+    final files = dir.listSync().whereType<File>().toList();
+    expect(files, isNotEmpty);
+    for (final f in files) {
+      try {
+        exercise(f.path);
+      } on CryptandException {
+        // A named, typed refusal.
+      }
+    }
+  });
 }

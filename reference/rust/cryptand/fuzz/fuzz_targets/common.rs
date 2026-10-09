@@ -28,6 +28,10 @@ pub fn repair_crcs(b: &mut [u8]) {
 pub fn exercise(data: &[u8], key: Option<&[u8]>) {
     let mut b = data.to_vec();
     repair_crcs(&mut b);
+    // Saves the file as the reader sees it, for `conformance/files/fuzz-regress/`.
+    if let Ok(dump) = std::env::var("CRYPTAND_FUZZ_DUMP") {
+        std::fs::write(dump, &b).unwrap();
+    }
     let path = std::env::temp_dir().join(format!("cryptand-fuzz-{}.cryptand", std::process::id()));
     std::fs::write(&path, &b).unwrap();
     let Ok(mut e) = Engine::open_read_only(&path, key) else { return };

@@ -80,6 +80,25 @@ class HostileTest {
         }
     }
 
+    /** PLAN M3.5: every minimized fuzz file (page CRCs repaired) is a typed refusal or a clean read. */
+    @Test
+    void everyFuzzRegressFileIsRefusedOrRead(@org.junit.jupiter.api.io.TempDir Path tmp) throws IOException {
+        Path dir = corpusFile().getParent().resolve("fuzz-regress");
+        int n = 0;
+        try (java.util.stream.Stream<Path> files = Files.list(dir)) {
+            for (Path f : (Iterable<Path>) files::iterator) {
+                Path copy = Files.copy(f, tmp.resolve(f.getFileName()));
+                try {
+                    exercise(copy);
+                } catch (CryptandException typed) {
+                    // a named, typed refusal
+                }
+                n++;
+            }
+        }
+        assertTrue(n > 0, "the fuzz-regress corpus is empty");
+    }
+
     @Test
     @DisplayName("every u32 field at every boundary yields a typed error and never a crash")
     void fieldBoundarySweep() throws IOException {

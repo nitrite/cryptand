@@ -430,6 +430,18 @@ impl Pager {
     // ---------------------------------------------------------------------
 
     pub fn read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        // 14 §9.1: a length read from the file never sizes an allocation past
+        // the file's end. ponytail: checked for reads over 1 MiB only, so the
+        // per-page path pays no extra syscall.
+        if len > 1 << 20 {
+            let size = match &self.file {
+                Some(f) => f.metadata()?.len(),
+                None => self.memory.len() as u64,
+            };
+            if offset.checked_add(len as u64).is_none_or(|end| end > size) {
+                return corrupt(format!("read past the end of the file: {offset}+{len} > {size}"));
+            }
+        }
         let mut buf = vec![0u8; len];
         match &mut self.file {
             Some(f) => {
@@ -703,10 +715,17 @@ impl Pager {
     }
 
     /// A whole extent, head page included.
+    /// A page number read from the file, as a byte offset that cannot wrap.
+    fn page_offset(&self, page: u64) -> Result<u64> {
+        match page.checked_mul(self.page_size as u64) {
+            Some(o) => Ok(o),
+            None => corrupt(format!("page {page} is past any file")),
+        }
+    }
+
     pub fn read_extent(&mut self, start_page: u64, pages: u32) -> Result<Vec<u8>> {
         self.page_reads += pages as u64;
-        let raw =
-            self.read_at(start_page * self.page_size as u64, pages as usize * self.page_size)?;
+        let raw = self.read_at(self.page_offset(start_page)?, pages as usize * self.page_size)?;
         if self.crypto.is_none() {
             return Ok(raw);
         }
@@ -722,7 +741,7 @@ impl Pager {
     /// The extent as stored, for the paths that must work without a key.
     pub fn read_extent_clear(&mut self, start_page: u64, pages: u32) -> Result<Vec<u8>> {
         self.page_reads += pages as u64;
-        self.read_at(start_page * self.page_size as u64, pages as usize * self.page_size)
+        self.read_at(self.page_offset(start_page)?, pages as usize * self.page_size)
     }
 
     pub fn write_extent(&mut self, start_page: u64, bytes: &[u8]) -> Result<()> {
