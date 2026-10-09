@@ -234,6 +234,59 @@ class GcRaceTest {
     }
 
     /**
+     * F-102, M2.2 torture seed 104844: collection judged a record dead on an
+     * overwrite still in flight, so never in the flush, and retired its
+     * segment durably; the kill lost the overwrite and the key's durable
+     * pointer named a segment tree 7 no longer had.
+     */
+    @Test
+    void collectionKeepsARecordShadowedOnlyByAnUnflushedWrite(@TempDir Path dir) throws Exception {
+        Engine.Options o = new Engine.Options();
+        o.durability = Superblock.Durability.NONE;
+        o.vlogMin = 64;
+        o.memtableEntries = 100_000;
+        o.backgroundCompaction = false;
+        Engine e = Engine.create(dir.resolve("db.cff"), o);
+        e.batch().put(1, key(1, 1), new byte[1000]).commit();
+        for (int k = 0; k < 300; k++) { // seals key(1, 1)'s 256 KiB segment
+            e.batch().put(1, key(2, k), new byte[1000]).commit();
+        }
+        for (int k = 0; k < 300; k++) { // and leaves it nearly dead: a GC candidate
+            e.batch().remove(1, key(2, k)).commit();
+        }
+        e.commitNow(true);
+        e.clusterIfNeeded(); // recounts liveness, so collection picks the segment
+        Thread[] gc = new Thread[1];
+        Engine first = e;
+        Engine.afterEntriesHook = () -> {
+            Engine.afterEntriesHook = null;
+            gc[0] = new Thread(first::collect);
+            gc[0].start();
+            try {
+                gc[0].join();
+            } catch (InterruptedException x) {
+                throw new AssertionError(x);
+            }
+        };
+        try {
+            e.batch().put(1, key(1, 1), new byte[10]).commit(); // the overwrite, never flushed
+        } finally {
+            Engine.afterEntriesHook = null;
+        }
+        e.commitNow(false); // a background commit: the retirement is durable, the under-budget shard is not
+        e.abandon();
+        e = Engine.open(dir.resolve("db.cff"), o);
+        try {
+            byte[] got = e.get(1, key(1, 1));
+            assertTrue(got != null && (got.length == 1000 || got.length == 10), "key(1, 1) is one of its versions");
+            org.dizitart.cryptand.ops.Verify.Report r = org.dizitart.cryptand.ops.Verify.run(e);
+            assertTrue(r.clean(), r.toString());
+        } finally {
+            e.close();
+        }
+    }
+
+    /**
      * F-037: a reader whose seq predates a GC rewrite still resolves the old
      * pointer after the segment is retired. Deterministic stand-in for a
      * snapshot pinned while GC runs: a cursor registered at an older seq.

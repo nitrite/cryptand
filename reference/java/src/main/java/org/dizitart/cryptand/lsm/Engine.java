@@ -935,6 +935,10 @@ public final class Engine implements AutoCloseable {
             seq++;
         }
         writeGate.readLock().unlock();
+        Runnable entries = afterEntriesHook;
+        if (entries != null) {
+            entries.run();
+        }
         long end = seq - 1;
 
         // Steps 6 and 7 under one acquisition of `seqLock`. They were two, and
@@ -3056,6 +3060,8 @@ public final class Engine implements AutoCloseable {
     static volatile long rewriteDelayNanos;
     /** Test seam (F-093): runs between a batch's value-log appends and its memtable publish. */
     static volatile Runnable afterValuesHook;
+    /** Test seam (F-102): runs between a batch's memtable publish and its completion. */
+    static volatile Runnable afterEntriesHook;
     /** Test seam (F-101): runs between tree 7's publish and the superblock. */
     static volatile Runnable afterStatsHook;
 
@@ -3089,6 +3095,16 @@ public final class Engine implements AutoCloseable {
         } finally {
             writeGate.writeLock().unlock();
         }
+    }
+
+    /** F-102: whether the segments alone, without the memtable, resolve the key to this record. */
+    private boolean namedBySegments(int treeId, byte[] cke, long segmentId, long offset, long nowMs) {
+        BtreePage.Leaf entry = lookup(treeId, cke, nextSeq.get(), nowMs, false, false);
+        if (entry == null || entry.kind() != BtreePage.Kind.VLOG) {
+            return false;
+        }
+        VlogPointer p = VlogPointer.decode(entry.value());
+        return p.segmentId() == segmentId && p.offset() == offset;
     }
 
     /**
@@ -3182,6 +3198,9 @@ public final class Engine implements AutoCloseable {
             }
         }
         List<Survivor> survivors = new ArrayList<>();
+        // F-102: records the memtable alone calls dead - shadowed by a write
+        // not yet in a segment - as {tree_id, key, offset}.
+        List<Object[]> shadowed = new ArrayList<>();
         long now = GC_NOW;
         // Every seq a reader can still resolve, not just `visibleSeq` — see
         // `livenessSeqs`. This is the check that decides what gets freed, so it
@@ -3221,6 +3240,9 @@ public final class Engine implements AutoCloseable {
                         }
                     }
                 }
+                if (namedBySegments(w.record().treeId(), w.record().key(), stats.segmentId, w.offset(), now)) {
+                    shadowed.add(new Object[] {w.record().treeId(), w.record().key(), w.offset()});
+                }
             });
         } finally {
             writeGate.writeLock().unlock();
@@ -3246,14 +3268,29 @@ public final class Engine implements AutoCloseable {
                     : vlog.append(rec.treeId(), rec.key(), rec.value(), stats.heat);
             bytesGc.addAndGet(moved.len());
             bytesDevice.addAndGet(moved.len());
-            lastRewriteSeq = Math.max(lastRewriteSeq,
-                    rewriteIfCurrent(rec.treeId(), rec.key(), VlogPointer.decode(old.value()), old, moved, now));
+            VlogPointer was = VlogPointer.decode(old.value());
+            long rewritten = rewriteIfCurrent(rec.treeId(), rec.key(), was, old, moved, now);
+            if (rewritten == 0) {
+                shadowed.add(new Object[] {rec.treeId(), rec.key(), was.offset()});
+            }
+            lastRewriteSeq = Math.max(lastRewriteSeq, rewritten);
         }
         long visible = Math.max(visibleSeq, completedThrough());
         flushShards(visible);
         // The rewrites have to be visible before the next pass computes
         // liveness against them - see makeVisible.
         makeVisible(visible);
+
+        // F-102: a record shadowed only by a write still in the memtable is
+        // live in what the next publish makes durable. Retired anyway, a
+        // crash lost the write and the key fell back to a pointer into a
+        // segment tree 7 no longer named. Deferred like the case below.
+        for (Object[] r : shadowed) {
+            if (namedBySegments((Integer) r[0], (byte[]) r[1], stats.segmentId, (Long) r[2], now)) {
+                deferredCollections.incrementAndGet();
+                return;
+            }
+        }
 
         // §6.8's second invariant: "a segment's extent is not freed until the
         // pointer-rewrite commit is durable". `makeVisible` cannot always
