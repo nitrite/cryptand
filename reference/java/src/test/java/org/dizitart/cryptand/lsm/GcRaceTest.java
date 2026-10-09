@@ -122,6 +122,76 @@ class GcRaceTest {
     }
 
     /**
+     * F-100, M2.2 torture seed 101908: a liveness refresh in the same window
+     * walked the batch's records, found no entry naming them, and stored the
+     * segment's {@code live_bytes} below what the trees reference.
+     */
+    @Test
+    void livenessRefreshWaitsForABatchBetweenItsValuesAndItsEntries(@TempDir Path dir) throws Exception {
+        Engine.Options o = new Engine.Options();
+        o.durability = Superblock.Durability.NONE;
+        o.vlogMin = 64;
+        o.backgroundCompaction = false;
+        Engine e = Engine.create(dir.resolve("db.cff"), o);
+        Thread[] refresh = new Thread[1];
+        Engine first = e;
+        Engine.afterValuesHook = () -> {
+            Engine.afterValuesHook = null;
+            refresh[0] = new Thread(first::clusterIfNeeded);
+            refresh[0].start();
+            try {
+                refresh[0].join(2000); // the fix blocks it on this batch; the bug finishes it here
+            } catch (InterruptedException x) {
+                throw new AssertionError(x);
+            }
+        };
+        Engine.Batch b = e.batch();
+        for (int k = 0; k < 400; k++) { // overflows F-096's first 256 KiB segment: this batch seals it
+            b.put(1, key(1, k), new byte[1000]);
+        }
+        try {
+            b.commit();
+        } finally {
+            Engine.afterValuesHook = null;
+        }
+        refresh[0].join();
+        e.commitNow(true);
+        e.abandon(); // the kill: close() would recount and hide it
+        e = Engine.open(dir.resolve("db.cff"), o);
+        org.dizitart.cryptand.ops.Verify.Report r = org.dizitart.cryptand.ops.Verify.run(e);
+        e.close();
+        assertTrue(r.clean(), r.toString());
+    }
+
+    /**
+     * F-100, the second half: a refresh judged a durable record dead because
+     * an overwrite still only in the memtable shadowed it; a publish then made
+     * the count durable without the overwrite, and the crash lost it.
+     */
+    @Test
+    void livenessIgnoresAnOverwriteNotYetFlushed(@TempDir Path dir) {
+        Engine.Options o = new Engine.Options();
+        o.durability = Superblock.Durability.NONE;
+        o.vlogMin = 64;
+        o.memtableEntries = 100_000;
+        o.backgroundCompaction = false;
+        Engine e = Engine.create(dir.resolve("db.cff"), o);
+        e.batch().put(1, key(1, 1), new byte[1000]).commit();
+        for (int k = 0; k < 300; k++) { // overflows F-096's first 256 KiB segment: key(1, 1)'s is sealed
+            e.batch().put(1, key(2, k), new byte[1000]).commit();
+        }
+        e.commitNow(true);
+        e.batch().put(1, key(1, 1), new byte[1000]).commit(); // the overwrite, memtable only
+        e.clusterIfNeeded(); // refreshes liveness
+        e.commitNow(false); // publishes tree 7; the shard is under budget and stays
+        e.abandon();
+        e = Engine.open(dir.resolve("db.cff"), o);
+        org.dizitart.cryptand.ops.Verify.Report r = org.dizitart.cryptand.ops.Verify.run(e);
+        e.close();
+        assertTrue(r.clean(), r.toString());
+    }
+
+    /**
      * F-037: a reader whose seq predates a GC rewrite still resolves the old
      * pointer after the segment is retired. Deterministic stand-in for a
      * snapshot pinned while GC runs: a cursor registered at an older seq.

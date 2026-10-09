@@ -1687,7 +1687,12 @@ public final class Engine implements AutoCloseable {
 
     private BtreePage.Leaf lookup(int treeId, byte[] cke, long snapshotSeq, long nowMs,
             boolean requirePublished) {
-        BtreePage.Leaf best = lookupRaw(treeId, cke, snapshotSeq, requirePublished);
+        return lookup(treeId, cke, snapshotSeq, nowMs, requirePublished, true);
+    }
+
+    private BtreePage.Leaf lookup(int treeId, byte[] cke, long snapshotSeq, long nowMs,
+            boolean requirePublished, boolean withMemtable) {
+        BtreePage.Leaf best = lookupRaw(treeId, cke, snapshotSeq, requirePublished, withMemtable);
         if (best == null) {
             return null;
         }
@@ -1711,16 +1716,21 @@ public final class Engine implements AutoCloseable {
 
     private BtreePage.Leaf lookupRaw(int treeId, byte[] cke, long snapshotSeq,
             boolean requirePublished) {
+        return lookupRaw(treeId, cke, snapshotSeq, requirePublished, true);
+    }
+
+    private BtreePage.Leaf lookupRaw(int treeId, byte[] cke, long snapshotSeq,
+            boolean requirePublished, boolean withMemtable) {
         readPins.acquire(sb.commitId);
         try {
-            return resolve(treeId, cke, snapshotSeq, requirePublished);
+            return resolve(treeId, cke, snapshotSeq, requirePublished, withMemtable);
         } finally {
             readPins.release();
         }
     }
 
     private BtreePage.Leaf resolve(int treeId, byte[] cke, long snapshotSeq) {
-        return resolve(treeId, cke, snapshotSeq, true);
+        return resolve(treeId, cke, snapshotSeq, true, true);
     }
 
     /**
@@ -1732,7 +1742,9 @@ public final class Engine implements AutoCloseable {
      * it got there. Collection passes {@code false}, because it must count an
      * in-flight entry as a live reference or it frees the record underneath it.
      */
-    private BtreePage.Leaf resolve(int treeId, byte[] cke, long snapshotSeq, boolean requirePublished) {
+    /** {@code withMemtable} false: the segments alone, what the next publish makes durable (F-100). */
+    private BtreePage.Leaf resolve(int treeId, byte[] cke, long snapshotSeq, boolean requirePublished,
+            boolean withMemtable) {
         lookups.incrementAndGet();
         byte[] uk = Ikey.userKey(treeId, cke);
         // Built only for the two readers that seek: the memtable, and a segment
@@ -1760,8 +1772,8 @@ public final class Engine implements AutoCloseable {
         // shard and before the batch is published, so zero proves there is no
         // published entry to find; an in-flight one may be missed, which only
         // a caller that does not require publication would notice.
-        ConcurrentSkipListMap<byte[], BtreePage.Leaf> shard =
-                requirePublished && residentEntries.get() == 0 ? null : shardFor(treeId, cke);
+        ConcurrentSkipListMap<byte[], BtreePage.Leaf> shard = !withMemtable
+                || requirePublished && residentEntries.get() == 0 ? null : shardFor(treeId, cke);
         for (Map.Entry<byte[], BtreePage.Leaf> m = shard == null || shard.isEmpty() ? null : shard.ceilingEntry(from = Ikey.seekAt(uk, snapshotSeq));
                 m != null; m = shard.higherEntry(m.getKey())) {
             if (!Ikey.hasUserKey(m.getKey(), uk)) {
@@ -1776,7 +1788,7 @@ public final class Engine implements AutoCloseable {
             break;
         }
 
-        long rd = greatestRangeDelete(treeId, cke, snapshotSeq);
+        long rd = withMemtable ? greatestRangeDelete(treeId, cke, snapshotSeq) : 0;
 
         LevelState state = levels;
         // Segments below this level cannot hold a newer version (see the hit).
@@ -2853,11 +2865,16 @@ public final class Engine implements AutoCloseable {
         for (long at : seqs) {
             // `false`: an entry still in flight is a live reference. Filtering
             // it out here would free the record underneath it.
-            BtreePage.Leaf entry = lookup(treeId, cke, at, nowMs, false);
-            if (entry != null && entry.kind() == BtreePage.Kind.VLOG) {
-                VlogPointer p = VlogPointer.decode(entry.value());
-                if (p.segmentId() == segmentId && p.offset() == offset) {
-                    return true;
+            // F-100: and the segments alone. A memtable write that shadows
+            // the record is not durable until flushed; counted dead on its
+            // say, a crash left the trees naming a record tree 7 called dead.
+            for (boolean withMemtable : new boolean[] {true, false}) {
+                BtreePage.Leaf entry = lookup(treeId, cke, at, nowMs, false, withMemtable);
+                if (entry != null && entry.kind() == BtreePage.Kind.VLOG) {
+                    VlogPointer p = VlogPointer.decode(entry.value());
+                    if (p.segmentId() == segmentId && p.offset() == offset) {
+                        return true;
+                    }
                 }
             }
         }
@@ -2871,9 +2888,17 @@ public final class Engine implements AutoCloseable {
      */
     private void refreshLiveness() {
         long now = GC_NOW;
-        long[] seqs = livenessSeqs();
-        vlog.recomputeLiveness((treeId, cke, segmentId, offset) ->
-                referencedAt(seqs, treeId, cke, segmentId, offset, now));
+        // F-100: exclusive, as collection is (F-093). A batch between its
+        // value-log appends and its memtable publish has records no entry
+        // names yet; walked then, they were counted dead.
+        writeGate.writeLock().lock();
+        try {
+            long[] seqs = livenessSeqs();
+            vlog.recomputeLiveness((treeId, cke, segmentId, offset) ->
+                    referencedAt(seqs, treeId, cke, segmentId, offset, now));
+        } finally {
+            writeGate.writeLock().unlock();
+        }
     }
 
     /** Requires {@link #structure}. One merge, in {@code (tree_id, CKE(key))} order. */
