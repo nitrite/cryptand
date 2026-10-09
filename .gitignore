@@ -4,3 +4,4 @@ Thumbs.db
 .vscode/
 *.iml
 reference/bench/runs/
+.cifuzz-corpus/

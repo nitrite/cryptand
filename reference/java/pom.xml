@@ -62,6 +62,19 @@
       nobody embeds. Everything below is test scope: JUnit, and Jackson only
       to read the shared conformance vectors, which are JSON.
     -->
+    <!-- jazzer-junit brings junit-platform 1.9; the BOM keeps every JUnit artifact on one version. -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.junit</groupId>
+                <artifactId>junit-bom</artifactId>
+                <version>${junit.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <!--
           Comparison-benchmark only, and `test` scope so neither reaches the
@@ -95,6 +108,14 @@
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- PLAN M3.3: coverage-guided fuzzing. Without JAZZER_FUZZ=1 the
+             @FuzzTest methods replay their seed inputs as ordinary tests. -->
+        <dependency>
+            <groupId>com.code-intelligence</groupId>
+            <artifactId>jazzer-junit</artifactId>
+            <version>0.24.0</version>
             <scope>test</scope>
         </dependency>
         <dependency>
