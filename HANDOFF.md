@@ -8,14 +8,21 @@
 - M0 done. M1: hop 0..1000 plain and 0..300 encrypted clean; 10 000-seed
   M1.2 runs still pending. M2.1: fault sweeps 1000 seeds clean (Rust, Java).
 - M2.3 `tools/enospc.sh` green on the F-096 build, Rust + Java, plain + encrypted.
-- M2.2 (this Mac, `/Volumes/External`): **Rust 5000 kills, 0 failures**
-  (seeds 1000..6000, half encrypted). Java 5000 kills: 25 failures → 9 (after
-  F-098, F-099) → 6 (after F-100, F-101). F-102 then fixed the corruption class;
-  the only failures left are F-103 leaks (104067 8/10, 103891 2/10). A final
-  Java 5000-kill run on the F-102 build has **not** been run.
+- M2.2 (this Mac, `/Volumes/External`): **Rust 5000 kills, 0 failures**.
+  Java on the F-103 build: 4999/5000 clean; the one failure (seed 102507) was
+  an OOM in rotate, F-104, fixed. Rerun of seeds 101000..103500 on F-104 is
+  running on the remote Mac (`~/Documents/codebase/cryptand-m22`,
+  `reference/bench/runs/m22-java5.log`).
+- M1.2 10 000-seed runs running on the remote Mac (`~/Documents/codebase/cryptand`,
+  pre-F-104 checkout): `reference/bench/runs/m12-rust.log` (plain then
+  `--encrypted`), `m12-java.log` (`tools/oplog_java.sh`, plain then encrypted,
+  JDK `openjdk@18`). Remote needs `JAVA_HOME=/opt/homebrew/opt/openjdk@18`
+  (system Java is 11).
+- One local `mvn verify` failed once on 10-09 (test not captured); the next two
+  were green (368). Watch for a flake.
 - F-098..F-103 fixed in Java (Rust checked: not affected; Dart unchecked, M5).
 - Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
-  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094..F-103 (Dart check).
+  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094..F-104 (Dart check).
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
   never build Java while a hop or Java torture runs, nor edit sources
   while `tools/gate.sh` runs (its interop stage rebuilds Java).
@@ -52,9 +59,9 @@
 
 ## Next action
 
-Read the tail of `reference/bench/runs/m22-java4.log` (two lines, `… kills, N failures`).
-0 failures: tick M2.2 for Java. Otherwise debug the failing seed with the recipe above.
-Then M1.2 10 000-seed runs, M3 fuzzing.
+On the remote Mac, tail `m22-java5.log` (want `2500 kills, 0 failures`; then tick
+M2.2 for Java) and the two `m12-*.log` (want `0 divergences` per line; then tick
+M1.2 for Rust + Java). Meanwhile start M3 fuzzing locally.
 
 ## Log
 
@@ -68,3 +75,4 @@ Then M1.2 10 000-seed runs, M3 fuzzing.
 - 2026-10-09 — Decisions on F-094 parity, profile floor, bundled commits; F-096 (hot extents, harness `.bak` leak filled the disk) fixed in Rust + Java; F-097 (Java double rollover orphaned a segment) fixed.
 - 2026-10-09 — M2.3 green on F-096; M2.2 Rust 5000/0; Java F-098 (decrypt vs memtable blob), F-099 (compact no flush), F-100 (liveness understated), F-101 (extent mid-publish), F-102 (GC vs unflushed overwrite) fixed; F-103 open for the human.
 - 2026-10-09 — F-103 fixed (human chose a: value log, no put-time BLOBs); final Java M2.2 run started.
+- 2026-10-09 — Java M2.2 4999/5000; F-104 (rotate OOM on a free page) fixed; M1.2 10k and M2.2 rerun started on the remote Mac.
