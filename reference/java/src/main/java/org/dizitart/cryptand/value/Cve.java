@@ -552,7 +552,7 @@ public final class Cve {
         r.skip(byteLen);
 
         long fieldCount = body.uvar();
-        if (fieldCount > Limits.MAX_FIELD_COUNT) {
+        if (fieldCount < 0 || fieldCount > Limits.MAX_FIELD_COUNT) {
             throw new LimitException("DOC declares " + fieldCount + " fields, limit is " + Limits.MAX_FIELD_COUNT);
         }
         if (fieldCount > byteLen) {

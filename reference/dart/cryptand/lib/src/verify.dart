@@ -244,9 +244,8 @@ extension EngineVerify on Engine {
 
     final free = <int>{};
     for (final e in store.freeExtents) {
-      for (var i = 0; i < e.pages; i++) {
-        free.add(e.startPage + i);
-      }
+      // F-114: the free list is the file's word too.
+      free.addAll(extentPages(e.startPage, e.pages, 'free extent'));
     }
     // Pages 0 and 1 are the superblock slots, reserved before anything is
     // allocated and owned by no tree.

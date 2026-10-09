@@ -650,6 +650,13 @@ public final class Verify {
     private void verifyFreeSpace(Superblock sb) {
         Map<Long, String> free = new HashMap<>();
         for (Pager.FreeExtent e : pager.freeList()) {
+            // F-114: the free list is the file's word; an extent past the page
+            // space is a finding, not four billion map entries.
+            if (e.startPage() < 0 || e.pages() < 0 || e.startPage() + e.pages() > pager.pageCount()) {
+                findings.add(new Finding(Kind.CORRUPTION, "free extent of " + e.pages() + " pages from "
+                        + e.startPage() + " runs past the " + pager.pageCount() + "-page file"));
+                continue;
+            }
             for (long p = e.startPage(); p < e.startPage() + e.pages(); p++) {
                 if (owners.containsKey(p)) {
                     findings.add(new Finding(Kind.DOUBLE_ALLOCATION, "page " + p

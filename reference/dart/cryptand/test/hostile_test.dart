@@ -26,6 +26,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cryptand/cryptand.dart';
+import 'package:cryptand/src/cow.dart' show FreeExtent;
 import 'package:test/test.dart';
 
 const List<int> boundaries = [0, 1, 2, 0x7FFFFFFF, 0xFFFFFFFE, 0xFFFFFFFF];
@@ -171,5 +172,14 @@ void main() {
     final b = Uint8List.fromList([0x20, 0x0c, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
         0xff, 0xff, 0xff, 0x01, 0xff, 0xff, 0xfd, 0xff, 0x32, 0xff, 0xff]);
     expect(() => decodeValue(b), throwsA(isA<CryptandException>()));
+  });
+
+  // F-114 (M3 Jazzer openFile, Java): a free extent claiming 2^32 pages made
+  // the verifier materialize every one of them.
+  test('a free extent past the file is a finding, not an allocation', () {
+    final db = DatabaseFile.open(corpusFile);
+    db.engine.store.loadFree([FreeExtent(0, 2, 0xFFFFFFFF)]);
+    final r = db.engine.verifyStructure();
+    expect(r.of(FindingClass.corruption), isNotEmpty);
   });
 }
