@@ -265,6 +265,10 @@ class EngineTest {
         // seals, and measures nothing at all.
         Engine.Options o = options();
         o.profile = Profile.MOBILE;
+        // The control below measures bytes still in the value log; a background
+        // collector that reclaims first under load shrinks them, and the
+        // control then fails on scheduling, not liveness.
+        o.backgroundCompaction = false;
         int rows = 150;
         try (Engine e = Engine.create(dir.resolve("gcspace.cryptand"), o)) {
             Random rnd = new Random(11);
