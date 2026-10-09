@@ -192,6 +192,48 @@ class GcRaceTest {
     }
 
     /**
+     * F-101, M2.2 torture seed 105950: a writer rolled over to a fresh hot
+     * segment between tree 7's publish and the superblock. The superblock
+     * counted the extent and tree 7 did not name it; the kill left it leaked.
+     */
+    @Test
+    void noExtentIsAllocatedBetweenTree7AndTheSuperblock(@TempDir Path dir) throws Exception {
+        Engine.Options o = new Engine.Options();
+        o.durability = Superblock.Durability.NONE;
+        o.vlogMin = 64;
+        o.backgroundCompaction = false;
+        Engine e = Engine.create(dir.resolve("db.cff"), o);
+        e.batch().put(1, key(1, 0), new byte[1000]).commit(); // opens the first hot segment
+        Thread[] writer = new Thread[1];
+        Engine first = e;
+        Engine.afterStatsHook = () -> {
+            Engine.afterStatsHook = null;
+            writer[0] = new Thread(() -> {
+                for (int k = 1; k < 400; k++) { // overflows F-096's first 256 KiB segment
+                    first.batch().put(1, key(1, k), new byte[1000]).commit();
+                }
+            });
+            writer[0].start();
+            try {
+                writer[0].join(2000); // the fix blocks it on this publish; the bug finishes it here
+            } catch (InterruptedException x) {
+                throw new AssertionError(x);
+            }
+        };
+        try {
+            e.commitNow(true);
+        } finally {
+            Engine.afterStatsHook = null;
+        }
+        writer[0].join();
+        e.abandon();
+        e = Engine.open(dir.resolve("db.cff"), o);
+        org.dizitart.cryptand.ops.Verify.Report r = org.dizitart.cryptand.ops.Verify.run(e);
+        e.close();
+        assertTrue(r.clean(), r.toString());
+    }
+
+    /**
      * F-037: a reader whose seq predates a GC rewrite still resolves the old
      * pointer after the segment is retired. Deterministic stand-in for a
      * snapshot pinned while GC runs: a cursor registered at an older seq.

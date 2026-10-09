@@ -1281,11 +1281,24 @@ public final class Engine implements AutoCloseable {
      * while its data sits perfectly intact on disk.
      */
     private void publishSuperblock(long visible, boolean allowRegression) {
+        vlog.beginPublish(); // F-101
+        try {
+            publishSuperblock0(visible, allowRegression);
+        } finally {
+            vlog.endPublish();
+        }
+    }
+
+    private void publishSuperblock0(long visible, boolean allowRegression) {
         long published = allowRegression ? visible : Math.max(visibleSeq, visible);
         for (Runnable hook : commitHooks) {
             hook.run();
         }
         vlog.publishStats();
+        Runnable afterStats = afterStatsHook;
+        if (afterStats != null) {
+            afterStats.run();
+        }
 
         // §2: roots for trees 0, 1, 2, 6, 7, 8 and 9 are in the superblock, and
         // EVERY OTHER TREE'S root is in its catalog descriptor. Trees 3, 4 and 5
@@ -3043,6 +3056,8 @@ public final class Engine implements AutoCloseable {
     static volatile long rewriteDelayNanos;
     /** Test seam (F-093): runs between a batch's value-log appends and its memtable publish. */
     static volatile Runnable afterValuesHook;
+    /** Test seam (F-101): runs between tree 7's publish and the superblock. */
+    static volatile Runnable afterStatsHook;
 
     private long rewriteIfCurrent(int treeId, byte[] key, VlogPointer was, BtreePage.Leaf old,
                                   VlogPointer moved, long now) {

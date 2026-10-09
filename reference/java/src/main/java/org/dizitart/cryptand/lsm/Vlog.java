@@ -367,6 +367,9 @@ public final class Vlog {
      */
     private synchronized Reservation reserve(
             boolean hotTier, int heatClass, int treeId, byte[] cke, byte[] value) {
+        if ((hotTier ? hot.get(heatClass) == null : cold == null) && awaitPublish()) {
+            return reserve(hotTier, heatClass, treeId, cke, value);
+        }
         Open open = hotTier ? openHot(heatClass) : openCold();
         VlogSegment.Record rec = new VlogSegment.Record(treeId, cke, value);
         // The size has to be known before the reservation, because the
@@ -383,6 +386,9 @@ public final class Vlog {
             // a fresh one. The over-reservation is debris, which is what the
             // contiguous watermark exists to tolerate.
             open.tail.addAndGet(-size);
+            if (awaitPublish()) {
+                return reserve(hotTier, heatClass, treeId, cke, value);
+            }
             seal(open);
             // F-097: `seal` drains, and draining waits, which lets a second
             // writer that overflowed the same segment seal it too. Only the
@@ -900,6 +906,42 @@ public final class Vlog {
         boolean any = appendedSinceBarrier;
         appendedSinceBarrier = false;
         return any;
+    }
+
+    /** F-101: the thread between {@link #beginPublish} and {@link #endPublish}, or null. */
+    private Thread publisher;
+
+    /**
+     * F-101: from tree 7's publish to the superblock, no new extent. One
+     * allocated in between was in {@code page_count} and outside the free
+     * list with no tree-7 entry naming it: a leak if the process died there.
+     */
+    public synchronized void beginPublish() {
+        publisher = Thread.currentThread();
+    }
+
+    public synchronized void endPublish() {
+        publisher = null;
+        notifyAll();
+    }
+
+    /**
+     * Waits out another thread's publish. True if it waited: the caller
+     * re-reads everything, since {@code wait} let other writers in.
+     */
+    private boolean awaitPublish() {
+        if (publisher == null || publisher == Thread.currentThread()) {
+            return false;
+        }
+        while (publisher != null) {
+            try {
+                wait();
+            } catch (InterruptedException x) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted waiting for a commit", x);
+            }
+        }
+        return true;
     }
 
     public synchronized void publishStats() {
