@@ -869,10 +869,12 @@ public final class Engine implements AutoCloseable {
             byte[] value = e.value;
             bytesLogical.add(e.cke.length + value.length);
             liveBytes.add(e.cke.length + value.length);
-            if (sb.blobThreshold > 0 && value.length >= sb.blobThreshold) {
-                e.kind = BtreePage.Kind.BLOB;
-                e.value = Blob.write(pager, value).encode();
-            } else if (sb.vlogMin > 0 && value.length >= sb.vlogMin) {
+            // F-103: no BLOB is written at put time, as in Rust. A blob extent
+            // allocated here is counted in page_count with nothing durable
+            // naming it until the flush, so a crash leaked it. Large values go
+            // to the value log; existing blobs are still read and compacted.
+            if ((sb.vlogMin > 0 && value.length >= sb.vlogMin)
+                    || (sb.blobThreshold > 0 && value.length >= sb.blobThreshold)) {
                 e.kind = BtreePage.Kind.VLOG;
                 e.value = vlog.append(e.treeId, e.cke, value, VlogSegment.HEAT_FIRST).encode();
                 bytesValue.add(VlogSegment.recordSize(e.cke, value));
