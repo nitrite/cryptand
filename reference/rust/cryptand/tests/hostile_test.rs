@@ -439,3 +439,42 @@ fn a_blob_longer_than_the_file_is_refused_before_allocating() {
     ptr[0..8].copy_from_slice(&(u64::MAX / 2).to_le_bytes());
     assert!(e.read_blob(&ptr).is_err());
 }
+
+/// Generator for `fuzz-regress/f113-catalog-cycle.cryptand` (F-113): a real
+/// catalog (a copy-on-write tree) whose root's last child points back at the
+/// root. Run once with `cargo test --test hostile_test -- --ignored make_f113`.
+#[test]
+#[ignore]
+fn make_f113_catalog_cycle() {
+    use cryptand::container::{Durability, Profile};
+    use cryptand::segment::Node;
+    let tmp = std::env::temp_dir().join(format!("cryptand-f113-{}.cryptand", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut db = cryptand::database::Database::create(&tmp, Profile::Desktop).unwrap();
+    for i in 0..400 {
+        db.collection(&format!("{i:0200}")).unwrap();
+    }
+    db.commit(Durability::Sync).unwrap();
+    db.close().unwrap();
+    let mut b = std::fs::read(&tmp).unwrap();
+    let sb = Superblock::parse(&b[..4096])
+        .ok()
+        .filter(|s| Superblock::parse(&b[4096..8192]).map_or(true, |t| s.commit_id >= t.commit_id))
+        .unwrap_or_else(|| Superblock::parse(&b[4096..8192]).unwrap());
+    let ps = sb.page_size();
+    let root = sb.catalog_root;
+    let at = root as usize * ps;
+    let off = {
+        let n = Node::parse(&b[at..at + ps], root).unwrap();
+        assert!(!n.is_leaf && n.cell_count >= 2, "catalog root is not internal");
+        n.cell_suffix(n.cell_count - 1).unwrap().1
+    };
+    b[at + off..at + off + 8].copy_from_slice(&root.to_le_bytes());
+    let page = &mut b[at..at + ps];
+    let h = PageHeader::parse(page).unwrap();
+    let end = PageHeader::checksum_range_end(page, &h);
+    let crc = cryptand::hash::crc32c(&page[4..end]);
+    page[..4].copy_from_slice(&crc.to_le_bytes());
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/files/fuzz-regress/f113-catalog-cycle.cryptand");
+    std::fs::write(out, &b).unwrap();
+}

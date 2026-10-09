@@ -85,6 +85,14 @@ fn value_of(payload: &[u8]) -> Result<Vec<u8>> {
     Ok(payload[start..end].to_vec())
 }
 
+/// F-113: child pointers come from the file, so every descent is bounded:
+/// a pointer back up would otherwise loop (or recurse) forever.
+const MAX_DEPTH: usize = 64;
+
+fn too_deep<T>() -> Result<T> {
+    corrupt(format!("copy-on-write tree is deeper than {MAX_DEPTH} levels"))
+}
+
 fn child_of(payload: &[u8]) -> Result<(u64, u64)> {
     if payload.len() < 16 {
         return corrupt("copy-on-write internal cell shorter than 16 bytes");
@@ -158,7 +166,7 @@ impl CowTree {
             return Ok(None);
         }
         let mut page_id = self.root;
-        loop {
+        for _ in 0..=MAX_DEPTH {
             let n = self.load(pager, page_id)?;
             if n.is_leaf {
                 return match find(&n.keys, key) {
@@ -171,6 +179,7 @@ impl CowTree {
             }
             page_id = child_of(&n.payloads[descend(&n.keys, key)])?.0;
         }
+        too_deep()
     }
 
     /// Every entry in `[lower, upper)`, in key order.
@@ -184,7 +193,7 @@ impl CowTree {
         if self.root == 0 {
             return Ok(out);
         }
-        self.walk(pager, self.root, lower, upper, &mut out)?;
+        self.walk(pager, self.root, lower, upper, &mut out, 0, &mut Default::default())?;
         Ok(out)
     }
 
@@ -195,7 +204,17 @@ impl CowTree {
         lower: Option<&[u8]>,
         upper: Option<&[u8]>,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
+        depth: usize,
+        seen: &mut std::collections::HashSet<u64>,
     ) -> Result<bool> {
+        // F-113: a tree reaches each page once; shared children would make
+        // the walk exponential, a pointer back up would recurse forever.
+        if depth > MAX_DEPTH {
+            return too_deep();
+        }
+        if !seen.insert(page_id) {
+            return corrupt(format!("copy-on-write page {page_id} is reached twice"));
+        }
         let n = self.load(pager, page_id)?;
         if n.is_leaf {
             for i in 0..n.count() {
@@ -223,7 +242,7 @@ impl CowTree {
                     return Ok(false);
                 }
             }
-            if !self.walk(pager, child_of(&n.payloads[i])?.0, lower, upper, out)? {
+            if !self.walk(pager, child_of(&n.payloads[i])?.0, lower, upper, out, depth + 1, seen)? {
                 return Ok(false);
             }
         }
@@ -236,17 +255,30 @@ impl CowTree {
         if self.root == 0 {
             return Ok(());
         }
-        self.reach(pager, self.root, out)
+        self.reach(pager, self.root, out, 0, &mut Default::default())
     }
 
-    fn reach(&self, pager: &mut Pager, page_id: u64, out: &mut Vec<u64>) -> Result<()> {
+    fn reach(
+        &self,
+        pager: &mut Pager,
+        page_id: u64,
+        out: &mut Vec<u64>,
+        depth: usize,
+        seen: &mut std::collections::HashSet<u64>,
+    ) -> Result<()> {
+        if depth > MAX_DEPTH {
+            return too_deep();
+        }
+        if !seen.insert(page_id) {
+            return corrupt(format!("copy-on-write page {page_id} is reached twice"));
+        }
         out.push(page_id);
         let n = self.load(pager, page_id)?;
         if n.is_leaf {
             return Ok(());
         }
         for p in &n.payloads {
-            self.reach(pager, child_of(p)?.0, out)?;
+            self.reach(pager, child_of(p)?.0, out, depth + 1, seen)?;
         }
         Ok(())
     }
@@ -289,6 +321,9 @@ impl CowTree {
         let mut path: Vec<(u64, CowNode, usize)> = Vec::new();
         let mut page_id = self.root;
         loop {
+            if path.len() > MAX_DEPTH {
+                return too_deep();
+            }
             let n = self.load(pager, page_id)?;
             if n.is_leaf {
                 path.push((page_id, n, usize::MAX));
@@ -507,6 +542,9 @@ impl CowTree {
         let mut n = self.load(pager, self.root)?;
         while !n.is_leaf {
             h += 1;
+            if h > MAX_DEPTH {
+                return too_deep();
+            }
             n = self.load(pager, child_of(&n.payloads[0])?.0)?;
         }
         Ok(h)

@@ -722,7 +722,8 @@ final class CowTree {
   Uint8List? get(Uint8List key) {
     if (root == 0) return null;
     var pageId = root;
-    while (true) {
+    for (var depth = 0;; depth++) {
+      _checkDepth(depth, pageId);
       final n = _load(pageId);
       if (n.isLeaf) {
         final i = _find(n.keys, key);
@@ -742,7 +743,25 @@ final class CowTree {
   Iterable<(Uint8List, Uint8List)> scan(
       {Uint8List? lower, Uint8List? upper}) sync* {
     if (root == 0) return;
-    yield* _walk(root, lower, upper);
+    yield* _walk(root, lower, upper, 0, <int>{});
+  }
+
+  /// F-113: child pointers come from the file, so every descent is bounded;
+  /// a pointer back up would otherwise loop or recurse forever.
+  void _checkDepth(int depth, int pageId) {
+    if (depth > 100) {
+      throw CorruptionException(
+          'tree $treeId is deeper than 100 pages at page $pageId; a copy-on-'
+          'write tree that deep is a cycle');
+    }
+  }
+
+  /// F-113: a tree reaches each page once; shared children would make a walk
+  /// exponential in the height.
+  void _visit(Set<int> seen, int pageId) {
+    if (!seen.add(pageId)) {
+      throw CorruptionException('tree $treeId reaches page $pageId twice');
+    }
   }
 
   /// Every page this tree occupies, internal and leaf.
@@ -753,10 +772,10 @@ final class CowTree {
   /// which pages it holds, and there was no way to ask.
   Iterable<int> reachablePages() sync* {
     if (root == 0) return;
-    yield* _reachable(root, 0);
+    yield* _reachable(root, 0, <int>{});
   }
 
-  Iterable<int> _reachable(int pageId, int depth) sync* {
+  Iterable<int> _reachable(int pageId, int depth, Set<int> seen) sync* {
     // A cyclic or wildly deep tree is a hostile file's cheapest denial of
     // service, and this walk is reachable from `verify` on a file the caller
     // did not write. The bound is the same one section 8 of
@@ -766,16 +785,19 @@ final class CowTree {
           'tree $treeId is deeper than 100 pages at page $pageId; a copy-on-'
           'write tree that deep is a cycle');
     }
+    _visit(seen, pageId);
     yield pageId;
     final n = _load(pageId);
     if (n.isLeaf) return;
     for (var i = 0; i < n.count; i++) {
-      yield* _reachable(_Node.childOf(n.payloads[i]).$1, depth + 1);
+      yield* _reachable(_Node.childOf(n.payloads[i]).$1, depth + 1, seen);
     }
   }
 
-  Iterable<(Uint8List, Uint8List)> _walk(
-      int pageId, Uint8List? lower, Uint8List? upper) sync* {
+  Iterable<(Uint8List, Uint8List)> _walk(int pageId, Uint8List? lower,
+      Uint8List? upper, int depth, Set<int> seen) sync* {
+    _checkDepth(depth, pageId);
+    _visit(seen, pageId);
     final n = _load(pageId);
     if (n.isLeaf) {
       for (var i = 0; i < n.count; i++) {
@@ -793,7 +815,8 @@ final class CowTree {
       if (upper != null && i > start && compareKeys(n.keys[i], upper) >= 0) {
         return;
       }
-      yield* _walk(_Node.childOf(n.payloads[i]).$1, lower, upper);
+      yield* _walk(
+          _Node.childOf(n.payloads[i]).$1, lower, upper, depth + 1, seen);
     }
   }
 
@@ -877,6 +900,7 @@ final class CowTree {
     final path = <(int, _Node, int)>[]; // (pageId, node, childIndex)
     var pageId = root;
     while (true) {
+      _checkDepth(path.length, pageId);
       final n = _load(pageId);
       if (n.isLeaf) {
         path.add((pageId, n, -1));

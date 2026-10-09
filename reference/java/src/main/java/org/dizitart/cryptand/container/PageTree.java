@@ -61,12 +61,24 @@ public final class PageTree {
     public static PageTree load(Pager pager, int treeId, long root) {
         PageTree t = new PageTree(pager, treeId, root);
         if (root != 0) {
-            t.readInto(root);
+            t.readInto(root, 0, new java.util.HashSet<>());
         }
         return t;
     }
 
-    private void readInto(long pageId) {
+    /**
+     * F-113: child pointers come from the file. A pointer back up would
+     * recurse until the stack overflows, and children shared between cells
+     * would load pages exponentially often; a tree reaches each page once.
+     */
+    private void readInto(long pageId, int depth, java.util.Set<Long> seen) {
+        if (depth > 64) {
+            throw new CorruptionException("internal tree " + treeId + " is deeper than 64 levels", pageId, null);
+        }
+        if (!seen.add(pageId)) {
+            throw new CorruptionException("internal tree " + treeId + " reaches page " + pageId + " twice",
+                    pageId, null);
+        }
         oldPages.add(pageId);
         byte[] page = pager.readRaw(pageId);
         PageHeader h = PageHeader.verify(page, pageId);
@@ -83,7 +95,7 @@ public final class PageTree {
             }
         } else {
             for (int i = 0; i < p.cellCount(); i++) {
-                readInto(p.internal(i).childPage());
+                readInto(p.internal(i).childPage(), depth + 1, seen);
             }
         }
     }
