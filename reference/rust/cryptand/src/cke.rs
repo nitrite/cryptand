@@ -456,11 +456,39 @@ fn decode_number(b: &[u8]) -> Result<(Value, usize)> {
                 if shift < 128 && shift > 0 && (m & ((1u128 << shift) - 1)) != 0 {
                     return corrupt("integer type code over a non-integral ordering region");
                 }
-                Value::Int { w, neg, mag: m >> shift }
+                let mag = m >> shift;
+                if !int_fits(w, neg, mag) {
+                    // F-109: the encoder never writes it, and §8's order is
+                    // undefined for a value no type holds.
+                    return corrupt(format!("{}{mag} does not fit {w:?}", if neg { "-" } else { "" }));
+                }
+                Value::Int { w, neg, mag }
             }
         }
     };
     Ok((value, used + 1))
+}
+
+/// Whether `±mag` is a value of the integer type `w` (`IntVar` is an i64).
+fn int_fits(w: NumType, neg: bool, mag: u128) -> bool {
+    let (bits, signed) = match w {
+        NumType::I8 => (8, true),
+        NumType::I16 => (16, true),
+        NumType::I32 => (32, true),
+        NumType::I64 | NumType::IntVar => (64, true),
+        NumType::I128 => (128, true),
+        NumType::U8 => (8, false),
+        NumType::U16 => (16, false),
+        NumType::U32 => (32, false),
+        NumType::U64 => (64, false),
+        NumType::U128 => (128, false),
+        _ => return false,
+    };
+    if !signed {
+        return !neg && (bits == 128 || mag >> bits == 0);
+    }
+    let half = 1u128 << (bits - 1);
+    mag < half || (neg && mag == half)
 }
 
 /// The inverse of §4.1's normalization, for the two float widths.

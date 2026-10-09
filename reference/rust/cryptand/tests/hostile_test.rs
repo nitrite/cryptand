@@ -374,3 +374,18 @@ fn an_extent_past_the_end_of_the_file_is_refused_before_allocating() {
     assert!(e.pager.read_extent(2, u32::MAX).is_err());
     assert!(e.pager.read_extent(u64::MAX / 2, 1).is_err());
 }
+
+/// F-109 (M3 fuzz `cke_roundtrip`): a NUMBER whose magnitude does not fit
+/// its integer type code decoded, and §8's order then disagreed with memcmp.
+#[test]
+fn an_integer_that_does_not_fit_its_type_code_is_refused() {
+    use cryptand::value::NumType;
+    let mut k = cke::encode(&Value::Int { w: NumType::I16, neg: false, mag: 300 }).unwrap();
+    *k.last_mut().unwrap() = NumType::I8.type_code();
+    assert!(matches!(cke::decode_all(&k), Err(cryptand::Error::Corrupt(_))), "300 decoded as an i8");
+    let mut k = cke::encode(&Value::Int { w: NumType::I64, neg: true, mag: 5 }).unwrap();
+    *k.last_mut().unwrap() = NumType::U64.type_code();
+    assert!(cke::decode_all(&k).is_err(), "-5 decoded as a u64");
+    let min = cke::encode(&Value::Int { w: NumType::I8, neg: true, mag: 128 }).unwrap();
+    assert!(cke::decode_all(&min).is_ok(), "i8::MIN is an i8");
+}

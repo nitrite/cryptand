@@ -588,7 +588,12 @@ CValue _rebuild(NumType t, bool negative, int e, U128 m) {
   if (u.shl(127 - e) != m) {
     throw CorruptionException('CKE integer mantissa has a fractional part');
   }
-  return CInt(t, negative, u);
+  try {
+    return CInt(t, negative, u);
+  } on InvalidArgumentException catch (e) {
+    // A well-formed region whose magnitude exceeds the declared width (F-109).
+    throw CorruptionException(e.message);
+  }
 }
 
 double _rebuildFloat(NumType t, bool negative, int e, U128 m) {

@@ -156,4 +156,12 @@ void main() {
       }
     }
   });
+
+  // F-109 (M3 fuzz cke_roundtrip): a NUMBER whose magnitude does not fit its
+  // integer type code is corruption, not a value no type holds.
+  test('an integer that does not fit its type code is refused', () {
+    final k = encodeKey(CInt(NumType.i16, false, U128.fromInt(300)));
+    k[k.length - 1] = NumType.i8.cke;
+    expect(() => decodeKey(k), throwsA(isA<CorruptionException>()));
+  });
 }
