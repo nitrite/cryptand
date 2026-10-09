@@ -3820,6 +3820,13 @@ public final class Engine implements AutoCloseable {
     public void compact() {
         structure.lock();
         try {
+            // F-099: flush first, as Rust's does. Otherwise the published
+            // compaction drops entries expired at a clock newer than the
+            // memtable writes a crash then loses: a state no prefix had.
+            long visible = Math.max(visibleSeq, completedThrough());
+            if (flushShards(visible)) {
+                makeVisible(visible);
+            }
             int last = lastLevel();
             for (int l = 0; l < last; l++) {
                 if (!manifest.at(l).isEmpty()) {

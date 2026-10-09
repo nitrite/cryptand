@@ -471,6 +471,40 @@ class MandatoryTest {
     }
 
     /**
+     * F-099, M2.2 torture seed 103043: compact() dropped an entry expired at
+     * the current clock but left the newer memtable writes unflushed, so a
+     * crash left a state no prefix of the history had.
+     */
+    @Test
+    void compactAfterExpiryThenCrashKeepsANewerWrite(@TempDir Path dir) {
+        Path f = dir.resolve("ttl.cryptand");
+        long[] now = {0};
+        Engine.Options o = options();
+        o.durability = Superblock.Durability.NONE;
+        o.memtableEntries = 100_000;
+        o.backgroundCompaction = false;
+        o.clock = () -> now[0];
+        Engine e = Engine.create(f, o);
+        try {
+            e.batch().putWithExpiry(TREE, key(1), value(1, 60), 100).commit();
+            e.commitNow(true);
+            now[0] = 50;
+            e.batch().put(TREE, key(2), value(2, 60)).commit();
+            now[0] = 200;
+            e.compact();
+        } finally {
+            e.abandon();
+        }
+        try (Engine reopened = Engine.open(f, o)) {
+            now[0] = 50;
+            if (reopened.get(TREE, key(1)) == null) {
+                assertArrayEquals(value(2, 60), reopened.get(TREE, key(2)),
+                        "the expired entry was dropped, so the write before the drop must survive");
+            }
+        }
+    }
+
+    /**
      * "Kill the process at randomized points during a sustained write, reopen,
      * and assert that every acknowledged batch is present, no unacknowledged
      * batch is partially present, and verification is clean."
