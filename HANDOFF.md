@@ -1,6 +1,6 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-09, end of session 10)
+## State (2026-10-09, session 11)
 
 - Branch `packaging/v1.0.0`. Manifests at 1.0.0, nothing published, no tags.
   Java targets Java 11 (built on JDK 17). Java `mvn verify` green after F-102;
@@ -13,9 +13,8 @@
   F-098, F-099) → 6 (after F-100, F-101). F-102 then fixed the corruption class;
   the only failures left are F-103 leaks (104067 8/10, 103891 2/10). A final
   Java 5000-kill run on the F-102 build has **not** been run.
-- F-098..F-102 fixed in Java this session (Rust checked: not affected; Dart
-  unchecked, M5). F-103 (S1) open, waiting on the human.
-- Open S1/S0 outside M5: F-103. M5: F-035, F-038, Dart halves of F-072,
+- F-098..F-103 fixed in Java (Rust checked: not affected; Dart unchecked, M5).
+- Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
   F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094..F-103 (Dart check).
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
   never build Java while a hop or Java torture runs, nor edit sources
@@ -49,17 +48,12 @@
 
 ## Open questions for the human
 
-- F-103: Java leaks a BLOB extent on a crash while its entry is still in the
-  memtable. (a) Java writes values ≥ `blob_threshold` to the value log, as
-  Rust does: no format change, readers still read blobs, also removes F-098's
-  class; or (b) keep blobs, and each publish lists memtable-only blob extents
-  as free in tree 1 (more code, a writer-vs-publish race to close as in F-101).
-  Recommendation: (a).
+- None.
 
 ## Next action
 
-Fix F-103 per the human's answer, rerun seeds 104067 and 103891, then the
-full Java M2.2: `nohup sh -c 'tools/torture.py java 101000 103500 --ops 400 --maint 1; tools/torture.py java 103500 106000 --ops 400 --maint 1 --encrypted' > reference/bench/runs/m22-java4.log 2>&1 &`.
+Read the tail of `reference/bench/runs/m22-java4.log` (two lines, `… kills, N failures`).
+0 failures: tick M2.2 for Java. Otherwise debug the failing seed with the recipe above.
 Then M1.2 10 000-seed runs, M3 fuzzing.
 
 ## Log
@@ -73,3 +67,4 @@ Then M1.2 10 000-seed runs, M3 fuzzing.
 - 2026-10-08 — F-093 (GC vs in-flight batch), F-094 (cold extent sizing), F-095 (failed publish numbering, Rust nonce limit); M2.3 green in Rust and Java.
 - 2026-10-09 — Decisions on F-094 parity, profile floor, bundled commits; F-096 (hot extents, harness `.bak` leak filled the disk) fixed in Rust + Java; F-097 (Java double rollover orphaned a segment) fixed.
 - 2026-10-09 — M2.3 green on F-096; M2.2 Rust 5000/0; Java F-098 (decrypt vs memtable blob), F-099 (compact no flush), F-100 (liveness understated), F-101 (extent mid-publish), F-102 (GC vs unflushed overwrite) fixed; F-103 open for the human.
+- 2026-10-09 — F-103 fixed (human chose a: value log, no put-time BLOBs); final Java M2.2 run started.

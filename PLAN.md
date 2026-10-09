@@ -17,7 +17,7 @@ interop gate 12/12 directions plaintext+encrypted.
 |---|---|---|---|---|
 | M0 | Execution infra, gates, CI matrix | all | 10-07 | **done** (0.5: 26/26 jobs green, run 37597698770) |
 | M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 checkers in all three; 1.3 hop built; 1.4 regress + hop in the gate; 1.5 index differential in all three, 2000 seeds clean) |
-| M2 | Crash consistency + concurrency | A | 10-16 | in progress (2.1 Rust+Java: 3000 fault seeds each clean, Dart after M5; 2.2: Rust 5000 kills 0 failures; Java 25→6, F-098–F-102 fixed, F-103 open (human); 2.3 `tools/enospc.sh`: Rust + Java green plain+encrypted; F-082–F-103) |
+| M2 | Crash consistency + concurrency | A | 10-16 | in progress (2.1 Rust+Java: 3000 fault seeds each clean, Dart after M5; 2.2: Rust 5000 kills 0 failures; Java 25→6, F-098–F-103 fixed, final 5000-kill run in progress; 2.3 `tools/enospc.sh`: Rust + Java green plain+encrypted; F-082–F-103) |
 | M3 | Coverage-guided fuzzing | A | 10-16 | todo |
 | M4 | Security review + pentest | A | 10-21 | todo |
 | M5 | Dart storage rewrite | B | 10-23 gate | todo |
