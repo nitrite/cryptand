@@ -17,8 +17,8 @@ interop gate 12/12 directions plaintext+encrypted.
 |---|---|---|---|---|
 | M0 | Execution infra, gates, CI matrix | all | 10-07 | **done** (0.5: 26/26 jobs green, run 37597698770) |
 | M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 checkers in all three; 1.3 hop built; 1.4 regress + hop in the gate; 1.5 index differential in all three, 2000 seeds clean) |
-| M2 | Crash consistency + concurrency | A | 10-16 | in progress (2.1 Rust+Java: 3000 fault seeds each clean, Dart after M5; 2.2: Rust 5000 kills 0 failures; Java 25→6, F-098–F-103 fixed, final 5000-kill run in progress; 2.3 `tools/enospc.sh`: Rust + Java green plain+encrypted; F-082–F-103) |
-| M3 | Coverage-guided fuzzing | A | 10-16 | todo |
+| M2 | Crash consistency + concurrency | A | 10-16 | in progress (2.1 Rust+Java: 3000 fault seeds each clean, Dart after M5; 2.2: Rust and Java 5000 kills 0 failures each (Java after F-098–F-104), Dart after M5; 2.3 `tools/enospc.sh`: Rust + Java green plain+encrypted; F-082–F-104) |
+| M3 | Coverage-guided fuzzing | A | 10-16 | in progress (3.1: 8 Rust cargo-fuzz targets, 4 h campaign running 10-09; 3.3: 7 Jazzer targets, replayed in `mvn verify`; `fuzz-regress/` replayed by the three hostile tests; F-105–F-110) |
 | M4 | Security review + pentest | A | 10-21 | todo |
 | M5 | Dart storage rewrite | B | 10-23 gate | todo |
 | M6 | Scale 10⁶→10⁹, soak, P2 | C | 10-24 | todo |
@@ -137,7 +137,7 @@ test compares the engine against a model on random histories.
   Invariants on reopen: opens, or refuses with a typed error and never a panic;
   `verify` is clean; every write acknowledged under a durable mode is present;
   a batch is all-or-nothing; the nonce floor is above every nonce used.
-- [ ] **2.2** Real kill -9 torture: a child process runs random ops including
+- [ ] **2.2** (10-09: Rust 5000 kills 0 failures; Java 5000 kills 0 failures, seeds 101000..106000, after F-098–F-104; Dart after M5) Real kill -9 torture: a child process runs random ops including
   compaction, value-log GC, `shrink`, `encrypt()`, `rotate_master_key`,
   `crypto_erase` and backup; the parent kills it at a random time, then
   reopens and runs `verify` plus the model check of M1.
