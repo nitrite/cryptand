@@ -23,14 +23,15 @@
   git-ignored, seeded from the Rust corpora; `mvn verify` replays ~11.8k).
   Crash files go to `reference/conformance/files/fuzz-regress/` CRC-repaired
   (`CRYPTAND_FUZZ_DUMP=path` while replaying one), replayed by the hostile
-  tests in all three. Fixed so far: F-105..F-110.
-- `segment` (cov 254) and `superblock_keyslot` (cov 152) targets are shallow:
-  `segment`'s seeds are single pages, not segment extents.
-- Java `EngineTest.collectionReclaimsSpace` failed once under fuzz load
-  ("fixture wrote too little"), green on rerun: a load-sensitive flake.
+  tests in all three. Fixed so far: F-105..F-111.
+- `segment` now seeds whole segment extents (cov 254 -> 737) and was
+  restarted 10-09 ~21:00 after F-111; `superblock_keyslot` is still shallow (cov 152).
+- Java `EngineTest.collectionReclaimsSpace` flaked twice under load (background
+  GC shrank the bytes its control counts); now runs without background
+  compaction (9b232eb), 3/3 under load.
 - F-098..F-103 fixed in Java (Rust checked: not affected; Dart unchecked, M5).
 - Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
-  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094..F-110 (Dart check), Dart corpus replay (M3.4).
+  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094..F-111 (Dart check), Dart corpus replay (M3.4).
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
   never build Java while a hop or Java torture runs, nor edit sources
   while `tools/gate.sh` runs (its interop stage rebuilds Java).
@@ -85,4 +86,4 @@ the remote `m12-*.log` (want `0 divergences`; then tick M1.2 for Rust + Java).
 - 2026-10-09 — M2.3 green on F-096; M2.2 Rust 5000/0; Java F-098 (decrypt vs memtable blob), F-099 (compact no flush), F-100 (liveness understated), F-101 (extent mid-publish), F-102 (GC vs unflushed overwrite) fixed; F-103 open for the human.
 - 2026-10-09 — F-103 fixed (human chose a: value log, no put-time BLOBs); final Java M2.2 run started.
 - 2026-10-09 — Java M2.2 4999/5000; F-104 (rotate OOM on a free page) fixed; M1.2 10k and M2.2 rerun started on the remote Mac.
-- 2026-10-09 — M2.2 Java done (5000/0). M3 started: cargo-fuzz (8) + Jazzer (7) targets; F-105..F-110 fixed (Rust, Java, Dart).
+- 2026-10-09 — M2.2 Java done (5000/0). M3 started: cargo-fuzz (8) + Jazzer (7) targets; F-105..F-111 fixed (Rust, Java, Dart); collectionReclaimsSpace flake fixed.
