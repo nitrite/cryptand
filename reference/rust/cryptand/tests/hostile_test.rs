@@ -389,3 +389,40 @@ fn an_integer_that_does_not_fit_its_type_code_is_refused() {
     let min = cke::encode(&Value::Int { w: NumType::I8, neg: true, mag: 128 }).unwrap();
     assert!(cke::decode_all(&min).is_ok(), "i8::MIN is an i8");
 }
+
+/// Generator for `fuzz-regress/f111-segment-cycle.cryptand` (F-111): a real
+/// segment whose root's last child points back at the root. Run once with
+/// `cargo test --test hostile_test -- --ignored make_f111`.
+#[test]
+#[ignore]
+fn make_f111_segment_cycle() {
+    use cryptand::container::Profile;
+    use cryptand::segment::Node;
+    let tmp = std::env::temp_dir().join(format!("cryptand-f111-{}.cryptand", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut e = Engine::create(&tmp, Profile::Desktop).unwrap();
+    for i in 0..20_000i64 {
+        e.put(16, &Value::NitriteId(i), &[7u8; 24]).unwrap();
+    }
+    e.flush().unwrap();
+    e.commit(cryptand::container::Durability::Sync).unwrap();
+    let refs = e.all_refs().unwrap();
+    drop(e);
+    let mut b = std::fs::read(&tmp).unwrap();
+    let ps = Superblock::parse(&b[..4096]).unwrap().page_size();
+    let r = refs.iter().find(|r| r.pages > 2).expect("a multi-page segment");
+    let at = ((r.start_page + r.root) as usize) * ps;
+    let off = {
+        let n = Node::parse(&b[at..at + ps], r.root).unwrap();
+        assert!(!n.is_leaf && n.cell_count >= 2, "root is not internal");
+        n.cell_suffix(n.cell_count - 1).unwrap().1
+    };
+    b[at + off..at + off + 8].copy_from_slice(&r.root.to_le_bytes());
+    let page = &mut b[at..at + ps];
+    let h = PageHeader::parse(page).unwrap();
+    let end = PageHeader::checksum_range_end(page, &h);
+    let crc = cryptand::hash::crc32c(&page[4..end]);
+    page[..4].copy_from_slice(&crc.to_le_bytes());
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/files/fuzz-regress/f111-segment-cycle.cryptand");
+    std::fs::write(out, &b).unwrap();
+}

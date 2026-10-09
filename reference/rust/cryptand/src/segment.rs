@@ -1710,9 +1710,13 @@ impl Segment {
         let mut first = true;
         // Leaves in key order, so a key's first cell is met before its others.
         let mut stack: Vec<(u64, u32)> = vec![(self.header.root_page, 0)];
+        let mut seen = std::collections::HashSet::new();
         while let Some((page, depth)) = stack.pop() {
             if depth > 64 {
                 return corrupt("segment tree is deeper than 64 levels");
+            }
+            if !seen.insert(page) {
+                return corrupt(format!("segment page {page} is reached twice (F-111)"));
             }
             let node = self.node(page)?;
             if !node.is_leaf {
@@ -1756,7 +1760,7 @@ impl Segment {
 
     /// Every entry, in internal-key order. Used by compaction and by scans.
     pub fn iter(&self) -> SegmentEntries<'_> {
-        SegmentEntries { cursor: SegmentCursor::new(self), started: false }
+        SegmentEntries { cursor: SegmentCursor::new(self), started: false, leaves: Default::default(), leaf: None }
     }
 
     /// §2.5 — every range delete in the segment, hoisted once so a scan does
@@ -1919,6 +1923,10 @@ impl<'a> SegmentCursor<'a> {
     /// outright when `target` is `None`). Returns whether a cell was found.
     fn descend(&mut self, mut page: u64, target: Option<&[u8]>) -> Result<bool> {
         loop {
+            // F-111: a child that points back up loops forever without this.
+            if self.path.len > 64 {
+                return corrupt("segment tree is deeper than 64 levels");
+            }
             let node = self.seg.node(page)?;
             if node.cell_count == 0 {
                 return Ok(false);
@@ -2076,6 +2084,10 @@ impl<'a> SegmentCursor<'a> {
 pub struct SegmentEntries<'a> {
     cursor: SegmentCursor<'a>,
     started: bool,
+    /// F-111: a tree reaches each leaf once. Children shared between internal
+    /// cells would otherwise make a full walk exponential in the height.
+    leaves: std::collections::HashSet<u64>,
+    leaf: Option<u64>,
 }
 
 impl<'a> Iterator for SegmentEntries<'a> {
@@ -2089,6 +2101,14 @@ impl<'a> Iterator for SegmentEntries<'a> {
             }
         } else if let Err(e) = self.cursor.next() {
             return Some(Err(e));
+        }
+        if let Some((page, _)) = self.cursor.position() {
+            if self.leaf != Some(page) {
+                if !self.leaves.insert(page) {
+                    return Some(corrupt(format!("segment leaf {page} is reached twice")));
+                }
+                self.leaf = Some(page);
+            }
         }
         match self.cursor.record() {
             Ok(Some(r)) => Some(Ok(r)),

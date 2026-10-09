@@ -1560,6 +1560,28 @@ final class SegmentCursor {
 
   /// `(node, cellIndex)` from the root down to the current leaf.
   final List<(Node, int)> _path = [];
+
+  /// F-111: leaves already walked by this iteration. A tree reaches each leaf
+  /// once; children shared between internal cells would otherwise make a walk
+  /// exponential in the height. Created on the first step to a second leaf.
+  Set<int>? _leaves;
+
+  void _push((Node, int) e) {
+    // F-111: a child that points back up would descend forever.
+    if (_path.length > 64) {
+      throw const CorruptionException('segment tree is deeper than 64 levels');
+    }
+    _path.add(e);
+  }
+
+  /// Records the leaf being left; refuses one walked before.
+  bool _arrive() {
+    final p = _leaf.pageIndex;
+    if (_leaves!.contains(p)) {
+      throw CorruptionException('segment leaf $p is reached twice');
+    }
+    return _valid = _leaf.cellCount > 0;
+  }
   bool _valid = false;
 
   bool get isValid => _valid;
@@ -1579,10 +1601,11 @@ final class SegmentCursor {
 
   void seekFirst() {
     _path.clear();
+    _leaves = null;
     descents++;
     var n = segment.node(segment.header.rootPage);
     while (true) {
-      _path.add((n, 0));
+      _push((n, 0));
       if (n.isLeaf) break;
       n = segment.node(n.childAt(0).$1);
     }
@@ -1591,11 +1614,12 @@ final class SegmentCursor {
 
   void seekLast() {
     _path.clear();
+    _leaves = null;
     descents++;
     var n = segment.node(segment.header.rootPage);
     while (true) {
       final i = n.cellCount - 1;
-      _path.add((n, i));
+      _push((n, i));
       if (n.isLeaf) break;
       n = segment.node(n.childAt(i).$1);
     }
@@ -1605,6 +1629,7 @@ final class SegmentCursor {
   /// Positions at the first entry whose internal key is >= [target].
   void seekCeiling(Uint8List target) {
     _path.clear();
+    _leaves = null;
     descents++;
     var n = segment.node(segment.header.rootPage);
     while (!n.isLeaf) {
@@ -1612,11 +1637,11 @@ final class SegmentCursor {
       // last child whose separator is <= target.
       var i = n.floorIndex(target);
       if (i < 0) i = 0;
-      _path.add((n, i));
+      _push((n, i));
       n = segment.node(n.childAt(i).$1);
     }
     final i = n.ceilingIndex(target);
-    _path.add((n, i));
+    _push((n, i));
     if (i >= n.cellCount) {
       _valid = true;
       next(); // roll into the following leaf
@@ -1634,6 +1659,7 @@ final class SegmentCursor {
     }
     // Walk up until a parent has another child, then down its left spine.
     // No sibling pointers: section 2.2 removed them, and this is the cost.
+    (_leaves ??= {}).add(_leaf.pageIndex);
     var level = _path.length - 2;
     while (level >= 0) {
       final (n, i) = _path[level];
@@ -1642,11 +1668,11 @@ final class SegmentCursor {
         _path[level] = (n, i + 1);
         var child = segment.node(n.childAt(i + 1).$1);
         while (true) {
-          _path.add((child, 0));
+          _push((child, 0));
           if (child.isLeaf) break;
           child = segment.node(child.childAt(0).$1);
         }
-        return _valid = _leaf.cellCount > 0;
+        return _arrive();
       }
       level--;
     }
@@ -1659,6 +1685,7 @@ final class SegmentCursor {
       _setLast(_index - 1);
       return true;
     }
+    (_leaves ??= {}).add(_leaf.pageIndex);
     var level = _path.length - 2;
     while (level >= 0) {
       final (n, i) = _path[level];
@@ -1667,11 +1694,11 @@ final class SegmentCursor {
         _path[level] = (n, i - 1);
         var child = segment.node(n.childAt(i - 1).$1);
         while (true) {
-          _path.add((child, child.cellCount - 1));
+          _push((child, child.cellCount - 1));
           if (child.isLeaf) break;
           child = segment.node(child.childAt(child.cellCount - 1).$1);
         }
-        return _valid = _leaf.cellCount > 0;
+        return _arrive();
       }
       level--;
     }
@@ -1689,6 +1716,7 @@ final class SegmentCursor {
       return;
     }
     _path.clear();
+    _leaves = null;
     descents++;
     var node = segment.node(segment.header.rootPage);
     var remaining = n;
@@ -1704,14 +1732,14 @@ final class SegmentCursor {
         _valid = false;
         return;
       }
-      _path.add((node, i));
+      _push((node, i));
       node = segment.node(node.childAt(i).$1);
     }
     if (remaining >= node.cellCount) {
       _valid = false;
       return;
     }
-    _path.add((node, remaining));
+    _push((node, remaining));
     _valid = true;
   }
 

@@ -304,8 +304,26 @@ public final class Segment {
         private int depth;
         private BtreePage leafPage;
         private boolean valid;
+        /**
+         * F-111: leaves already walked by this iteration. A tree reaches each
+         * leaf once; children shared between internal cells would otherwise
+         * make a walk exponential in the height. Created on the first step to
+         * a second leaf, so a point read allocates nothing.
+         */
+        private java.util.HashSet<Long> leaves;
+
+        private void leaving() {
+            if (leaves == null) {
+                leaves = new java.util.HashSet<>();
+            }
+            leaves.add(pages[depth - 1]);
+        }
 
         private void push(long page, int cell) {
+            // F-111: a child that points back up would descend forever.
+            if (depth > 64) {
+                throw new CorruptionException("segment tree is deeper than 64 levels");
+            }
             if (depth == pages.length) {
                 pages = java.util.Arrays.copyOf(pages, depth * 2);
                 cells = java.util.Arrays.copyOf(cells, depth * 2);
@@ -328,17 +346,20 @@ public final class Segment {
 
         public void seekFirst() {
             depth = 0;
+            leaves = null;
             descendFrom(absolute(meta.rootPage), true);
         }
 
         public void seekLast() {
             depth = 0;
+            leaves = null;
             descendFrom(absolute(meta.rootPage), false);
         }
 
         /** Positions on the first entry with an internal key {@code >= target}. */
         public void seek(byte[] target) {
             depth = 0;
+            leaves = null;
             long p = absolute(meta.rootPage);
             while (true) {
                 BtreePage b = page(p);
@@ -407,6 +428,7 @@ public final class Segment {
             if (cells[depth - 1] < leafPage.cellCount()) {
                 return true;
             }
+            leaving();
             for (int d = depth - 2; d >= 0; d--) {
                 BtreePage b = page(pages[d]);
                 int i = cells[d] + 1;
@@ -429,6 +451,7 @@ public final class Segment {
                 cells[depth - 1]--;
                 return true;
             }
+            leaving();
             for (int d = depth - 2; d >= 0; d--) {
                 BtreePage b = page(pages[d]);
                 int i = cells[d] - 1;
@@ -453,6 +476,9 @@ public final class Segment {
                 int i = leftmost ? 0 : b.cellCount() - 1;
                 push(p, i);
                 if (b.isLeaf()) {
+                    if (leaves != null && leaves.contains(p)) {
+                        throw new CorruptionException("segment leaf " + p + " is reached twice");
+                    }
                     leafPage = b;
                     valid = true;
                     return;
