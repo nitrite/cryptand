@@ -8,21 +8,29 @@
 - M0 done. M1: hop 0..1000 plain and 0..300 encrypted clean; 10 000-seed
   M1.2 runs still pending. M2.1: fault sweeps 1000 seeds clean (Rust, Java).
 - M2.3 `tools/enospc.sh` green on the F-096 build, Rust + Java, plain + encrypted.
-- M2.2 (this Mac, `/Volumes/External`): **Rust 5000 kills, 0 failures**.
-  Java on the F-103 build: 4999/5000 clean; the one failure (seed 102507) was
-  an OOM in rotate, F-104, fixed. Rerun of seeds 101000..103500 on F-104 is
-  running on the remote Mac (`~/Documents/codebase/cryptand-m22`,
-  `reference/bench/runs/m22-java5.log`).
-- M1.2 10 000-seed runs running on the remote Mac (`~/Documents/codebase/cryptand`,
-  pre-F-104 checkout): `reference/bench/runs/m12-rust.log` (plain then
-  `--encrypted`), `m12-java.log` (`tools/oplog_java.sh`, plain then encrypted,
-  JDK `openjdk@18`). Remote needs `JAVA_HOME=/opt/homebrew/opt/openjdk@18`
-  (system Java is 11).
-- One local `mvn verify` failed once on 10-09 (test not captured); the next two
-  were green (368). Watch for a flake.
+- M2.2 done for Rust and Java: 5000 kills, 0 failures each (Java seeds
+  101000..103500 rerun on the remote Mac after F-104). Dart after M5.
+- M1.2 10 000-seed runs still running on the remote Mac
+  (`~/Documents/codebase/cryptand`, pre-F-104 checkout):
+  `reference/bench/runs/m12-rust.log` (prints only at the end; plain then
+  `--encrypted`), `m12-java.log` (`tools/oplog_java.sh`, plain then encrypted).
+  Remote Java: `JAVA_HOME=/opt/homebrew/opt/openjdk@18` (system Java is 11).
+- M3 (this Mac): 8 cargo-fuzz targets in `reference/rust/cryptand/fuzz/`
+  (`seed.py` seeds `corpus/`), 4 h each from 10-09 ~20:00, logs
+  `reference/bench/runs/fuzz/m3-*.log` (`cke_roundtrip` restarted ~20:10).
+  Jazzer: `JazzerTest.java` (7 targets); fuzz one with `JAZZER_FUZZ=1 mvn
+  surefire:test -Dtest=JazzerTest#openFile` (corpus `.cifuzz-corpus/`,
+  git-ignored, seeded from the Rust corpora; `mvn verify` replays ~11.8k).
+  Crash files go to `reference/conformance/files/fuzz-regress/` CRC-repaired
+  (`CRYPTAND_FUZZ_DUMP=path` while replaying one), replayed by the hostile
+  tests in all three. Fixed so far: F-105..F-110.
+- `segment` (cov 254) and `superblock_keyslot` (cov 152) targets are shallow:
+  `segment`'s seeds are single pages, not segment extents.
+- Java `EngineTest.collectionReclaimsSpace` failed once under fuzz load
+  ("fixture wrote too little"), green on rerun: a load-sensitive flake.
 - F-098..F-103 fixed in Java (Rust checked: not affected; Dart unchecked, M5).
 - Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
-  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094..F-104 (Dart check).
+  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094..F-110 (Dart check), Dart corpus replay (M3.4).
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
   never build Java while a hop or Java torture runs, nor edit sources
   while `tools/gate.sh` runs (its interop stage rebuilds Java).
@@ -59,9 +67,10 @@
 
 ## Next action
 
-On the remote Mac, tail `m22-java5.log` (want `2500 kills, 0 failures`; then tick
-M2.2 for Java) and the two `m12-*.log` (want `0 divergences` per line; then tick
-M1.2 for Rust + Java). Meanwhile start M3 fuzzing locally.
+When the Rust fuzz campaign ends (~10-10 00:10), triage `m3-*.log` (crash files
+under `fuzz/artifacts/`), then give `segment` real segment-extent seeds and run
+the Jazzer campaign (2 h per target, one `mvn surefire:test` per target). Check
+the remote `m12-*.log` (want `0 divergences`; then tick M1.2 for Rust + Java).
 
 ## Log
 
@@ -76,3 +85,4 @@ M1.2 for Rust + Java). Meanwhile start M3 fuzzing locally.
 - 2026-10-09 — M2.3 green on F-096; M2.2 Rust 5000/0; Java F-098 (decrypt vs memtable blob), F-099 (compact no flush), F-100 (liveness understated), F-101 (extent mid-publish), F-102 (GC vs unflushed overwrite) fixed; F-103 open for the human.
 - 2026-10-09 — F-103 fixed (human chose a: value log, no put-time BLOBs); final Java M2.2 run started.
 - 2026-10-09 — Java M2.2 4999/5000; F-104 (rotate OOM on a free page) fixed; M1.2 10k and M2.2 rerun started on the remote Mac.
+- 2026-10-09 — M2.2 Java done (5000/0). M3 started: cargo-fuzz (8) + Jazzer (7) targets; F-105..F-110 fixed (Rust, Java, Dart).
