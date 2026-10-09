@@ -95,6 +95,11 @@ pub fn check_writable(v: &Value) -> Result<()> {
             Ok(())
         }
         Value::Array(items) => items.iter().try_for_each(check_writable),
+        Value::Doc(fields) if fields.len() > crate::limits::MAX_FIELDS => Err(crate::Error::Invalid(format!(
+            "document has {} fields, limit is {} (00-conventions.md)",
+            fields.len(),
+            crate::limits::MAX_FIELDS
+        ))),
         Value::Doc(fields) => fields.iter().try_for_each(|(_, x)| check_writable(x)),
         _ => Ok(()),
     }
@@ -553,6 +558,14 @@ fn read_doc_body(
     at += 1;
     if flags & 1 == 0 {
         return corrupt("SORTED_BY_NAME_ID MUST be 1 in v1");
+    }
+    // Each field-table entry is two uvarints, at least two bytes (14 §9.1:
+    // never size an allocation from an untrusted count).
+    if count > crate::limits::MAX_FIELDS {
+        return corrupt(format!("document declares {count} fields, limit is {}", crate::limits::MAX_FIELDS));
+    }
+    if count > (body.len() - at) / 2 {
+        return corrupt(format!("document declares {count} fields in {} bytes", body.len() - at));
     }
     let mut refs = Vec::with_capacity(count);
     for _ in 0..count {

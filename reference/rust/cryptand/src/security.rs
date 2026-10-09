@@ -200,6 +200,9 @@ pub struct Keyslot {
 impl Keyslot {
     pub fn parse(b: &[u8]) -> Result<Keyslot> {
         use keyslot as k;
+        if b.len() < k::SIZE {
+            return corrupt(format!("keyslot is {} bytes, expected {}", b.len(), k::SIZE));
+        }
         let state = b[k::STATE];
         if state > 1 {
             return corrupt(format!("keyslot state {state} is neither 0 nor 1"));

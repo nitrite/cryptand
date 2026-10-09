@@ -319,3 +319,22 @@ fn a_name_id_above_u32_is_refused_not_aliased() {
     let bad = [0x22, 0x09, 0x01, 0x01, 0x82, 0x80, 0x80, 0x80, 0x20, 0x00, 0x00];
     assert!(cryptand::cve::decode_all(&bad, &dict).is_err());
 }
+
+/// F-105 (M3 fuzz `cve_decode`): a DOC whose field count is near 2^61 sized
+/// an allocation from it. §9.1: a typed error, never an allocation failure.
+#[test]
+fn a_document_declaring_huge_field_count_is_refused_without_allocating() {
+    let crash = [
+        0x22, 0x0c, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0xff, 0xff, 0xff, 0xfd, 0xff, 0x32, 0xff, 0xff,
+    ];
+    let r = cryptand::cve::decode_all(&crash, &|_| None);
+    assert!(matches!(r, Err(cryptand::Error::Corrupt(_))), "{r:?}");
+    let wide = Value::Doc((0..=cryptand::limits::MAX_FIELDS).map(|i| (format!("f{i}"), Value::Null)).collect());
+    assert!(cryptand::cve::check_writable(&wide).is_err(), "a document over the field limit is writable");
+}
+
+/// F-106 (M3 fuzz `superblock_keyslot`): a short slice panicked.
+#[test]
+fn a_short_keyslot_is_refused_not_a_panic() {
+    assert!(cryptand::security::Keyslot::parse(&[]).is_err());
+}
