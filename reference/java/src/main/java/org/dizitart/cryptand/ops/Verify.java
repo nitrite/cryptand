@@ -372,6 +372,12 @@ public final class Verify {
     }
 
     private long walk(Segment seg, SegmentMeta m, long relativePage, int depth, Set<Integer> depths) {
+        // F-119: F-111's bound, here too; a child that points back up recursed until the stack overflowed.
+        if (depth > 64) {
+            findings.add(new Finding(Kind.CORRUPTION,
+                    "segment " + m.segmentId + "'s tree is deeper than 64 levels"));
+            return -1;
+        }
         byte[] payload;
         try {
             payload = pager.readPage(m.startPage + relativePage);
