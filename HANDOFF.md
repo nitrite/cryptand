@@ -6,24 +6,32 @@
   Java targets Java 11 (built on JDK 17). Java `mvn verify` green at 5101229
   (F-115); Rust `cargo test --workspace` green 10-08.
 - M0 done. M2.1, M2.2 (Rust, Java), M2.3 done. Dart after M5.
-- M1.2: Rust 10 000 seeds plain + encrypted, 0 divergences. Java's run hit
-  F-115 (seeds 6537, 8967; fixed, replay clean) and is rerunning on the remote
-  Mac at 5101229 from 10-10 10:35: `~/Documents/codebase/cryptand/reference/bench/runs/m12-java.log`
-  (plain then `--encrypted`, ~4 h each; old log `m12-java-preF115.log`).
+- M1.2: Rust 10 000 seeds plain + encrypted, 0 divergences. Java at 5101229
+  (remote `~/Documents/codebase/cryptand/reference/bench/runs/m12-java.log`):
+  plain 10 000/0; `--encrypted` 1/10 000 diverged, seed 9334: verify says
+  `CORRUPTION VLOG pointer in segment 77: value-log segment 13 has no entry
+  in tree 7`. Not triaged, no F number yet. M1.2 not done.
   Remote debug instrumentation from the F-115 hunt is in `git stash` there.
-  Remote Java: `JAVA_HOME=/opt/homebrew/opt/openjdk@18`.
+- Remote JDKs: `openjdk@18` is a link to 24.0.1 (not 18). Jazzer needs
+  `JAVA_HOME=/opt/homebrew/opt/openjdk@21` (installed 10-10); under 24 its
+  instrumentation fails (`class file major version 68`) yet the run still
+  reports a clean pass.
 - M3 Rust: 8 cargo-fuzz targets x 4 h done 10-10, 0 crashes. Coverage:
   open_file 4758, open_encrypted 3846, cve_decode 1333, analyzer 1228,
   segment 764, cke_roundtrip 675, wkb 367, superblock_keyslot 152 (shallow).
 - M3 Jazzer runs on the remote Mac in a separate clone
   `~/Documents/codebase/cryptand-fuzz` (all CPU-heavy work goes there, human
   10-10), 4 targets at a time, 2 h each, logs `reference/bench/runs/fuzz/jz-*.log`
-  there. ckeRoundtrip and openFile stopped on F-116/F-117 (fixed, f3c57b5);
-  rerun those two after the current batch ends (rebuilding classes under a
-  running fuzzer breaks it). Gate runs on the remote too: clone
+  there. Every 10-10 Jazzer run before 23:30 IST ran under JDK 24 and proves
+  nothing; all 7 targets need a JDK 21 rerun. ckeRoundtrip is running under
+  21 since 23:37 (ends ~01:40, no findings at 23:55). openFile under 21 found
+  F-119 (fixed, 420d2d2); rerun it after ckeRoundtrip ends (rebuilding classes
+  under a running fuzzer breaks it). Gate runs on the remote too: clone
   `cryptand-gate` (rsync the tree; Dart 3.12.2 SDK in `~/dart-sdk/bin`, put it on PATH; interop green there at da1cd1d).
   Crash files go to `reference/conformance/files/fuzz-regress/` CRC-repaired
-  (`CRYPTAND_FUZZ_DUMP=path` while replaying one). Fixed so far: F-105..F-114.
+  (call `JazzerTest.repairCrcs`; `CRYPTAND_FUZZ_DUMP` keeps only the last
+  input replayed). Replaying inputs needs `process-test-resources`, since
+  `surefire:test` reads `target/test-classes`. Fixed so far: F-105..F-119.
 - Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
   F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088,
   F-094..F-115 (Dart check), Dart corpus replay (M3.4).
@@ -61,9 +69,10 @@
 
 ## Next action
 
-When the remote Jazzer batch ends (~15:00), pull f3c57b5 into `cryptand-fuzz`,
-rerun ckeRoundtrip and openFile, triage `jz-*.log`. Check remote
-`m12-java.log` (want `0 divergences` twice; tick M1.2). F-118 done in all three.
+Triage Java M1.2 encrypted seed 9334 (VLOG pointer with no entry in tree 7;
+replay that one seed). When ckeRoundtrip ends (~01:40), pull 420d2d2 into
+`cryptand-fuzz`, delete the untracked `crash-0580…`/`crash-0d3a…` in
+`JazzerTestInputs/openFile`, then rerun all 7 targets under openjdk@21, 4 at a time.
 
 ## Log
 
@@ -81,3 +90,4 @@ rerun ckeRoundtrip and openFile, triage `jz-*.log`. Check remote
 - 2026-10-09 — M2.2 Java done (5000/0). M3 started: cargo-fuzz (8) + Jazzer (7) targets; F-105..F-112 fixed (Rust, Java, Dart); collectionReclaimsSpace flake fixed.
 - 2026-10-10 — Rust fuzz 8x4 h clean; M1.2 Rust 10k clean; F-115 (Java liveness vs visibleSeq) fixed; Java M1.2 and Jazzer rerun.
 - 2026-10-10 — CPU work moved to the remote Mac; F-116 (TIME signed order), F-117 (vlog stats shape) fixed in Java + Dart; F-118 (wrong-shape records) fixed in all three.
+- 2026-10-10 — Jazzer was under JDK 24 (no instrumentation); openjdk@21 installed; F-119 (Java Verify.walk recursion) fixed; Java M1.2 encrypted seed 9334 diverges.
