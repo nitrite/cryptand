@@ -1,5 +1,6 @@
 package org.dizitart.cryptand.ops;
 
+import org.dizitart.cryptand.CorruptionException;
 import org.dizitart.cryptand.Snapshot;
 import org.dizitart.cryptand.container.PageTree;
 import org.dizitart.cryptand.key.Cke;
@@ -149,7 +150,16 @@ public final class Checkpoint {
         return Value.Doc.of(f);
     }
 
+    /** 14 §9.1 (F-118, as F-110): a record of the wrong shape is corruption. */
     public static Checkpoint fromValue(String name, Value value) {
+        try {
+            return decode(name, value);
+        } catch (ClassCastException | NullPointerException | IndexOutOfBoundsException e) {
+            throw new CorruptionException("checkpoint '" + name + "' has the wrong shape: " + e);
+        }
+    }
+
+    private static Checkpoint decode(String name, Value value) {
         Value.Doc d = (Value.Doc) value;
         Value expires = d.field("expires");
         return new Checkpoint(name,

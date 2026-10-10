@@ -702,7 +702,12 @@ public final class Collection {
             for (Map.Entry<String, TreeDescriptor> e : db.catalog().entrySet()) {
                 TreeDescriptor d = e.getValue();
                 if (TreeDescriptor.Kind.POSTINGS.equals(d.kind()) && name.equals(d.owner())) {
-                    textIndexes.add(new FullTextIndex(db, this, e.getKey(), d));
+                    try {
+                        textIndexes.add(new FullTextIndex(db, this, e.getKey(), d));
+                    } catch (ClassCastException | NullPointerException | IndexOutOfBoundsException x) {
+                        // 14 §9.1 (F-118, as F-110): params of the wrong shape are corruption.
+                        throw new CorruptionException("text index '" + e.getKey() + "' has params of the wrong shape: " + x);
+                    }
                 }
             }
         }
@@ -784,7 +789,13 @@ public final class Collection {
             for (Map.Entry<String, TreeDescriptor> e : db.catalog().entrySet()) {
                 TreeDescriptor d = e.getValue();
                 if (TreeDescriptor.Kind.VECTOR_GRAPH.equals(d.kind()) && name.equals(d.owner())) {
-                    VectorIndex index = new VectorIndex(db, this, e.getKey(), d);
+                    VectorIndex index;
+                    try {
+                        index = new VectorIndex(db, this, e.getKey(), d);
+                    } catch (ClassCastException | NullPointerException | IndexOutOfBoundsException x) {
+                        // 14 §9.1 (F-118, as F-110): params of the wrong shape are corruption.
+                        throw new CorruptionException("vector index '" + e.getKey() + "' has params of the wrong shape: " + x);
+                    }
                     engine.addCommitHook(index::commit);
                     vectorIndexes.add(index);
                 }

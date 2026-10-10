@@ -1,5 +1,6 @@
 package org.dizitart.cryptand.ops;
 
+import org.dizitart.cryptand.CorruptionException;
 import org.dizitart.cryptand.container.PageTree;
 import org.dizitart.cryptand.key.Cke;
 import org.dizitart.cryptand.lsm.SegmentMeta;
@@ -106,7 +107,16 @@ public final class ChangeFeed {
         return Value.Doc.of(f);
     }
 
+    /** 14 §9.1 (F-118, as F-110): an entry of the wrong shape is corruption. */
     public static ChangeFeed fromEntry(byte[] cke, Value value) {
+        try {
+            return decode(cke, value);
+        } catch (ClassCastException | NullPointerException | IndexOutOfBoundsException e) {
+            throw new CorruptionException("change-feed entry has the wrong shape: " + e);
+        }
+    }
+
+    private static ChangeFeed decode(byte[] cke, Value value) {
         List<Value> parts = ((Value.Array) Cke.decode(cke)).items();
         Value.Doc d = (Value.Doc) value;
         Value id = d.field("id");
