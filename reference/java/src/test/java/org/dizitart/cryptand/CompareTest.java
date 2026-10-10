@@ -141,6 +141,7 @@ class CompareTest {
                 new Value.Date(19000),
                 new Value.Time(0),
                 new Value.Time(86_399_999_999_999L),
+                new Value.Time(-1L), // F-116: u64 2^64-1, above every TIME
                 new Value.Duration(0, 0),
                 new Value.Duration(-1, 999_999_999),
                 new Value.Duration(1, 1),

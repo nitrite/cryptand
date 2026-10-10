@@ -79,6 +79,7 @@ List<CValue> orderedCorpus() => <CValue>[
       const CDate(19000),
       CTime(0),
       CTime(86399999999999),
+      CTime(-1), // F-116: u64 2^64-1, above every TIME
       CDuration(0, 0),
       CDuration(-1, 999999999),
       CDuration(1, 1),

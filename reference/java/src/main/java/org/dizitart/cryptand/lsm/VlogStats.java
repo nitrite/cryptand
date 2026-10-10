@@ -1,5 +1,6 @@
 package org.dizitart.cryptand.lsm;
 
+import org.dizitart.cryptand.CorruptionException;
 import org.dizitart.cryptand.key.Cke;
 import org.dizitart.cryptand.value.NumType;
 import org.dizitart.cryptand.value.Value;
@@ -71,7 +72,16 @@ public final class VlogStats {
         return Value.Doc.of(f);
     }
 
+    /** 14 §9.1 (F-117, as F-110): a stats entry of the wrong shape is corruption, not an NPE. */
     public static VlogStats fromValue(byte[] key, Value v) {
+        try {
+            return decode(key, v);
+        } catch (ClassCastException | NullPointerException e) {
+            throw new CorruptionException("value-log stats entry has the wrong shape: " + e);
+        }
+    }
+
+    private static VlogStats decode(byte[] key, Value v) {
         VlogStats s = new VlogStats();
         s.segmentId = SegmentMeta.longOf(Cke.decode(key));
         Value.Doc d = (Value.Doc) v;

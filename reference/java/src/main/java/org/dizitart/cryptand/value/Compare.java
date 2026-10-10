@@ -375,7 +375,8 @@ public final class Compare {
             return Integer.compare(((Value.Date) a).days(), ((Value.Date) b).days());
         }
         if (sa == Cke.TemporalClass.TIME) {
-            return Long.compare(((Value.Time) a).nanos(), ((Value.Time) b).nanos());
+            // F-116: TIME is u64 (02 §3); a long above 2^63 reads negative.
+            return Long.compareUnsigned(((Value.Time) a).nanos(), ((Value.Time) b).nanos());
         }
         Value.Duration da = (Value.Duration) a;
         Value.Duration db = (Value.Duration) b;

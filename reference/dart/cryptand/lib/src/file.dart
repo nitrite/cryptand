@@ -608,25 +608,32 @@ abstract final class DatabaseFile {
     final stats = CowTree(store, treeId: TreeId.vlogStats, root: sb.vlogStatsRoot);
     e.outerTrees['tree 7'] = stats;
     for (final (k, v) in stats.scan()) {
-      final id = ((decodeKey(k) as CInt).magnitude).lo;
-      final d = decodeValue(v) as CDoc;
-      int u(String f) => ((d[f]! as CInt).magnitude).lo;
-      bool b(String f) => (d[f] as CBool?)?.value ?? false;
-      Uint8List? by(String f) => (d[f] as CBytes?)?.value;
-      final extent = store.readExtentClear(u('start_page'), u('pages'));
-      final seg = VlogSegment.fromExtent(
-        extent,
-        sb.pageSize,
-        bytes: u('bytes'),
-        records: u('records'),
-        sealed: b('sealed'),
-        clustered: b('clustered'),
-        minKey: by('min_key'),
-        maxKey: by('max_key'),
-        liveBytes: u('live_bytes'),
-        liveRecords: u('live_records'),
-      );
-      seg.startPage = u('start_page');
+      final int id;
+      final VlogSegment seg;
+      // 14 §9.1 (F-117, as F-110): a stats entry of the wrong shape is
+      // corruption, not a `TypeError`.
+      try {
+        id = ((decodeKey(k) as CInt).magnitude).lo;
+        final d = decodeValue(v) as CDoc;
+        int u(String f) => ((d[f]! as CInt).magnitude).lo;
+        bool b(String f) => (d[f] as CBool?)?.value ?? false;
+        Uint8List? by(String f) => (d[f] as CBytes?)?.value;
+        final extent = store.readExtentClear(u('start_page'), u('pages'));
+        seg = VlogSegment.fromExtent(
+          extent,
+          sb.pageSize,
+          bytes: u('bytes'),
+          records: u('records'),
+          sealed: b('sealed'),
+          clustered: b('clustered'),
+          minKey: by('min_key'),
+          maxKey: by('max_key'),
+          liveBytes: u('live_bytes'),
+          liveRecords: u('live_records'),
+        )..startPage = u('start_page');
+      } on TypeError catch (e) {
+        throw CorruptionException('value-log stats entry has the wrong shape: $e');
+      }
       // §4.3 of `spec/14-security.md` and §4 of `spec/10-transactions.md`: on
       // open, every unsealed value-log segment is sealed at its durable
       // watermark and a fresh segment is opened for new writes. Unencrypted

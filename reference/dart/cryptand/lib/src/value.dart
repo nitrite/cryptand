@@ -379,11 +379,10 @@ final class CDate extends CValue {
   String toString() => 'date($days)';
 }
 
-/// `u64` nanoseconds since midnight.
+/// `u64` nanoseconds since midnight, as the int's 64 bits: F-116, a value
+/// above 2^63 reads negative and orders above every other.
 final class CTime extends CValue {
-  CTime(this.nanos) {
-    if (nanos < 0) throw InvalidArgumentException('time nanos negative');
-  }
+  CTime(this.nanos);
   final int nanos;
   @override
   int get tag => Tag.time;

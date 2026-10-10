@@ -198,7 +198,8 @@ int _compareTemporal(CValue a, CValue b) {
     case TemporalClass.date:
       return (a as CDate).days.compareTo((b as CDate).days);
     case TemporalClass.time:
-      return (a as CTime).nanos.compareTo((b as CTime).nanos);
+      // F-116: TIME is u64 (02 §3); an int above 2^63 reads negative.
+      return _compareU64((a as CTime).nanos, (b as CTime).nanos);
     default:
       final da = a as CDuration, db = b as CDuration;
       final c = da.secs.compareTo(db.secs);
@@ -292,3 +293,7 @@ int compareNumeric(CValue a, CValue b) {
   // Larger magnitude sorts lower among negatives.
   return x.sign == SignClass.negFinite ? -c : c;
 }
+
+/// Unsigned order of two u64 held in Dart's signed 64-bit int.
+int _compareU64(int a, int b) =>
+    (a ^ 0x8000000000000000).compareTo(b ^ 0x8000000000000000);
