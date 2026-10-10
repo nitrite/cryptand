@@ -15,12 +15,14 @@
 - M3 Rust: 8 cargo-fuzz targets x 4 h done 10-10, 0 crashes. Coverage:
   open_file 4758, open_encrypted 3846, cve_decode 1333, analyzer 1228,
   segment 764, cke_roundtrip 675, wkb 367, superblock_keyslot 152 (shallow).
-- M3 Jazzer: 7 targets running in parallel on this Mac from 10-10 ~10:45,
-  2 h each (`@FuzzTest(maxDuration)`), logs `reference/bench/runs/fuzz/jz-*.log`.
-  Do NOT build Java here until they end: the 10-10 00:51 openFile "crash" was
-  a `NoClassDefFoundError` from a rebuild under it. The previous campaign was
-  killed at 01:21; its untracked `JazzerTestInputs/*/crash-*` are kill
-  leftovers that replay clean (not findings; delete when convenient).
+- M3 Jazzer runs on the remote Mac in a separate clone
+  `~/Documents/codebase/cryptand-fuzz` (all CPU-heavy work goes there, human
+  10-10), 4 targets at a time, 2 h each, logs `reference/bench/runs/fuzz/jz-*.log`
+  there. Two findings within seconds, both open: ckeRoundtrip "memcmp order
+  disagrees with §8" (crash-2541…, crash-fc17…) and openFile NPE on a missing
+  BOOL field in `Value$Doc.field` (crash-d5cd…, crash-0580…). Copies in the
+  session scratchpad; the local untracked `crash-*` are the same inputs.
+  `mvn verify` does NOT replay `crash-*` files.
   Crash files go to `reference/conformance/files/fuzz-regress/` CRC-repaired
   (`CRYPTAND_FUZZ_DUMP=path` while replaying one). Fixed so far: F-105..F-114.
 - Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
@@ -60,7 +62,7 @@
 
 ## Next action
 
-When Jazzer ends (~12:45), triage `jz-*.log` (`FuzzTestFindingException`);
+Reproduce and fix the two Jazzer findings (next F-numbers; CKE order may touch the frozen format, so ask before changing bytes), check R/J/D; then rerun those two targets remotely;
 then check remote `m12-java.log` for `java: seeds 0..10000: 0 divergences`
 twice and tick M1.2 (Rust + Java). Then deepen `superblock_keyslot` seeds.
 
