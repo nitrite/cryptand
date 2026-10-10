@@ -18,11 +18,10 @@
 - M3 Jazzer runs on the remote Mac in a separate clone
   `~/Documents/codebase/cryptand-fuzz` (all CPU-heavy work goes there, human
   10-10), 4 targets at a time, 2 h each, logs `reference/bench/runs/fuzz/jz-*.log`
-  there. Two findings within seconds, both open: ckeRoundtrip "memcmp order
-  disagrees with §8" (crash-2541…, crash-fc17…) and openFile NPE on a missing
-  BOOL field in `Value$Doc.field` (crash-d5cd…, crash-0580…). Copies in the
-  session scratchpad; the local untracked `crash-*` are the same inputs.
-  `mvn verify` does NOT replay `crash-*` files.
+  there. ckeRoundtrip and openFile stopped on F-116/F-117 (fixed, f3c57b5);
+  rerun those two after the current batch ends (rebuilding classes under a
+  running fuzzer breaks it). Gate runs on the remote too: clone
+  `cryptand-gate` (rsync the tree, no Dart there; Dart tests run here).
   Crash files go to `reference/conformance/files/fuzz-regress/` CRC-repaired
   (`CRYPTAND_FUZZ_DUMP=path` while replaying one). Fixed so far: F-105..F-114.
 - Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
@@ -62,9 +61,10 @@
 
 ## Next action
 
-Reproduce and fix the two Jazzer findings (next F-numbers; CKE order may touch the frozen format, so ask before changing bytes), check R/J/D; then rerun those two targets remotely;
-then check remote `m12-java.log` for `java: seeds 0..10000: 0 divergences`
-twice and tick M1.2 (Rust + Java). Then deepen `superblock_keyslot` seeds.
+When the remote Jazzer batch ends (~15:00), pull f3c57b5 into `cryptand-fuzz`,
+rerun ckeRoundtrip and openFile, triage `jz-*.log`. Check remote
+`m12-java.log` (want `0 divergences` twice; tick M1.2). F-117 siblings in Java
+(KDF params, index params, ChangeFeed, Checkpoint): check and fix as one finding.
 
 ## Log
 
@@ -81,3 +81,4 @@ twice and tick M1.2 (Rust + Java). Then deepen `superblock_keyslot` seeds.
 - 2026-10-09 — Java M2.2 4999/5000; F-104 (rotate OOM on a free page) fixed; M1.2 10k and M2.2 rerun started on the remote Mac.
 - 2026-10-09 — M2.2 Java done (5000/0). M3 started: cargo-fuzz (8) + Jazzer (7) targets; F-105..F-112 fixed (Rust, Java, Dart); collectionReclaimsSpace flake fixed.
 - 2026-10-10 — Rust fuzz 8x4 h clean; M1.2 Rust 10k clean; F-115 (Java liveness vs visibleSeq) fixed; Java M1.2 and Jazzer rerun.
+- 2026-10-10 — CPU work moved to the remote Mac; F-116 (TIME signed order), F-117 (vlog stats shape) fixed in Java + Dart.
