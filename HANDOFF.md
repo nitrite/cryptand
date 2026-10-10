@@ -63,8 +63,7 @@
 
 When the remote Jazzer batch ends (~15:00), pull f3c57b5 into `cryptand-fuzz`,
 rerun ckeRoundtrip and openFile, triage `jz-*.log`. Check remote
-`m12-java.log` (want `0 divergences` twice; tick M1.2). F-118 (fixed in Java):
-check Rust and Dart for the same unchecked decodes.
+`m12-java.log` (want `0 divergences` twice; tick M1.2). F-118 done in all three.
 
 ## Log
 
@@ -81,4 +80,4 @@ check Rust and Dart for the same unchecked decodes.
 - 2026-10-09 — Java M2.2 4999/5000; F-104 (rotate OOM on a free page) fixed; M1.2 10k and M2.2 rerun started on the remote Mac.
 - 2026-10-09 — M2.2 Java done (5000/0). M3 started: cargo-fuzz (8) + Jazzer (7) targets; F-105..F-112 fixed (Rust, Java, Dart); collectionReclaimsSpace flake fixed.
 - 2026-10-10 — Rust fuzz 8x4 h clean; M1.2 Rust 10k clean; F-115 (Java liveness vs visibleSeq) fixed; Java M1.2 and Jazzer rerun.
-- 2026-10-10 — CPU work moved to the remote Mac; F-116 (TIME signed order), F-117 (vlog stats shape) fixed in Java + Dart; F-118 (Java siblings) fixed.
+- 2026-10-10 — CPU work moved to the remote Mac; F-116 (TIME signed order), F-117 (vlog stats shape) fixed in Java + Dart; F-118 (wrong-shape records) fixed in all three.
