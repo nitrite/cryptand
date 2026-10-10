@@ -170,19 +170,23 @@ final class IndexStats {
       });
 
   static IndexStats fromDoc(CDoc d) {
-    int u(String f) => ((d[f]! as CInt).magnitude).lo;
+    int u(String f) => expectField<CInt>(d, f, 'index stats').magnitude.lo;
     return IndexStats(
       updatedSeq: u('updated_seq'),
       entries: u('entries'),
       distinctEstimate: u('distinct_estimate'),
       nullCount: u('null_count'),
-      minKey: (d['min_key']! as CBytes).value,
-      maxKey: (d['max_key']! as CBytes).value,
+      minKey: expectField<CBytes>(d, 'min_key', 'index stats').value,
+      maxKey: expectField<CBytes>(d, 'max_key', 'index stats').value,
       histogram: [
-        for (final b in (d['histogram']! as CArray).items)
+        for (final b in expectField<CArray>(d, 'histogram', 'index stats').items)
           HistogramBucket(
-            ((b as CDoc)['bound']! as CBytes).value,
-            ((b['cumulative']!) as CInt).magnitude.lo,
+            expectField<CBytes>(
+                    expectValue<CDoc>(b, 'index stats bucket'), 'bound', 'index stats bucket')
+                .value,
+            expectField<CInt>(b as CDoc, 'cumulative', 'index stats bucket')
+                .magnitude
+                .lo,
           )
       ],
     );

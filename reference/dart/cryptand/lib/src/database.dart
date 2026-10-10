@@ -179,7 +179,7 @@ final class Collection {
       if (existing != null) {
         _unindexDocumentText(post, a, fields, existing, id);
       }
-      final positions = (post.params['positions'] as CBool?)?.value ?? true;
+      final positions = optionalField<CBool>(post.params, 'positions', 'text index params')?.value ?? true;
       _indexDocumentText(post, a, fields, doc, id, positions);
     }
     _e.put(treeId, id, encodeValue(doc));
@@ -275,7 +275,7 @@ final class Collection {
   IndexStats? statsOf(TreeDescriptor indexTree) {
     final d = db.catalog.get(db.catalog.nameOf(indexTree.treeId)!);
     final s = d?.params['stats'];
-    return s == null ? null : IndexStats.fromDoc(s as CDoc);
+    return s == null ? null : IndexStats.fromDoc(expectValue<CDoc>(s, 'index stats'));
   }
 
   /// Picks the most selective index among [candidates], `06` §7.1.
@@ -351,16 +351,21 @@ final class Collection {
 
   Analyzer _analyzerOf(TreeDescriptor postings) {
     final p = postings.params;
-    final ap = (p['analyzer_params'] as CDoc?) ?? CDoc(const {});
-    final words = (ap['stopwords'] as CArray?)
-            ?.items
-            .map((e) => (e as CStr).value)
-            .toList() ??
-        const <String>[];
+    final ap = p['analyzer_params'] == null
+        ? CDoc(const {})
+        : expectField<CDoc>(p, 'analyzer_params', 'text index params');
+    final words = ap['stopwords'] == null
+        ? const <String>[]
+        : [
+            for (final e in expectField<CArray>(ap, 'stopwords', 'text index params').items)
+              expectValue<CStr>(e, 'text index params stopword').value
+          ];
     return Analyzer(
-      name: (p['analyzer']! as CStr).value,
+      name: expectField<CStr>(p, 'analyzer', 'text index params').value,
       stopwords: words,
-      stemmer: (ap['stemmer'] as CStr?)?.value ?? Stemmer.none,
+      stemmer: ap['stemmer'] == null
+          ? Stemmer.none
+          : expectField<CStr>(ap, 'stemmer', 'text index params').value,
     );
   }
 
@@ -377,8 +382,8 @@ final class Collection {
     if (byTerm.isEmpty) return;
 
     final p = postings.params;
-    final dictId = ((p['term_dict']! as CInt).magnitude).lo;
-    final revId = ((p['term_index']! as CInt).magnitude).lo;
+    final dictId = expectField<CInt>(p, 'term_dict', 'text index params').magnitude.lo;
+    final revId = expectField<CInt>(p, 'term_index', 'text index params').magnitude.lo;
     final docId = (id as CNitriteId).id;
 
     for (final entry in byTerm.entries) {
@@ -428,8 +433,8 @@ final class Collection {
     if (terms.isEmpty) return;
 
     final p = postings.params;
-    final dictId = ((p['term_dict']! as CInt).magnitude).lo;
-    final positions = (p['positions'] as CBool?)?.value ?? true;
+    final dictId = expectField<CInt>(p, 'term_dict', 'text index params').magnitude.lo;
+    final positions = optionalField<CBool>(p, 'positions', 'text index params')?.value ?? true;
     final docId = (id as CNitriteId).id;
 
     for (final term in terms) {
@@ -463,8 +468,9 @@ final class Collection {
             (
               d,
               [
-                for (final f in (d.params['fields']! as CArray).items)
-                  (f as CStr).value
+                for (final f
+                    in expectField<CArray>(d.params, 'fields', 'text index params').items)
+                  expectValue<CStr>(f, 'text index params field').value
               ]
             )
       ];
@@ -513,7 +519,7 @@ final class Collection {
   /// The `term_dict` entry for a term, or null.
   TermEntry? termEntry(TreeDescriptor postings, String term) {
     final dictId =
-        ((postings.params['term_dict']! as CInt).magnitude).lo;
+        expectField<CInt>(postings.params, 'term_dict', 'text index params').magnitude.lo;
     final v = _e.get(dictId, CStr(term));
     return v == null ? null : TermEntry.decode(v);
   }
@@ -547,7 +553,7 @@ final class Collection {
   /// A phrase query. §4.3: an implementation MUST reject one against an index
   /// without positions "rather than approximate it with a conjunction".
   List<CValue> phraseSearch(TreeDescriptor postings, String phrase) {
-    final positions = (postings.params['positions'] as CBool?)?.value ?? false;
+    final positions = optionalField<CBool>(postings.params, 'positions', 'text index params')?.value ?? false;
     if (!positions) {
       throw const UnsupportedFeatureException(
           'this full-text index has positions = false, so a phrase query '

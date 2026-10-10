@@ -117,14 +117,16 @@ final class Checkpoint {
       name: name,
       commitId: u('commit_id'),
       seq: u('seq'),
-      created: (d['created']! as CTimestamp).millis,
+      created: expectField<CTimestamp>(d, 'created', 'checkpoint record').millis,
       catalogRoot: u('catalog_root'),
       freelistRoot: u('freelist_root'),
       attributesRoot: u('attributes_root'),
       manifestRoot: u('manifest_root'),
       vlogStatsRoot: u('vlog_stats_root'),
       changefeedRoot: u('changefeed_root'),
-      expires: (d['expires'] as CTimestamp?)?.millis,
+      expires: d['expires'] == null
+          ? null
+          : expectField<CTimestamp>(d, 'expires', 'checkpoint record').millis,
     );
   }
 

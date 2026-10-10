@@ -963,6 +963,11 @@ T expectValue<T extends CValue>(CValue? v, String what) {
 T expectField<T extends CValue>(CDoc d, String field, String what) =>
     expectValue<T>(d[field], '$what field `$field`');
 
+/// [expectValue] for an optional field: absent is null, the wrong type is
+/// still corruption (F-118).
+T? optionalField<T extends CValue>(CDoc d, String field, String what) =>
+    d[field] == null ? null : expectField<T>(d, field, what);
+
 CValue decodeValue(Uint8List bytes, {NameDict? dict}) {
   final r = ByteReader(bytes);
   final v = readValue(r, dict: dict);

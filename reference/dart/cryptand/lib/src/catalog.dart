@@ -151,23 +151,24 @@ final class TreeDescriptor {
       expectField<CInt>(doc, 'tree_id', 'tree descriptor').magnitude.lo;
   String get kind =>
       expectField<CStr>(doc, 'kind', 'tree descriptor').value;
-  bool get levelled => (doc['levelled'] as CBool?)?.value ?? false;
-  int get entries => ((doc['entries'] as CInt?)?.magnitude)?.lo ?? 0;
-  int get features => ((doc['features'] as CInt?)?.magnitude)?.lo ?? 0;
-  int? get root => ((doc['root'] as CInt?)?.magnitude)?.lo;
-  String? get owner => (doc['owner'] as CStr?)?.value;
-  String? get keyKind => (doc['key_kind'] as CStr?)?.value;
-  int? get nameDict => ((doc['name_dict'] as CInt?)?.magnitude)?.lo;
-  int? get staleFrom => ((doc['stale_from'] as CInt?)?.magnitude)?.lo;
+  bool get levelled => optionalField<CBool>(doc, 'levelled', 'tree descriptor')?.value ?? false;
+  int get entries => (optionalField<CInt>(doc, 'entries', 'tree descriptor')?.magnitude)?.lo ?? 0;
+  int get features => (optionalField<CInt>(doc, 'features', 'tree descriptor')?.magnitude)?.lo ?? 0;
+  int? get root => (optionalField<CInt>(doc, 'root', 'tree descriptor')?.magnitude)?.lo;
+  String? get owner => optionalField<CStr>(doc, 'owner', 'tree descriptor')?.value;
+  String? get keyKind => optionalField<CStr>(doc, 'key_kind', 'tree descriptor')?.value;
+  int? get nameDict => (optionalField<CInt>(doc, 'name_dict', 'tree descriptor')?.magnitude)?.lo;
+  int? get staleFrom => (optionalField<CInt>(doc, 'stale_from', 'tree descriptor')?.magnitude)?.lo;
 
   /// §3.1 — every per-tree *policy* field, at the top level of one document.
   ///
   /// "That is the test for whether a field belongs in `params`: a *structural*
   /// field is one a reader must obey to read the tree at all."
-  CDoc get params => (doc['params'] as CDoc?) ?? CDoc(const {});
+  CDoc get params => optionalField<CDoc>(doc, 'params', 'tree descriptor') ?? CDoc(const {});
 
   CValue? param(String name) => params[name];
-  String? paramStr(String name) => (params[name] as CStr?)?.value;
+  String? paramStr(String name) =>
+      optionalField<CStr>(params, name, 'tree params')?.value;
 
   /// A copy with [changes] applied and every other field — including ones this
   /// implementation does not understand — left exactly as it was.
@@ -417,7 +418,7 @@ final class Attributes {
     final existing = get(storeKey);
     final writers = existing == null
         ? const <CValue>[]
-        : ((existing['writers'] as CArray?)?.items ?? const []);
+        : (optionalField<CArray>(existing, 'writers', r'$store')?.items ?? const []);
     put(
         storeKey,
         CDoc({
@@ -439,7 +440,7 @@ final class Attributes {
     if (store == null) {
       throw const InvalidArgumentException(r'$store has not been initialized');
     }
-    final writers = (store['writers'] as CArray?)?.items ?? const [];
+    final writers = optionalField<CArray>(store, 'writers', r'$store')?.items ?? const [];
     if (writers.any((w) => w is CStr && w.value == writerId)) return;
     put(storeKey,
         CDoc({...store.fields, 'writers': CArray([...writers, CStr(writerId)])}));

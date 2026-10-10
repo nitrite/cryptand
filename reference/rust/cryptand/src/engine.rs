@@ -839,6 +839,10 @@ impl Engine {
         for (k, v) in self.freelist.scan(&mut self.pager, None, None)? {
             let key = cke::decode_all(&k)?;
             let Value::Array(items) = key else { continue };
+            // F-118: a short key is skipped like a non-ARRAY one, not indexed into a panic.
+            if items.len() < 2 {
+                continue;
+            }
             let num = |v: &Value| match v {
                 Value::Int { mag, .. } => *mag as u64,
                 _ => 0,

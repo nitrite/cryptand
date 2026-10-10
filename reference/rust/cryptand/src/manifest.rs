@@ -119,6 +119,10 @@ impl SegmentRef {
     pub fn decode(key: &[u8], value: &[u8]) -> Result<SegmentRef> {
         let k = cke::decode_all(key)?;
         let Value::Array(items) = k else { return invalid("manifest key is not an ARRAY") };
+        // F-118: indexed below.
+        if items.len() < 2 {
+            return invalid("manifest key has fewer than two parts");
+        }
         let d = cve::decode_all(value, &|_| None)?;
         let u = |f: &str| -> u64 {
             match d.field(f) {
@@ -282,5 +286,18 @@ impl Manifest {
             .into_iter()
             .filter(|r| r.covers(user_key_prefix))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-118: a key with fewer than two parts was indexed into a panic.
+    #[test]
+    fn short_key_is_an_error() {
+        let key = crate::cke::encode(&Value::Array(vec![])).unwrap();
+        let value = crate::cve::encode(&Value::Doc(vec![]));
+        assert!(SegmentRef::decode(&key, &value).is_err());
     }
 }

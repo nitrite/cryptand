@@ -22,6 +22,7 @@ import 'dart:typed_data';
 import 'bytes.dart';
 import 'catalog.dart';
 import 'cke.dart';
+import 'cve.dart' show expectField, expectValue;
 import 'errors.dart';
 import 'value.dart';
 
@@ -62,11 +63,16 @@ final class IndexDescriptor {
   static IndexDescriptor fromDescriptor(TreeDescriptor d) {
     final p = d.params;
     return IndexDescriptor(
-      indexType: (p['index_type']! as CStr).value,
-      dataTree: ((p['data_tree']! as CInt).magnitude).lo,
-      fields: [for (final f in (p['fields']! as CArray).items) (f as CStr).value],
-      sparse: (p['sparse'] as CBool?)?.value ?? false,
-      collation: (p['collation'] as CStr?)?.value,
+      indexType: expectField<CStr>(p, 'index_type', 'index params').value,
+      dataTree: expectField<CInt>(p, 'data_tree', 'index params').magnitude.lo,
+      fields: [
+        for (final f in expectField<CArray>(p, 'fields', 'index params').items)
+          expectValue<CStr>(f, 'index params field').value
+      ],
+      sparse: p['sparse'] != null && expectField<CBool>(p, 'sparse', 'index params').value,
+      collation: p['collation'] == null
+          ? null
+          : expectField<CStr>(p, 'collation', 'index params').value,
     );
   }
 

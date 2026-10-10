@@ -583,12 +583,17 @@ abstract final class DatabaseFile {
     if (sb.freelistRoot != 0) {
       final extents = <FreeExtent>[];
       for (final (k, v) in e.freelist.scan()) {
-        final a = decodeKey(k) as CArray;
-        final d = decodeValue(v) as CDoc;
+        // F-118: narrowed, so a hostile entry is corruption, not a TypeError.
+        final a = expectValue<CArray>(decodeKey(k), 'free-list key');
+        if (a.items.length < 2) {
+          throw const CorruptionException(
+              'free-list key has fewer than two parts');
+        }
+        final d = expectValue<CDoc>(decodeValue(v), 'free-list entry');
         extents.add(FreeExtent(
-          ((a.items[0] as CInt).magnitude).lo,
-          ((a.items[1] as CInt).magnitude).lo,
-          ((d['pages']! as CInt).magnitude).lo,
+          expectValue<CInt>(a.items[0], 'free-list key').magnitude.lo,
+          expectValue<CInt>(a.items[1], 'free-list key').magnitude.lo,
+          expectField<CInt>(d, 'pages', 'free-list entry').magnitude.lo,
         ));
       }
       store.loadFree(extents);

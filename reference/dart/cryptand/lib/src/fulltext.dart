@@ -167,7 +167,8 @@ final class PostingsBlock {
   }
 
   static PostingsBlock decode(Uint8List treeValue) =>
-      decodeRaw((decodeValue(treeValue) as CBytes).value);
+      decodeRaw(
+          expectValue<CBytes>(decodeValue(treeValue), 'postings block').value);
 
   /// §4.1's key: `CKE(Array[U32 term_id, NITRITE_ID first_doc_of_block])`.
   ///
@@ -215,8 +216,8 @@ final class TermEntry {
       }));
 
   static TermEntry decode(Uint8List bytes) {
-    final d = decodeValue(bytes) as CDoc;
-    int u(String f) => ((d[f]! as CInt).magnitude).lo;
+    final d = expectValue<CDoc>(decodeValue(bytes), 'term entry');
+    int u(String f) => expectField<CInt>(d, f, 'term entry').magnitude.lo;
     return TermEntry(u('id'), u('df'), u('ttf'));
   }
 

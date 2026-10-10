@@ -52,7 +52,11 @@ impl ChangeFeed for Engine {
         self.changefeed = t;
         let mut out = Vec::new();
         for (k, v) in rows? {
+            // F-118: a short key is skipped like a non-ARRAY one, not indexed into a panic.
             let Value::Array(items) = cke::decode_all(&k)? else { continue };
+            if items.len() < 2 {
+                continue;
+            }
             let num = |v: &Value| match v {
                 Value::Int { mag, .. } => *mag as u64,
                 _ => 0,
