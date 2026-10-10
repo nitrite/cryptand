@@ -2865,12 +2865,16 @@ public final class Engine implements AutoCloseable {
      */
     private long[] livenessSeqs() {
         List<long[]> snaps = new ArrayList<>(liveSnapshots);
-        long[] out = new long[snaps.size() + 1];
+        long[] out = new long[snaps.size() + 2];
         // Everything written, visible or not. `nextSeq` is the next to be
         // handed out, so this is at or above every seq in the memtable.
         out[0] = nextSeq.get();
+        // F-115: and `visibleSeq`, where a READ_COMMITTED transaction and an
+        // index build read without pinning. A delete or overwrite above it
+        // hides the record from `nextSeq`'s view only.
+        out[1] = visibleSeq;
         for (int i = 0; i < snaps.size(); i++) {
-            out[i + 1] = snaps.get(i)[0];
+            out[i + 2] = snaps.get(i)[0];
         }
         return out;
     }

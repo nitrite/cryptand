@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** F-030: a GC rewrite must not shadow a user write that lands between its liveness check and its insert. */
@@ -189,6 +190,54 @@ class GcRaceTest {
         org.dizitart.cryptand.ops.Verify.Report r = org.dizitart.cryptand.ops.Verify.run(e);
         e.close();
         assertTrue(r.clean(), r.toString());
+    }
+
+    /**
+     * F-115, M1.2 seeds 6537 and 8967: a delete in the memtable but not yet
+     * visible still leaves the record readable at {@code visibleSeq}. Liveness
+     * judged only at {@code nextSeq} called it dead while readers could still
+     * resolve it.
+     */
+    @Test
+    void livenessCountsARecordReadersCanStillSeeUnderAnUnpublishedDelete(@TempDir Path dir) throws Exception {
+        Engine.Options o = new Engine.Options();
+        o.durability = Superblock.Durability.NONE;
+        o.vlogMin = 64;
+        o.backgroundCompaction = false;
+        Engine e = Engine.create(dir.resolve("db.cff"), o);
+        try {
+            e.batch().put(1, key(1, 1), new byte[1000]).commit();
+            e.commitNow(true);
+            java.util.concurrent.CountDownLatch inWindow = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+            Engine.afterEntriesHook = () -> {
+                Engine.afterEntriesHook = null;
+                inWindow.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException x) {
+                    Thread.currentThread().interrupt();
+                }
+            };
+            Engine db = e;
+            Thread deleter = new Thread(() -> db.batch().removeRange(1, key(1, 0), key(1, 9)).commit());
+            deleter.start();
+            assertTrue(inWindow.await(10, java.util.concurrent.TimeUnit.SECONDS), "the delete never reached the window");
+            // A READ_COMMITTED transaction reads here (Transaction.readSeq).
+            assertNotNull(e.get(1, key(1, 1), e.visibleSeq(), Engine.CLOCK_ON_DEMAND),
+                    "a reader at visibleSeq still sees the value");
+            e.clusterIfNeeded(); // refreshes liveness
+            long live = 0;
+            for (VlogStats st : e.vlog().allStats()) {
+                live += st.liveBytes;
+            }
+            release.countDown();
+            deleter.join();
+            assertTrue(live > 0, "the record a reader can still resolve was counted dead");
+        } finally {
+            Engine.afterEntriesHook = null;
+            e.close();
+        }
     }
 
     /**
