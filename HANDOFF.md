@@ -21,7 +21,7 @@
   there. ckeRoundtrip and openFile stopped on F-116/F-117 (fixed, f3c57b5);
   rerun those two after the current batch ends (rebuilding classes under a
   running fuzzer breaks it). Gate runs on the remote too: clone
-  `cryptand-gate` (rsync the tree, no Dart there; Dart tests run here).
+  `cryptand-gate` (rsync the tree; Dart 3.12.2 SDK in `~/dart-sdk/bin`, put it on PATH; interop green there at da1cd1d).
   Crash files go to `reference/conformance/files/fuzz-regress/` CRC-repaired
   (`CRYPTAND_FUZZ_DUMP=path` while replaying one). Fixed so far: F-105..F-114.
 - Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
