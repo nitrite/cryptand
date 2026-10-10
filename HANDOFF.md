@@ -1,43 +1,35 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-09, session 11)
+## State (2026-10-10, session 12)
 
 - Branch `packaging/v1.0.0`. Manifests at 1.0.0, nothing published, no tags.
-  Java targets Java 11 (built on JDK 17). Java `mvn verify` green after F-102;
-  Rust `cargo test --workspace` (debug) green 10-08, `--release` rebuilt for M2.2.
-- M0 done. M1: hop 0..1000 plain and 0..300 encrypted clean; 10 000-seed
-  M1.2 runs still pending. M2.1: fault sweeps 1000 seeds clean (Rust, Java).
-- M2.3 `tools/enospc.sh` green on the F-096 build, Rust + Java, plain + encrypted.
-- M2.2 done for Rust and Java: 5000 kills, 0 failures each (Java seeds
-  101000..103500 rerun on the remote Mac after F-104). Dart after M5.
-- M1.2 10 000-seed runs still running on the remote Mac
-  (`~/Documents/codebase/cryptand`, pre-F-104 checkout):
-  `reference/bench/runs/m12-rust.log` (prints only at the end; plain then
-  `--encrypted`), `m12-java.log` (`tools/oplog_java.sh`, plain then encrypted).
-  Remote Java: `JAVA_HOME=/opt/homebrew/opt/openjdk@18` (system Java is 11).
-- M3 (this Mac): 8 cargo-fuzz targets in `reference/rust/cryptand/fuzz/`
-  (`seed.py` seeds `corpus/`), 4 h each from 10-09 ~20:00, logs
-  `reference/bench/runs/fuzz/m3-*.log` (`cke_roundtrip` restarted ~20:10).
-  Jazzer: `JazzerTest.java` (7 targets); fuzz one with `JAZZER_FUZZ=1 mvn
-  surefire:test -Dtest=JazzerTest#openFile` (corpus `.cifuzz-corpus/`,
-  git-ignored, seeded from the Rust corpora; `mvn verify` replays ~11.8k).
+  Java targets Java 11 (built on JDK 17). Java `mvn verify` green at 5101229
+  (F-115); Rust `cargo test --workspace` green 10-08.
+- M0 done. M2.1, M2.2 (Rust, Java), M2.3 done. Dart after M5.
+- M1.2: Rust 10 000 seeds plain + encrypted, 0 divergences. Java's run hit
+  F-115 (seeds 6537, 8967; fixed, replay clean) and is rerunning on the remote
+  Mac at 5101229 from 10-10 10:35: `~/Documents/codebase/cryptand/reference/bench/runs/m12-java.log`
+  (plain then `--encrypted`, ~4 h each; old log `m12-java-preF115.log`).
+  Remote debug instrumentation from the F-115 hunt is in `git stash` there.
+  Remote Java: `JAVA_HOME=/opt/homebrew/opt/openjdk@18`.
+- M3 Rust: 8 cargo-fuzz targets x 4 h done 10-10, 0 crashes. Coverage:
+  open_file 4758, open_encrypted 3846, cve_decode 1333, analyzer 1228,
+  segment 764, cke_roundtrip 675, wkb 367, superblock_keyslot 152 (shallow).
+- M3 Jazzer: 7 targets running in parallel on this Mac from 10-10 ~10:45,
+  2 h each (`@FuzzTest(maxDuration)`), logs `reference/bench/runs/fuzz/jz-*.log`.
+  Do NOT build Java here until they end: the 10-10 00:51 openFile "crash" was
+  a `NoClassDefFoundError` from a rebuild under it. The previous campaign was
+  killed at 01:21; its untracked `JazzerTestInputs/*/crash-*` are kill
+  leftovers that replay clean (not findings; delete when convenient).
   Crash files go to `reference/conformance/files/fuzz-regress/` CRC-repaired
-  (`CRYPTAND_FUZZ_DUMP=path` while replaying one), replayed by the hostile
-  tests in all three. Fixed so far: F-105..F-112.
-- `segment` now seeds whole segment extents (cov 254 -> 737) and was
-  restarted 10-09 ~21:00 after F-111 (`open_file` ~21:40 after F-112), so the 4 h CPU budget per target restarts with them; `superblock_keyslot` is still shallow (cov 152).
-- Java `EngineTest.collectionReclaimsSpace` flaked twice under load (background
-  GC shrank the bytes its control counts); now runs without background
-  compaction (9b232eb), 3/3 under load.
-- F-098..F-103 fixed in Java (Rust checked: not affected; Dart unchecked, M5).
+  (`CRYPTAND_FUZZ_DUMP=path` while replaying one). Fixed so far: F-105..F-114.
 - Open S1/S0 outside M5: none. M5: F-035, F-038, Dart halves of F-072,
-  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088, F-094..F-112 (Dart check), Dart corpus replay (M3.4).
+  F-080, F-084 check, M2.2 Dart, F-075, F-079, F-081, F-087, F-088,
+  F-094..F-115 (Dart check), Dart corpus replay (M3.4).
 - Rust `stall_test` fails whenever another job fsyncs on /Volumes/External;
-  never build Java while a hop or Java torture runs, nor edit sources
-  while `tools/gate.sh` runs (its interop stage rebuilds Java).
+  never build Java while a hop, Java torture or Jazzer runs.
 - Debug recipe that worked: loop one seed (`one()` from `tools/torture.py`),
-  then halt the child at op boundaries (temporary `Runtime.halt` at the end of
-  `tortureChild`) to tell op-boundary bugs from mid-op ones.
+  then halt the child at op boundaries to tell op-boundary bugs from mid-op ones.
 
 ## Decisions already made (human)
 
@@ -68,10 +60,9 @@
 
 ## Next action
 
-When the Rust fuzz campaign ends (~10-10 00:10), triage `m3-*.log` (crash files
-under `fuzz/artifacts/`), then give `segment` real segment-extent seeds and run
-the Jazzer campaign (2 h per target, one `mvn surefire:test` per target). Check
-the remote `m12-*.log` (want `0 divergences`; then tick M1.2 for Rust + Java).
+When Jazzer ends (~12:45), triage `jz-*.log` (`FuzzTestFindingException`);
+then check remote `m12-java.log` for `java: seeds 0..10000: 0 divergences`
+twice and tick M1.2 (Rust + Java). Then deepen `superblock_keyslot` seeds.
 
 ## Log
 
@@ -87,3 +78,4 @@ the remote `m12-*.log` (want `0 divergences`; then tick M1.2 for Rust + Java).
 - 2026-10-09 — F-103 fixed (human chose a: value log, no put-time BLOBs); final Java M2.2 run started.
 - 2026-10-09 — Java M2.2 4999/5000; F-104 (rotate OOM on a free page) fixed; M1.2 10k and M2.2 rerun started on the remote Mac.
 - 2026-10-09 — M2.2 Java done (5000/0). M3 started: cargo-fuzz (8) + Jazzer (7) targets; F-105..F-112 fixed (Rust, Java, Dart); collectionReclaimsSpace flake fixed.
+- 2026-10-10 — Rust fuzz 8x4 h clean; M1.2 Rust 10k clean; F-115 (Java liveness vs visibleSeq) fixed; Java M1.2 and Jazzer rerun.
