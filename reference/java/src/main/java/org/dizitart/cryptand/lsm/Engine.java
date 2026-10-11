@@ -1905,6 +1905,11 @@ public final class Engine implements AutoCloseable {
         return lookupRaw(treeId, cke, snapshotSeq);
     }
 
+    /** As above, at the read horizon {@link #containsKey(int, byte[])} and {@code get} use. */
+    public BtreePage.Leaf newestVersion(int treeId, byte[] cke) {
+        return lookupRaw(treeId, cke, readHorizon());
+    }
+
     /**
      * Records a segment's key range as unavailable and names it.
      *

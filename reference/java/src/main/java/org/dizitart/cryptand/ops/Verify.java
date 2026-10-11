@@ -347,8 +347,10 @@ public final class Verify {
         if (seq >= engine.superblock().minRetainedSeq) {
             return false;
         }
-        BtreePage.Leaf newest = engine.newestVersion(
-                Ikey.treeIdOf(ik), Ikey.ckeOf(ik), engine.visibleSeq());
+        // F-121: at the read horizon, the view the containsKey below and every
+        // get use. At visibleSeq a published rewrite above it was invisible, so
+        // a superseded cell read as live and its collected segment as corruption.
+        BtreePage.Leaf newest = engine.newestVersion(Ikey.treeIdOf(ik), Ikey.ckeOf(ik));
         if (newest != null && Ikey.seqOf(newest.key()) > seq) {
             return true;
         }
