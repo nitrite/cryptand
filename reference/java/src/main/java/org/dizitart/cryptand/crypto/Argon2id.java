@@ -73,7 +73,8 @@ public final class Argon2id {
         int laneLength = m / parallelism;
         int segmentLength = laneLength / 4;
 
-        byte[] h0 = initialHash(password, salt, secret, associatedData, tCost, m, parallelism, outputLength);
+        // H_0 takes m_cost as given, not m' (RFC 9106 §3.2 step 1; F-126).
+        byte[] h0 = initialHash(password, salt, secret, associatedData, tCost, mCostKib, parallelism, outputLength);
 
         long[][] blocks = new long[m][QWORDS];
         for (int lane = 0; lane < parallelism; lane++) {
@@ -166,6 +167,13 @@ public final class Argon2id {
         }
 
         int startIndex = (pass == 0 && slice == 0) ? 2 : 0;
+        if (dataIndependent && startIndex == 2) {
+            // Column 2 reads address word 2, so the first block is needed
+            // before the loop's i % 128 == 0 trigger ever fires (F-126).
+            inputBlock[6]++;
+            fillBlock(zeroBlock, inputBlock, addressBlock, false);
+            fillBlock(zeroBlock, addressBlock, addressBlock, false);
+        }
         int curOffset = lane * laneLength + slice * segmentLength + startIndex;
         int prevOffset = curOffset % laneLength == 0 ? curOffset + laneLength - 1 : curOffset - 1;
 

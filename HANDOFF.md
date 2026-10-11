@@ -28,6 +28,13 @@
   removed). F-123 added `v1.0-security-converting`; spec 14 §13 reworded so it
   must read, not fail (human, 1c28a0c). Left for M4.5: Java wiping the
   caller's password array (row 29), the never-log marker test (row 40).
+- M4.2 done: shared KATs in `reference/conformance/vectors/kat` (Wycheproof
+  AEAD/HKDF/HMAC extracted from local RustCrypto crate test data with
+  `blb2json.py`, BLAKE2 reference keyed KAT, CPython unkeyed edges, Argon2id
+  RFC 9106 + phc test.c + 2 RustCrypto rows). Tests: R `kat_test.rs`, J
+  `KatTest`, D `kat_test.dart`. Found F-126 (S0): Java and Dart Argon2id were
+  not RFC 9106 past segment length 2; fixed. Interop gate is raw-key only:
+  a password-slot leg is the follow-up (task chip offered).
 - Remote JDKs: `openjdk@18` links to 24.0.1. Jazzer: `JAVA_HOME=/opt/homebrew/opt/openjdk@21`.
 - Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
   `reference/conformance/files/fuzz-regress/fNNN-*.cryptand`
@@ -61,8 +68,8 @@
 
 ## Next action
 
-M4.2: primitive KATs in all three (Wycheproof chacha20/xchacha20-poly1305,
-hkdf/hmac-sha256; RFC 9106 Argon2id incl. parallelism > 1; BLAKE2b).
+M4.3: file-attacker harness (`security_attack`), per PLAN. Before it, or in
+parallel: the interop password-slot leg (F-126 follow-up).
 
 ## Log
 
@@ -72,3 +79,4 @@ hkdf/hmac-sha256; RFC 9106 Argon2id incl. parallelism > 1; BLAKE2b).
 - 2026-10-11 — M1.2 Java encrypted 0..10000 clean; last 3 Jazzer targets clean, M3 Rust/Java done.
 - 2026-10-11 — M4 started: SECURITY-REVIEW.md first pass; F-122 fixed (R+J tests), F-123 converting vector added after approval.
 - 2026-10-11 — spec 14 §13 reworded for security-converting; M4.1 done (F-124 tests, F-125 docs).
+- 2026-10-11 — M4.2 KATs in all three; F-126 Argon2id (J+D) found and fixed.

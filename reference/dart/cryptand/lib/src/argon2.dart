@@ -246,7 +246,6 @@ Argon2Result argon2id({
         // (Argon2d) addressing everywhere else. That split is the whole point
         // of the "id" variant and is the single easiest thing to get wrong.
         final dataIndependent = pass == 0 && slice < 2;
-        var addrIndex = 0;
         if (dataIndependent) {
           for (var i = 0; i < _words; i++) {
             inputBlock[i] = 0;
@@ -272,11 +271,12 @@ Argon2Result argon2id({
 
           int j1, j2;
           if (dataIndependent) {
-            if (addrIndex % _words == 0) {
+            // Column i reads address word i % 128; the segment starting at
+            // column 2 still needs its first block generated (F-126).
+            if (i % _words == 0 || i == startCol) {
               nextAddressBlock();
-              addrIndex = 0;
             }
-            final w = addrBlock[addrIndex++];
+            final w = addrBlock[i % _words];
             j1 = w & 0xFFFFFFFF;
             j2 = (w >>> 32) & 0xFFFFFFFF;
           } else {
