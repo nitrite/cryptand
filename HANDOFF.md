@@ -9,7 +9,8 @@
   encrypted seed 9334 was F-121 (verify false positive, fixed d057be4; 1000
   remote replays clean after, it failed within 473 before). Final Java
   `--encrypted` 0..10000 at d057be4: 0 divergences (log
-  `m12-java-enc.log` in the remote `cryptand` clone).
+  `m12-java-enc.log` in the remote `cryptand` clone; F-115 debug
+  instrumentation sits in its `git stash`).
 - M3: Rust 8 cargo-fuzz targets x 4 h clean. Jazzer (7 targets) in remote
   clone `~/Documents/codebase/cryptand-fuzz`, logs
   `reference/bench/runs/fuzz/jz-*.log`, 2 h each, 4 at a time. Every run
