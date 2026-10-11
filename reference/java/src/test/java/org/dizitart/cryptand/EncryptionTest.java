@@ -228,6 +228,48 @@ class EncryptionTest {
      * <p>This is the test that catches the crash-reuse defect §4.1 describes,
      * and nothing else catches it: every affected page verifies perfectly.
      */
+    /**
+     * §4.3: after a crash, no append to a value-log segment an earlier session
+     * opened. A record's nonce is (segment counter, offset) and re-appending
+     * overwrites the old ciphertext, so a scan for repeated nonces cannot see
+     * the reuse; this checks the rule itself.
+     */
+    @Test
+    @DisplayName("a value-log segment from a crashed session is sealed, not re-appended")
+    void vlogSegmentIsSealedAfterCrash(@TempDir Path dir) {
+        Path f = dir.resolve("reappend.cryptand");
+        byte[] k = testKey();
+        Engine.Options o = encrypted(k);
+        o.profile = Profile.DESKTOP;
+        o.rawKey = k;
+        java.util.Map<Long, Long> open = new java.util.HashMap<>();
+        Engine e = Engine.create(f, o);
+        e.batch().put(TREE, key("a"), new byte[Profile.DESKTOP.vlogMin() + 512]).commit();
+        e.commitNow(true);
+        for (org.dizitart.cryptand.lsm.VlogStats st : e.vlog().allStats()) {
+            if (!st.sealed) {
+                open.put(st.segmentId, st.bytes);
+            }
+        }
+        assertFalse(open.isEmpty(), "the fixture left no value-log segment open");
+        e.abandon();
+
+        Engine.Options r = new Engine.Options();
+        r.profile = Profile.DESKTOP;
+        r.rawKey = k;
+        try (Engine e2 = Engine.open(f, r)) {
+            e2.batch().put(TREE, key("b"), new byte[Profile.DESKTOP.vlogMin() + 512]).commit();
+            e2.commitNow(true);
+            for (org.dizitart.cryptand.lsm.VlogStats st : e2.vlog().allStats()) {
+                if (open.containsKey(st.segmentId)) {
+                    assertTrue(st.sealed, "segment " + st.segmentId + " was not sealed at open");
+                    assertEquals(open.get(st.segmentId), st.bytes,
+                            "segment " + st.segmentId + " was appended to after a crash");
+                }
+            }
+        }
+    }
+
     @Test
     @DisplayName("no nonce is ever issued twice, across sessions")
     void nonceUniqueness(@TempDir Path dir) throws Exception {

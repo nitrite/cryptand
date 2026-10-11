@@ -271,4 +271,25 @@ class SecurityConformanceTest {
         assertFalse(Security.constantTimeEquals(a, Vectors.hex("00112234")));
         assertFalse(Security.constantTimeEquals(a, Vectors.hex("001122")));
     }
+
+    /** 14 §11: close() zeroes the master key and every subkey. */
+    @Test
+    void closeZeroesEveryKey() throws Exception {
+        byte[] master = new byte[32];
+        java.util.Arrays.fill(master, (byte) 7);
+        org.dizitart.cryptand.crypto.FileCipher c =
+                org.dizitart.cryptand.crypto.FileCipher.of(master, new byte[16], 0);
+        c.close();
+        int keys = 0;
+        for (java.lang.reflect.Field f : c.getClass().getDeclaredFields()) {
+            if (f.getType() != byte[].class || f.getName().equals("databaseUuid")) {
+                continue;
+            }
+            f.setAccessible(true);
+            byte[] k = (byte[]) f.get(c);
+            assertArrayEquals(new byte[k.length], k, f.getName() + " survives close()");
+            keys++;
+        }
+        assertTrue(keys >= 4, "found only " + keys + " key fields");
+    }
 }

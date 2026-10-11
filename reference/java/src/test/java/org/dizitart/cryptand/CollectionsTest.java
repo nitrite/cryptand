@@ -346,6 +346,29 @@ class CollectionsTest {
             assertTrue(db.authenticate("alice", "hunter2".getBytes(StandardCharsets.UTF_8)));
             assertFalse(db.authenticate("alice", "hunter3".getBytes(StandardCharsets.UTF_8)));
             assertFalse(db.authenticate("bob", password));
+
+            // 14 §10: a per-record random salt, and only the derived hash.
+            db.addUser("carol", password, Profile.MOBILE);
+            byte[] ra = record(db, "alice");
+            byte[] rc = record(db, "carol");
+            Value.Doc a = (Value.Doc) org.dizitart.cryptand.value.Cve.decode(ra);
+            Value.Doc c = (Value.Doc) org.dizitart.cryptand.value.Cve.decode(rc);
+            assertFalse(java.util.Arrays.equals(((Value.Bytes) a.field("salt")).value(),
+                    ((Value.Bytes) c.field("salt")).value()), "two records share a salt");
+            assertFalse(java.util.Arrays.equals(((Value.Bytes) a.field("hash")).value(),
+                    ((Value.Bytes) c.field("hash")).value()), "one password, one hash");
+            assertFalse(new String(ra, StandardCharsets.ISO_8859_1).contains("hunter2"),
+                    "the password is stored");
+        }
+    }
+
+    private static byte[] record(Database db, String user) {
+        db.engine().lockStructure();
+        try {
+            return db.engine().usersTree().get(
+                    org.dizitart.cryptand.key.Cke.encode(new Value.Str(user)));
+        } finally {
+            db.engine().unlockStructure();
         }
     }
 

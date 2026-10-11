@@ -726,3 +726,40 @@ fn the_nonce_floor_publish_never_rewrites_the_live_slot() {
     let after = std::fs::read(&t.path).unwrap()[at..at + 4096].to_vec();
     assert_eq!(before, after, "the live superblock slot was rewritten in place");
 }
+
+/// 14 §3.3: a raw-key slot (`kdf = 0`) writes its cost fields and salt as zero.
+#[test]
+fn a_raw_key_slot_writes_its_kdf_parameters_as_zero() {
+    let s = make_keyslot(&[1u8; 32], &[2u8; 16], 0, &[3u8; 32], 0, 3, 65536, 1, "raw").unwrap();
+    assert_eq!((s.t_cost, s.m_cost_kib, s.parallelism, s.salt), (0, 0, 0, [0u8; 32]));
+}
+
+/// 14 §4.3: after a crash, no append to a value-log segment from an earlier
+/// session. A record's nonce is (segment counter, offset), and re-appending
+/// overwrites the old ciphertext, so a scan of the file for repeated nonces
+/// cannot see the reuse; this checks the rule itself.
+#[test]
+fn a_value_log_segment_from_a_crashed_session_is_sealed_not_reappended() {
+    let t = TempDb::new("reappend");
+    let key = [4u8; 32];
+    let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &key, 0, 0, 0, 0).unwrap();
+    let big = vec![1u8; e.sb.vlog_min as usize + 512];
+    e.put(T, &Value::NitriteId(1), &big).unwrap();
+    e.flush().unwrap();
+    e.commit(Durability::Sync).unwrap();
+    let open: Vec<u64> = e.vlog_stats.iter().filter(|(_, s)| !s.sealed).map(|(&id, _)| id).collect();
+    assert!(!open.is_empty(), "the fixture left no value-log segment open");
+    drop(e); // the crash: no close, no seal
+
+    let mut e = Engine::open(&t.path, Some(&key)).unwrap();
+    for id in &open {
+        assert!(e.vlog_stats[id].sealed, "segment {id} was not sealed at open");
+    }
+    let before: Vec<(u64, u64)> = open.iter().map(|id| (*id, e.vlog_stats[id].bytes)).collect();
+    e.put(T, &Value::NitriteId(2), &big).unwrap();
+    e.flush().unwrap();
+    e.commit(Durability::Sync).unwrap();
+    for (id, bytes) in before {
+        assert_eq!(e.vlog_stats[&id].bytes, bytes, "segment {id} was appended to after a crash");
+    }
+}

@@ -225,6 +225,20 @@ void main() {
           label: 'password',
         );
 
+    test('a raw-key slot writes its kdf parameters as zero', () {
+      final s = wrapMasterKey(
+          masterKey: Uint8List(32),
+          kek: Uint8List(32),
+          databaseUuid: Uint8List(16),
+          slotIndex: 0,
+          wrapNonce: Uint8List(24),
+          salt: Uint8List(32)..fillRange(0, 32, 0xAB),
+          kdf: Keyslot.kdfRaw);
+      final back = Keyslot.decode(s.encode(), 0);
+      expect([back.tCost, back.mCostKib, back.parallelism], [0, 0, 0]);
+      expect(back.salt.every((b) => b == 0), isTrue);
+    });
+
     test('is exactly 144 bytes and round-trips', () {
       final raw = sample().encode();
       expect(raw.length, 144);
