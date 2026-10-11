@@ -300,3 +300,23 @@ fn converts_under_live_snapshot() {
         }
     }
 }
+
+/// Writes `conformance/files/v1.0-security-converting.cryptand` (14 §13, F-123):
+/// `v1.0-core` encrypted under the corpus key and stopped after one
+/// `convert_step`, so pages of both flags remain. Run once, by hand:
+/// `cargo test -p cryptand --test convert_test -- --ignored make_converting_vector`.
+#[test]
+#[ignore]
+fn make_converting_vector() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/files");
+    let out = dir.join("v1.0-security-converting.cryptand");
+    std::fs::copy(dir.join("v1.0-core.cryptand"), &out).unwrap();
+    let key: Vec<u8> = (1..=32).collect(); // the manifest's corpus key, 0102…20
+    let mut e = Engine::open(&out, None).unwrap();
+    e.encrypt(&key, 0, 0, 0, 0).unwrap();
+    assert_eq!(e.convert_step().unwrap(), Step::More);
+    let c = e.conversion().unwrap();
+    assert!(c.converted > 0 && c.remaining > 0, "not half-converted: {c:?}");
+    e.close(true).unwrap();
+    println!("{c:?}");
+}

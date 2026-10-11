@@ -734,6 +734,31 @@ void main(List<String> args) {
             'unused and nothing is proven.'));
   }
 
+  {
+    // 14 section 13's half-encrypted file. Dart cannot convert yet (M5), so
+    // Rust writes it from v1.0-core (`convert_test::make_converting_vector`)
+    // and this only checks it and lists it. Regenerate it whenever v1.0-core
+    // changes.
+    const name = 'v1.0-security-converting.cryptand';
+    final findings = readAll('${outDir.path}/$name', corpusKey);
+    if (findings != 0) {
+      throw StateError('$name: $findings finding(s); a half-converted file is '
+          'a valid file (14 section 8.4)');
+    }
+    stdout.writeln('  ${name.padRight(36)} (from Rust)  0 findings');
+    entries.add(Entry(name, 'read',
+        documents: coreRows.length,
+        digest: coreDigest,
+        key: corpusKey,
+        note: 'v1.0-core encrypted in place and stopped half-way: cipher = 1 '
+            'and a keyslot, with encrypted and plaintext pages side by side. '
+            "Section 8.3: a reader MUST use each page's own flags.ENCRYPTED, "
+            'so this reads exactly as v1.0-core does; section 8.4: a '
+            'half-converted file is a valid file. Unlike the other '
+            'security-* files it is not an attack, and refusing it is the '
+            'failure.'));
+  }
+
   // -------------------------------------------------------------------------
   // manifest.json
   // -------------------------------------------------------------------------
