@@ -12,7 +12,7 @@
 use crate::cke;
 use crate::cow::CowTree;
 use crate::cve;
-use crate::error::{invalid, Result};
+use crate::error::{corrupt, invalid, Result};
 use crate::pager::Pager;
 use crate::value::{NumType, Value};
 
@@ -252,7 +252,7 @@ impl TreeDescriptor {
     pub fn decode(bytes: &[u8]) -> Result<TreeDescriptor> {
         match cve::decode_all(bytes, &|_| None)? {
             Value::Doc(f) => Ok(TreeDescriptor { doc: f }),
-            _ => invalid("a tree descriptor is a CVE document"),
+            _ => corrupt("a tree descriptor is a CVE document"),
         }
     }
 }
@@ -330,7 +330,7 @@ impl Catalog {
         match self.by_id.get(pager, &id_key(id))? {
             Some(v) => match cve::decode_all(&v, &|_| None)? {
                 Value::Str(s) => Ok(Some(s)),
-                _ => invalid("tree 3 value is not a CVE STR"),
+                _ => corrupt("tree 3 value is not a CVE STR"),
             },
             None => Ok(None),
         }
@@ -358,7 +358,7 @@ impl Catalog {
         for (k, v) in self.tree.scan(pager, None, None)? {
             let name = match cke::decode_all(&k)? {
                 Value::Str(s) => s,
-                _ => return invalid("a catalog key is CKE(STR name)"),
+                _ => return corrupt("a catalog key is CKE(STR name)"),
             };
             out.push((name, TreeDescriptor::decode(&v)?));
         }
@@ -433,7 +433,7 @@ impl Attributes {
         match self.tree.get(pager, &name_key(name))? {
             Some(v) => match cve::decode_all(&v, &|_| None)? {
                 Value::Doc(f) => Ok(Some(f)),
-                _ => invalid("an attributes value is a CVE document"),
+                _ => corrupt("an attributes value is a CVE document"),
             },
             None => Ok(None),
         }

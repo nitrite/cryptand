@@ -763,3 +763,21 @@ fn a_value_log_segment_from_a_crashed_session_is_sealed_not_reappended() {
         assert_eq!(e.vlog_stats[&id].bytes, bytes, "segment {id} was appended to after a crash");
     }
 }
+
+/// F-130, 14 §9.1: a file cut short is a typed corruption error, not an I/O
+/// error. Found by `tools/security_attack.py` ("truncated mid-page").
+#[test]
+fn a_truncated_file_is_corruption_not_an_io_error() {
+    let (t, mut e) = encrypted("truncated");
+    for i in 0..200i64 {
+        e.put(T, &Value::NitriteId(i), &vec![i as u8; 700]).unwrap();
+    }
+    e.close(true).unwrap();
+    let len = std::fs::metadata(&t.path).unwrap().len();
+    let ps = 8192u64;
+    std::fs::OpenOptions::new().write(true).open(&t.path).unwrap().set_len(len - ps - ps / 2).unwrap();
+    let r = Engine::open(&t.path, Some(&[7u8; 32])).and_then(|mut e| {
+        (0..200i64).try_for_each(|i| e.get(T, &Value::NitriteId(i)).map(|_| ()))
+    });
+    assert!(matches!(r, Err(Error::Corrupt(_))), "{r:?}");
+}

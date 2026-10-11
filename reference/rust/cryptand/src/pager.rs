@@ -453,7 +453,13 @@ impl Pager {
         match &mut self.file {
             Some(f) => {
                 f.seek(SeekFrom::Start(offset))?;
-                f.read_exact(&mut buf)?;
+                // 14 §9.1: a file cut short is corruption, typed, not an I/O fault (F-130).
+                if let Err(e) = f.read_exact(&mut buf) {
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        return corrupt(format!("read past the end of the file: {offset}+{len}"));
+                    }
+                    return Err(e.into());
+                }
             }
             None => {
                 let end = offset as usize + len;
