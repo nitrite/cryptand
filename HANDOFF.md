@@ -8,10 +8,8 @@
 - M1.2: Rust 10 000 plain + encrypted clean. Java plain 10 000/0. Java
   encrypted seed 9334 was F-121 (verify false positive, fixed d057be4; 1000
   remote replays clean after, it failed within 473 before). Final Java
-  `--encrypted` 0..10000 running on the remote at d057be4 since 11:19 IST
-  (~4 h): `~/Documents/codebase/cryptand/reference/bench/runs/m12-java-enc.log`.
-  That clone has F-115 debug instrumentation in `git stash`; its working tree
-  is clean.
+  `--encrypted` 0..10000 at d057be4: 0 divergences (log
+  `m12-java-enc.log` in the remote `cryptand` clone).
 - M3: Rust 8 cargo-fuzz targets x 4 h clean. Jazzer (7 targets) in remote
   clone `~/Documents/codebase/cryptand-fuzz`, logs
   `reference/bench/runs/fuzz/jz-*.log`, 2 h each, 4 at a time. Every run
@@ -30,7 +28,7 @@
   (`CRYPTAND_FUZZ_DUMP` keeps only the last input replayed). Replaying
   Jazzer inputs needs `process-test-resources`: `surefire:test` reads `target/test-classes`.
 - Remote gate clone `cryptand-gate` (rsync the tree; Dart SDK `~/dart-sdk/bin`).
-- Open outside M5: none (Java M1.2 final run pending). M5 (Dart): F-035, F-038, F-072,
+- Open outside M5: none. M5 (Dart): F-035, F-038, F-072,
   M2.2 Dart, Dart checks of F-079, F-081, F-084, F-087, F-088, F-094..F-121
   (`?`/`M5` in FINDINGS), Dart corpus replay (M3.4).
 - Traps: Rust `stall_test` fails while another job fsyncs on /Volumes/External;
