@@ -817,8 +817,11 @@ conformance/
     v1.0-security-converting        a half-encrypted file, mixed page flags
 ```
 
-Each `security-*` file MUST produce a **specific, named security error**,
-distinct from a corruption error, and MUST NOT return data. Mandatory tests:
+Each `security-*` file except `security-converting` MUST produce a
+**specific, named security error**, distinct from a corruption error, and MUST
+NOT return data. `security-converting` is not an attack: a half-converted file
+is a valid file (§8.4), and it MUST read exactly as its plaintext original,
+each page by its own `flags.ENCRYPTED` (§8.3). Mandatory tests:
 
 - **A tamper test**, over all `security-*` vectors above.
 - **A nonce-uniqueness test.** Write until the published floor of §4.1 is
