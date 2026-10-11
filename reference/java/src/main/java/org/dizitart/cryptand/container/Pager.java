@@ -686,6 +686,17 @@ public final class Pager {
      * checksum, decrypt, then decompress — so a corrupt page is never fed to a
      * codec or a cipher.
      */
+    /**
+     * F-128, 14 §5.5: {@code h}, as read, is the write its parent recorded.
+     * Checked whenever a key is in hand; with {@code cipher = 0} both are 0.
+     */
+    public void checkNonce(long pageId, PageHeader h, long want) {
+        if (crypto != null && h.nonce != want) {
+            throw new org.dizitart.cryptand.TamperingException("page " + pageId + " has nonce " + h.nonce
+                    + ", its parent recorded " + want + ": an older write replayed", pageId);
+        }
+    }
+
     public byte[] readPage(long pageId) {
         // **The cache holds decoded payloads, not raw pages.** A hit on a raw
         // page still had to be cloned, CRC-verified over the whole page, then
@@ -763,6 +774,22 @@ public final class Pager {
      * {@link #freeExtent} — invalidates the page id here as well.
      */
     public BtreePage readTreePage(long pageId) {
+        return readTreePage(pageId, -1);
+    }
+
+    /**
+     * 04 §2.1, F-128: a page of an extent written in one commit carries that
+     * commit's id; another is an older extent's page replayed in place.
+     */
+    public void checkCommit(long pageId, PageHeader h, long want) {
+        if (crypto != null && want >= 0 && h.commitId != want) {
+            throw new org.dizitart.cryptand.TamperingException("page " + pageId + " has commit " + h.commitId
+                    + ", its extent " + want + ": an older write replayed", pageId);
+        }
+    }
+
+    /** {@code headCommit < 0}: not a segment page, nothing to check. */
+    public BtreePage readTreePage(long pageId, long headCommit) {
         Slots slots = treeSlots;
         int slot = (int) (pageId & slots.mask());
         Cached hit = slots.a().get(slot);
@@ -776,6 +803,7 @@ public final class Pager {
         checkInFile(pageId);
         file.readFully(offsetOf(pageId), page, 0, pageSize);
         PageHeader h = PageHeader.verify(page, pageId);
+        checkCommit(pageId, h, headCommit);
         byte[] payload = decodePayload(page, h, pageId);
         BtreePage parsed = BtreePage.parse(payload, 0, payload.length);
         if (pageId >= 2 && slots == treeSlots
@@ -1116,10 +1144,24 @@ public final class Pager {
      * <em>other</em> language, several steps later.
      */
     public byte[] buildExtentPage(long pageId, PageHeader h, byte[] payload) {
+        return buildExtentPage(pageId, h, payload, commitId);
+    }
+
+    /**
+     * With the {@code commit_id} to stamp, which every page of one extent
+     * shares (04 §2.1, F-128). A builder captures it once: a publish on
+     * another thread moves {@link #commitId()} while an extent is being laid
+     * out, and split one segment across two commits.
+     */
+    public byte[] buildExtentPage(long pageId, PageHeader h, byte[] payload, long commit) {
         int saved = pageCodec;
         pageCodec = Superblock.Codec.NONE;
         try {
-            return buildPage(pageId, h, payload);
+            byte[] body = prepareBody(pageId, h, payload, commit);
+            byte[] page = new byte[pageSize];
+            System.arraycopy(body, 0, page, PageHeader.BYTES, body.length);
+            h.writeInto(page);
+            return page;
         } finally {
             pageCodec = saved;
         }
@@ -1136,11 +1178,11 @@ public final class Pager {
      * on top of the checksum that has to run anyway.
      */
     public void buildExtentPageInto(long pageId, PageHeader h, byte[] payload,
-            byte[] dst, int dstOff) {
+            byte[] dst, int dstOff, long commit) {
         int saved = pageCodec;
         pageCodec = Superblock.Codec.NONE;
         try {
-            byte[] body = prepareBody(pageId, h, payload);
+            byte[] body = prepareBody(pageId, h, payload, commit);
             System.arraycopy(body, 0, dst, dstOff + PageHeader.BYTES, body.length);
             java.util.Arrays.fill(dst, dstOff + PageHeader.BYTES + body.length,
                     dstOff + pageSize, (byte) 0);
@@ -1161,12 +1203,16 @@ public final class Pager {
 
     /** Settles every header field and returns the bytes to store after it. */
     private byte[] prepareBody(long pageId, PageHeader h, byte[] payload) {
+        return prepareBody(pageId, h, payload, commitId);
+    }
+
+    private byte[] prepareBody(long pageId, PageHeader h, byte[] payload, long commit) {
         if (payload.length > payloadSize()) {
             throw new InvalidArgumentException("payload is " + payload.length
                     + " bytes, a " + pageSize + "-byte page holds " + payloadSize());
         }
         h.payloadLen = payload.length;
-        h.commitId = commitId;
+        h.commitId = commit;
         byte[] body = payload;
         h.flags &= ~(PageHeader.Flags.COMPRESSED | PageHeader.Flags.ENCRYPTED);
         h.codecOrReserved = 0;

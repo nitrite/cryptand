@@ -351,7 +351,9 @@ public final class SegmentBuilder {
         head.pageType = PageHeader.Type.SEGMENT_HEADER;
         head.flags = PageHeader.Flags.EXTENT_HEAD;
         head.extentPages = pages;
-        byte[] headPage = pager.buildExtentPage(start, head, meta.encodeHeadPayload());
+        long commit = pager.commitId(); // one for the whole extent (F-128)
+        byte[] headPage = pager.buildExtentPage(start, head, meta.encodeHeadPayload(), commit);
+        meta.nonce = head.nonce; // F-128: what the manifest entry records
         System.arraycopy(headPage, 0, extent, 0, headPage.length);
 
         int index = 1;
@@ -359,13 +361,13 @@ public final class SegmentBuilder {
             PageHeader h = new PageHeader();
             h.pageType = BtreePage.isLeafPayload(payload)
                     ? PageHeader.Type.BTREE_LEAF : PageHeader.Type.BTREE_INTERNAL;
-            pager.buildExtentPageInto(start + index, h, payload, extent, index * pager.pageSize());
+            pager.buildExtentPageInto(start + index, h, payload, extent, index * pager.pageSize(), commit);
             index++;
         }
         for (byte[] payload : filterPages) {
             PageHeader h = new PageHeader();
             h.pageType = PageHeader.Type.SEGMENT_FILTER;
-            pager.buildExtentPageInto(start + index, h, payload, extent, index * pager.pageSize());
+            pager.buildExtentPageInto(start + index, h, payload, extent, index * pager.pageSize(), commit);
             index++;
         }
 

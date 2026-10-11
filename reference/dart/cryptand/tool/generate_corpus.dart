@@ -777,6 +777,20 @@ void main(List<String> args) {
             'CONVERTING clear, a page, record or chunk without ENCRYPTED '
             'MUST be reported as tampering.'));
   }
+  {
+    // F-128, written by Rust's `replay_test::make_replay_vector` from
+    // v1.0-encrypted. Regenerate it whenever v1.0-encrypted changes.
+    const name = 'v1.0-security-replay.cryptand';
+    stdout.writeln('  ${name.padRight(36)} (from Rust)');
+    entries.add(Entry(name, 'error',
+        errorClass: 'tampering',
+        key: corpusKey,
+        note: 'v1.0-encrypted after twelve more commits, with one page put '
+            'back to what it held before them: authentic bytes at their own '
+            'position, valid tag and checksum. Section 5.5: every parent '
+            "records its child's nonce, and this child is not the write it "
+            'recorded.'));
+  }
 
   // -------------------------------------------------------------------------
   // manifest.json

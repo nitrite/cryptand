@@ -33,26 +33,32 @@ public final class Segment {
     private final Pager pager;
     private final long startPage;
     private final SegmentMeta meta;
+    /** 04 §2.1, F-128: every headed page of the extent carries this commit id. */
+    private final long headCommit;
     private BlockedBloom filter;
     private boolean filterLoaded;
 
-    private Segment(Pager pager, long startPage, SegmentMeta meta) {
+    private Segment(Pager pager, long startPage, SegmentMeta meta, long headCommit) {
         this.pager = pager;
         this.startPage = startPage;
         this.meta = meta;
+        this.headCommit = headCommit;
     }
 
-    public static Segment open(Pager pager, long startPage) {
+    /** A segment its manifest entry names, with the nonce that entry recorded (14 §5.5). */
+    public static Segment open(Pager pager, long startPage, long nonce) {
+        PageHeader h = pager.readHeader(startPage);
+        pager.checkNonce(startPage, h, nonce);
         byte[] payload = pager.readPage(startPage);
         SegmentMeta m = SegmentMeta.decodeHeadPayload(payload);
         m.startPage = startPage;
-        PageHeader h = pager.readHeader(startPage);
+        m.nonce = nonce;
         if (h.pageType != PageHeader.Type.SEGMENT_HEADER) {
             throw new CorruptionException("page " + startPage + " has type " + h.pageType
                     + ", expected SEGMENT_HEADER", startPage, null);
         }
         m.pages = h.extentPages;
-        return new Segment(pager, startPage, m);
+        return new Segment(pager, startPage, m, h.commitId);
     }
 
     public SegmentMeta meta() {
@@ -89,7 +95,7 @@ public final class Segment {
 
     private BlockedBloom readFilter() {
         long first = absolute(meta.filterPage);
-        byte[] head = pager.readPage(first);
+        byte[] head = readOwn(first);
         ByteReader r = new ByteReader(head);
         r.u32();
         int blockCount = r.u32();
@@ -104,10 +110,18 @@ public final class Segment {
         w.bytes(head);
         long page = first + 1;
         while (w.length() < needed) {
-            byte[] more = pager.readPage(page++);
+            byte[] more = readOwn(page++);
             w.bytes(more, 0, (int) Math.min(more.length, needed - w.length()));
         }
         return BlockedBloom.decode(w.toBytes());
+    }
+
+    /** A page of this extent: 04 §2.1, F-128, it carries the head's commit id. */
+    private byte[] readOwn(long page) {
+        byte[] raw = pager.readRaw(page);
+        PageHeader h = PageHeader.verify(raw, page);
+        pager.checkCommit(page, h, headCommit);
+        return pager.decodePayload(raw, h, page);
     }
 
     /** Whether this segment may hold {@code userKey}; a segment with no filter always may. */
@@ -185,7 +199,7 @@ public final class Segment {
             if ((s & 0xFFFF) != tag) {
                 continue;
             }
-            BtreePage b = pager.readTreePage(absolute(s >>> 32));
+            BtreePage b = pager.readTreePage(absolute(s >>> 32), headCommit);
             int cell = (int) (s >>> 16) & 0xFFFF;
             if (!b.isLeaf() || cell >= b.cellCount()) {
                 throw new CorruptionException("point index names cell " + cell + " of a page that does not hold it",
@@ -337,7 +351,7 @@ public final class Segment {
             // Shared and parsed once — see `Pager.readTreePage`. A segment is
             // written once and never edited, so the page a descent reads is the
             // page that was built.
-            return pager.readTreePage(absolutePage);
+            return pager.readTreePage(absolutePage, headCommit);
         }
 
         public boolean isValid() {

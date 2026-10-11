@@ -64,6 +64,7 @@ pub mod sb {
     pub const WRITER_ID: usize = 256;
     pub const NEXT_NONCE: usize = 288;
     pub const SB_MAC: usize = 296;
+    pub const ROOT_NONCES: usize = 328;
     pub const KEYSLOTS: usize = 3512;
     pub const CHECKSUM: usize = 4092;
 }
@@ -294,6 +295,9 @@ pub struct Superblock {
     pub writer_id: String,
     pub next_nonce: u64,
     pub sb_mac: [u8; 32],
+    /// F-128, 14 §5.5: the header `nonce` of each root, in the order catalog,
+    /// freelist, attributes, manifest, vlog_stats, checkpoint, changefeed.
+    pub root_nonces: [u64; 7],
     pub keyslots: [u8; 576],
     /// `11-conformance.md` §4 rule 5: a *rewriter* preserves reserved bytes; a
     /// *creator* writes zeros. Carrying the whole image is how that is kept.
@@ -352,6 +356,7 @@ impl Default for Superblock {
             writer_id: String::new(),
             next_nonce: 0,
             sb_mac: [0; 32],
+            root_nonces: [0; 7],
             keyslots: [0; 576],
             reserved: Vec::new(),
         }
@@ -444,11 +449,12 @@ impl Superblock {
                 .to_string(),
             next_nonce: u64le(b, sb::NEXT_NONCE),
             sb_mac: b[sb::SB_MAC..sb::SB_MAC + 32].try_into().unwrap(),
+            root_nonces: std::array::from_fn(|i| u64le(b, sb::ROOT_NONCES + 8 * i)),
             keyslots,
             reserved: vec![
                 (221, b[221..224].to_vec()),
                 (248, b[248..256].to_vec()),
-                (328, b[328..3512].to_vec()),
+                (384, b[384..3512].to_vec()),
                 (4088, b[4088..4092].to_vec()),
             ],
         })
@@ -511,6 +517,9 @@ impl Superblock {
         b[sb::WRITER_ID..sb::WRITER_ID + n].copy_from_slice(&w[..n]);
         put_u64(&mut b, sb::NEXT_NONCE, self.next_nonce);
         b[sb::SB_MAC..sb::SB_MAC + 32].copy_from_slice(&self.sb_mac);
+        for (i, n) in self.root_nonces.iter().enumerate() {
+            put_u64(&mut b, sb::ROOT_NONCES + 8 * i, *n);
+        }
         b[sb::KEYSLOTS..sb::KEYSLOTS + 576].copy_from_slice(&self.keyslots);
         // §4 rule 5 of `11-conformance.md`: copy reserved bytes forward.
         for (at, bytes) in &self.reserved {

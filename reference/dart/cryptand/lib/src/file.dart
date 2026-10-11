@@ -92,7 +92,8 @@ abstract final class DatabaseFile {
       }
       final start = store.allocExtent(seg.pageCount);
       store.writeExtent(start, seg.extent);
-      placed.add(_withPlacement(ref, start, seg.pageCount));
+      placed.add(
+          _withPlacement(ref, start, seg.pageCount, store.writtenNonce));
       moved = true;
     }
 
@@ -178,6 +179,16 @@ abstract final class DatabaseFile {
       vlogStatsRoot: stats.root,
       checkpointRoot: e.checkpoints.root,
       changefeedRoot: e.changeFeed.root,
+      // F-128, `14-security.md` §5.5: what each root page was sealed under.
+      rootNonces: [
+        db.catalog.tree.rootNonce,
+        e.freelist.rootNonce,
+        db.attributes.tree.rootNonce,
+        e.manifest.tree.rootNonce,
+        stats.rootNonce,
+        e.checkpoints.tree.rootNonce,
+        e.changeFeed.tree.rootNonce,
+      ],
       nextTreeId: db.catalog.nextTreeId,
       nextSegmentId: e.nextSegmentId,
       nextVlogSegmentId: e.vlog.nextId,
@@ -543,6 +554,7 @@ abstract final class DatabaseFile {
       freelistRoot: sb.freelistRoot,
       checkpointRoot: sb.checkpointRoot,
       changefeedRoot: sb.changefeedRoot,
+      rootNonces: sb.rootNonces,
     );
     e
       ..databaseUuid = Uint8List.fromList(sb.databaseUuid)
@@ -608,12 +620,15 @@ abstract final class DatabaseFile {
         throw CorruptionException(
             'manifest entry for segment ${ref.segmentId} has no extent');
       }
-      e.extents[ref.segmentId] =
-          Segment(store.readExtent(ref.startPage, ref.pages), sb.pageSize);
+      e.extents[ref.segmentId] = Segment(
+          store.readSegment(ref.startPage, ref.pages, ref.nonce), sb.pageSize);
     }
 
     // Value-log segments, from tree 7.
-    final stats = CowTree(store, treeId: TreeId.vlogStats, root: sb.vlogStatsRoot);
+    final stats = CowTree(store,
+        treeId: TreeId.vlogStats,
+        root: sb.vlogStatsRoot,
+        rootNonce: sb.rootNonces[4]);
     e.outerTrees['tree 7'] = stats;
     for (final (k, v) in stats.scan()) {
       final int id;
@@ -664,7 +679,9 @@ abstract final class DatabaseFile {
     return Database(
       engine: e,
       catalogRoot: sb.catalogRoot,
+      catalogNonce: sb.rootNonces[0],
       attributesRoot: sb.attributesRoot,
+      attributesNonce: sb.rootNonces[2],
       nextTreeId: sb.nextTreeId,
       // §4 rule 2 of `spec/11-conformance.md`: a reopen preserves what the
       // file holds, so it does not overwrite the store metadata another SDK
@@ -739,7 +756,8 @@ Uint8List encodeVlogStats(VlogSegment v, {required int startPage}) {
   return encodeValue(CDoc(f));
 }
 
-SegmentRef _withPlacement(SegmentRef r, int startPage, int pages) => SegmentRef(
+SegmentRef _withPlacement(SegmentRef r, int startPage, int pages, int nonce) =>
+    SegmentRef(
       segmentId: r.segmentId,
       level: r.level,
       group: r.group,
@@ -758,4 +776,5 @@ SegmentRef _withPlacement(SegmentRef r, int startPage, int pages) => SegmentRef(
       valueBytes: r.valueBytes,
       vlogBytes: r.vlogBytes,
       trees: r.trees,
+      nonce: nonce,
     );

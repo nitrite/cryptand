@@ -42,6 +42,7 @@ final class Snapshot {
     required this.checkpointRoot,
     required this.changefeedRoot,
     this.takenAtMs = 0,
+    this.rootNonces = const [0, 0, 0, 0, 0, 0, 0],
   });
 
   final int seq;
@@ -53,6 +54,10 @@ final class Snapshot {
   final int vlogStatsRoot;
   final int checkpointRoot;
   final int changefeedRoot;
+
+  /// F-128: the roots' header nonces, in the superblock's `root_nonces`
+  /// order.
+  final List<int> rootNonces;
 
   /// Wall clock at which this snapshot was taken, for
   /// `oldest_snapshot_age_ms` (`13-operations.md` §6).

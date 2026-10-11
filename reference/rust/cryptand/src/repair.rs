@@ -33,7 +33,7 @@ impl EngineRepair for Engine {
     /// pages and reading their `level`, `group`, key bounds and seq range.
     fn rebuild_manifest(&mut self) -> Result<RepairReport> {
         let mut rep = RepairReport::default();
-        let mut fresh = Manifest::new(0);
+        let mut fresh = Manifest::new((0, 0));
         fresh.tree.commit_id = self.sb.commit_id;
         // A retired segment's extent is freed but is never overwritten until it
         // is reallocated, so the file still holds its `SEGMENT_HEADER` page. The
@@ -70,7 +70,8 @@ impl EngineRepair for Engine {
             let extent = self.pager.read_extent(page, pages)?;
             match Segment::open(extent, self.pager.page_size) {
                 Ok(seg) => {
-                    let r = SegmentRef::of(&seg, sh.level, sh.group, page);
+                    // Repair trusts what it finds: the head's own nonce.
+                    let r = SegmentRef::of(&seg, sh.level, sh.group, page, h.nonce);
                     if fresh.add(&mut self.pager, &r).is_ok() {
                         rep.segments_recovered += 1;
                     }
@@ -215,7 +216,7 @@ impl Engine {
         let v = crate::engine::encode_vlog_stats(&s);
         let mut t = std::mem::replace(
             &mut self.vlog_stats_tree,
-            crate::cow::CowTree::new(crate::catalog::tree_id::VLOG_STATS, 0),
+            crate::cow::CowTree::new(crate::catalog::tree_id::VLOG_STATS, 0, 0),
         );
         t.commit_id = self.sb.commit_id;
         let r = t.put(&mut self.pager, &key, &v);

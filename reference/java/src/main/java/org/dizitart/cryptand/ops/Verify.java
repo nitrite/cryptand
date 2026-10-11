@@ -233,7 +233,7 @@ public final class Verify {
     private void verifySegment(SegmentMeta m) {
         Segment seg;
         try {
-            seg = Segment.open(pager, m.startPage);
+            seg = Segment.open(pager, m.startPage, m.nonce);
         } catch (RuntimeException e) {
             report(e, "segment " + m.segmentId + " at page " + m.startPage);
             return;
@@ -643,7 +643,7 @@ public final class Verify {
         BtreePage p = BtreePage.parse(payload, 0, payload.length);
         if (!p.isLeaf()) {
             for (int i = 0; i < p.cellCount(); i++) {
-                claimTree(p.internal(i).childPage(), what);
+                claimTree(p.internalCow(i).childPage(), what);
             }
         }
     }

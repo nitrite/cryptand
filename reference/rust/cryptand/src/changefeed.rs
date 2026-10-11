@@ -47,7 +47,7 @@ impl ChangeFeed for Engine {
     fn read_changes(&mut self, tree: u32, from_seq: u64) -> Result<Vec<Change>> {
         let lower = feed_key(tree, from_seq);
         let upper = feed_key(tree.saturating_add(1), 0);
-        let t = std::mem::replace(&mut self.changefeed, CowTree::new(tree_id::CHANGE_FEED, 0));
+        let t = std::mem::replace(&mut self.changefeed, CowTree::new(tree_id::CHANGE_FEED, 0, 0));
         let rows = t.scan(&mut self.pager, Some(&lower), Some(&upper));
         self.changefeed = t;
         let mut out = Vec::new();
@@ -89,7 +89,7 @@ impl ChangeFeed for Engine {
             .filter(|c| c.seq < below_seq)
             .map(|c| c.seq)
             .collect();
-        let mut t = std::mem::replace(&mut self.changefeed, CowTree::new(tree_id::CHANGE_FEED, 0));
+        let mut t = std::mem::replace(&mut self.changefeed, CowTree::new(tree_id::CHANGE_FEED, 0, 0));
         t.commit_id = self.sb.commit_id;
         let mut n = 0;
         for seq in &doomed {

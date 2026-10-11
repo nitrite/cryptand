@@ -679,16 +679,17 @@ public final class Engine implements AutoCloseable {
     }
 
     private void loadTrees() {
-        catalogTree = PageTree.load(pager, TreeId.CATALOG, sb.catalogRoot);
-        freeTree = PageTree.load(pager, TreeId.FREE_SPACE, sb.freelistRoot);
-        attributesTree = PageTree.load(pager, TreeId.ATTRIBUTES, sb.attributesRoot);
-        treeIndexTree = PageTree.load(pager, TreeId.TREE_INDEX, sideTreeRoot("$tree_index"));
-        repairTree = PageTree.load(pager, TreeId.REPAIR_LOG, sideTreeRoot("$repair_log"));
-        usersTree = PageTree.load(pager, TreeId.USERS, sideTreeRoot("$users"));
-        manifestTree = PageTree.load(pager, TreeId.MANIFEST, sb.manifestRoot);
-        vlogStatsTree = PageTree.load(pager, TreeId.VLOG_STATS, sb.vlogStatsRoot);
-        checkpointTree = PageTree.load(pager, TreeId.CHECKPOINTS, sb.checkpointRoot);
-        changefeedTree = PageTree.load(pager, TreeId.CHANGE_FEED, sb.changefeedRoot);
+        long[] n = sb.rootNonces;
+        catalogTree = PageTree.load(pager, TreeId.CATALOG, sb.catalogRoot, n[0]);
+        freeTree = PageTree.load(pager, TreeId.FREE_SPACE, sb.freelistRoot, n[1]);
+        attributesTree = PageTree.load(pager, TreeId.ATTRIBUTES, sb.attributesRoot, n[2]);
+        treeIndexTree = sideTree(TreeId.TREE_INDEX, "$tree_index");
+        repairTree = sideTree(TreeId.REPAIR_LOG, "$repair_log");
+        usersTree = sideTree(TreeId.USERS, "$users");
+        manifestTree = PageTree.load(pager, TreeId.MANIFEST, sb.manifestRoot, n[3]);
+        vlogStatsTree = PageTree.load(pager, TreeId.VLOG_STATS, sb.vlogStatsRoot, n[4]);
+        checkpointTree = PageTree.load(pager, TreeId.CHECKPOINTS, sb.checkpointRoot, n[5]);
+        changefeedTree = PageTree.load(pager, TreeId.CHANGE_FEED, sb.changefeedRoot, n[6]);
         manifest = new Manifest(manifestTree);
         vlog = new Vlog(pager, vlogStatsTree, sb.vlogSegmentBytes, sb.nextVlogSegmentId);
         vlog.setCipher(cipher);
@@ -714,14 +715,15 @@ public final class Engine implements AutoCloseable {
      */
     private final Map<Long, Segment> segmentCache = new java.util.concurrent.ConcurrentHashMap<>();
 
-    /** The root a catalog descriptor records for one of the non-superblock trees. */
-    private long sideTreeRoot(String name) {
+    /** One of the non-superblock trees, from the root its catalog descriptor records. */
+    private PageTree sideTree(int treeId, String name) {
         byte[] raw = catalogTree.get(TreeDescriptor.catalogKey(name));
         if (raw == null) {
-            return 0;
+            return PageTree.load(pager, treeId, 0, 0);
         }
-        Long root = TreeDescriptor.decode(raw, null).root();
-        return root == null ? 0 : root;
+        TreeDescriptor d = TreeDescriptor.decode(raw, null);
+        Long root = d.root();
+        return PageTree.load(pager, treeId, root == null ? 0 : root, d.rootNonce());
     }
 
     private void republishLevels() {
@@ -737,7 +739,7 @@ public final class Engine implements AutoCloseable {
             // wrong keys. Segment ids are never reused, which is what makes
             // them the safe half of the key.
             if (cached == null || cached.meta().segmentId != m.segmentId) {
-                cached = Segment.open(pager, m.startPage);
+                cached = Segment.open(pager, m.startPage, m.nonce);
                 segmentCache.put(m.startPage, cached);
             }
             open.add(cached);
@@ -1345,6 +1347,10 @@ public final class Engine implements AutoCloseable {
         // allocation corruption rather than a repairable leak.
         freeTree.releaseOldPages();
         sb.freelistRoot = commitFreeTree();
+        // F-128, 14 §5.5: what each root page was sealed under.
+        sb.rootNonces = new long[]{catalogTree.rootNonce(), freeTree.rootNonce(),
+                attributesTree.rootNonce(), manifestTree.rootNonce(), vlogStatsTree.rootNonce(),
+                checkpointTree.rootNonce(), changefeedTree.rootNonce()};
 
         // F-095: a publish that fails is not a commit. Left numbered, the
         // retry skipped an id and, slots alternating by id, overwrote the last
@@ -1454,8 +1460,9 @@ public final class Engine implements AutoCloseable {
         }
         byte[] existing = catalogTree.get(key);
         if (existing != null) {
-            Long recorded = TreeDescriptor.decode(existing, null).root();
-            if (recorded != null && recorded == root) {
+            TreeDescriptor was = TreeDescriptor.decode(existing, null);
+            Long recorded = was.root();
+            if (recorded != null && recorded == root && was.rootNonce() == tree.rootNonce()) {
                 return;
             }
         }
@@ -1463,7 +1470,7 @@ public final class Engine implements AutoCloseable {
                 .treeId(treeId)
                 .kind(TreeDescriptor.Kind.INTERNAL)
                 .levelled(false)
-                .root(root)
+                .root(root, tree.rootNonce())
                 .entries(tree.size())
                 .created(sb.createdUtcMs)
                 .keyKind(keyKind)
@@ -1970,6 +1977,10 @@ public final class Engine implements AutoCloseable {
                 ByteWriter w = new ByteWriter(cell.value().length * 2);
                 w.bytes(cell.value());
                 long next = cell.overflowPage();
+                // ponytail: 01 §5's binding (every overflow page carries the
+                // leaf's commit_id, F-128) is not checked here: no 1.0 writer
+                // produces a chain, so no older chain page exists to replay.
+                // Pass the leaf's segment commit in when a writer appears.
                 while (next != 0) {
                     byte[] payload = pager.readPage(next);
                     ByteReader r = new ByteReader(payload);
@@ -2467,7 +2478,7 @@ public final class Engine implements AutoCloseable {
         inputs.sort(Comparator.<SegmentMeta>comparingInt(m -> m.level)
                 .thenComparing(m -> -m.segmentId));
         for (SegmentMeta m : inputs) {
-            Segment s = Segment.open(pager, m.startPage);
+            Segment s = Segment.open(pager, m.startPage, m.nonce);
             open.add(s);
             sources.add(new EntrySource.OfSegment(s));
         }
@@ -3797,7 +3808,7 @@ public final class Engine implements AutoCloseable {
             }
             Checkpoint c = new Checkpoint(name, sb.commitId, visibleSeq,
                     options.clock.getAsLong(), sb.catalogRoot, sb.freelistRoot, sb.attributesRoot,
-                    sb.manifestRoot, sb.vlogStatsRoot, sb.changefeedRoot, expiresUtcMs);
+                    sb.manifestRoot, sb.vlogStatsRoot, sb.changefeedRoot, expiresUtcMs, sb.rootNonces);
             checkpointTree.put(Checkpoint.key(name), Cve.encode(c.toValue()));
             liveSnapshots.add(new long[]{c.seq(), c.commitId()});
             publishSuperblock(visibleSeq);
@@ -3852,7 +3863,7 @@ public final class Engine implements AutoCloseable {
             }
             residentEntries.set(0);
             pendingRangeDeletes.clear();
-            c.asSnapshot(sb.checkpointRoot).applyTo(sb);
+            c.asSnapshot(sb.checkpointRoot, sb.rootNonces[5]).applyTo(sb);
             reloadTrees();
             visibleSeq = c.seq();
             completeAll(c.seq());
@@ -4092,7 +4103,8 @@ public final class Engine implements AutoCloseable {
             }
             if (mv.segment() != null) {
                 try {
-                    copySegment(mv.start(), to, mv.pages());
+                    long nonce = copySegment(mv.start(), to, mv.pages());
+                    mv.segment().nonce = nonce;
                 } catch (CorruptionException e) {
                     // Out of service, or about to be: it stays where it is.
                     pager.freeExtent(to, mv.pages());
@@ -4115,7 +4127,8 @@ public final class Engine implements AutoCloseable {
      * ({@code 14-security.md} §5.2): it is opened where it was and sealed again
      * where it goes.
      */
-    private void copySegment(long from, long to, int pages) {
+    /** Returns the head page's new nonce (F-128), 0 in the clear. */
+    private long copySegment(long from, long to, int pages) {
         if (pager.crypto() == null) {
             // In slices, so a large segment costs a bounded buffer.
             byte[] buf = new byte[Math.min(pages, 256) * sb.pageSize()];
@@ -4125,16 +4138,22 @@ public final class Engine implements AutoCloseable {
                 pager.file().readFully(pager.offsetOf(from + done), chunk, 0, n);
                 pager.writeAt(pager.offsetOf(to + done), chunk);
             }
-            return;
+            return 0;
         }
+        long head = 0;
+        long commit = pager.commitId(); // one for the whole extent (F-128)
         for (int i = 0; i < pages; i++) {
             byte[] raw = pager.readRaw(from + i);
             PageHeader h = PageHeader.verify(raw, from + i);
             byte[] page = h.isSet(PageHeader.Flags.ENCRYPTED)
-                    ? pager.buildExtentPage(to + i, h, pager.decodePayload(raw, h, from + i))
+                    ? pager.buildExtentPage(to + i, h, pager.decodePayload(raw, h, from + i), commit)
                     : raw;
+            if (i == 0) {
+                head = h.nonce;
+            }
             pager.writeAt(pager.offsetOf(to + i), page);
         }
+        return head;
     }
 
     /**
@@ -4518,9 +4537,9 @@ public final class Engine implements AutoCloseable {
         if (TreeDescriptor.IndexType.SPATIAL.equals(d.indexType())) {
             Value dv = d.params().field("dimensions");
             int dims = dv == null ? 2 : (int) SegmentMeta.longOf(dv);
-            return org.dizitart.cryptand.index.RTree.load(pager, d.treeId(), dims, d.root()).pages();
+            return org.dizitart.cryptand.index.RTree.load(pager, d.treeId(), dims, d.root(), d.rootNonce()).pages();
         }
-        return PageTree.load(pager, d.treeId(), d.root()).pages();
+        return PageTree.load(pager, d.treeId(), d.root(), d.rootNonce()).pages();
     }
 
     private final Map<Integer, Runnable> owners = new java.util.concurrent.ConcurrentHashMap<>();
@@ -4554,20 +4573,23 @@ public final class Engine implements AutoCloseable {
             }
             TreeDescriptor d = TreeDescriptor.decode(catalogTree.get(t.catalogKey), null);
             long root;
+            long nonce;
             if (TreeDescriptor.IndexType.SPATIAL.equals(d.indexType())) {
                 Value dv = d.params().field("dimensions");
             int dims = dv == null ? 2 : (int) SegmentMeta.longOf(dv);
                 org.dizitart.cryptand.index.RTree rt =
-                        org.dizitart.cryptand.index.RTree.load(pager, treeId, dims, d.root());
+                        org.dizitart.cryptand.index.RTree.load(pager, treeId, dims, d.root(), d.rootNonce());
                 rt.markDirty();
                 root = rt.commit();
+                nonce = rt.rootNonce();
             } else {
-                PageTree pt = PageTree.load(pager, treeId, d.root());
+                PageTree pt = PageTree.load(pager, treeId, d.root(), d.rootNonce());
                 pt.markDirty();
                 root = pt.commit();
+                nonce = pt.rootNonce();
             }
             Map<String, Value> fields = new java.util.LinkedHashMap<>(d.document().fields());
-            fields.put("root", Value.integer(NumType.U64, root));
+            TreeDescriptor.putRoot(fields, root, nonce);
             catalogTree.put(t.catalogKey, new TreeDescriptor(Value.Doc.of(fields)).encode(null));
         }
     }
@@ -4601,7 +4623,7 @@ public final class Engine implements AutoCloseable {
             } else {
                 c.plainSegments.add(m);
             }
-            Segment seg = Segment.open(pager, m.startPage);
+            Segment seg = Segment.open(pager, m.startPage, m.nonce);
             for (EntrySource.OfSegment it = new EntrySource.OfSegment(seg); it.isValid(); it.next()) {
                 BtreePage.Leaf cell = it.entry();
                 if (cell.kind() == BtreePage.Kind.BLOB) {
@@ -4711,7 +4733,7 @@ public final class Engine implements AutoCloseable {
                 for (long p = m.startPage; p < m.startPage + m.pages; p++) {
                     pages.add(p);
                 }
-                Segment seg = Segment.open(e.pager, m.startPage);
+                Segment seg = Segment.open(e.pager, m.startPage, m.nonce);
                 for (EntrySource.OfSegment it = new EntrySource.OfSegment(seg); it.isValid(); it.next()) {
                     if (it.entry().kind() == BtreePage.Kind.BLOB) {
                         Blob b = Blob.decode(it.entry().value());

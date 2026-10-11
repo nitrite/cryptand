@@ -168,6 +168,15 @@ impl TreeDescriptor {
     pub fn root(&self) -> Option<u64> {
         self.uint("root")
     }
+    /// F-128, 14 §5.5: the `root` page's header nonce; absent means 0.
+    pub fn root_nonce(&self) -> u64 {
+        self.uint("root_nonce").unwrap_or(0)
+    }
+    /// `root` and `root_nonce` together, so neither is ever written alone.
+    pub fn with_root(&self, (root, nonce): (u64, u64)) -> TreeDescriptor {
+        let u = |v: u64| Some(Value::int(NumType::U64, v as i128));
+        self.with(vec![("root", u(root)), ("root_nonce", if nonce == 0 { None } else { u(nonce) })])
+    }
     pub fn name_dict(&self) -> Option<u32> {
         self.uint("name_dict").map(|v| v as u32)
     }
@@ -276,10 +285,11 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    pub fn new(catalog_root: u64, tree_index_root: u64, next_tree_id: u64) -> Catalog {
+    /// The tree index is rooted from its own descriptor, loaded after open.
+    pub fn new((root, nonce): (u64, u64), next_tree_id: u64) -> Catalog {
         Catalog {
-            tree: CowTree::new(tree_id::CATALOG, catalog_root),
-            by_id: CowTree::new(tree_id::TREE_INDEX, tree_index_root),
+            tree: CowTree::new(tree_id::CATALOG, root, nonce),
+            by_id: CowTree::new(tree_id::TREE_INDEX, 0, 0),
             next_tree_id,
         }
     }
@@ -425,8 +435,8 @@ pub struct Attributes {
 pub const STORE_ATTRIBUTES_KEY: &str = "$store";
 
 impl Attributes {
-    pub fn new(root: u64) -> Attributes {
-        Attributes { tree: CowTree::new(tree_id::ATTRIBUTES, root) }
+    pub fn new((root, nonce): (u64, u64)) -> Attributes {
+        Attributes { tree: CowTree::new(tree_id::ATTRIBUTES, root, nonce) }
     }
 
     pub fn get(&self, pager: &mut Pager, name: &str) -> Result<Option<Vec<(String, Value)>>> {

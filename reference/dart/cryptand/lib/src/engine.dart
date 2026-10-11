@@ -206,6 +206,7 @@ final class Engine {
     int freelistRoot = 0,
     int checkpointRoot = 0,
     int changefeedRoot = 0,
+    List<int> rootNonces = const [0, 0, 0, 0, 0, 0, 0],
   })  : segmentEntries = segmentEntries ?? memtableEntries,
         store = store ?? PageStore(pageSize: pageSize),
         vlog = ValueLog(
@@ -213,10 +214,14 @@ final class Engine {
           segmentBytes: vlogSegmentBytes ?? (4 << 20),
           cachePages: cachePages,
         ) {
-    manifest = Manifest(this.store, root: manifestRoot);
-    freelist = CowTree(this.store, treeId: TreeId.freeSpace, root: freelistRoot);
-    checkpoints = CheckpointStore(this.store, root: checkpointRoot);
-    changeFeed = ChangeFeed(this.store, root: changefeedRoot);
+    manifest =
+        Manifest(this.store, root: manifestRoot, rootNonce: rootNonces[3]);
+    freelist = CowTree(this.store,
+        treeId: TreeId.freeSpace, root: freelistRoot, rootNonce: rootNonces[1]);
+    checkpoints = CheckpointStore(this.store,
+        root: checkpointRoot, rootNonce: rootNonces[5]);
+    changeFeed =
+        ChangeFeed(this.store, root: changefeedRoot, rootNonce: rootNonces[6]);
     vlog.freeExtent = this.store.freeExtent;
     _refreshRetention();
   }
@@ -669,7 +674,9 @@ final class Engine {
     // §5.2: a job whose inputs the manifest no longer names must be abandoned,
     // and abandoning costs only the work done.
     abandonCompaction();
-    manifest.tree.root = c.manifestRoot;
+    manifest.tree
+      ..root = c.manifestRoot
+      ..rootNonce = c.rootNonces[3];
     _levelCache.clear();
     _invalidateCandidateOrder();
     visibleSeq = c.seq;
@@ -719,6 +726,7 @@ final class Engine {
       checkpointRoot: 0,
       changefeedRoot: 0,
       takenAtMs: nowMs,
+      rootNonces: [0, 0, 0, manifest.tree.rootNonce, 0, 0, 0],
     );
     _liveSnapshots.add(s);
     return s;

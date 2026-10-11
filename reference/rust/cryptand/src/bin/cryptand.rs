@@ -125,7 +125,7 @@ fn dump(path: &str) -> cryptand::Result<ExitCode> {
     }
     println!();
     println!("\ncatalog:");
-    let cat = std::mem::replace(&mut e.catalog, cryptand::catalog::Catalog::new(0, 0, 16));
+    let cat = std::mem::replace(&mut e.catalog, cryptand::catalog::Catalog::new((0, 0), 16));
     let all = cat.all(&mut e.pager)?;
     e.catalog = cat;
     for (name, d) in all {
@@ -323,7 +323,7 @@ fn fuzz(path: &str, iterations: u64) -> cryptand::Result<ExitCode> {
             let n = rep.of(Class::Corruption).len() + rep.of(Class::Tampering).len();
             // And then *read*, which is where the decoders are. Every tree the
             // catalog names, every row in it, through the ordinary cursor path.
-            let cat = std::mem::replace(&mut e.catalog, cryptand::catalog::Catalog::new(0, 0, 16));
+            let cat = std::mem::replace(&mut e.catalog, cryptand::catalog::Catalog::new((0, 0), 16));
             let all = cat.all(&mut e.pager);
             e.catalog = cat;
             for (_, d) in all.unwrap_or_default() {

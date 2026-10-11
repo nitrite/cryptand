@@ -150,7 +150,7 @@ impl Backup for Engine {
             &self.changefeed,
             &self.freelist,
         ] {
-            let tree = crate::cow::CowTree::new(t.tree_id, t.root);
+            let tree = crate::cow::CowTree::new(t.tree_id, t.root, t.root_nonce);
             tree.reachable(&mut self.pager, &mut pages)?;
         }
         for p in pages {

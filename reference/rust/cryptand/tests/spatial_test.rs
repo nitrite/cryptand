@@ -211,6 +211,7 @@ fn a_page_whose_dimensions_disagree_with_the_descriptor_is_rejected() {
             bbox: Envelope { min: [0.0; 4], max: [1.0; 4] },
             payload: 1,
             child_entries: 1,
+            child_nonce: 0,
         }],
     };
     let page = n.encode(8192).unwrap();

@@ -41,11 +41,9 @@ SB_NEXT_NONCE, SB_MAC, SB_KEYSLOTS, SB_CRC, SB_UUID = 288, 296, 3512, 4092, 160
 SLOT = 144
 ENCRYPTED, EXTENT_HEAD = 2, 8
 
-# Spec gaps awaiting the human (FINDINGS.md). The attack still runs and is
-# reported as GAP; the gate fails only on outcomes outside these sets, so a
-# crash or an unnamed error on these inputs is still a failure.
-GAP_F128 = frozenset({'gap'})   # older authentic page replayed at its own position
-GAP_OUTCOMES = {'tamper', 'corrupt', 'ok-same', 'ok-DIFFERENT'}
+# F-128 (14 §5.5): an older page replayed at its own position is tampering
+# when anything reads it; one at a position nothing reaches reads the same.
+REPLAY = frozenset({'tamper', 'ok-same'})
 
 def page_size(b):
     return 1 << b[14]
@@ -196,7 +194,7 @@ def variants(base, cred, twin, other, older, live):
         # Replay: an older authentic version of this page, at its own position.
         if len(older) >= o + ps and older[o:o + ps] != base[o:o + ps] and older[o + 5] & ENCRYPTED:
             yield loc, 'replayed older version', edit(lambda b: b.__setitem__(slice(o, o + ps), older[o:o + ps])), \
-                GAP_F128
+                REPLAY
         # Forgery: the plaintext twin's page, unflagged, valid CRC.
         n = max(h['ext'], 1)
         if len(twin) >= o + n * ps and twin[o + 4] == base[o + 4] and not twin[o + 5] & ENCRYPTED:
@@ -285,7 +283,7 @@ def main():
                            cwd=os.path.join(REF, 'dart/cryptand'))
         return open(f, 'rb').read()
 
-    failures, total, seen, gaps = [], 0, {}, set()
+    failures, total, seen = [], 0, {}
     for w in writers:
         base_old = make(w, 'old', KEY)
         f = os.path.join(work, f'{w}-old.cryptand')
@@ -332,20 +330,12 @@ def main():
                 total += 1
                 seen[got] = seen.get(got, 0) + 1
                 row.append(f'{r}={got}')
-                if 'gap' in allowed:
-                    if got in GAP_OUTCOMES:
-                        if got != 'tamper':
-                            gaps.add((attack, 'F-128'))
-                        continue
-                    allowed = GAP_OUTCOMES
                 if got not in allowed:
                     failures.append((w, r, loc, attack + (' (password file)' if cred == 'pw' else ''),
                                      f'{got}, allowed {sorted(allowed)}'))
             print(f'   {loc:<18} {attack + (" [pw]" if cred == "pw" else ""):<40} {" ".join(row)}', flush=True)
 
     print(f'\n== result: {total} runs, outcomes {dict(sorted(seen.items()))}')
-    for attack, f in sorted(gaps):
-        print(f'   GAP  {attack}: accepted or not named as tampering ({f}, awaiting a spec decision)')
     for w, r, loc, attack, why in failures:
         print(f'   FAIL writer={w} reader={r} {loc}: {attack} -> {why}')
     if not a.keep:

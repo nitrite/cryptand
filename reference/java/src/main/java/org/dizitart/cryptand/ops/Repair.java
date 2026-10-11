@@ -167,6 +167,7 @@ public final class Repair {
                     SegmentMeta m = SegmentMeta.decodeHeadPayload(pager.readPage(page));
                     m.startPage = page;
                     m.pages = h.extentPages;
+                    m.nonce = h.nonce; // repair trusts the head it found
                     manifest.add(m);
                     for (long p = page; p < page + h.extentPages; p++) {
                         seen.add(p);

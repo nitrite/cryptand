@@ -53,7 +53,7 @@ public final class SpatialIndex {
         this.srid = s == null ? null : (int) SegmentMeta.longOf(s);
         Long root = descriptor.root();
         this.tree = RTree.load(db.engine().pager(), descriptor.treeId(), dimensions,
-                root == null ? 0 : root);
+                root == null ? 0 : root, descriptor.rootNonce());
         // F-072: a conversion step asks this object, which holds the tree in
         // memory, to rewrite it; commit() publishes the new root.
         db.engine().registerOwner(descriptor.treeId(), () -> {
@@ -140,9 +140,9 @@ public final class SpatialIndex {
     /** Repacks and republishes the root. Called by the engine's commit path. */
     public synchronized void commit() {
         long root = tree.commit();
-        if (descriptor.root() == null || descriptor.root() != root) {
+        if (descriptor.root() == null || descriptor.root() != root || descriptor.rootNonce() != tree.rootNonce()) {
             Map<String, Value> fields = new LinkedHashMap<>(descriptor.document().fields());
-            fields.put("root", Value.integer(NumType.U64, root));
+            TreeDescriptor.putRoot(fields, root, tree.rootNonce());
             fields.put("entries", Value.integer(NumType.U64, tree.size()));
             descriptor = new TreeDescriptor(Value.Doc.of(fields));
             db.putDescriptor(name, descriptor);

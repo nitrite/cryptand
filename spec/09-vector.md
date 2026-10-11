@@ -151,7 +151,6 @@ params = {
     "algorithm":    "hnsw" | "vamana",
     "precision":    "f32" | "f16" | "i8",
     "vector_region": U64,               -- head page of the region chain
-    "vector_region_nonce": U64,         -- its header `nonce` when `cipher = 1` (14 §5.5)
     "code_region":   U64?,              -- PQ codes, if any
     "codebook":      BLOB_REF?,
     "entry_points":  ARRAY[U64],        -- slot ids

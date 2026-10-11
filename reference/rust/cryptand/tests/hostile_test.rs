@@ -143,7 +143,7 @@ fn corpus() -> PathBuf {
 fn exercise(path: &Path) -> cryptand::Result<()> {
     let mut e = Engine::open(path, None)?;
     e.verify()?;
-    let cat = std::mem::replace(&mut e.catalog, cryptand::catalog::Catalog::new(0, 0, 16));
+    let cat = std::mem::replace(&mut e.catalog, cryptand::catalog::Catalog::new((0, 0), 16));
     let all = cat.all(&mut e.pager);
     e.catalog = cat;
     for (_, d) in all.unwrap_or_default() {

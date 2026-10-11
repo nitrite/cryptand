@@ -36,10 +36,12 @@ pub struct SegmentRef {
     pub value_bytes: u64,
     pub vlog_bytes: u64,
     pub trees: Vec<u32>,
+    /// F-128, 14 §5.5: the head page's header nonce.
+    pub nonce: u64,
 }
 
 impl SegmentRef {
-    pub fn of(s: &Segment, level: u8, group: u8, start_page: u64) -> SegmentRef {
+    pub fn of(s: &Segment, level: u8, group: u8, start_page: u64, nonce: u64) -> SegmentRef {
         let h = &s.header;
         let mut trees: Vec<u32> = h.tree_span.iter().map(|(t, _)| *t).collect();
         trees.sort_unstable();
@@ -62,6 +64,7 @@ impl SegmentRef {
             value_bytes: h.value_bytes,
             vlog_bytes: h.vlog_bytes,
             trees,
+            nonce,
         }
     }
 
@@ -92,6 +95,7 @@ impl SegmentRef {
             ("start_page".into(), u64v(self.start_page)),
             ("pages".into(), Value::Int { w: NumType::U32, neg: false, mag: self.pages as u128 }),
             ("root".into(), u64v(self.root)),
+            ("nonce".into(), u64v(self.nonce)),
             ("filter".into(), u64v(self.filter)),
             ("min_seq".into(), u64v(self.min_seq)),
             ("max_seq".into(), u64v(self.max_seq)),
@@ -149,6 +153,7 @@ impl SegmentRef {
             start_page: u("start_page"),
             pages: u("pages") as u32,
             root: u("root"),
+            nonce: u("nonce"),
             filter: u("filter"),
             min_seq: u("min_seq"),
             max_seq: u("max_seq"),
@@ -209,8 +214,8 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    pub fn new(root: u64) -> Manifest {
-        Manifest { tree: CowTree::new(crate::catalog::tree_id::MANIFEST, root), epoch: next_epoch() }
+    pub fn new((root, nonce): (u64, u64)) -> Manifest {
+        Manifest { tree: CowTree::new(crate::catalog::tree_id::MANIFEST, root, nonce), epoch: next_epoch() }
     }
 
     pub fn root(&self) -> u64 {

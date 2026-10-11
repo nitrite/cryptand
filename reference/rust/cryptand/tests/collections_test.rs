@@ -246,7 +246,7 @@ fn the_catalog_answers_every_enumeration_of_section_11() {
     db.engine.flush().unwrap();
     db.commit(Durability::Sync).unwrap();
 
-    let cat = std::mem::replace(&mut db.engine.catalog, cryptand::catalog::Catalog::new(0, 0, 16));
+    let cat = std::mem::replace(&mut db.engine.catalog, cryptand::catalog::Catalog::new((0, 0), 16));
     let pager = &mut db.engine.pager;
     assert_eq!(cat.collections(pager).unwrap(), vec!["orders".to_string()]);
     assert!(cat.repositories(pager, false).unwrap().is_empty());
@@ -268,7 +268,7 @@ fn an_unknown_tree_kind_is_listed_copied_and_never_deleted() {
     // NOT be interpreted."
     let (_t, mut db) = db("opaque", Profile::Desktop);
     let now = cryptand::engine::now_millis();
-    let mut cat = std::mem::replace(&mut db.engine.catalog, cryptand::catalog::Catalog::new(0, 0, 16));
+    let mut cat = std::mem::replace(&mut db.engine.catalog, cryptand::catalog::Catalog::new((0, 0), 16));
     cat.create(&mut db.engine.pager, "future", "quantum_index", None, None, None, 0, vec![], now)
         .unwrap();
     let err = cat.drop(&mut db.engine.pager, "future").unwrap_err();
@@ -283,7 +283,7 @@ fn an_unknown_descriptor_field_survives_a_rewrite() {
     // silently deletes a Java application's fields.
     let (_t, mut db) = db("preserve", Profile::Desktop);
     let now = cryptand::engine::now_millis();
-    let mut cat = std::mem::replace(&mut db.engine.catalog, cryptand::catalog::Catalog::new(0, 0, 16));
+    let mut cat = std::mem::replace(&mut db.engine.catalog, cryptand::catalog::Catalog::new((0, 0), 16));
     let d = cat
         .create(&mut db.engine.pager, "t", kind::KV, None, None, None, 0, vec![], now)
         .unwrap();

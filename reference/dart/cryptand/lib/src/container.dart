@@ -181,6 +181,7 @@ class Sb {
   // Security area, spec/14-security.md.
   static const int nextNonce = 288;
   static const int sbMac = 296;
+  static const int rootNonces = 328;
   static const int keyslots = 3512;
   static const int checksum = 4092;
 
@@ -300,6 +301,7 @@ final class Superblock {
     this.liveValueBytes = 0,
     this.writerId = 'cryptand-dart/0.1.0-phase1',
     this.nextNonce = 0,
+    List<int>? rootNonces,
     Uint8List? sbMac,
     Uint8List? keyslots,
     int? vlogMin,
@@ -316,7 +318,8 @@ final class Superblock {
     int? readaheadWindow,
     int? segmentTargetBytes,
     this.memtableShards = 1,
-  })  : databaseUuid = databaseUuid ?? Uint8List(16),
+  })  : rootNonces = List.unmodifiable(rootNonces ?? List.filled(7, 0)),
+        databaseUuid = databaseUuid ?? Uint8List(16),
         sbMac = sbMac ?? Uint8List(32),
         keyslots = keyslots ?? Uint8List(Sb.keyslotSize * Sb.keyslotCount),
         // Clamped to the cap `00-conventions.md` section 8 sets, because the
@@ -393,6 +396,11 @@ final class Superblock {
   final int liveValueBytes;
   final String writerId;
   final int nextNonce;
+
+  /// F-128, `14-security.md` §5.5: each root's header nonce, in the order
+  /// catalog, freelist, attributes, manifest, vlog_stats, checkpoint,
+  /// changefeed.
+  final List<int> rootNonces;
   final Uint8List sbMac;
   final Uint8List keyslots;
   final int vlogMin;
@@ -477,6 +485,9 @@ final class Superblock {
     }
     buf.setRange(Sb.writerId, Sb.writerId + id.length, id);
     bd.setUint64(Sb.nextNonce, nextNonce, Endian.little);
+    for (var i = 0; i < 7; i++) {
+      bd.setUint64(Sb.rootNonces + 8 * i, rootNonces[i], Endian.little);
+    }
     buf
       ..setRange(Sb.sbMac, Sb.sbMac + 32, sbMac)
       ..setRange(Sb.keyslots, Sb.keyslots + keyslots.length, keyslots);
@@ -541,6 +552,10 @@ final class Superblock {
       liveValueBytes: bd.getUint64(Sb.liveValueBytes, Endian.little),
       writerId: _readWriterId(buf),
       nextNonce: bd.getUint64(Sb.nextNonce, Endian.little),
+      rootNonces: [
+        for (var i = 0; i < 7; i++)
+          bd.getUint64(Sb.rootNonces + 8 * i, Endian.little)
+      ],
       sbMac: Uint8List.fromList(buf.sublist(Sb.sbMac, Sb.sbMac + 32)),
       keyslots: Uint8List.fromList(buf.sublist(
           Sb.keyslots, Sb.keyslots + Sb.keyslotSize * Sb.keyslotCount)),

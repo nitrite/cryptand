@@ -78,7 +78,10 @@ found.
 
 ## What encryption does not protect against
 
-An encrypted file detects edits to its pages and its superblock, but not
+An encrypted file detects edits to its pages and its superblock, and an older
+copy of a single page put back in place (each parent records its child's
+nonce; vector regions excepted, since they are rebuilt from the documents,
+`spec/14-security.md` §5.5). It does not detect whole-file
 **rollback**: someone who replaces the whole file with a genuine older copy
 of itself gets a file that verifies, because every byte of it was once valid
 (`spec/14-security.md` §1.2 N2, §6.3). If your threat model includes this,

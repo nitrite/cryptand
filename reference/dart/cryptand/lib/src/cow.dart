@@ -119,6 +119,30 @@ final class PageStore {
   /// plaintext page is not a converting file's mixture but a forgery.
   bool strict = false;
 
+  /// F-128, `14-security.md` §5.5: the header `nonce` of the page [write]
+  /// (or the head of the extent [writeExtent]) last wrote, which its parent
+  /// records, and of the page [read] last read, which [checkNonce] compares.
+  int writtenNonce = 0;
+  int readNonce = 0;
+
+  /// The page just read is the write its parent recorded. Checked whenever a
+  /// key is in hand; with `cipher = 0` both are 0.
+  void checkNonce(int pageId, int want) {
+    if (crypto != null && readNonce != want) {
+      throw TamperException(
+          'page $pageId has nonce $readNonce, its parent recorded $want: an '
+          'older write replayed',
+          pageId: pageId);
+    }
+  }
+
+  /// [read], then [checkNonce].
+  Uint8List readBound(int pageId, int nonce) {
+    final page = read(pageId);
+    checkNonce(pageId, nonce);
+    return page;
+  }
+
   /// `spec/01-container.md` §7's `page_codec`: the **default** for newly
   /// written pages, never a property of the file. A page's own state is in its
   /// `flags.COMPRESSED` and `codec_or_reserved`, so a file may hold a mixture
@@ -263,10 +287,14 @@ final class PageStore {
       throw const InvalidArgumentException(
           'an extent must be a whole number of pages');
     }
+    var head = 0;
     for (var i = 0; i * pageSize < extent.length; i++) {
       writeInExtent(startPage + i,
           Uint8List.sublistView(extent, i * pageSize, (i + 1) * pageSize));
+      if (i == 0) head = writtenNonce;
     }
+    // F-128: what the manifest records is the head's nonce.
+    writtenNonce = head;
   }
 
   /// A whole extent with no page cipher: `spec/14-security.md` section 5.1
@@ -299,6 +327,41 @@ final class PageStore {
     final out = Uint8List(pages * pageSize);
     for (var i = 0; i < pages; i++) {
       out.setRange(i * pageSize, (i + 1) * pageSize, readClear(startPage + i));
+    }
+    return out;
+  }
+
+  /// F-128, `14-security.md` §5.5: [readExtent] for a segment its manifest
+  /// entry names. The head is the write the entry recorded, and every headed
+  /// page carries the head's `commit_id` (04 §2.1), so none is an older
+  /// extent's.
+  Uint8List readSegment(int startPage, int pages, int nonce) {
+    final out = readExtent(startPage, pages);
+    if (crypto == null) return out;
+    final raw = readExtentClear(startPage, pages);
+    final head = PageHeader.read(Uint8List.sublistView(raw, 0, pageSize),
+        pageId: startPage);
+    if (head.nonce != nonce) {
+      throw TamperException(
+          'segment at page $startPage has nonce ${head.nonce}, the manifest '
+          'recorded $nonce: an older write replayed',
+          pageId: startPage);
+    }
+    for (var i = 1; i < pages; i++) {
+      final PageHeader h;
+      try {
+        h = PageHeader.read(
+            Uint8List.sublistView(raw, i * pageSize, (i + 1) * pageSize),
+            pageId: startPage + i);
+      } on CorruptionException {
+        continue;
+      }
+      if (h.isEncrypted && h.commitId != head.commitId) {
+        throw TamperException(
+            'page ${startPage + i} of the segment at $startPage has commit '
+            '${h.commitId}, its head ${head.commitId}: an older write replayed',
+            pageId: startPage + i);
+      }
     }
     return out;
   }
@@ -348,6 +411,7 @@ final class PageStore {
 
   Uint8List read(int pageId) {
     final raw = readClear(pageId);
+    readNonce = ByteData.sublistView(raw).getUint64(32, Endian.little);
     // §5.2's read order: verify checksum, decrypt, then decompress.
     final plain = crypto == null ? raw : _openPage(pageId, raw);
     return _inflatePage(pageId, plain);
@@ -371,6 +435,7 @@ final class PageStore {
           'page $pageId is ${page.length} B, expected $pageSize');
     }
     pageWrites++;
+    writtenNonce = 0;
     // §7's order, and §5.2 restates it: compress, then encrypt. The other
     // order compresses ciphertext, which does not compress.
     final deflated = _deflatePage(page) ?? page;
@@ -393,6 +458,7 @@ final class PageStore {
           'page $pageId is ${page.length} B, expected $pageSize');
     }
     pageWrites++;
+    writtenNonce = 0;
     _rawWrite(pageId, crypto == null ? page : _sealPage(pageId, page));
   }
 
@@ -529,6 +595,7 @@ final class PageStore {
           'the 16-byte AEAD tag in a $pageSize B page');
     }
     final counter = crypto!.nonces.allocate();
+    writtenNonce = counter;
     final out = Uint8List(pageSize);
     final sealedHeader = PageHeader(
       pageType: h.pageType,
@@ -650,9 +717,10 @@ final class _Node {
         }
         payloads.add(leafPayload(r.bytesCopy(r.uvar())));
       } else {
+        // F-128: a copy-on-write cell adds `child_nonce` (04 §2.2).
         final child = r.u64();
         final entries = r.u64();
-        payloads.add(childPayload(child, entries));
+        payloads.add(childPayload(child, entries, r.u64()));
       }
     }
     return _Node(n.isLeaf, keys, payloads);
@@ -665,17 +733,24 @@ final class _Node {
         ..bytes(value))
       .takeBytes();
 
-  static Uint8List childPayload(int page, int entries) =>
-      (ByteWriter(16)..u64(page)..u64(entries)).takeBytes();
+  static Uint8List childPayload(int page, int entries, int nonce) =>
+      (ByteWriter(24)..u64(page)..u64(entries)..u64(nonce)).takeBytes();
 
   static Uint8List valueOf(Uint8List payload) {
     final r = ByteReader(payload)..u8();
     return r.bytesCopy(r.uvar());
   }
 
-  static (int, int) childOf(Uint8List payload) {
+  /// `(child_page, child_subtree_entries, child_nonce)`.
+  static (int, int, int) childOf(Uint8List payload) {
     final r = ByteReader(payload);
-    return (r.u64(), r.u64());
+    return (r.u64(), r.u64(), r.u64());
+  }
+
+  /// A child to descend into: its page and the nonce its parent recorded.
+  static (int, int) link(Uint8List payload) {
+    final c = childOf(payload);
+    return (c.$1, c.$3);
   }
 }
 
@@ -684,11 +759,22 @@ final class _Node {
 /// [root] is the published root page id; 0 means the tree is empty, which is
 /// what an unset superblock root field says.
 final class CowTree {
-  CowTree(this.store, {required this.treeId, this.root = 0});
+  CowTree(this.store,
+      {required this.treeId, this.root = 0, this.rootNonce = 0});
 
   final PageStore store;
   final int treeId;
   int root;
+
+  /// F-128: the root page's header nonce, recorded by whoever holds [root].
+  int rootNonce;
+
+  (int, int) get _rootLink => (root, rootNonce);
+
+  void _setRoot((int, int) link) {
+    root = link.$1;
+    rootNonce = link.$2;
+  }
 
   /// Pages written since the last [resetCounters], i.e. the copy-on-write
   /// cost of the edits made. A path copy is `height` pages, not one.
@@ -702,13 +788,15 @@ final class CowTree {
   bool get isEmpty => root == 0;
 
   int get entryCount =>
-      root == 0 ? 0 : _load(root).subtreeEntries;
+      root == 0 ? 0 : _load(_rootLink).subtreeEntries;
 
-  _Node _load(int pageId) => _Node.decode(store.read(pageId), pageId);
+  _Node _load((int, int) link) =>
+      _Node.decode(store.readBound(link.$1, link.$2), link.$1);
 
-  int _write(_Node n) => _writeAt(store.alloc(), n);
+  /// The page id and the nonce it was sealed under.
+  (int, int) _write(_Node n) => _writeAt(store.alloc(), n);
 
-  int _writeAt(int id, _Node n) {
+  (int, int) _writeAt(int id, _Node n) {
     store.write(
         id,
         encodeNodePage(
@@ -721,7 +809,7 @@ final class CowTree {
           treeId: treeId,
         ));
     pagesCopied++;
-    return id;
+    return (id, store.writtenNonce);
   }
 
   // -------------------------------------------------------------------------
@@ -730,15 +818,15 @@ final class CowTree {
 
   Uint8List? get(Uint8List key) {
     if (root == 0) return null;
-    var pageId = root;
+    var at = _rootLink;
     for (var depth = 0;; depth++) {
-      _checkDepth(depth, pageId);
-      final n = _load(pageId);
+      _checkDepth(depth, at.$1);
+      final n = _load(at);
       if (n.isLeaf) {
         final i = _find(n.keys, key);
         return i < 0 ? null : _Node.valueOf(n.payloads[i]);
       }
-      pageId = _Node.childOf(n.payloads[_descend(n.keys, key)]).$1;
+      at = _Node.link(n.payloads[_descend(n.keys, key)]);
     }
   }
 
@@ -752,7 +840,7 @@ final class CowTree {
   Iterable<(Uint8List, Uint8List)> scan(
       {Uint8List? lower, Uint8List? upper}) sync* {
     if (root == 0) return;
-    yield* _walk(root, lower, upper, 0, <int>{});
+    yield* _walk(_rootLink, lower, upper, 0, <int>{});
   }
 
   /// F-113: child pointers come from the file, so every descent is bounded;
@@ -781,10 +869,11 @@ final class CowTree {
   /// which pages it holds, and there was no way to ask.
   Iterable<int> reachablePages() sync* {
     if (root == 0) return;
-    yield* _reachable(root, 0, <int>{});
+    yield* _reachable(_rootLink, 0, <int>{});
   }
 
-  Iterable<int> _reachable(int pageId, int depth, Set<int> seen) sync* {
+  Iterable<int> _reachable((int, int) link, int depth, Set<int> seen) sync* {
+    final pageId = link.$1;
     // A cyclic or wildly deep tree is a hostile file's cheapest denial of
     // service, and this walk is reachable from `verify` on a file the caller
     // did not write. The bound is the same one section 8 of
@@ -796,18 +885,19 @@ final class CowTree {
     }
     _visit(seen, pageId);
     yield pageId;
-    final n = _load(pageId);
+    final n = _load(link);
     if (n.isLeaf) return;
     for (var i = 0; i < n.count; i++) {
-      yield* _reachable(_Node.childOf(n.payloads[i]).$1, depth + 1, seen);
+      yield* _reachable(_Node.link(n.payloads[i]), depth + 1, seen);
     }
   }
 
-  Iterable<(Uint8List, Uint8List)> _walk(int pageId, Uint8List? lower,
+  Iterable<(Uint8List, Uint8List)> _walk((int, int) link, Uint8List? lower,
       Uint8List? upper, int depth, Set<int> seen) sync* {
+    final pageId = link.$1;
     _checkDepth(depth, pageId);
     _visit(seen, pageId);
-    final n = _load(pageId);
+    final n = _load(link);
     if (n.isLeaf) {
       for (var i = 0; i < n.count; i++) {
         final k = n.keys[i];
@@ -824,8 +914,7 @@ final class CowTree {
       if (upper != null && i > start && compareKeys(n.keys[i], upper) >= 0) {
         return;
       }
-      yield* _walk(
-          _Node.childOf(n.payloads[i]).$1, lower, upper, depth + 1, seen);
+      yield* _walk(_Node.link(n.payloads[i]), lower, upper, depth + 1, seen);
     }
   }
 
@@ -907,17 +996,17 @@ final class CowTree {
 
     // Descend, remembering the pages to copy on the way back up.
     final path = <(int, _Node, int)>[]; // (pageId, node, childIndex)
-    var pageId = root;
+    var link = _rootLink;
     while (true) {
-      _checkDepth(path.length, pageId);
-      final n = _load(pageId);
+      _checkDepth(path.length, link.$1);
+      final n = _load(link);
       if (n.isLeaf) {
-        path.add((pageId, n, -1));
+        path.add((link.$1, n, -1));
         break;
       }
       final i = _descend(n.keys, key);
-      path.add((pageId, n, i));
-      pageId = _Node.childOf(n.payloads[i]).$1;
+      path.add((link.$1, n, i));
+      link = _Node.link(n.payloads[i]);
     }
 
     final leaf = path.last.$2;
@@ -956,10 +1045,10 @@ final class CowTree {
       parent.keys.removeAt(childIndex);
       parent.payloads.removeAt(childIndex);
       for (var i = 0; i < children.length; i++) {
-        final (id, n) = children[i];
+        final ((id, nonce), n) = children[i];
         parent.keys.insert(childIndex + i, Uint8List.fromList(n.keys.first));
-        parent.payloads
-            .insert(childIndex + i, _Node.childPayload(id, n.subtreeEntries));
+        parent.payloads.insert(
+            childIndex + i, _Node.childPayload(id, n.subtreeEntries, nonce));
       }
       replacements = _split(parent);
       level--;
@@ -968,13 +1057,13 @@ final class CowTree {
     if (replacements.length == 1) {
       final only = replacements.first;
       if (only.count == 0) {
-        root = 0;
+        _setRoot((0, 0));
       } else if (!only.isLeaf && only.count == 1) {
         // A root with one child is a chain of one; its child is already a
         // valid root, so the level is dropped rather than written.
-        root = _Node.childOf(only.payloads[0]).$1;
+        _setRoot(_Node.link(only.payloads[0]));
       } else {
-        root = _write(only);
+        _setRoot(_write(only));
       }
       return;
     }
@@ -984,9 +1073,10 @@ final class CowTree {
     for (final n in replacements) {
       if (n.count == 0) continue;
       keys.add(Uint8List.fromList(n.keys.first));
-      payloads.add(_Node.childPayload(_write(n), n.subtreeEntries));
+      final (id, nonce) = _write(n);
+      payloads.add(_Node.childPayload(id, n.subtreeEntries, nonce));
     }
-    root = _write(_Node(false, keys, payloads));
+    _setRoot(_write(_Node(false, keys, payloads)));
   }
 
   /// Replaces the whole tree with [entries] (sorted, distinct keys), built
@@ -1002,7 +1092,7 @@ final class CowTree {
   /// `spec/01-container.md` §9 calls a double allocation.
   void rebuildFresh(List<(Uint8List, Uint8List)> entries) {
     if (entries.isEmpty) {
-      root = 0;
+      _setRoot((0, 0));
       return;
     }
     var level = _split(_Node(true, [for (final e in entries) e.$1],
@@ -1011,12 +1101,12 @@ final class CowTree {
       final keys = <Uint8List>[];
       final payloads = <Uint8List>[];
       for (final n in level) {
-        final id = _writeAt(store.allocFresh(), n);
+        final (id, nonce) = _writeAt(store.allocFresh(), n);
         keys.add(n.keys.first);
-        payloads.add(_Node.childPayload(id, n.subtreeEntries));
+        payloads.add(_Node.childPayload(id, n.subtreeEntries, nonce));
       }
       if (level.length == 1) {
-        root = _Node.childOf(payloads.first).$1;
+        _setRoot(_Node.link(payloads.first));
         return;
       }
       level = _split(_Node(false, keys, payloads));
@@ -1045,10 +1135,10 @@ final class CowTree {
   int get height {
     if (root == 0) return 0;
     var h = 1;
-    var n = _load(root);
+    var n = _load(_rootLink);
     while (!n.isLeaf) {
       h++;
-      n = _load(_Node.childOf(n.payloads[0]).$1);
+      n = _load(_Node.link(n.payloads[0]));
     }
     return h;
   }

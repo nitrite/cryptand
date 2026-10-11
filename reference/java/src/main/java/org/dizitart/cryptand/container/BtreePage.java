@@ -180,11 +180,22 @@ public final class BtreePage {
         private final byte[] separator;
         private final long childPage;
         private final long childSubtreeEntries;
+        /** F-128, 14 §5.5: a copy-on-write cell's {@code child_nonce}; 0 in a segment. */
+        private final long childNonce;
 
         public Internal(byte[] separator, long childPage, long childSubtreeEntries) {
+            this(separator, childPage, childSubtreeEntries, 0);
+        }
+
+        public Internal(byte[] separator, long childPage, long childSubtreeEntries, long childNonce) {
             this.separator = separator;
             this.childPage = childPage;
             this.childSubtreeEntries = childSubtreeEntries;
+            this.childNonce = childNonce;
+        }
+
+        public long childNonce() {
+            return childNonce;
         }
 
         public byte[] separator() {
@@ -210,12 +221,13 @@ public final class BtreePage {
             Internal that = (Internal) o;
             return java.util.Objects.equals(separator, that.separator)
                     && childPage == that.childPage
-                    && childSubtreeEntries == that.childSubtreeEntries;
+                    && childSubtreeEntries == that.childSubtreeEntries
+                    && childNonce == that.childNonce;
         }
 
         @Override
         public int hashCode() {
-            return java.util.Objects.hash(separator, childPage, childSubtreeEntries);
+            return java.util.Objects.hash(separator, childPage, childSubtreeEntries, childNonce);
         }
 
         @Override
@@ -366,6 +378,15 @@ public final class BtreePage {
     }
 
     public Internal internal(int i) {
+        return internal(i, false);
+    }
+
+    /** A copy-on-write tree's cell, which adds {@code child_nonce} (04 §2.2, F-128). */
+    public Internal internalCow(int i) {
+        return internal(i, true);
+    }
+
+    private Internal internal(int i, boolean cow) {
         if (leaf) {
             throw new CorruptionException("internal cell requested from a leaf page");
         }
@@ -374,7 +395,7 @@ public final class BtreePage {
         byte[] suffix = r.bytes(suffixLen);
         long child = r.u64();
         long entries = r.u64();
-        return new Internal(concat(prefix, suffix), child, entries);
+        return new Internal(concat(prefix, suffix), child, entries, cow ? r.u64() : 0);
     }
 
     /**
@@ -674,12 +695,22 @@ public final class BtreePage {
     }
 
     public static byte[] encodeInternals(List<Internal> cells, int payloadLen) {
+        return encodeInternals(cells, payloadLen, false);
+    }
+
+    /** A copy-on-write tree's internal page: every cell carries {@code child_nonce}. */
+    public static byte[] encodeInternalsCow(List<Internal> cells, int payloadLen) {
+        return encodeInternals(cells, payloadLen, true);
+    }
+
+    private static byte[] encodeInternals(List<Internal> cells, int payloadLen, boolean cow) {
         byte[] prefix = commonPrefixOfSeparators(cells);
         int n = cells.size();
+        int extra = cow ? 8 : 0;
         int total = 0;
         long entries = 0;
         for (Internal c : cells) {
-            total += internalCellBytes(c, prefix.length) - 2;
+            total += internalCellBytes(c, prefix.length) - 2 + extra;
             entries += c.childSubtreeEntries();
         }
         byte[] out = startPage(n, prefix, payloadLen, false, entries, total);
@@ -689,7 +720,7 @@ public final class BtreePage {
         int top = payloadLen;
         for (int i = 0; i < n; i++) {
             Internal c = cells.get(i);
-            top -= internalCellBytes(c, prefix.length) - 2;
+            top -= internalCellBytes(c, prefix.length) - 2 + extra;
             int p = top;
             byte[] sep = c.separator();
             int suffixLen = sep.length - prefix.length;
@@ -697,7 +728,10 @@ public final class BtreePage {
             System.arraycopy(sep, prefix.length, out, p, suffixLen);
             p += suffixLen;
             p = putU64(out, p, c.childPage());
-            putU64(out, p, c.childSubtreeEntries());
+            p = putU64(out, p, c.childSubtreeEntries());
+            if (cow) {
+                putU64(out, p, c.childNonce());
+            }
             putPointer(out, prefix.length, i, top);
         }
         return out;

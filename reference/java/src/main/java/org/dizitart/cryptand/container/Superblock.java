@@ -150,6 +150,11 @@ public final class Superblock {
     public long nextNonce;
     /** Keyed MAC over this superblock; zero when {@code cipher = 0}. */
     public byte[] sbMac = new byte[32];
+    /**
+     * F-128, 14 §5.5: each root's header nonce, in the order catalog, freelist,
+     * attributes, manifest, vlog_stats, checkpoint, changefeed (offset 328).
+     */
+    public long[] rootNonces = new long[7];
     /** 4 x 144 bytes; the wrapped master key. Zero when {@code cipher = 0}. */
     public byte[] keyslots = new byte[576];
 
@@ -232,6 +237,11 @@ public final class Superblock {
         }
         System.arraycopy(head, 0, out, 0, head.length);
         System.arraycopy(fixed(sbMac, 32), 0, out, 296, 32);
+        for (int i = 0; i < 7; i++) {
+            for (int b = 0; b < 8; b++) {
+                out[328 + 8 * i + b] = (byte) (rootNonces[i] >>> (8 * b));
+            }
+        }
         System.arraycopy(fixed(keyslots, 576), 0, out, 3512, 576);
 
         // §6 of 00-conventions: the checksum is the last field and covers
@@ -378,6 +388,13 @@ public final class Superblock {
         sb.writerId = trimZeroPadded(r.bytes(32));
         sb.nextNonce = r.u64();
         sb.sbMac = Arrays.copyOfRange(slot, 296, 328);
+        for (int i = 0; i < 7; i++) {
+            long v = 0;
+            for (int b = 7; b >= 0; b--) {
+                v = (v << 8) | (slot[328 + 8 * i + b] & 0xFF);
+            }
+            sb.rootNonces[i] = v;
+        }
         sb.keyslots = Arrays.copyOfRange(slot, 3512, 3512 + 576);
 
         sb.check();

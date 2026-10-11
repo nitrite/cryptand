@@ -145,10 +145,11 @@ void main() {
 
   group('the R-tree page format, section 2.1', () {
     test('entry strides are exactly what the table says', () {
-      // Internal: 16 x dimensions + 16. Leaf: 16 x dimensions + 8.
-      expect(entryStride(2, false), 48);
+      // Internal: 16 x dimensions + 24 (F-128 child_nonce). Leaf: 16 x
+      // dimensions + 8.
+      expect(entryStride(2, false), 56);
       expect(entryStride(2, true), 40);
-      expect(entryStride(3, false), 64);
+      expect(entryStride(3, false), 72);
       expect(entryStride(4, true), 72);
     });
 

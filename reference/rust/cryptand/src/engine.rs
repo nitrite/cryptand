@@ -143,6 +143,8 @@ pub struct Snapshot {
     pub vlog_stats_root: u64,
     pub checkpoint_root: u64,
     pub changefeed_root: u64,
+    /// F-128: the nonces of the seven roots above, as `Superblock::root_nonces`.
+    pub root_nonces: [u64; 7],
     pub created_ms: i64,
 }
 
@@ -189,7 +191,8 @@ pub struct CompactionJob {
     entries: Vec<SegEntry>,
     cursor: usize,
     builder: Option<SegmentBuilder>,
-    outputs: Vec<(Vec<u8>, u64)>,
+    /// `(extent, start_page, head nonce)`.
+    outputs: Vec<(Vec<u8>, u64, u64)>,
     per_output: u64,
     pub bytes_written: u64,
     /// F-050: BLOB pointers of dropped entries, freed when the job publishes.
@@ -451,13 +454,13 @@ impl Engine {
         let mut e = Engine {
             scan_examined: 0,
             pager,
-            manifest: Manifest::new(0),
-            catalog: Catalog::new(0, 0, tree_id::FIRST_USER_TREE as u64),
-            attributes: Attributes::new(0),
-            freelist: CowTree::new(tree_id::FREE_SPACE, 0),
-            vlog_stats_tree: CowTree::new(tree_id::VLOG_STATS, 0),
-            checkpoints: CowTree::new(tree_id::CHECKPOINTS, 0),
-            changefeed: CowTree::new(tree_id::CHANGE_FEED, 0),
+            manifest: Manifest::new((0, 0)),
+            catalog: Catalog::new((0, 0), tree_id::FIRST_USER_TREE as u64),
+            attributes: Attributes::new((0, 0)),
+            freelist: CowTree::new(tree_id::FREE_SPACE, 0, 0),
+            vlog_stats_tree: CowTree::new(tree_id::VLOG_STATS, 0, 0),
+            checkpoints: CowTree::new(tree_id::CHECKPOINTS, 0, 0),
+            changefeed: CowTree::new(tree_id::CHANGE_FEED, 0, 0),
             memtable: (0..shards).map(|_| BTreeMap::new()).collect(),
             memtable_bytes: 0,
             memtable_entry_limit: pc.memtable_entries,
@@ -662,13 +665,13 @@ impl Engine {
         let mut e = Engine {
             scan_examined: 0,
             pager,
-            manifest: Manifest::new(sb.manifest_root),
-            catalog: Catalog::new(sb.catalog_root, 0, sb.next_tree_id),
-            attributes: Attributes::new(sb.attributes_root),
-            freelist: CowTree::new(tree_id::FREE_SPACE, sb.freelist_root),
-            vlog_stats_tree: CowTree::new(tree_id::VLOG_STATS, sb.vlog_stats_root),
-            checkpoints: CowTree::new(tree_id::CHECKPOINTS, sb.checkpoint_root),
-            changefeed: CowTree::new(tree_id::CHANGE_FEED, sb.changefeed_root),
+            manifest: Manifest::new((sb.manifest_root, sb.root_nonces[3])),
+            catalog: Catalog::new((sb.catalog_root, sb.root_nonces[0]), sb.next_tree_id),
+            attributes: Attributes::new((sb.attributes_root, sb.root_nonces[2])),
+            freelist: CowTree::new(tree_id::FREE_SPACE, sb.freelist_root, sb.root_nonces[1]),
+            vlog_stats_tree: CowTree::new(tree_id::VLOG_STATS, sb.vlog_stats_root, sb.root_nonces[4]),
+            checkpoints: CowTree::new(tree_id::CHECKPOINTS, sb.checkpoint_root, sb.root_nonces[5]),
+            changefeed: CowTree::new(tree_id::CHANGE_FEED, sb.changefeed_root, sb.root_nonces[6]),
             memtable: (0..shards).map(|_| BTreeMap::new()).collect(),
             memtable_bytes: 0,
             memtable_entry_limit: pc.memtable_entries,
@@ -772,11 +775,12 @@ impl Engine {
     pub const TREE_INDEX_DESCRIPTOR: &'static str = "$tree_index";
 
     fn reload_tree_index(&mut self) -> Result<()> {
-        let root = match self.catalog.get(&mut self.pager, Engine::TREE_INDEX_DESCRIPTOR)? {
-            Some(d) => d.root().unwrap_or(0),
-            None => 0,
+        let (root, nonce) = match self.catalog.get(&mut self.pager, Engine::TREE_INDEX_DESCRIPTOR)? {
+            Some(d) => (d.root().unwrap_or(0), d.root_nonce()),
+            None => (0, 0),
         };
         self.catalog.by_id.root = root;
+        self.catalog.by_id.root_nonce = nonce;
         if root == 0 {
             self.catalog.rebuild_tree_index(&mut self.pager)?;
         }
@@ -784,21 +788,18 @@ impl Engine {
     }
 
     fn publish_tree_index_root(&mut self) -> Result<()> {
-        let root = self.catalog.by_id.root;
-        if root == 0 {
+        let root = (self.catalog.by_id.root, self.catalog.by_id.root_nonce);
+        if root.0 == 0 {
             return Ok(());
         }
-        let mut cat = std::mem::replace(&mut self.catalog, Catalog::new(0, 0, 16));
+        let mut cat = std::mem::replace(&mut self.catalog, Catalog::new((0, 0), 16));
         let existing = cat.get(&mut self.pager, Engine::TREE_INDEX_DESCRIPTOR)?;
         let d = match existing {
-            Some(d) if d.root() == Some(root) => {
+            Some(d) if d.root() == Some(root.0) && d.root_nonce() == root.1 => {
                 self.catalog = cat;
                 return Ok(());
             }
-            Some(d) => d.with(vec![(
-                "root",
-                Some(Value::Int { w: NumType::U64, neg: false, mag: root as u128 }),
-            )]),
+            Some(d) => d.with_root(root),
             None => crate::catalog::TreeDescriptor::create(
                 tree_id::TREE_INDEX,
                 crate::catalog::kind::INTERNAL,
@@ -809,10 +810,8 @@ impl Engine {
                 vec![],
                 now_millis(),
             )
-            .with(vec![
-                ("root", Some(Value::Int { w: NumType::U64, neg: false, mag: root as u128 })),
-                ("levelled", Some(Value::Bool(false))),
-            ]),
+            .with_root(root)
+            .with(vec![("levelled", Some(Value::Bool(false)))]),
         };
         // Straight into the catalog tree: `create` would allocate a fresh
         // `tree_id`, and tree 3's is reserved (§2).
@@ -1022,7 +1021,7 @@ impl Engine {
             ),
             ("writers".to_string(), writers),
         ];
-        let mut attrs = std::mem::replace(&mut self.attributes, Attributes::new(0));
+        let mut attrs = std::mem::replace(&mut self.attributes, Attributes::new((0, 0)));
         let r = attrs.put(&mut self.pager, crate::catalog::STORE_ATTRIBUTES_KEY, fields);
         self.attributes = attrs;
         r
@@ -1204,7 +1203,7 @@ impl Engine {
             ("op".into(), Value::Str(op_name.into())),
             ("key".into(), Value::Bytes(cke_key.to_vec())),
         ]));
-        let mut t = std::mem::replace(&mut self.changefeed, CowTree::new(tree_id::CHANGE_FEED, 0));
+        let mut t = std::mem::replace(&mut self.changefeed, CowTree::new(tree_id::CHANGE_FEED, 0, 0));
         t.commit_id = self.sb.commit_id;
         let r = t.put(&mut self.pager, &key, &v);
         self.changefeed = t;
@@ -1398,7 +1397,7 @@ impl Engine {
     fn write_vlog_stats(&mut self, id: u64) -> Result<()> {
         let Some(s) = self.vlog_stats.get(&id).cloned() else { return Ok(()) };
         let key = cke::encode(&Value::Int { w: NumType::U64, neg: false, mag: id as u128 })?;
-        let mut t = std::mem::replace(&mut self.vlog_stats_tree, CowTree::new(tree_id::VLOG_STATS, 0));
+        let mut t = std::mem::replace(&mut self.vlog_stats_tree, CowTree::new(tree_id::VLOG_STATS, 0, 0));
         t.commit_id = self.sb.commit_id;
         // F-043: a retired segment's extent is free, so tree 7 must not name it
         // (04 §11 invariant 8b: once reused, the head says another segment).
@@ -1594,11 +1593,12 @@ impl Engine {
         let pages = (extent.len() / self.pager.page_size) as u32;
         let start = self.pager.alloc_extent(pages)?;
         self.pager.write_extent(start, &extent)?;
+        let nonce = self.pager.written_nonce;
         self.counters.write_amp_key_index += extent.len() as u64;
         let seg = Segment::open(extent, self.pager.page_size)?;
-        let r = SegmentRef::of(&seg, level, group, start);
+        let r = SegmentRef::of(&seg, level, group, start, nonce);
         self.admit(r.segment_id, Arc::new(seg));
-        let mut m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+        let mut m = std::mem::replace(&mut self.manifest, Manifest::new((0, 0)));
         m.tree.commit_id = self.sb.commit_id;
         let res = m.add(&mut self.pager, &r);
         self.manifest = m;
@@ -1676,7 +1676,7 @@ impl Engine {
             return Ok(s);
         }
         self.counters.page_cache_misses += 1;
-        let extent = self.pager.read_extent(r.start_page, r.pages)?;
+        let extent = self.pager.read_segment(r.start_page, r.pages, r.nonce)?;
         let s = Arc::new(Segment::open(extent, self.pager.page_size)?);
         self.admit(r.segment_id, s.clone());
         Ok(s)
@@ -1730,7 +1730,7 @@ impl Engine {
         if let Some(hit) = self.manifest_cache.get(&level) {
             return Ok(hit.clone());
         }
-        let m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+        let m = std::mem::replace(&mut self.manifest, Manifest::new((0, 0)));
         let r = m.level(&mut self.pager, level);
         self.manifest = m;
         let refs = r?;
@@ -1759,7 +1759,7 @@ impl Engine {
         if let Some(hit) = &self.manifest_all_cache {
             return Ok(hit.clone());
         }
-        let m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+        let m = std::mem::replace(&mut self.manifest, Manifest::new((0, 0)));
         let r = m.all(&mut self.pager);
         self.manifest = m;
         let refs = r?;
@@ -2764,14 +2764,14 @@ impl Engine {
             return Err(e);
         }
         self.counters.write_amp_key_index += extent.len() as u64;
-        job.outputs.push((extent, start));
+        job.outputs.push((extent, start, self.pager.written_nonce));
         Ok(())
     }
 
     /// Gives back a failed job's outputs: never published, so no reader holds
     /// them, and dropped with the job they leaked (M2.3).
     fn abandon_compaction(&mut self, job: CompactionJob) {
-        for (extent, start) in &job.outputs {
+        for (extent, start, _) in &job.outputs {
             self.pager.free_extent(*start, (extent.len() / self.pager.page_size) as u32, 0);
         }
     }
@@ -2784,13 +2784,13 @@ impl Engine {
             self.abandon_compaction(job);
             return Err(e);
         }
-        let mut m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+        let mut m = std::mem::replace(&mut self.manifest, Manifest::new((0, 0)));
         m.tree.commit_id = self.sb.commit_id;
         // M2.3: an edit below can fail (ENOSPC writing a tree page) with the
         // inputs already removed; the manifest then named neither inputs nor
         // outputs and the next commit published the loss. Copy-on-write leaves
         // the old root intact, so a failure restores it.
-        let (root, freed) = (m.tree.root, m.tree.freed.len());
+        let (root, freed) = ((m.tree.root, m.tree.root_nonce), m.tree.freed.len());
         self.pager.alloc_log = Some(Vec::new());
         let mut err = None;
         // Inputs are removed **before** outputs are added: a compaction whose
@@ -2805,10 +2805,10 @@ impl Engine {
         }
         let outputs = std::mem::take(&mut job.outputs);
         if err.is_none() {
-            for (extent, start) in &outputs {
+            for (extent, start, nonce) in &outputs {
                 match Segment::open(extent.clone(), self.pager.page_size) {
                     Ok(seg) => {
-                        let r = SegmentRef::of(&seg, job.target_level, job.target_group, *start);
+                        let r = SegmentRef::of(&seg, job.target_level, job.target_group, *start, *nonce);
                         self.admit(r.segment_id, Arc::new(seg));
                         if let Err(e) = m.add(&mut self.pager, &r) {
                             err = Some(e);
@@ -2834,7 +2834,7 @@ impl Engine {
             back.tree.freed = std::mem::take(&mut m.tree.freed);
             self.manifest = back;
             // Never published, so no reader holds them.
-            for (extent, start) in &outputs {
+            for (extent, start, _) in &outputs {
                 self.pager.free_extent(*start, (extent.len() / self.pager.page_size) as u32, 0);
             }
             return Err(e);
@@ -3044,11 +3044,11 @@ impl Engine {
             };
             match what {
                 Extent::Segment(r) => {
-                    let bytes = self.pager.read_extent(start, pages)?;
+                    let bytes = self.pager.read_segment(start, pages, r.nonce)?;
                     self.pager.write_extent(to, &bytes)?;
-                    let mut m = std::mem::replace(&mut self.manifest, Manifest::new(0));
+                    let mut m = std::mem::replace(&mut self.manifest, Manifest::new((0, 0)));
                     m.tree.commit_id = self.sb.commit_id;
-                    let moved = SegmentRef { start_page: to, ..r.clone() };
+                    let moved = SegmentRef { start_page: to, nonce: self.pager.written_nonce, ..r.clone() };
                     let res = m.remove(&mut self.pager, &r).and_then(|_| m.add(&mut self.pager, &moved));
                     self.manifest = m;
                     res?;
@@ -3332,6 +3332,19 @@ impl Engine {
     // §8 — snapshots and retention
     // ---------------------------------------------------------------
 
+    /// F-128, 14 §5.5: in `Superblock::root_nonces` order.
+    pub fn root_nonces(&self) -> [u64; 7] {
+        [
+            self.catalog.tree.root_nonce,
+            self.freelist.root_nonce,
+            self.attributes.tree.root_nonce,
+            self.manifest.tree.root_nonce,
+            self.vlog_stats_tree.root_nonce,
+            self.checkpoints.root_nonce,
+            self.changefeed.root_nonce,
+        ]
+    }
+
     pub fn snapshot(&mut self) -> Snapshot {
         let s = Snapshot {
             seq: self.visible_seq,
@@ -3343,6 +3356,7 @@ impl Engine {
             vlog_stats_root: self.vlog_stats_tree.root,
             checkpoint_root: self.checkpoints.root,
             changefeed_root: self.changefeed.root,
+            root_nonces: self.root_nonces(),
             created_ms: now_millis(),
         };
         self.live_snapshots.push(s);
@@ -3386,7 +3400,7 @@ impl Engine {
     /// Cached rather than scanned: retention is consulted on every commit, and
     /// tree 8 only changes when a checkpoint is created, dropped or restored.
     pub fn refresh_checkpoint_floors(&mut self) -> Result<()> {
-        let tree = CowTree::new(tree_id::CHECKPOINTS, self.checkpoints.root);
+        let tree = CowTree::new(tree_id::CHECKPOINTS, self.checkpoints.root, self.checkpoints.root_nonce);
         let rows = tree.scan(&mut self.pager, None, None)?;
         let (mut seq, mut commit) = (None, None);
         for (_, v) in rows {
@@ -3449,6 +3463,7 @@ impl Engine {
         self.sb.vlog_stats_root = self.vlog_stats_tree.root;
         self.sb.checkpoint_root = self.checkpoints.root;
         self.sb.changefeed_root = self.changefeed.root;
+        self.sb.root_nonces = self.root_nonces();
         self.sb.min_retained_commit = self.min_retained_commit();
         self.sb.min_retained_seq = self.min_retained_seq();
         self.sb.modified_utc_ms = now_millis();

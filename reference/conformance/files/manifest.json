@@ -216,6 +216,16 @@
       "at_open_or_read": true,
       "tolerated_clean": false,
       "note": "v1.0-security-converting with CONVERTING cleared and sb_mac resealed (F-127): the superblock now says conversion is over, so its plaintext pages are what a forged page in a finished file looks like. Section 8.3: with cipher = 1 and CONVERTING clear, a page, record or chunk without ENCRYPTED MUST be reported as tampering."
+    },
+    {
+      "name": "v1.0-security-replay.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "tampering",
+      "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "v1.0-encrypted after twelve more commits, with one page put back to what it held before them: authentic bytes at their own position, valid tag and checksum. Section 5.5: every parent records its child's nonce, and this child is not the write it recorded."
     }
   ]
 }

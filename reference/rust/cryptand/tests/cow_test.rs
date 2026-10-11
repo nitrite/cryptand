@@ -10,7 +10,7 @@ use cryptand::pager::Pager;
 #[test]
 fn every_page_is_reachable_or_freed_also_when_a_leaf_empties() {
     let mut pager = Pager::in_memory(4096);
-    let mut t = CowTree::new(2, 0);
+    let mut t = CowTree::new(2, 0, 0);
     let key = |i: usize| format!("k{i:04}").into_bytes();
     let check = |t: &CowTree, pager: &mut Pager, when: &str| {
         let mut live = Vec::new();

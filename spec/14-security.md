@@ -493,8 +493,7 @@ stale data or a tree that no longer fits together (F-128).
 
 Every edge from a parent to a headed page therefore records the child's header
 `nonce`, which is unique per write (§4): the superblock's `root_nonces`
-(`01-container.md` §2), a catalog descriptor's `root_nonce` and
-`vector_region_nonce`, a copy-on-write internal cell's `child_nonce`
+(`01-container.md` §2), a checkpoint's (`13-operations.md` §1), a catalog descriptor's `root_nonce`, a copy-on-write internal cell's `child_nonce`
 (`04-segments.md` §2.2), an R-tree internal entry's `child_nonce`
 (`08-spatial.md` §2.1), and a manifest entry's `nonce` (`04-segments.md`
 §3.2). Where a child is always written in the same commit as its parent, the
@@ -511,10 +510,12 @@ is checked: there is no key, so there is nothing to authenticate.
 What stays unbound: a value-log record's AAD names its segment, and segment ids
 are never reused, so it needs no edge. A blob's chunks are bound to its head
 page id only; a replayed older blob at the same position fails the pointer's
-`crc32c` and is reported as corruption. A vector region's chunks are rewritten
-in place and are not bound: an older chunk can be replayed, and returns a stale
+`crc32c` and is reported as corruption. A vector region is not bound at all:
+its head page and chunks are rewritten in place as slots change, so an older
+head, chunk or `next_region` link can be replayed and returns a stale or missing
 vector. A region is rebuildable from the documents (`09-vector.md` §7), and
-binding each chunk would need a counter table the format does not have.
+binding it would mean re-recording a nonce in its descriptor on every slot
+write and a counter table for its chunks, neither of which the format has.
 
 ---
 

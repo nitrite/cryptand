@@ -119,7 +119,8 @@ public final class VectorIndex {
         // and the graph in memory, to re-lay them itself.
         db.engine().registerOwner(descriptor.treeId(), this::convertInPlace);
         Long root = descriptor.root();
-        this.adjacency = PageTree.load(db.engine().pager(), descriptor.treeId(), root == null ? 0 : root);
+        this.adjacency = PageTree.load(db.engine().pager(), descriptor.treeId(), root == null ? 0 : root,
+                descriptor.rootNonce());
         loadMaps();
     }
 
@@ -301,8 +302,9 @@ public final class VectorIndex {
         long root = adjacency.commit();
         region.liveCount = slotToDoc.size();
         Map<String, Value> fields = new LinkedHashMap<>(descriptor.document().fields());
-        boolean changed = descriptor.root() == null || descriptor.root() != root;
-        fields.put("root", Value.integer(NumType.U64, root));
+        boolean changed = descriptor.root() == null || descriptor.root() != root
+                || descriptor.rootNonce() != adjacency.rootNonce();
+        TreeDescriptor.putRoot(fields, root, adjacency.rootNonce());
         fields.put("entries", Value.integer(NumType.U64, slotToDoc.size()));
         Map<String, Value> params = new LinkedHashMap<>(descriptor.params().fields());
         List<Value> entryPoints = new ArrayList<>();

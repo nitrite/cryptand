@@ -46,6 +46,7 @@ final class Checkpoint {
     required this.vlogStatsRoot,
     required this.changefeedRoot,
     this.expires,
+    this.rootNonces = const [0, 0, 0, 0, 0, 0, 0],
   });
 
   factory Checkpoint.of(String name, Snapshot s, {int? expires}) => Checkpoint(
@@ -60,6 +61,7 @@ final class Checkpoint {
         vlogStatsRoot: s.vlogStatsRoot,
         changefeedRoot: s.changefeedRoot,
         expires: expires,
+        rootNonces: [...s.rootNonces.take(5), 0, s.rootNonces[6]],
       );
 
   final String name;
@@ -72,6 +74,10 @@ final class Checkpoint {
   final int manifestRoot;
   final int vlogStatsRoot;
   final int changefeedRoot;
+
+  /// F-128, `13-operations.md` §1: the superblock's `root_nonces` order, the
+  /// checkpoint entry 0.
+  final List<int> rootNonces;
 
   /// §1: an implementation MUST honour this and drop the checkpoint past it.
   final int? expires;
@@ -94,6 +100,7 @@ final class Checkpoint {
         checkpointRoot: 0,
         changefeedRoot: changefeedRoot,
         takenAtMs: created,
+        rootNonces: rootNonces,
       );
 
   Uint8List encode() => encodeValue(CDoc({
@@ -106,6 +113,9 @@ final class Checkpoint {
         'manifest_root': CInt.of(NumType.u64, manifestRoot),
         'vlog_stats_root': CInt.of(NumType.u64, vlogStatsRoot),
         'changefeed_root': CInt.of(NumType.u64, changefeedRoot),
+        if (rootNonces.any((n) => n != 0))
+          'root_nonces':
+              CArray([for (final n in rootNonces) CInt.of(NumType.u64, n)]),
         if (expires != null) 'expires': CTimestamp(expires!),
       }));
 
@@ -124,10 +134,24 @@ final class Checkpoint {
       manifestRoot: u('manifest_root'),
       vlogStatsRoot: u('vlog_stats_root'),
       changefeedRoot: u('changefeed_root'),
+      rootNonces: _rootNonces(d),
       expires: d['expires'] == null
           ? null
           : expectField<CTimestamp>(d, 'expires', 'checkpoint record').millis,
     );
+  }
+
+  static List<int> _rootNonces(CDoc d) {
+    if (d['root_nonces'] == null) return const [0, 0, 0, 0, 0, 0, 0];
+    final a = expectField<CArray>(d, 'root_nonces', 'checkpoint record');
+    if (a.items.length != 7) {
+      throw CorruptionException(
+          'checkpoint root_nonces has ${a.items.length} entries, not 7');
+    }
+    return [
+      for (final v in a.items)
+        expectValue<CInt>(v, 'checkpoint root_nonces').magnitude.lo
+    ];
   }
 
   /// §1 is explicit that this field is absent, and the absence is the design.
@@ -139,8 +163,9 @@ final class Checkpoint {
 
 /// Tree 8.
 final class CheckpointStore {
-  CheckpointStore(PageStore store, {int root = 0})
-      : tree = CowTree(store, treeId: TreeId.checkpoints, root: root);
+  CheckpointStore(PageStore store, {int root = 0, int rootNonce = 0})
+      : tree = CowTree(store,
+            treeId: TreeId.checkpoints, root: root, rootNonce: rootNonce);
 
   final CowTree tree;
 

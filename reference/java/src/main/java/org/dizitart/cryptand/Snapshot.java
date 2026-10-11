@@ -25,8 +25,16 @@ public final class Snapshot {
     private final long vlogStatsRoot;
     private final long checkpointRoot;
     private final long changefeedRoot;
+    /** F-128: the seven roots' nonces, in {@code Superblock.rootNonces} order. */
+    private final long[] rootNonces;
 
     public Snapshot(long seq, long commitId, long catalogRoot, long freelistRoot, long attributesRoot, long manifestRoot, long vlogStatsRoot, long checkpointRoot, long changefeedRoot) {
+        this(seq, commitId, catalogRoot, freelistRoot, attributesRoot, manifestRoot, vlogStatsRoot,
+                checkpointRoot, changefeedRoot, new long[7]);
+    }
+
+    public Snapshot(long seq, long commitId, long catalogRoot, long freelistRoot, long attributesRoot, long manifestRoot, long vlogStatsRoot, long checkpointRoot, long changefeedRoot, long[] rootNonces) {
+        this.rootNonces = rootNonces.clone();
         this.seq = seq;
         this.commitId = commitId;
         this.catalogRoot = catalogRoot;
@@ -108,7 +116,11 @@ public final class Snapshot {
         return new Snapshot(sb.visibleSeq, sb.commitId,
                 sb.catalogRoot, sb.freelistRoot, sb.attributesRoot,
                 sb.manifestRoot, sb.vlogStatsRoot,
-                sb.checkpointRoot, sb.changefeedRoot);
+                sb.checkpointRoot, sb.changefeedRoot, sb.rootNonces);
+    }
+
+    public long[] rootNonces() {
+        return rootNonces.clone();
     }
 
     /** Writes these roots back into a superblock — {@code 13-operations.md} §1's restore. */
@@ -121,5 +133,6 @@ public final class Snapshot {
         sb.vlogStatsRoot = vlogStatsRoot;
         sb.checkpointRoot = checkpointRoot;
         sb.changefeedRoot = changefeedRoot;
+        sb.rootNonces = rootNonces.clone();
     }
 }

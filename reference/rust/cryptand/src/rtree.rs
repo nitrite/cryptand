@@ -15,12 +15,12 @@ use crate::wkb::Envelope;
 
 pub const IS_LEAF: u8 = 0x01;
 
-/// §2.1 — `16 x dimensions + 16` for an internal entry, `16 x dimensions + 8`
+/// §2.1 — `16 x dimensions + 24` for an internal entry (F-128 `child_nonce`), `16 x dimensions + 8`
 /// for a leaf entry. Fixed-width, no varints: a bounding-box comparison is the
 /// hot loop of every spatial query, and a fixed stride lets an implementation
 /// scan a node without decoding it.
 pub fn entry_stride(dimensions: u8, is_leaf: bool) -> usize {
-    16 * dimensions as usize + if is_leaf { 8 } else { 16 }
+    16 * dimensions as usize + if is_leaf { 8 } else { 24 }
 }
 
 pub fn max_entries_for(page_size: usize, dimensions: u8, is_leaf: bool) -> usize {
@@ -33,6 +33,8 @@ pub struct RTreeEntry {
     /// `child_page` for an internal entry, `nitrite_id` for a leaf entry.
     pub payload: i64,
     pub child_entries: u64,
+    /// F-128, 14 §5.5: the child's header nonce; internal entries only.
+    pub child_nonce: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -86,7 +88,8 @@ impl RTreeNode {
             at += 8;
             if !self.is_leaf {
                 page[at..at + 8].copy_from_slice(&e.child_entries.to_le_bytes());
-                at += 8;
+                page[at + 8..at + 16].copy_from_slice(&e.child_nonce.to_le_bytes());
+                at += 16;
             }
         }
         PageHeader {
@@ -142,14 +145,14 @@ impl RTreeNode {
             }
             let payload = i64::from_le_bytes(page[at..at + 8].try_into().unwrap());
             at += 8;
-            let child_entries = if is_leaf {
-                1
+            let (child_entries, child_nonce) = if is_leaf {
+                (1, 0)
             } else {
-                let v = u64le(page, at);
-                at += 8;
+                let v = (u64le(page, at), u64le(page, at + 8));
+                at += 16;
                 v
             };
-            entries.push(RTreeEntry { bbox, payload, child_entries });
+            entries.push(RTreeEntry { bbox, payload, child_entries, child_nonce });
         }
         Ok(RTreeNode { is_leaf, dimensions, entries })
     }
@@ -165,6 +168,8 @@ pub struct SpatialEntry {
 /// An R-tree rooted from its catalog descriptor, over the container's pages.
 pub struct RTree {
     pub root: u64,
+    /// F-128: the root's header nonce, as the descriptor's `root_nonce`.
+    pub root_nonce: u64,
     pub dimensions: u8,
     pub max_entries: usize,
     pub tree_id: u32,
@@ -172,19 +177,20 @@ pub struct RTree {
 
 impl RTree {
     pub fn new(tree_id: u32, dimensions: u8, max_entries: usize) -> RTree {
-        RTree { root: 0, dimensions, max_entries, tree_id }
+        RTree { root: 0, root_nonce: 0, dimensions, max_entries, tree_id }
     }
 
-    fn load(&self, pager: &mut Pager, page: u64) -> Result<RTreeNode> {
-        let (_h, raw) = pager.read_verified(page)?;
+    fn load(&self, pager: &mut Pager, (page, nonce): (u64, u64)) -> Result<RTreeNode> {
+        let (_h, raw) = pager.read_bound(page, nonce)?;
         RTreeNode::parse(&raw, self.dimensions)
     }
 
-    fn store(&self, pager: &mut Pager, n: &RTreeNode) -> Result<u64> {
+    /// The page id and the nonce it was sealed under.
+    fn store(&self, pager: &mut Pager, n: &RTreeNode) -> Result<(u64, u64)> {
         let id = pager.alloc_extent(1)?;
         let page = n.encode(pager.page_size)?;
         pager.write_page(id, &page)?;
-        Ok(id)
+        Ok((id, pager.written_nonce))
     }
 
     /// Bulk-loads from a sorted-by-x list. Bulk loading is one of the free
@@ -193,7 +199,7 @@ impl RTree {
     /// degrades every query).
     pub fn build(&mut self, pager: &mut Pager, mut rows: Vec<SpatialEntry>) -> Result<()> {
         if rows.is_empty() {
-            self.root = 0;
+            (self.root, self.root_nonce) = (0, 0);
             return Ok(());
         }
         rows.sort_by(|a, b| {
@@ -203,11 +209,11 @@ impl RTree {
             .max_entries
             .min(max_entries_for(pager.page_size, self.dimensions, true))
             .max(2);
-        let mut level: Vec<(u64, Envelope, u64)> = Vec::new();
+        let mut level: Vec<((u64, u64), Envelope, u64)> = Vec::new();
         for chunk in rows.chunks(fanout) {
             let entries: Vec<RTreeEntry> = chunk
                 .iter()
-                .map(|r| RTreeEntry { bbox: r.bbox, payload: r.id, child_entries: 1 })
+                .map(|r| RTreeEntry { bbox: r.bbox, payload: r.id, child_entries: 1, child_nonce: 0 })
                 .collect();
             let node = RTreeNode { is_leaf: true, dimensions: self.dimensions, entries };
             let bbox = node.bbox();
@@ -226,8 +232,9 @@ impl RTree {
                     .iter()
                     .map(|(p, b, n)| RTreeEntry {
                         bbox: *b,
-                        payload: *p as i64,
+                        payload: p.0 as i64,
                         child_entries: *n,
+                        child_nonce: p.1,
                     })
                     .collect();
                 let node = RTreeNode { is_leaf: false, dimensions: self.dimensions, entries };
@@ -238,7 +245,7 @@ impl RTree {
             }
             level = up;
         }
-        self.root = level[0].0;
+        (self.root, self.root_nonce) = level[0].0;
         Ok(())
     }
 
@@ -248,7 +255,7 @@ impl RTree {
         if self.root == 0 {
             return Ok(out);
         }
-        let mut stack = vec![self.root];
+        let mut stack = vec![(self.root, self.root_nonce)];
         while let Some(p) = stack.pop() {
             let n = self.load(pager, p)?;
             for e in &n.entries {
@@ -258,7 +265,7 @@ impl RTree {
                 if n.is_leaf {
                     out.push(e.payload);
                 } else {
-                    stack.push(e.payload as u64);
+                    stack.push((e.payload as u64, e.child_nonce));
                 }
             }
         }
@@ -289,7 +296,7 @@ impl RTree {
             }
             s.sqrt()
         };
-        let mut queue: Vec<(f64, u64, bool, i64)> = vec![(0.0, self.root, false, 0)];
+        let mut queue: Vec<(f64, (u64, u64), bool, i64)> = vec![(0.0, (self.root, self.root_nonce), false, 0)];
         while let Some(i) = queue
             .iter()
             .enumerate()
@@ -307,9 +314,9 @@ impl RTree {
             let n = self.load(pager, page)?;
             for e in &n.entries {
                 if n.is_leaf {
-                    queue.push((dist(&e.bbox), 0, true, e.payload));
+                    queue.push((dist(&e.bbox), (0, 0), true, e.payload));
                 } else {
-                    queue.push((dist(&e.bbox), e.payload as u64, false, 0));
+                    queue.push((dist(&e.bbox), (e.payload as u64, e.child_nonce), false, 0));
                 }
             }
         }
@@ -323,7 +330,7 @@ impl RTree {
             return Ok(());
         }
         let mut depths = Vec::new();
-        self.verify_node(pager, self.root, 0, &mut depths)?;
+        self.verify_node(pager, (self.root, self.root_nonce), 0, &mut depths)?;
         depths.sort_unstable();
         depths.dedup();
         if depths.len() > 1 {
@@ -332,7 +339,7 @@ impl RTree {
         Ok(())
     }
 
-    fn verify_node(&self, pager: &mut Pager, page: u64, depth: usize, depths: &mut Vec<usize>) -> Result<Envelope> {
+    fn verify_node(&self, pager: &mut Pager, page: (u64, u64), depth: usize, depths: &mut Vec<usize>) -> Result<Envelope> {
         let n = self.load(pager, page)?;
         if n.is_leaf {
             depths.push(depth);
@@ -340,7 +347,7 @@ impl RTree {
         }
         let mut union = Envelope::empty();
         for e in &n.entries {
-            let child = self.verify_node(pager, e.payload as u64, depth + 1, depths)?;
+            let child = self.verify_node(pager, (e.payload as u64, e.child_nonce), depth + 1, depths)?;
             let d = self.dimensions as usize;
             for i in 0..d {
                 if child.min[i] != e.bbox.min[i] || child.max[i] != e.bbox.max[i] {

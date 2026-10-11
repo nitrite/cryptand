@@ -20,8 +20,15 @@ value = CVE { "commit_id": U64, "seq": U64, "created": TIMESTAMP,
               "catalog_root":    U64, "freelist_root":  U64,
               "attributes_root": U64, "manifest_root":  U64,
               "vlog_stats_root": U64, "changefeed_root": U64,
+              "root_nonces": ARRAY[U64]?,
               "expires": TIMESTAMP? }
 ```
+
+`root_nonces` is absent when every entry would be 0 (always so with
+`cipher = 0`); otherwise it holds the seven roots' header nonces in
+the order of the superblock's `root_nonces` (`01-container.md` §2), the
+`checkpoint_root` entry written 0. A reader binds each root to it exactly as it
+binds the superblock's (`14-security.md` §5.5).
 
 That is the full `Snapshot` tuple of `10-transactions.md` §1 **less
 `checkpoint_root`**, which is deliberately not captured: restoring a checkpoint

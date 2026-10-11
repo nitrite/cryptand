@@ -75,8 +75,9 @@ final class Change {
 
 /// Tree 9.
 final class ChangeFeed {
-  ChangeFeed(PageStore store, {int root = 0})
-      : tree = CowTree(store, treeId: TreeId.changeFeed, root: root);
+  ChangeFeed(PageStore store, {int root = 0, int rootNonce = 0})
+      : tree = CowTree(store,
+            treeId: TreeId.changeFeed, root: root, rootNonce: rootNonce);
 
   final CowTree tree;
 

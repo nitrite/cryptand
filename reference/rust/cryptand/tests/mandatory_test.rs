@@ -249,8 +249,8 @@ fn a_lower_level_with_a_higher_max_seq_does_not_win() {
         let start = e.pager.alloc_extent(pages).unwrap();
         e.pager.write_extent(start, &extent).unwrap();
         let seg = Segment::open(extent, page).unwrap();
-        let r = SegmentRef::of(&seg, level, 0, start);
-        let mut m = std::mem::replace(&mut e.manifest, cryptand::manifest::Manifest::new(0));
+        let r = SegmentRef::of(&seg, level, 0, start, e.pager.written_nonce);
+        let mut m = std::mem::replace(&mut e.manifest, cryptand::manifest::Manifest::new((0, 0)));
         m.add(&mut e.pager, &r).unwrap();
         e.manifest = m;
     }

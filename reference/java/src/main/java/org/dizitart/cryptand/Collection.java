@@ -600,7 +600,7 @@ public final class Collection {
                 // §3 of the catalog: false for rtree, which is a copy-on-write
                 // tree of its own page types rooted at `root`.
                 .levelled(false)
-                .root(0)
+                .root(0, 0)
                 .created(engine.options().clock.getAsLong())
                 .keyKind("opaque")
                 .owner(name)
@@ -754,7 +754,7 @@ public final class Collection {
                 .treeId(treeId)
                 .kind(TreeDescriptor.Kind.VECTOR_GRAPH)
                 .levelled(false)
-                .root(0)
+                .root(0, 0)
                 .created(engine.options().clock.getAsLong())
                 .keyKind("array")
                 .owner(name)

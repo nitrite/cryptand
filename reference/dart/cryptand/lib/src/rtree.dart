@@ -31,13 +31,19 @@ class RTreeFlags {
 
 /// One entry of an R-tree node.
 final class RTreeEntry {
-  const RTreeEntry(this.box, {this.childPage = 0, this.childEntries = 0, this.docId = 0});
+  const RTreeEntry(this.box,
+      {this.childPage = 0,
+      this.childEntries = 0,
+      this.childNonce = 0,
+      this.docId = 0});
 
   final Envelope box;
 
-  /// Internal entries only.
+  /// Internal entries only. [childNonce] is F-128's: the child's header nonce
+  /// (`14-security.md` §5.5).
   final int childPage;
   final int childEntries;
+  final int childNonce;
 
   /// Leaf entries only.
   final int docId;
@@ -106,7 +112,8 @@ final class RTreeNode {
       } else {
         bd
           ..setUint64(after, e.childPage, Endian.little)
-          ..setUint64(after + 8, e.childEntries, Endian.little);
+          ..setUint64(after + 8, e.childEntries, Endian.little)
+          ..setUint64(after + 16, e.childNonce, Endian.little);
       }
       off += stride;
     }
@@ -157,17 +164,18 @@ final class RTreeNode {
           ? RTreeEntry(Envelope(min, max), docId: bd.getInt64(after, Endian.little))
           : RTreeEntry(Envelope(min, max),
               childPage: bd.getUint64(after, Endian.little),
-              childEntries: bd.getUint64(after + 8, Endian.little)));
+              childEntries: bd.getUint64(after + 8, Endian.little),
+              childNonce: bd.getUint64(after + 16, Endian.little)));
       off += stride;
     }
     return RTreeNode(isLeaf, dims, entries);
   }
 }
 
-/// §2.1: internal entries are `16 × dimensions + 16` bytes, leaf entries
-/// `16 × dimensions + 8`.
+/// §2.1: internal entries are `16 × dimensions + 24` bytes (F-128's
+/// `child_nonce`), leaf entries `16 × dimensions + 8`.
 int entryStride(int dimensions, bool isLeaf) =>
-    16 * dimensions + (isLeaf ? 8 : 16);
+    16 * dimensions + (isLeaf ? 8 : 24);
 
 /// The maximum entries a page holds at a given shape.
 int maxEntriesFor(int pageSize, int dimensions, bool isLeaf) =>
@@ -203,14 +211,29 @@ final class RTree {
 
   int get _minEntries => math.max(2, maxEntries ~/ 2);
 
-  RTreeNode _load(int page) =>
-      RTreeNode.decode(store.read(page), expectedDimensions: dimensions);
+  /// F-128: the nonce each page was last sealed under. Nodes are rewritten in
+  /// place, so this is what a parent entry records.
+  final Map<int, int> _nonces = {};
+
+  int get rootNonce => _nonces[root] ?? 0;
+
+  RTreeNode _load(int page) => RTreeNode.decode(
+      store.readBound(page, _nonces[page] ?? 0),
+      expectedDimensions: dimensions);
+
+  void _put(int page, RTreeNode n) {
+    store.write(page, n.encode(store.pageSize, treeId: treeId));
+    _nonces[page] = store.writtenNonce;
+  }
 
   int _write(RTreeNode n) {
     final id = store.alloc();
-    store.write(id, n.encode(store.pageSize, treeId: treeId));
+    _put(id, n);
     return id;
   }
+
+  RTreeEntry _ref(Envelope box, int page, int entries) => RTreeEntry(box,
+      childPage: page, childEntries: entries, childNonce: _nonces[page] ?? 0);
 
   // -------------------------------------------------------------------------
   // Insertion
@@ -229,10 +252,8 @@ final class RTree {
     if (split != null) {
       // The root split, so the tree grows a level.
       root = _write(RTreeNode(false, dimensions, [
-        RTreeEntry(split.$1.box,
-            childPage: _write(split.$1), childEntries: split.$1.subtreeEntries),
-        RTreeEntry(split.$2.box,
-            childPage: _write(split.$2), childEntries: split.$2.subtreeEntries),
+        _ref(split.$1.box, _write(split.$1), split.$1.subtreeEntries),
+        _ref(split.$2.box, _write(split.$2), split.$2.subtreeEntries),
       ]));
     }
   }
@@ -244,7 +265,7 @@ final class RTree {
     if (node.isLeaf) {
       node.entries.add(entry);
       if (node.entries.length <= maxEntries) {
-        store.write(page, node.encode(store.pageSize, treeId: treeId));
+        _put(page, node);
         return null;
       }
       return _split(node);
@@ -256,17 +277,17 @@ final class RTree {
 
     if (split == null) {
       final updated = _load(child.childPage);
-      node.entries[i] = RTreeEntry(updated.box,
-          childPage: child.childPage, childEntries: updated.subtreeEntries);
+      node.entries[i] =
+          _ref(updated.box, child.childPage, updated.subtreeEntries);
     } else {
-      node.entries[i] = RTreeEntry(split.$1.box,
-          childPage: _write(split.$1), childEntries: split.$1.subtreeEntries);
-      node.entries.add(RTreeEntry(split.$2.box,
-          childPage: _write(split.$2), childEntries: split.$2.subtreeEntries));
+      node.entries[i] =
+          _ref(split.$1.box, _write(split.$1), split.$1.subtreeEntries);
+      node.entries
+          .add(_ref(split.$2.box, _write(split.$2), split.$2.subtreeEntries));
     }
 
     if (node.entries.length <= maxEntries) {
-      store.write(page, node.encode(store.pageSize, treeId: treeId));
+      _put(page, node);
       return null;
     }
     return _split(node);

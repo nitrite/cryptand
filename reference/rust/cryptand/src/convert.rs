@@ -102,16 +102,16 @@ fn is_spatial(d: &TreeDescriptor) -> bool {
 
 /// One R-tree's pages and its leaf rows, walked from the root.
 fn rtree_walk(pager: &mut crate::pager::Pager, d: &TreeDescriptor) -> Result<(Vec<u64>, Vec<SpatialEntry>)> {
-    let (mut pages, mut rows, mut stack) = (Vec::new(), Vec::new(), vec![d.root().unwrap_or(0)]);
-    while let Some(p) = stack.pop() {
-        let (_h, raw) = pager.read_verified(p)?;
+    let (mut pages, mut rows, mut stack) = (Vec::new(), Vec::new(), vec![(d.root().unwrap_or(0), d.root_nonce())]);
+    while let Some((p, nonce)) = stack.pop() {
+        let (_h, raw) = pager.read_bound(p, nonce)?;
         let n = RTreeNode::parse(&raw, spatial_dims(d))?;
         pages.push(p);
         for x in n.entries {
             if n.is_leaf {
                 rows.push(SpatialEntry { bbox: x.bbox, id: x.payload });
             } else {
-                stack.push(x.payload as u64);
+                stack.push((x.payload as u64, x.child_nonce));
             }
         }
     }
@@ -124,7 +124,7 @@ pub(crate) fn index_tree_pages(pager: &mut crate::pager::Pager, d: &TreeDescript
         return Ok(rtree_walk(pager, d)?.0);
     }
     let mut out = Vec::new();
-    CowTree::new(d.tree_id(), d.root().unwrap_or(0)).reachable(pager, &mut out)?;
+    CowTree::new(d.tree_id(), d.root().unwrap_or(0), d.root_nonce()).reachable(pager, &mut out)?;
     Ok(out)
 }
 
@@ -295,17 +295,17 @@ impl ConvertApi for Engine {
                     let leaf = (self.pager.payload_cap() - 16) / crate::rtree::entry_stride(dims, false);
                     let mut t = crate::rtree::RTree::new(d.tree_id(), dims, leaf);
                     t.build(&mut self.pager, rows)?;
-                    t.root
+                    (t.root, t.root_nonce)
                 } else {
-                    let mut t = CowTree::new(d.tree_id(), d.root().unwrap_or(0));
+                    let mut t = CowTree::new(d.tree_id(), d.root().unwrap_or(0), d.root_nonce());
                     t.commit_id = commit_id;
                     t.relocate(&mut self.pager)?;
                     for p in std::mem::take(&mut t.freed) {
                         self.pager.free_extent(p, 1, commit_id);
                     }
-                    t.root
+                    (t.root, t.root_nonce)
                 };
-                let d = d.with(vec![("root", Some(Value::int(NumType::U64, root as i128)))]);
+                let d = d.with_root(root);
                 self.catalog.put(&mut self.pager, &name, &d)?;
             }
         } else if c.plain_tree_pages > 0 {

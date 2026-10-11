@@ -98,6 +98,11 @@ pub struct Pager {
     /// F-127, 14 §8.3: `cipher = 1` and `CONVERTING` clear, so a plaintext
     /// page is not a converting file's mixture but a forgery.
     pub strict: bool,
+    /// F-128, 14 §5.5: the header `nonce` of the page [`Pager::write_page`]
+    /// last wrote, which its parent records, and of the page
+    /// [`Pager::read_page`] last read, which [`Pager::check_nonce`] compares.
+    pub written_nonce: u64,
+    pub read_nonce: u64,
 }
 
 impl Pager {
@@ -185,6 +190,8 @@ impl Pager {
             low_first: false,
             write_clear: false,
             strict: false,
+            written_nonce: 0,
+            read_nonce: 0,
         }
     }
 
@@ -500,6 +507,7 @@ impl Pager {
 
     pub fn read_page(&mut self, page_id: u64) -> Result<Vec<u8>> {
         let raw = self.read_page_clear(page_id)?;
+        self.read_nonce = PageHeader::parse(&raw).map_or(0, |h| h.nonce);
         // §5.2's read order: verify checksum, decrypt, then decompress.
         let plain = if self.crypto.is_some() { self.open_page(page_id, raw)? } else { raw };
         self.inflate_page(page_id, plain)
@@ -523,6 +531,7 @@ impl Pager {
             return invalid(format!("page {page_id} is {} B, expected {}", page.len(), self.page_size));
         }
         self.page_writes += 1;
+        self.written_nonce = 0;
         // §7's order, and §5.2 restates it: compress, then encrypt. The other
         // order compresses ciphertext, which does not compress.
         let deflated = self.deflate_page(page)?;
@@ -669,6 +678,7 @@ impl Pager {
             ));
         }
         let counter = self.crypto.as_mut().unwrap().take()?;
+        self.written_nonce = counter;
         let mut out = vec![0u8; self.page_size];
         h.flags |= page_flags::ENCRYPTED;
         h.stored_len = (stored + AEAD_TAG_BYTES) as u32;
@@ -745,6 +755,36 @@ impl Pager {
         }
     }
 
+    /// F-128, 14 §5.5: [`Pager::read_extent`] for a segment its manifest entry
+    /// names: the head is the write the entry recorded, and every headed page
+    /// carries the head's `commit_id` (04 §2.1), so none is an older extent's.
+    pub fn read_segment(&mut self, start_page: u64, pages: u32, nonce: u64) -> Result<Vec<u8>> {
+        let out = self.read_extent(start_page, pages)?;
+        if self.crypto.is_none() {
+            return Ok(out);
+        }
+        let raw = self.read_at(self.page_offset(start_page)?, pages as usize * self.page_size)?;
+        let head = PageHeader::parse(&raw)?;
+        if head.nonce != nonce {
+            return Err(crate::error::Error::Tamper(format!(
+                "segment at page {start_page} has nonce {}, the manifest recorded {nonce}: an older write replayed",
+                head.nonce
+            )));
+        }
+        for i in 1..pages as usize {
+            let Ok(h) = PageHeader::parse(&raw[i * self.page_size..]) else { continue };
+            if h.encrypted() && h.commit_id != head.commit_id {
+                return Err(crate::error::Error::Tamper(format!(
+                    "page {} of the segment at {start_page} has commit {}, its head {}: an older write replayed",
+                    start_page + i as u64,
+                    h.commit_id,
+                    head.commit_id
+                )));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn read_extent(&mut self, start_page: u64, pages: u32) -> Result<Vec<u8>> {
         self.page_reads += pages as u64;
         let raw = self.read_at(self.page_offset(start_page)?, pages as usize * self.page_size)?;
@@ -771,15 +811,22 @@ impl Pager {
             return invalid("an extent must be a whole number of pages");
         }
         self.page_writes += (bytes.len() / self.page_size) as u64;
+        self.written_nonce = 0;
         if !self.seals() {
             return self.write_at(start_page * self.page_size as u64, bytes);
         }
         let mut out = Vec::with_capacity(bytes.len());
+        let mut head = 0;
         for i in 0..(bytes.len() / self.page_size) as u64 {
             let at = i as usize * self.page_size;
             let sealed = self.seal_page(start_page + i, &bytes[at..at + self.page_size])?;
+            if i == 0 {
+                head = self.written_nonce;
+            }
             out.extend_from_slice(&sealed);
         }
+        // F-128: what the manifest records is the head's nonce.
+        self.written_nonce = head;
         self.write_at(start_page * self.page_size as u64, &out)
     }
 
@@ -916,6 +963,25 @@ impl Pager {
             written += take;
         }
         Ok(())
+    }
+
+    /// F-128, 14 §5.5: the page just read is the write its parent recorded.
+    /// Checked whenever a key is in hand; with `cipher = 0` both are 0.
+    pub fn check_nonce(&self, page_id: u64, want: u64) -> Result<()> {
+        if self.crypto.is_some() && self.read_nonce != want {
+            return Err(crate::error::Error::Tamper(format!(
+                "page {page_id} has nonce {}, its parent recorded {want}: an older write replayed",
+                self.read_nonce
+            )));
+        }
+        Ok(())
+    }
+
+    /// [`Pager::read_verified`], then [`Pager::check_nonce`].
+    pub fn read_bound(&mut self, page_id: u64, nonce: u64) -> Result<(PageHeader, Vec<u8>)> {
+        let r = self.read_verified(page_id)?;
+        self.check_nonce(page_id, nonce)?;
+        Ok(r)
     }
 
     /// §3 — verify the checksum before decompression and before decryption.

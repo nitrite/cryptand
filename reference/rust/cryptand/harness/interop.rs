@@ -70,7 +70,7 @@ struct Db {
 }
 
 fn tree_id_of(e: &mut Engine, name: &str) -> Option<u32> {
-    let cat = std::mem::replace(&mut e.catalog, Catalog::new(0, 0, 16));
+    let cat = std::mem::replace(&mut e.catalog, Catalog::new((0, 0), 16));
     let d = cat.get(&mut e.pager, name);
     e.catalog = cat;
     d.ok().flatten().map(|d| d.tree_id())
@@ -205,7 +205,7 @@ fn cmd_write(path: &str) -> cryptand::Result<()> {
         None => Engine::create(&PathBuf::from(path), Profile::Desktop)?,
     };
     let now = cryptand::engine::now_millis();
-    let mut cat = std::mem::replace(&mut e.catalog, Catalog::new(0, 0, 16));
+    let mut cat = std::mem::replace(&mut e.catalog, Catalog::new((0, 0), 16));
     let dict = cat
         .create(&mut e.pager, NAME_DICT, kind::NAME_DICT, Some(COLLECTION), None, Some("u32"), 0, vec![], now)?
         .tree_id();
@@ -271,7 +271,7 @@ fn cmd_read(path: &str) -> cryptand::Result<()> {
     println!("commit_id={}", db.e.sb.commit_id);
     println!("segments={}", db.e.all_refs()?.len());
     println!("vlog_segments={}", db.e.vlog_stats.len());
-    let cat = std::mem::replace(&mut db.e.catalog, Catalog::new(0, 0, 16));
+    let cat = std::mem::replace(&mut db.e.catalog, Catalog::new((0, 0), 16));
     let mut names: Vec<String> = cat.all(&mut db.e.pager)?.into_iter().map(|(n, _)| n).collect();
     db.e.catalog = cat;
     names.sort();

@@ -35,8 +35,10 @@ final class Database {
   Database({
     Engine? engine,
     int catalogRoot = 0,
+    int catalogNonce = 0,
     int treeIndexRoot = 0,
     int attributesRoot = 0,
+    int attributesNonce = 0,
     int nextTreeId = TreeId.firstUserTree,
     bool initStoreMetadata = true,
   }) : engine = engine ?? Engine() {
@@ -46,9 +48,12 @@ final class Database {
     // superblock could name.
     final store = this.engine.store;
     catalog = Catalog(store,
-        catalogRoot: catalogRoot, treeIndexRoot: treeIndexRoot);
+        catalogRoot: catalogRoot,
+        catalogNonce: catalogNonce,
+        treeIndexRoot: treeIndexRoot);
     catalog.nextTreeId = nextTreeId;
-    attributes = Attributes(store, root: attributesRoot);
+    attributes =
+        Attributes(store, root: attributesRoot, rootNonce: attributesNonce);
     this.engine.outerTrees
       ..['the catalog'] = catalog.tree
       ..['tree 3'] = catalog.byId

@@ -108,7 +108,7 @@ impl Database {
         }
         let now = crate::engine::now_millis();
         let dict_name = format!("{name}$names");
-        let mut cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new(0, 0, 16));
+        let mut cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new((0, 0), 16));
         let dict_desc = cat.create(
             &mut self.engine.pager,
             &dict_name,
@@ -123,7 +123,7 @@ impl Database {
         self.engine.catalog = cat;
         let dict_tree = dict_desc?.tree_id();
 
-        let mut cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new(0, 0, 16));
+        let mut cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new((0, 0), 16));
         let desc = cat.create(
             &mut self.engine.pager,
             name,
@@ -147,7 +147,7 @@ impl Database {
         c.persist_dict(&mut self.engine)?;
         // §6 — the attributes entry, created and touched in the same commit.
         let mut attrs =
-            std::mem::replace(&mut self.engine.attributes, crate::catalog::Attributes::new(0));
+            std::mem::replace(&mut self.engine.attributes, crate::catalog::Attributes::new((0, 0)));
         let r = attrs.touch(&mut self.engine.pager, name, now);
         self.engine.attributes = attrs;
         r?;
@@ -184,7 +184,7 @@ impl Database {
 
     /// §11 — the enumerations a reader must support, given only the catalog.
     pub fn collections(&mut self) -> Result<Vec<String>> {
-        let cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new(0, 0, 16));
+        let cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new((0, 0), 16));
         let r = cat.collections(&mut self.engine.pager);
         self.engine.catalog = cat;
         r
@@ -375,7 +375,7 @@ impl Indexing for Database {
             ),
             ("sparse".to_string(), Value::Bool(sparse)),
         ];
-        let mut cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new(0, 0, 16));
+        let mut cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new((0, 0), 16));
         let d = cat.create(
             &mut self.engine.pager,
             &name,
@@ -473,7 +473,7 @@ impl Indexing for Database {
         let stats = b.build(self.engine.visible_seq, budget);
 
         let mut cat =
-            std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new(0, 0, 16));
+            std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new((0, 0), 16));
         let r = (|| -> Result<()> {
             let Some(mut d) = cat.get(&mut self.engine.pager, &idx.name)? else {
                 return invalid(format!("no catalog entry for index {}", idx.name));

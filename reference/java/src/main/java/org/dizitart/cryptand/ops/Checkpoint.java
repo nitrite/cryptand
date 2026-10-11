@@ -38,8 +38,17 @@ public final class Checkpoint {
     private final long vlogStatsRoot;
     private final long changefeedRoot;
     private final Long expiresUtcMs;
+    /** F-128, 13 §1: in {@code Superblock.rootNonces} order, the checkpoint entry 0. */
+    private final long[] rootNonces;
 
     public Checkpoint(String name, long commitId, long seq, long createdUtcMs, long catalogRoot, long freelistRoot, long attributesRoot, long manifestRoot, long vlogStatsRoot, long changefeedRoot, Long expiresUtcMs) {
+        this(name, commitId, seq, createdUtcMs, catalogRoot, freelistRoot, attributesRoot, manifestRoot,
+                vlogStatsRoot, changefeedRoot, expiresUtcMs, new long[7]);
+    }
+
+    public Checkpoint(String name, long commitId, long seq, long createdUtcMs, long catalogRoot, long freelistRoot, long attributesRoot, long manifestRoot, long vlogStatsRoot, long changefeedRoot, Long expiresUtcMs, long[] rootNonces) {
+        this.rootNonces = rootNonces.clone();
+        this.rootNonces[5] = 0;
         this.name = name;
         this.commitId = commitId;
         this.seq = seq;
@@ -144,6 +153,13 @@ public final class Checkpoint {
         f.put("manifest_root", Value.integer(NumType.U64, manifestRoot));
         f.put("vlog_stats_root", Value.integer(NumType.U64, vlogStatsRoot));
         f.put("changefeed_root", Value.integer(NumType.U64, changefeedRoot));
+        if (java.util.Arrays.stream(rootNonces).anyMatch(n -> n != 0)) {
+            List<Value> a = new ArrayList<>();
+            for (long n : rootNonces) {
+                a.add(Value.integer(NumType.U64, n));
+            }
+            f.put("root_nonces", new Value.Array(a));
+        }
         if (expiresUtcMs != null) {
             f.put("expires", new Value.Timestamp(expiresUtcMs));
         }
@@ -162,6 +178,18 @@ public final class Checkpoint {
     private static Checkpoint decode(String name, Value value) {
         Value.Doc d = (Value.Doc) value;
         Value expires = d.field("expires");
+        long[] nonces = new long[7];
+        Value rn = d.field("root_nonces");
+        if (rn != null) {
+            List<Value> items = ((Value.Array) rn).items();
+            if (items.size() != 7) {
+                throw new CorruptionException("checkpoint '" + name + "' root_nonces has "
+                        + items.size() + " entries, not 7");
+            }
+            for (int i = 0; i < 7; i++) {
+                nonces[i] = SegmentMeta.longOf(items.get(i));
+            }
+        }
         return new Checkpoint(name,
                 SegmentMeta.longOf(d.field("commit_id")),
                 SegmentMeta.longOf(d.field("seq")),
@@ -172,13 +200,15 @@ public final class Checkpoint {
                 SegmentMeta.longOf(d.field("manifest_root")),
                 SegmentMeta.longOf(d.field("vlog_stats_root")),
                 SegmentMeta.longOf(d.field("changefeed_root")),
-                expires == null ? null : ((Value.Timestamp) expires).millis());
+                expires == null ? null : ((Value.Timestamp) expires).millis(), nonces);
     }
 
     /** The eight roots this checkpoint replaces, over the current checkpoint root. */
-    public Snapshot asSnapshot(long currentCheckpointRoot) {
+    public Snapshot asSnapshot(long currentCheckpointRoot, long currentCheckpointNonce) {
+        long[] rootNonces = this.rootNonces.clone();
+        rootNonces[5] = currentCheckpointNonce;
         return new Snapshot(seq, commitId, catalogRoot, freelistRoot, attributesRoot,
-                manifestRoot, vlogStatsRoot, currentCheckpointRoot, changefeedRoot);
+                manifestRoot, vlogStatsRoot, currentCheckpointRoot, changefeedRoot, rootNonces);
     }
 
     public static List<Checkpoint> all(PageTree tree) {

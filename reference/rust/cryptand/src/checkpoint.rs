@@ -20,6 +20,8 @@ pub struct Checkpoint {
     pub manifest_root: u64,
     pub vlog_stats_root: u64,
     pub changefeed_root: u64,
+    /// F-128: as `Superblock::root_nonces`, the checkpoint entry 0.
+    pub root_nonces: [u64; 7],
     pub expires: Option<i64>,
 }
 
@@ -40,6 +42,10 @@ impl Checkpoint {
             ("vlog_stats_root".to_string(), u64v(self.vlog_stats_root)),
             ("changefeed_root".to_string(), u64v(self.changefeed_root)),
         ];
+        if self.root_nonces.iter().any(|&n| n != 0) {
+            let a = self.root_nonces.iter().map(|&n| u64v(n)).collect();
+            f.push(("root_nonces".to_string(), Value::Array(a)));
+        }
         if let Some(x) = self.expires {
             f.push(("expires".to_string(), Value::Timestamp(x)));
         }
@@ -68,6 +74,21 @@ impl Checkpoint {
             manifest_root: u("manifest_root"),
             vlog_stats_root: u("vlog_stats_root"),
             changefeed_root: u("changefeed_root"),
+            root_nonces: {
+                let mut r = [0u64; 7];
+                if let Some(Value::Array(a)) = d.field("root_nonces") {
+                    if a.len() != 7 {
+                        return crate::error::corrupt(format!("checkpoint root_nonces has {} entries, not 7", a.len()));
+                    }
+                    for (i, v) in a.iter().enumerate() {
+                        let Value::Int { mag, neg: false, .. } = v else {
+                            return crate::error::corrupt("checkpoint root_nonces holds a non-U64");
+                        };
+                        r[i] = *mag as u64;
+                    }
+                }
+                r
+            },
             expires: match d.field("expires") {
                 Some(Value::Timestamp(t)) => Some(*t),
                 _ => None,
@@ -89,6 +110,7 @@ impl Checkpoint {
             // `checkpoint_root` and replaces the other eight.
             checkpoint_root: 0,
             changefeed_root: self.changefeed_root,
+            root_nonces: { let mut r = self.root_nonces; r[5] = 0; r },
             created_ms: self.created,
         }
     }
@@ -123,9 +145,10 @@ impl Checkpoints for Engine {
             manifest_root: s.manifest_root,
             vlog_stats_root: s.vlog_stats_root,
             changefeed_root: s.changefeed_root,
+            root_nonces: { let mut r = s.root_nonces; r[5] = 0; r },
             expires,
         };
-        let mut t = std::mem::replace(&mut self.checkpoints, crate::cow::CowTree::new(tree_id::CHECKPOINTS, 0));
+        let mut t = std::mem::replace(&mut self.checkpoints, crate::cow::CowTree::new(tree_id::CHECKPOINTS, 0, 0));
         t.commit_id = self.sb.commit_id;
         let r = t.put(&mut self.pager, &key_of(name), &c.encode());
         self.checkpoints = t;
@@ -136,7 +159,7 @@ impl Checkpoints for Engine {
     }
 
     fn checkpoint(&mut self, name: &str) -> Result<Option<Checkpoint>> {
-        let t = std::mem::replace(&mut self.checkpoints, crate::cow::CowTree::new(tree_id::CHECKPOINTS, 0));
+        let t = std::mem::replace(&mut self.checkpoints, crate::cow::CowTree::new(tree_id::CHECKPOINTS, 0, 0));
         let v = t.get(&mut self.pager, &key_of(name));
         self.checkpoints = t;
         match v? {
@@ -146,7 +169,7 @@ impl Checkpoints for Engine {
     }
 
     fn list_checkpoints(&mut self) -> Result<Vec<Checkpoint>> {
-        let t = std::mem::replace(&mut self.checkpoints, crate::cow::CowTree::new(tree_id::CHECKPOINTS, 0));
+        let t = std::mem::replace(&mut self.checkpoints, crate::cow::CowTree::new(tree_id::CHECKPOINTS, 0, 0));
         let rows = t.scan(&mut self.pager, None, None);
         self.checkpoints = t;
         let mut out = Vec::new();
@@ -161,7 +184,7 @@ impl Checkpoints for Engine {
     }
 
     fn drop_checkpoint(&mut self, name: &str) -> Result<bool> {
-        let mut t = std::mem::replace(&mut self.checkpoints, crate::cow::CowTree::new(tree_id::CHECKPOINTS, 0));
+        let mut t = std::mem::replace(&mut self.checkpoints, crate::cow::CowTree::new(tree_id::CHECKPOINTS, 0, 0));
         t.commit_id = self.sb.commit_id;
         let r = t.remove(&mut self.pager, &key_of(name));
         self.checkpoints = t;

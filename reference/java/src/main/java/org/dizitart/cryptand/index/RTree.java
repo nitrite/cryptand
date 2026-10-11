@@ -87,19 +87,23 @@ public final class RTree {
     private final List<Entry> entries = new ArrayList<>();
     private final List<Long> oldPages = new ArrayList<>();
     private long root;
+    /** F-128: the root's header nonce, as the descriptor's {@code root_nonce}. */
+    private long rootNonce;
     private boolean dirty;
 
-    private RTree(Pager pager, int treeId, int dimensions, long root) {
+    private RTree(Pager pager, int treeId, int dimensions, long root, long rootNonce) {
         this.pager = pager;
         this.treeId = treeId;
         this.dimensions = dimensions;
         this.root = root;
+        this.rootNonce = rootNonce;
     }
 
-    public static RTree load(Pager pager, int treeId, int dimensions, long root) {
-        RTree t = new RTree(pager, treeId, dimensions, root);
+    /** Every page is read here, and each is checked against its parent's nonce (14 §5.5). */
+    public static RTree load(Pager pager, int treeId, int dimensions, long root, long rootNonce) {
+        RTree t = new RTree(pager, treeId, dimensions, root, rootNonce);
         if (root != 0) {
-            t.read(root);
+            t.read(root, rootNonce);
         }
         return t;
     }
@@ -120,6 +124,10 @@ public final class RTree {
 
     public long root() {
         return root;
+    }
+
+    public long rootNonce() {
+        return rootNonce;
     }
 
     public int size() {
@@ -145,9 +153,12 @@ public final class RTree {
     // page format, §2.1
     // ==================================================================
 
-    private void read(long page) {
+    private void read(long page, long nonce) {
         oldPages.add(page);
-        byte[] payload = pager.readPage(page);
+        byte[] raw = pager.readRaw(page);
+        PageHeader h = PageHeader.verify(raw, page);
+        pager.checkNonce(page, h, nonce);
+        byte[] payload = pager.decodePayload(raw, h, page);
         ByteReader r = new ByteReader(payload);
         int count = r.u16();
         int dims = r.u8();
@@ -176,13 +187,13 @@ public final class RTree {
             } else {
                 long child = r.u64();
                 r.u64();
-                read(child);
+                read(child, r.u64());
             }
         }
     }
 
     private int entryStride(boolean leaf) {
-        return 16 * dimensions + (leaf ? 8 : 16);
+        return 16 * dimensions + (leaf ? 8 : 24);
     }
 
     private int fanout(boolean leaf) {
@@ -198,7 +209,9 @@ public final class RTree {
             pager.freeExtent(p, 1);
         }
         oldPages.clear();
-        root = entries.isEmpty() ? 0 : build();
+        long[] top = entries.isEmpty() ? new long[2] : build();
+        root = top[0];
+        rootNonce = top[1];
         dirty = false;
         return root;
     }
@@ -207,7 +220,8 @@ public final class RTree {
      * Sort-Tile-Recursive packing: sort by each axis in turn and slice into
      * tiles, which gives low-overlap nodes for a static set at O(n log n).
      */
-    private long build() {
+    /** {@code {root, rootNonce}}. */
+    private long[] build() {
         List<Entry> sorted = new ArrayList<>(entries);
         sorted.sort(Comparator.comparingDouble(e -> centre(e.box(), 0)));
         int leafFanout = fanout(true);
@@ -231,7 +245,7 @@ public final class RTree {
             }
             level = next;
         }
-        return (long) level.get(0)[1];
+        return (long[]) level.get(0)[1];
     }
 
     private static double centre(Wkb.Box b, int axis) {
@@ -241,7 +255,7 @@ public final class RTree {
         return (b.min()[axis] + b.max()[axis]) / 2;
     }
 
-    /** {@code {Box, pageId, subtreeEntries}} for the level above. */
+    /** {@code {Box, {pageId, nonce}, subtreeEntries}} for the level above. */
     private Object[] emitLeaf(List<Entry> node) {
         ByteWriter w = new ByteWriter(pager.payloadSize());
         w.u16(node.size()).u8(dimensions).u8(FLAG_IS_LEAF).u32(0).u64(node.size());
@@ -265,7 +279,8 @@ public final class RTree {
         for (Object[] c : children) {
             Wkb.Box box = (Wkb.Box) c[0];
             writeBox(w, box);
-            w.u64((long) c[1]).u64((long) c[2]);
+            long[] at = (long[]) c[1];
+            w.u64(at[0]).u64((long) c[2]).u64(at[1]);
             cover = cover.union(box);
         }
         return new Object[]{cover, write(w, PageHeader.Type.RTREE_INTERNAL), total};
@@ -280,14 +295,15 @@ public final class RTree {
         }
     }
 
-    private long write(ByteWriter w, int pageType) {
+    /** {@code {pageId, nonce}}: the nonce is what the parent records (14 §5.5). */
+    private long[] write(ByteWriter w, int pageType) {
         long page = pager.allocate(1);
         oldPages.add(page);
         PageHeader h = new PageHeader();
         h.pageType = pageType;
         h.treeId = treeId;
         pager.writePage(page, h, w.toBytes());
-        return page;
+        return new long[]{page, h.nonce};
     }
 
     // ==================================================================
@@ -432,6 +448,7 @@ public final class RTree {
             ids.add(r.u64());
             if (!leaf) {
                 r.u64();
+                r.u64(); // child_nonce, checked when the tree was loaded
             }
         }
         return new Node(leaf, boxes, ids);

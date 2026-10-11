@@ -225,7 +225,7 @@ class SpatialTest {
             db.engine().commitNow();
             TreeDescriptor d = db.descriptor(index.name());
             assertThrows(CorruptionException.class,
-                    () -> RTree.load(db.engine().pager(), d.treeId(), 3, d.root()));
+                    () -> RTree.load(db.engine().pager(), d.treeId(), 3, d.root(), d.rootNonce()));
         }
     }
 

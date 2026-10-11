@@ -36,6 +36,8 @@ public final class PageTree {
             new TreeMap<>(BtreePage::memcmp);
     private final List<Long> oldPages = new ArrayList<>();
     private long root;
+    /** F-128: the root page's header nonce, recorded by whoever holds the root. */
+    private long rootNonce;
     private boolean dirty;
     /**
      * Bumped by every content change, so a decoded view of this tree can tell
@@ -51,17 +53,21 @@ public final class PageTree {
      */
     private volatile long version;
 
-    private PageTree(Pager pager, int treeId, long root) {
+    private PageTree(Pager pager, int treeId, long root, long rootNonce) {
         this.pager = pager;
         this.treeId = treeId;
         this.root = root;
+        this.rootNonce = rootNonce;
     }
 
-    /** Reads a whole tree. {@code root == 0} means the tree does not exist yet. */
-    public static PageTree load(Pager pager, int treeId, long root) {
-        PageTree t = new PageTree(pager, treeId, root);
+    /**
+     * Reads a whole tree. {@code root == 0} means the tree does not exist yet;
+     * {@code rootNonce} is the nonce its holder recorded (14 §5.5).
+     */
+    public static PageTree load(Pager pager, int treeId, long root, long rootNonce) {
+        PageTree t = new PageTree(pager, treeId, root, rootNonce);
         if (root != 0) {
-            t.readInto(root, 0, new java.util.HashSet<>());
+            t.readInto(root, rootNonce, 0, new java.util.HashSet<>());
         }
         return t;
     }
@@ -71,7 +77,7 @@ public final class PageTree {
      * recurse until the stack overflows, and children shared between cells
      * would load pages exponentially often; a tree reaches each page once.
      */
-    private void readInto(long pageId, int depth, java.util.Set<Long> seen) {
+    private void readInto(long pageId, long nonce, int depth, java.util.Set<Long> seen) {
         if (depth > 64) {
             throw new CorruptionException("internal tree " + treeId + " is deeper than 64 levels", pageId, null);
         }
@@ -82,6 +88,7 @@ public final class PageTree {
         oldPages.add(pageId);
         byte[] page = pager.readRaw(pageId);
         PageHeader h = PageHeader.verify(page, pageId);
+        pager.checkNonce(pageId, h, nonce);
         byte[] payload = pager.decodePayload(page, h, pageId);
         BtreePage p = BtreePage.parse(payload, 0, payload.length);
         if (p.isLeaf()) {
@@ -95,7 +102,8 @@ public final class PageTree {
             }
         } else {
             for (int i = 0; i < p.cellCount(); i++) {
-                readInto(p.internal(i).childPage(), depth + 1, seen);
+                BtreePage.Internal c = p.internalCow(i);
+                readInto(c.childPage(), c.childNonce(), depth + 1, seen);
             }
         }
     }
@@ -106,6 +114,10 @@ public final class PageTree {
 
     public long root() {
         return root;
+    }
+
+    public long rootNonce() {
+        return rootNonce;
     }
 
     public boolean isDirty() {
@@ -183,7 +195,7 @@ public final class PageTree {
             return root;
         }
         releaseOldPages();
-        root = entries.isEmpty() ? 0 : build(false);
+        setRoot(entries.isEmpty() ? null : build(false));
         dirty = false;
         return root;
     }
@@ -216,7 +228,7 @@ public final class PageTree {
 
     /** Rebuilds using only file-extending allocations — see {@link Pager#allocateFresh}. */
     public long commitFresh() {
-        root = entries.isEmpty() ? 0 : build(true);
+        setRoot(entries.isEmpty() ? null : build(true));
         dirty = false;
         return root;
     }
@@ -245,12 +257,17 @@ public final class PageTree {
     public long commitInto(long start) {
         next = start;
         try {
-            root = entries.isEmpty() ? 0 : build(true);
+            setRoot(entries.isEmpty() ? null : build(true));
         } finally {
             next = -1;
         }
         dirty = false;
         return root;
+    }
+
+    private void setRoot(BtreePage.Internal top) {
+        root = top == null ? 0 : top.childPage();
+        rootNonce = top == null ? 0 : top.childNonce();
     }
 
     private long next = -1;
@@ -264,7 +281,7 @@ public final class PageTree {
         return fresh ? pager.allocateFresh(1) : pager.allocate(1);
     }
 
-    private long build(boolean fresh) {
+    private BtreePage.Internal build(boolean fresh) {
         int payloadSize = pager.payloadSize();
 
         // Leaves, filled and emitted in order.
@@ -296,7 +313,7 @@ public final class PageTree {
             List<BtreePage.Internal> group = new ArrayList<>();
             for (BtreePage.Internal c : level) {
                 group.add(c);
-                if (BtreePage.encodeInternals(group, payloadSize) == null) {
+                if (BtreePage.encodeInternalsCow(group, payloadSize) == null) {
                     group.remove(group.size() - 1);
                     next.add(emitInternal(group, fresh));
                     group.clear();
@@ -308,7 +325,7 @@ public final class PageTree {
             }
             level = next;
         }
-        return level.get(0).childPage();
+        return level.get(0);
     }
 
     private BtreePage.Internal emitLeaf(List<BtreePage.Leaf> cells, boolean fresh) {
@@ -327,11 +344,11 @@ public final class PageTree {
         h.pageType = PageHeader.Type.BTREE_LEAF;
         h.treeId = treeId;
         pager.writePage(page, h, payload);
-        return new BtreePage.Internal(cells.get(0).key(), page, cells.size());
+        return new BtreePage.Internal(cells.get(0).key(), page, cells.size(), h.nonce);
     }
 
     private BtreePage.Internal emitInternal(List<BtreePage.Internal> cells, boolean fresh) {
-        byte[] payload = BtreePage.encodeInternals(cells, pager.payloadSize());
+        byte[] payload = BtreePage.encodeInternalsCow(cells, pager.payloadSize());
         if (counting) {
             counted++;
             return new BtreePage.Internal(cells.get(0).separator(), 0, 0);
@@ -346,6 +363,6 @@ public final class PageTree {
         for (BtreePage.Internal c : cells) {
             entryCount += c.childSubtreeEntries();
         }
-        return new BtreePage.Internal(cells.get(0).separator(), page, entryCount);
+        return new BtreePage.Internal(cells.get(0).separator(), page, entryCount, h.nonce);
     }
 }

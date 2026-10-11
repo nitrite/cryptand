@@ -47,6 +47,7 @@ final class SegmentRef {
     this.valueBytes = 0,
     this.vlogBytes = 0,
     this.trees = const [],
+    this.nonce = 0,
   });
 
   factory SegmentRef.of(Segment s, {required int level, required int group}) {
@@ -90,6 +91,9 @@ final class SegmentRef {
   final int valueBytes;
   final int vlogBytes;
   final List<int> trees;
+
+  /// F-128, `14-security.md` §5.5: the head page's header nonce.
+  final int nonce;
 
   /// True when this segment's key range can hold [userKeyPrefix].
   ///
@@ -137,6 +141,7 @@ final class SegmentRef {
         'start_page': CInt.of(NumType.u64, startPage),
         'pages': CInt.of(NumType.u32, pages),
         'root': CInt.of(NumType.u64, root),
+        'nonce': CInt.of(NumType.u64, nonce),
         'filter': CInt.of(NumType.u64, filter),
         'min_seq': CInt.of(NumType.u64, minSeq),
         'max_seq': CInt.of(NumType.u64, maxSeq),
@@ -174,6 +179,7 @@ final class SegmentRef {
       startPage: u('start_page'),
       pages: u('pages'),
       root: u('root'),
+      nonce: (d['nonce'] as CInt?)?.magnitude.lo ?? 0,
       filter: u('filter'),
       minSeq: u('min_seq'),
       maxSeq: u('max_seq'),
@@ -207,8 +213,9 @@ Uint8List manifestKey(int level, int group, Uint8List minInternalKey) =>
 
 /// Tree 6.
 final class Manifest {
-  Manifest(PageStore store, {int root = 0})
-      : tree = CowTree(store, treeId: TreeId.manifest, root: root);
+  Manifest(PageStore store, {int root = 0, int rootNonce = 0})
+      : tree = CowTree(store,
+            treeId: TreeId.manifest, root: root, rootNonce: rootNonce);
 
   final CowTree tree;
 

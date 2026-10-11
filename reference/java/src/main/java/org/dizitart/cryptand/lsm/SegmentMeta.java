@@ -67,6 +67,8 @@ public final class SegmentMeta {
     // --- manifest-side, not in the head page's field table but implied by it ---
     public long startPage;
     public int pages;
+    /** F-128, 14 §5.5: the head page's header nonce, as the manifest records it. */
+    public long nonce;
 
     public boolean hasRangeDeletes() {
         return (flags & HAS_RANGE_DELETES) != 0;
@@ -185,6 +187,7 @@ public final class SegmentMeta {
         f.put("start_page", Value.integer(NumType.U64, startPage));
         f.put("pages", Value.integer(NumType.U32, pages));
         f.put("root", Value.integer(NumType.U64, rootPage));
+        f.put("nonce", Value.integer(NumType.U64, nonce));
         f.put("filter", Value.integer(NumType.U64, filterPage));
         f.put("min_seq", Value.integer(NumType.U64, minSeq));
         f.put("max_seq", Value.integer(NumType.U64, maxSeq));
@@ -230,6 +233,8 @@ public final class SegmentMeta {
         m.startPage = longOf(d.field("start_page"));
         m.pages = (int) longOf(d.field("pages"));
         m.rootPage = longOf(d.field("root"));
+        Value n = d.field("nonce");
+        m.nonce = n == null ? 0 : longOf(n);
         m.filterPage = longOf(d.field("filter"));
         m.minSeq = longOf(d.field("min_seq"));
         m.maxSeq = longOf(d.field("max_seq"));

@@ -112,6 +112,22 @@ public final class TreeDescriptor {
         return optionalLong("root");
     }
 
+    /** F-128, 14 §5.5: the {@code root} page's header nonce; absent means 0. */
+    public long rootNonce() {
+        Long n = optionalLong("root_nonce");
+        return n == null ? 0 : n;
+    }
+
+    /** {@code root} and {@code root_nonce} into {@code fields}, so neither is written alone. */
+    public static void putRoot(Map<String, Value> fields, long root, long nonce) {
+        fields.put("root", Value.integer(NumType.U64, root));
+        if (nonce == 0) {
+            fields.remove("root_nonce");
+        } else {
+            fields.put("root_nonce", Value.integer(NumType.U64, nonce));
+        }
+    }
+
     /**
      * True when this tree's data lives in manifest segments. False for
      * {@code rtree}, which is a copy-on-write tree of its own page types, and
@@ -208,8 +224,8 @@ public final class TreeDescriptor {
             return this;
         }
 
-        public Builder root(long root) {
-            fields.put("root", Value.integer(NumType.U64, root));
+        public Builder root(long root, long nonce) {
+            putRoot(fields, root, nonce);
             return this;
         }
 

@@ -54,8 +54,9 @@ impl CowNode {
                 }
                 payloads.push(leaf_payload(&value));
             } else {
-                let (child, entries) = n.child_at(i)?;
-                payloads.push(child_payload(child, entries));
+                // F-128: a copy-on-write cell adds `child_nonce` (04 §2.2).
+                let c = child_of(p)?;
+                payloads.push(child_payload(c.0, c.1, c.2));
             }
         }
         Ok(CowNode { is_leaf: n.is_leaf, keys, payloads })
@@ -71,10 +72,11 @@ fn leaf_payload(value: &[u8]) -> Vec<u8> {
     v
 }
 
-fn child_payload(page: u64, entries: u64) -> Vec<u8> {
-    let mut v = Vec::with_capacity(16);
+fn child_payload(page: u64, entries: u64, nonce: u64) -> Vec<u8> {
+    let mut v = Vec::with_capacity(24);
     v.extend_from_slice(&page.to_le_bytes());
     v.extend_from_slice(&entries.to_le_bytes());
+    v.extend_from_slice(&nonce.to_le_bytes());
     v
 }
 
@@ -93,14 +95,18 @@ fn too_deep<T>() -> Result<T> {
     corrupt(format!("copy-on-write tree is deeper than {MAX_DEPTH} levels"))
 }
 
-fn child_of(payload: &[u8]) -> Result<(u64, u64)> {
-    if payload.len() < 16 {
-        return corrupt("copy-on-write internal cell shorter than 16 bytes");
+/// `(child_page, child_subtree_entries, child_nonce)`.
+fn child_of(payload: &[u8]) -> Result<(u64, u64, u64)> {
+    if payload.len() < 24 {
+        return corrupt("copy-on-write internal cell shorter than 24 bytes");
     }
-    Ok((
-        u64::from_le_bytes(payload[0..8].try_into().unwrap()),
-        u64::from_le_bytes(payload[8..16].try_into().unwrap()),
-    ))
+    let u = |a: usize| u64::from_le_bytes(payload[a..a + 8].try_into().unwrap());
+    Ok((u(0), u(8), u(16)))
+}
+
+/// A child to descend into: its page id and the nonce its parent recorded.
+fn link(payload: &[u8]) -> Result<(u64, u64)> {
+    child_of(payload).map(|c| (c.0, c.2))
 }
 
 /// A reserved tree. `root` is the published root page id; 0 means empty, which
@@ -108,6 +114,8 @@ fn child_of(payload: &[u8]) -> Result<(u64, u64)> {
 pub struct CowTree {
     pub tree_id: u32,
     pub root: u64,
+    /// F-128: the root page's header `nonce`, recorded by whoever holds `root`.
+    pub root_nonce: u64,
     pub commit_id: u64,
     /// Pages a path copy has orphaned, to be added to the free tree at the
     /// committing `commit_id`.
@@ -116,25 +124,30 @@ pub struct CowTree {
 }
 
 impl CowTree {
-    pub fn new(tree_id: u32, root: u64) -> CowTree {
-        CowTree { tree_id, root, commit_id: 0, freed: Vec::new(), pages_copied: 0 }
+    pub fn new(tree_id: u32, root: u64, root_nonce: u64) -> CowTree {
+        CowTree { tree_id, root, root_nonce, commit_id: 0, freed: Vec::new(), pages_copied: 0 }
+    }
+
+    fn root_link(&self) -> (u64, u64) {
+        (self.root, self.root_nonce)
     }
 
     pub fn is_empty(&self) -> bool {
         self.root == 0
     }
 
-    fn load(&self, pager: &mut Pager, page_id: u64) -> Result<CowNode> {
-        let (_h, page) = pager.read_verified(page_id)?;
+    fn load(&self, pager: &mut Pager, (page_id, nonce): (u64, u64)) -> Result<CowNode> {
+        let (_h, page) = pager.read_bound(page_id, nonce)?;
         CowNode::decode(&page, page_id)
     }
 
-    fn write(&mut self, pager: &mut Pager, n: &CowNode) -> Result<u64> {
+    /// Returns the page id and the nonce it was sealed under.
+    fn write(&mut self, pager: &mut Pager, n: &CowNode) -> Result<(u64, u64)> {
         let id = pager.alloc_extent(1)?;
         self.write_at(pager, id, n)
     }
 
-    fn write_at(&mut self, pager: &mut Pager, id: u64, n: &CowNode) -> Result<u64> {
+    fn write_at(&mut self, pager: &mut Pager, id: u64, n: &CowNode) -> Result<(u64, u64)> {
         let page = encode_node_page(
             pager.page_size,
             pager.payload_cap(),
@@ -147,14 +160,14 @@ impl CowTree {
         )?;
         pager.write_page(id, &page)?;
         self.pages_copied += 1;
-        Ok(id)
+        Ok((id, pager.written_nonce))
     }
 
     pub fn entry_count(&self, pager: &mut Pager) -> Result<u64> {
         if self.root == 0 {
             return Ok(0);
         }
-        Ok(self.load(pager, self.root)?.subtree_entries())
+        Ok(self.load(pager, self.root_link())?.subtree_entries())
     }
 
     // -----------------------------------------------------------------
@@ -165,7 +178,7 @@ impl CowTree {
         if self.root == 0 {
             return Ok(None);
         }
-        let mut page_id = self.root;
+        let mut page_id = self.root_link();
         for _ in 0..=MAX_DEPTH {
             let n = self.load(pager, page_id)?;
             if n.is_leaf {
@@ -177,7 +190,7 @@ impl CowTree {
             if n.count() == 0 {
                 return Ok(None);
             }
-            page_id = child_of(&n.payloads[descend(&n.keys, key)])?.0;
+            page_id = link(&n.payloads[descend(&n.keys, key)])?;
         }
         too_deep()
     }
@@ -193,14 +206,14 @@ impl CowTree {
         if self.root == 0 {
             return Ok(out);
         }
-        self.walk(pager, self.root, lower, upper, &mut out, 0, &mut Default::default())?;
+        self.walk(pager, self.root_link(), lower, upper, &mut out, 0, &mut Default::default())?;
         Ok(out)
     }
 
     fn walk(
         &self,
         pager: &mut Pager,
-        page_id: u64,
+        (page_id, nonce): (u64, u64),
         lower: Option<&[u8]>,
         upper: Option<&[u8]>,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
@@ -215,7 +228,7 @@ impl CowTree {
         if !seen.insert(page_id) {
             return corrupt(format!("copy-on-write page {page_id} is reached twice"));
         }
-        let n = self.load(pager, page_id)?;
+        let n = self.load(pager, (page_id, nonce))?;
         if n.is_leaf {
             for i in 0..n.count() {
                 let k = &n.keys[i];
@@ -242,7 +255,7 @@ impl CowTree {
                     return Ok(false);
                 }
             }
-            if !self.walk(pager, child_of(&n.payloads[i])?.0, lower, upper, out, depth + 1, seen)? {
+            if !self.walk(pager, link(&n.payloads[i])?, lower, upper, out, depth + 1, seen)? {
                 return Ok(false);
             }
         }
@@ -255,13 +268,13 @@ impl CowTree {
         if self.root == 0 {
             return Ok(());
         }
-        self.reach(pager, self.root, out, 0, &mut Default::default())
+        self.reach(pager, self.root_link(), out, 0, &mut Default::default())
     }
 
     fn reach(
         &self,
         pager: &mut Pager,
-        page_id: u64,
+        (page_id, nonce): (u64, u64),
         out: &mut Vec<u64>,
         depth: usize,
         seen: &mut std::collections::HashSet<u64>,
@@ -273,12 +286,12 @@ impl CowTree {
             return corrupt(format!("copy-on-write page {page_id} is reached twice"));
         }
         out.push(page_id);
-        let n = self.load(pager, page_id)?;
+        let n = self.load(pager, (page_id, nonce))?;
         if n.is_leaf {
             return Ok(());
         }
         for p in &n.payloads {
-            self.reach(pager, child_of(p)?.0, out, depth + 1, seen)?;
+            self.reach(pager, link(p)?, out, depth + 1, seen)?;
         }
         Ok(())
     }
@@ -319,20 +332,20 @@ impl CowTree {
 
     fn edit_existing(&mut self, pager: &mut Pager, key: &[u8], payload: Option<Vec<u8>>) -> Result<()> {
         let mut path: Vec<(u64, CowNode, usize)> = Vec::new();
-        let mut page_id = self.root;
+        let mut at_link = self.root_link();
         loop {
             if path.len() > MAX_DEPTH {
                 return too_deep();
             }
-            let n = self.load(pager, page_id)?;
+            let n = self.load(pager, at_link)?;
             if n.is_leaf {
-                path.push((page_id, n, usize::MAX));
+                path.push((at_link.0, n, usize::MAX));
                 break;
             }
             let i = descend(&n.keys, key);
-            let child = child_of(&n.payloads[i])?.0;
-            path.push((page_id, n, i));
-            page_id = child;
+            let child = link(&n.payloads[i])?;
+            path.push((at_link.0, n, i));
+            at_link = child;
         }
         {
             let leaf = &mut path.last_mut().unwrap().1;
@@ -385,9 +398,9 @@ impl CowTree {
             parent.keys.remove(ci);
             parent.payloads.remove(ci);
             let mut at = ci;
-            for (id, n) in &children {
+            for ((id, nonce), n) in &children {
                 parent.keys.insert(at, n.keys[0].clone());
-                parent.payloads.insert(at, child_payload(*id, n.subtree_entries()));
+                parent.payloads.insert(at, child_payload(*id, n.subtree_entries(), *nonce));
                 at += 1;
             }
             replacements = self.split(cap, parent.clone())?;
@@ -396,12 +409,12 @@ impl CowTree {
 
         if replacements.len() == 1 {
             let only = &replacements[0];
-            self.root = if only.count() == 0 {
-                0
+            (self.root, self.root_nonce) = if only.count() == 0 {
+                (0, 0)
             } else if !only.is_leaf && only.count() == 1 {
                 // A root with one child is a chain of one; its child is already
                 // a valid root, so the level is dropped rather than written.
-                child_of(&only.payloads[0])?.0
+                link(&only.payloads[0])?
             } else {
                 self.write(pager, only)?
             };
@@ -415,11 +428,11 @@ impl CowTree {
                 continue;
             }
             keys.push(n.keys[0].clone());
-            let id = self.write(pager, n)?;
-            payloads.push(child_payload(id, n.subtree_entries()));
+            let (id, nonce) = self.write(pager, n)?;
+            payloads.push(child_payload(id, n.subtree_entries(), nonce));
         }
         let node = CowNode { is_leaf: false, keys, payloads };
-        self.root = self.write(pager, &node)?;
+        (self.root, self.root_nonce) = self.write(pager, &node)?;
         Ok(())
     }
 
@@ -470,7 +483,7 @@ impl CowTree {
     fn build(&mut self, pager: &mut Pager, entries: Vec<(Vec<u8>, Vec<u8>)>, mut place: Place) -> Result<u64> {
         if entries.is_empty() {
             if !matches!(place, Place::Count) {
-                self.root = 0;
+                (self.root, self.root_nonce) = (0, 0);
             }
             return Ok(0);
         }
@@ -492,15 +505,13 @@ impl CowTree {
                     }
                     Place::Count => 0,
                 };
-                if !matches!(place, Place::Count) {
-                    self.write_at(pager, id, n)?;
-                }
+                let nonce = if matches!(place, Place::Count) { 0 } else { self.write_at(pager, id, n)?.1 };
                 keys.push(n.keys[0].clone());
-                payloads.push(child_payload(id, n.subtree_entries()));
+                payloads.push(child_payload(id, n.subtree_entries(), nonce));
             }
             if level.len() == 1 {
                 if !matches!(place, Place::Count) {
-                    self.root = child_of(&payloads[0])?.0;
+                    (self.root, self.root_nonce) = link(&payloads[0])?;
                 }
                 return Ok(written);
             }
@@ -539,13 +550,13 @@ impl CowTree {
             return Ok(0);
         }
         let mut h = 1;
-        let mut n = self.load(pager, self.root)?;
+        let mut n = self.load(pager, self.root_link())?;
         while !n.is_leaf {
             h += 1;
             if h > MAX_DEPTH {
                 return too_deep();
             }
-            n = self.load(pager, child_of(&n.payloads[0])?.0)?;
+            n = self.load(pager, link(&n.payloads[0])?)?;
         }
         Ok(h)
     }

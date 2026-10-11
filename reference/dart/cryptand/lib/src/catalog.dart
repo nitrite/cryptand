@@ -155,6 +155,24 @@ final class TreeDescriptor {
   int get entries => (optionalField<CInt>(doc, 'entries', 'tree descriptor')?.magnitude)?.lo ?? 0;
   int get features => (optionalField<CInt>(doc, 'features', 'tree descriptor')?.magnitude)?.lo ?? 0;
   int? get root => (optionalField<CInt>(doc, 'root', 'tree descriptor')?.magnitude)?.lo;
+
+  /// F-128, `14-security.md` §5.5: the `root` page's header nonce; absent
+  /// means 0.
+  int get rootNonce =>
+      (optionalField<CInt>(doc, 'root_nonce', 'tree descriptor')?.magnitude)
+          ?.lo ??
+      0;
+
+  /// This descriptor with `root` and `root_nonce` replaced together.
+  TreeDescriptor withRoot(int root, int nonce) {
+    final f = Map.of(doc.fields)..['root'] = CInt.of(NumType.u64, root);
+    if (nonce == 0) {
+      f.remove('root_nonce');
+    } else {
+      f['root_nonce'] = CInt.of(NumType.u64, nonce);
+    }
+    return TreeDescriptor(CDoc(f));
+  }
   String? get owner => optionalField<CStr>(doc, 'owner', 'tree descriptor')?.value;
   String? get keyKind => optionalField<CStr>(doc, 'key_kind', 'tree descriptor')?.value;
   int? get nameDict => (optionalField<CInt>(doc, 'name_dict', 'tree descriptor')?.magnitude)?.lo;
@@ -199,8 +217,10 @@ final class TreeDescriptor {
 /// scanning the catalog if its descriptor is missing, which is what
 /// [rebuildTreeIndex] does.
 final class Catalog {
-  Catalog(this.store, {int catalogRoot = 0, int treeIndexRoot = 0})
-      : tree = CowTree(store, treeId: TreeId.catalog, root: catalogRoot),
+  Catalog(this.store,
+      {int catalogRoot = 0, int catalogNonce = 0, int treeIndexRoot = 0})
+      : tree = CowTree(store,
+            treeId: TreeId.catalog, root: catalogRoot, rootNonce: catalogNonce),
         byId = CowTree(store, treeId: TreeId.treeIndex, root: treeIndexRoot);
 
   final PageStore store;
@@ -312,9 +332,12 @@ final class Catalog {
   /// reachable from nothing and recorded in no free tree — a leak per open,
   /// which `spec/01-container.md` §9 step 7 finds and which nothing else would.
   void loadTreeIndex() {
-    final root = get(treeIndexDescriptor)?.root ?? 0;
+    final d = get(treeIndexDescriptor);
+    final root = d?.root ?? 0;
     if (root != 0) {
-      byId.root = root;
+      byId
+        ..root = root
+        ..rootNonce = d!.rootNonce;
     } else {
       rebuildTreeIndex();
     }
@@ -325,18 +348,19 @@ final class Catalog {
     final root = byId.root;
     if (root == 0) return;
     final existing = get(treeIndexDescriptor);
-    if (existing != null && existing.root == root) return;
-    final d = existing == null
-        ? TreeDescriptor.create(
-            treeId: TreeId.treeIndex,
-            kind: TreeKind.internal,
-            keyKind: 'u32',
-            root: root,
-            levelled: false)
-        : TreeDescriptor(CDoc({
-            ...existing.doc.fields,
-            'root': CInt.of(NumType.u64, root),
-          }));
+    if (existing != null &&
+        existing.root == root &&
+        existing.rootNonce == byId.rootNonce) {
+      return;
+    }
+    final d = (existing ??
+            TreeDescriptor.create(
+                treeId: TreeId.treeIndex,
+                kind: TreeKind.internal,
+                keyKind: 'u32',
+                root: root,
+                levelled: false))
+        .withRoot(root, byId.rootNonce);
     // Straight into the catalog tree: `create` would allocate a fresh
     // `tree_id`, and tree 3's is reserved (§2).
     tree.put(_nameKey(treeIndexDescriptor), d.encode());
@@ -380,8 +404,9 @@ final class Catalog {
 
 /// Tree 2, replacing `$nitrite_meta_map`. §6.
 final class Attributes {
-  Attributes(PageStore store, {int root = 0})
-      : tree = CowTree(store, treeId: TreeId.attributes, root: root);
+  Attributes(PageStore store, {int root = 0, int rootNonce = 0})
+      : tree = CowTree(store,
+            treeId: TreeId.attributes, root: root, rootNonce: rootNonce);
 
   final CowTree tree;
 
