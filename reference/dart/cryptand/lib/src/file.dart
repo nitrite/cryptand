@@ -52,6 +52,9 @@ abstract final class DatabaseFile {
   /// manifest and tree 7 are written, which appends copy-on-write pages *after*
   /// the extents and so cannot move them; then the superblock, last, because it
   /// is what publishes all of it.
+  ///
+  /// [writerId] is plaintext on disk even when encrypted (14 section 11): a
+  /// product and version only, never a user name or device identifier.
   static void save(Database db, String path,
       {String? writerId, Uint8List? keyslots}) {
     final e = db.engine;

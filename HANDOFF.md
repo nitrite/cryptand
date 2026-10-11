@@ -23,10 +23,11 @@
   clean too, so all 7 Jazzer targets are clean under 21. Old logs in `fuzz/old/`.
   Launch: `JAZZER_FUZZ=1 mvn -B surefire:test -Dtest=JazzerTest#<t>` in
   `reference/java` (maxDuration 2h in the annotation). Old crash inputs in `~/fuzz-crashes`.
-- M4 started: `reference/SECURITY-REVIEW.md`, 39 rows (spec 14 MUSTs →
-  test per language). F-122 fixed (crypto-erase / last-slot tests, R+J).
-  F-123 fixed: `v1.0-security-converting` added (approved), read clean by all three.
-  Rows with `?` (5, 10, 11, 13, 26, 27, 28 J, 30, 31) still need a test located or written.
+- M4.1 done: `reference/SECURITY-REVIEW.md`, 40 rows, no `?` left. F-122..F-125
+  fixed (missing tests and docs; each new test shown failing with its guard
+  removed). F-123 added `v1.0-security-converting`; spec 14 §13 reworded so it
+  must read, not fail (human, 1c28a0c). Left for M4.5: Java wiping the
+  caller's password array (row 29), the never-log marker test (row 40).
 - Remote JDKs: `openjdk@18` links to 24.0.1. Jazzer: `JAVA_HOME=/opt/homebrew/opt/openjdk@21`.
 - Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
   `reference/conformance/files/fuzz-regress/fNNN-*.cryptand`
@@ -56,14 +57,12 @@
 
 ## Open questions for the human
 
-- Spec 14 §13 says each `security-*` file MUST raise a named security error,
-  but `security-converting` is a valid file (§8.4) and must read clean. Reword
-  §13 to exclude it (text only, no bytes)? Until then the manifest says `read`.
+- None.
 
 ## Next action
 
-M4.1: resolve the `?` rows of `reference/SECURITY-REVIEW.md` (find or write
-each test, show it failing with the guard removed), then M4.2 KATs.
+M4.2: primitive KATs in all three (Wycheproof chacha20/xchacha20-poly1305,
+hkdf/hmac-sha256; RFC 9106 Argon2id incl. parallelism > 1; BLAKE2b).
 
 ## Log
 
@@ -72,3 +71,4 @@ each test, show it failing with the guard removed), then M4.2 KATs.
 - 2026-10-11 — Jazzer openFile/openEncrypted/cveDecode/analyzer 2 h clean under 21; last 3 targets started.
 - 2026-10-11 — M1.2 Java encrypted 0..10000 clean; last 3 Jazzer targets clean, M3 Rust/Java done.
 - 2026-10-11 — M4 started: SECURITY-REVIEW.md first pass; F-122 fixed (R+J tests), F-123 converting vector added after approval.
+- 2026-10-11 — spec 14 §13 reworded for security-converting; M4.1 done (F-124 tests, F-125 docs).

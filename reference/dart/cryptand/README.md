@@ -92,3 +92,9 @@ dart analyze
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
+
+## Key material in memory
+
+Keys and subkeys live in `Uint8List` and are zeroed when the database is
+closed. The Dart VM's garbage collector moves objects and may leave copies the
+program never sees, so zeroing is **best-effort** (`spec/14-security.md` §11).

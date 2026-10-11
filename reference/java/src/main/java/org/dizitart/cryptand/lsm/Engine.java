@@ -87,6 +87,10 @@ public final class Engine implements AutoCloseable {
         public boolean backgroundCompaction = true;
         /** §5.2's step bound; the profile's value on mobile. */
         public long compactionStepBytes = 256 * 1024;
+        /**
+         * Plaintext on disk, even when encrypted (14 §11): a product and version
+         * only, never a user name or device identifier.
+         */
         public String writerId = "nitrite-java/1.0.0";
         /** §1's default ceiling on the space one checkpoint may pin. */
         public int checkpointSpaceLimitPct = 25;
