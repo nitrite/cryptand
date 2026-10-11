@@ -28,7 +28,7 @@ Stated first, because a security section without one is a list of primitives.
 |---|---|---|
 | **T1** | **Offline disclosure.** The attacker obtains the file — stolen device, lost backup, recovered disk block, a copy taken by another app — and reads its contents. | AEAD over every page payload and every value-log record (§5) |
 | **T2** | **Tampering.** The attacker modifies bytes in the file so the application reads something the application never wrote. | Poly1305 tag per page and per record; a modified page fails to open, it does not decrypt to garbage (§5) |
-| **T3** | **Splicing and relocation.** The attacker moves a valid encrypted page to another offset, or copies a page from one database into another, to substitute one record for another. | the nonce binds ciphertext to its `nonce` counter value, and the AAD binds it to its page header; the master key is bound to `database_uuid` (§3.4, §5.2) |
+| **T3** | **Splicing, relocation and replay.** The attacker moves a valid encrypted page to another offset, copies a page from one database into another, or copies an older version of a page back over its own position, to substitute one record for another. | the nonce binds ciphertext to its `nonce` counter value, and the AAD binds it to its page header; the master key is bound to `database_uuid`; every parent records its child's nonce (§3.4, §5.2, §5.5) |
 | **T4** | **Downgrade.** The attacker edits the plaintext superblock to set `cipher = 0`, to weaken `kdf` cost parameters so a password can be brute-forced, to clear a `features_required` bit, or to swap in another file's roots. | the superblock carries a keyed MAC covering every field that governs how the file is interpreted (§6) |
 | **T5** | **Malicious file.** The attacker hands the application a crafted `.cryptand` file — as a "shared database", an import, a restored backup — aiming for memory corruption, unbounded allocation, or code execution in the reader. | the untrusted-input rules of §9, which apply **whether or not the file is encrypted** |
 
@@ -482,6 +482,39 @@ lets an implementation `mmap` a vector region and read vectors as zero-copy
 slices, which is what bounds DiskANN's resident memory by the OS page cache. An
 encrypted region cannot be sliced in place: every access decrypts a chunk into a
 buffer the implementation must hold and bound itself. §12 accounts for it.
+
+### 5.5 Binding a page to its parent
+
+The nonce binds a page's ciphertext to its position and the AAD to its header,
+but nothing in a page says *which write* of that position its parent meant.
+Positions are reused once freed (`01-container.md` §6), so an older, authentic
+page copied back over its own position would verify, and the reader would get
+stale data or a tree that no longer fits together (F-128).
+
+Every edge from a parent to a headed page therefore records the child's header
+`nonce`, which is unique per write (§4): the superblock's `root_nonces`
+(`01-container.md` §2), a catalog descriptor's `root_nonce` and
+`vector_region_nonce`, a copy-on-write internal cell's `child_nonce`
+(`04-segments.md` §2.2), an R-tree internal entry's `child_nonce`
+(`08-spatial.md` §2.1), and a manifest entry's `nonce` (`04-segments.md`
+§3.2). Where a child is always written in the same commit as its parent, the
+`commit_id` in its authenticated header binds it instead: every headed page of a
+segment extent carries the head's (`04-segments.md` §2.1), and every overflow
+page the pointing leaf's (`01-container.md` §5).
+
+With `cipher = 1` a reader MUST compare the recorded nonce with the child's
+header `nonce` before it uses the child, and MUST report a mismatch as
+tampering. A plaintext page in a converting file (§8.3) has nonce 0 and is
+recorded as 0. With `cipher = 0` every recorded nonce is written 0 and nothing
+is checked: there is no key, so there is nothing to authenticate.
+
+What stays unbound: a value-log record's AAD names its segment, and segment ids
+are never reused, so it needs no edge. A blob's chunks are bound to its head
+page id only; a replayed older blob at the same position fails the pointer's
+`crc32c` and is reported as corruption. A vector region's chunks are rewritten
+in place and are not bound: an older chunk can be replayed, and returns a stale
+vector. A region is rebuildable from the documents (`09-vector.md` §7), and
+binding each chunk would need a counter table the format does not have.
 
 ---
 

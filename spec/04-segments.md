@@ -109,6 +109,12 @@ After the 40-byte page header:
 | 112 | … | `min_key`, then `max_key` |
 | … | … | `tree_span[]` — `tree_count` × { `u32 tree_id`, `u64 entry_count` } |
 
+**Every headed page of a segment extent MUST carry the head page's
+`commit_id`**, and a reader in an encrypted file MUST report a page that does
+not as tampering. The extent is written in one commit, so any page that
+differs is a page from an earlier extent at the same position
+(`14-security.md` §5.5).
+
 `min_key`/`max_key` let the manifest prune a segment without opening it, which
 is what makes a levelled point lookup one segment per level. `min_expiry` lets a
 compaction know, without reading the segment, whether it can drop anything.
@@ -196,6 +202,17 @@ bytes suffix_len        -- separator, prefix removed
 u64   child_page        -- relative to the extent start
 u64   child_subtree_entries
 ```
+
+**In a copy-on-write tree** (§3.3: trees 0–15, and any tree rooted at a
+catalog `root`) the internal cell carries one more field, and `child_page` is
+an absolute page id:
+
+```
+u64   child_nonce       -- the child page's header `nonce`; 0 when `cipher = 0`
+```
+
+A segment's internal cells do not: a segment is written whole in one commit,
+and §2.1's binding rule covers it (`14-security.md` §5.5).
 
 Cell *i* holds the least internal key reachable in child *i*. A writer SHOULD
 truncate separators to the shortest string that still separates the neighbouring
@@ -481,6 +498,7 @@ Reserved tree 6, a plain copy-on-write B+tree rooted from the superblock:
 key   = CKE(Array[ U8 level, U8 group, BYTES min_internal_key ])
 value = CVE {
     "segment_id": U64, "start_page": U64, "pages": U32, "root": U64,
+    "nonce":      U64,              -- head page's header `nonce`; 0 when `cipher = 0`
     "filter":     U64, "min_seq":   U64, "max_seq": U64,
     "entries":    U64, "tombstones": U64, "min_expiry": U64,
     "min_key":    BYTES, "max_key": BYTES,

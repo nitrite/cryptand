@@ -90,13 +90,14 @@ After the 40-byte page header, both node types share:
 | 8 | 8 | `subtree_entries` |
 | 16 | … | entries |
 
-**Internal entry** (`16 × dimensions + 16` bytes):
+**Internal entry** (`16 × dimensions + 24` bytes):
 
 ```
 f64  min[dimensions]
 f64  max[dimensions]
 u64  child_page
 u64  child_subtree_entries
+u64  child_nonce         -- the child's header `nonce`; 0 when `cipher = 0` (14 §5.5)
 ```
 
 **Leaf entry** (`16 × dimensions + 8` bytes):

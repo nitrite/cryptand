@@ -50,23 +50,33 @@
 
 ## Open questions for the human
 
-- **F-127 (S0, format change):** a reader trusts each page's `ENCRYPTED` flag
-  (14 §8.3, for conversion), so plaintext pages forged into an encrypted file
-  are read as authentic. Proposal: a MAC'd superblock state "conversion in
-  progress" (a `features_optional` bit or a reserved byte); when `cipher = 1`
-  and it is clear, a page, record or chunk without `ENCRYPTED` MUST be
-  tampering. The writer sets it at encrypt/decrypt start, clears it when
-  `unencrypted_pages` reaches 0. Approve, or choose another fix?
-- **F-128 (S1):** an older authentic page copied back over its own position
-  verifies. (a) For 1.0: declare per-page replay part of N2 in 14 §1.2/§6.3 and
-  the READMEs, harness expects corruption-or-stale; (b) bind each child's nonce
-  in its parent pointer (format change, larger). Recommend (a) now, (b) in 1.1.
+- None open. F-127 fixed (957bde6). F-128 (b) approved 10-12, design below.
+
+## F-128 design (approved: full A–G for 1.0)
+
+Encrypted files only (cipher = 0: fields written 0, never checked). A reader
+in a strict file (F-127) MUST report tampering when a child's header `nonce`
+differs from the nonce its parent recorded.
+A superblock: 7 root nonces at 328..383 (catalog, freelist, attributes,
+manifest, vlog_stats, checkpoint, changefeed), under `sb_mac`.
+B catalog descriptor `root_nonce` U64 (and `vector_region_nonce`).
+C CoW B+tree internal cell: `u64 child_nonce` after `child_subtree_entries`
+(CoW trees only; segment cells unchanged).
+D R-tree internal entry: `u64 child_nonce` (entry 16·d + 24 bytes).
+E manifest entry `"nonce": U64` = segment head page nonce.
+F every headed page inside a segment extent carries the head's `commit_id`.
+G overflow pages carry the pointing leaf's `commit_id` (no layout change).
+Spec text: 14 §5.5 (normative), 01 §2/§5, 04 §2.1/§2.2/§3.2, 05 §3, 08 §2.1, 09.
+Residual, documented: vector-region chunks (rewritten in place, rebuildable);
+blob replay is caught by the pointer's crc32c as corruption.
 
 ## Next action
 
-Extend `tools/security_attack.py` to value-log records and blob/vector chunks
-(a writer with values above `vlog_min`); then apply the human's F-127/F-128
-decisions. M4.4 (nonces) can start meanwhile.
+F-128 in Rust: pager records the nonce it sealed/opened; CowTree child_nonce
+(A, C) and roots; catalog `root_nonce` (B); rtree (D); manifest `nonce` (E);
+segment commit rule (F). Then Java, Dart, regenerate corpus, harness expects
+tamper for "replayed older version". Then extend the harness to value-log
+records and blob/vector chunks.
 
 ## Log
 

@@ -86,7 +86,8 @@ Exactly 4096 bytes, regardless of `page_size`, at offset `0` (slot A) and offset
 | 256 | 32 | `writer_id` | UTF-8, zero-padded, e.g. `"nitrite-rust/0.5.0"` |
 | 288 | 8 | `next_nonce` | monotonic AEAD nonce counter; never reused (`14-security.md` §4.1) |
 | 296 | 32 | `sb_mac` | keyed MAC over this superblock; zero when `cipher = 0` (`14-security.md` §6.2) |
-| 328 | 3184 | reserved | |
+| 328 | 56 | `root_nonces` | 7 × u64: the page-header `nonce` of `catalog_root`, `freelist_root`, `attributes_root`, `manifest_root`, `vlog_stats_root`, `checkpoint_root`, `changefeed_root`, in that order; 0 for an absent root and when `cipher = 0` (`14-security.md` §5.5) |
+| 384 | 3128 | reserved | |
 | 3512 | 576 | `keyslots` | 4 × 144 bytes; the wrapped master key (`14-security.md` §3.3) |
 | 4088 | 4 | reserved | |
 | 4092 | 4 | `checksum` | CRC-32C over bytes `0…4091` |
@@ -225,6 +226,10 @@ u64  next_page_id     (0 = last)
 u32  fragment_len
 bytes(fragment_len)
 ```
+
+A chain is written in the same commit as the leaf that points at it, so every
+overflow page MUST carry that leaf's `commit_id`, and a reader in an encrypted
+file MUST report one that does not as tampering (`14-security.md` §5.5).
 
 **Blob** — for a value at or above `blob_threshold` (256 KiB on `desktop`;
 `12-profiles.md` §1 gives the value for each profile). `byte_len` below is the
