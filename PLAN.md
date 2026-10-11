@@ -111,7 +111,8 @@ test compares the engine against a model on random histories.
   F-018…F-022; Java 0..300 full mix clean after F-026…F-031, F-034, F-036,
   F-037, F-040 (0..600 plain + 100 encrypted, 0 divergences); Dart 200 plain +
   24 encrypted clean after F-032, F-033, F-039. Dart replays are minutes per
-  log because of F-038; 10 000 seeds still to run) Model checker per implementation: replay an op-log against the
+  log because of F-038. 10-11: Rust and Java 0..10000 plain + encrypted, 0
+  divergences (Java encrypted after F-121); Dart 10 000 after M5) Model checker per implementation: replay an op-log against the
   engine **and** a sorted in-memory map; compare every read, and a full-scan
   digest at the end and after every `reopen`. Rust harness bin, Java test
   class, Dart test.

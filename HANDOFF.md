@@ -56,8 +56,8 @@
 
 ## Next action
 
-~15:30+ check `m12-java-enc.log` for `0 divergences` (still running at
-15:05); if so tick M1.2 in PLAN. At ~17:05 triage jz-wkb, jz-superblockKeyslot,
+M1.2 Java encrypted 0..10000: 0 divergences (done 10-11); only Dart
+10 000 remains (M5). At ~17:05 triage jz-wkb, jz-superblockKeyslot,
 jz-ckeRoundtrip; if clean, M3 Jazzer under 21 is done for Rust/Java.
 
 ## Log
