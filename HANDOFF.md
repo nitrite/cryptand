@@ -19,8 +19,8 @@
   Under 21: openFile found F-119 (fixed 420d2d2); ckeRoundtrip found F-120
   (spec, fixed 3d93fec, option a). openFile, openEncrypted, cveDecode,
   analyzer 2 h each at 6f701f5: clean (BUILD SUCCESS, 0 failures, no
-  JDK-68 errors). Running since 15:05 IST at 5da815b: wkb,
-  superblockKeyslot, ckeRoundtrip (end ~17:05). Old logs in `fuzz/old/`.
+  JDK-68 errors). wkb, superblockKeyslot, ckeRoundtrip 2 h at 5da815b:
+  clean too, so all 7 Jazzer targets are clean under 21. Old logs in `fuzz/old/`.
   Launch: `JAZZER_FUZZ=1 mvn -B surefire:test -Dtest=JazzerTest#<t>` in
   `reference/java` (maxDuration 2h in the annotation). Old crash inputs in `~/fuzz-crashes`.
 - Remote JDKs: `openjdk@18` links to 24.0.1. Jazzer: `JAVA_HOME=/opt/homebrew/opt/openjdk@21`.
@@ -55,12 +55,12 @@
 
 ## Next action
 
-M1.2 Java encrypted 0..10000: 0 divergences (done 10-11); only Dart
-10 000 remains (M5). At ~17:05 triage jz-wkb, jz-superblockKeyslot,
-jz-ckeRoundtrip; if clean, M3 Jazzer under 21 is done for Rust/Java.
+M3 for Rust/Java is done (Dart corpus replay waits for M5). Start M4
+(security review + pentest) per PLAN.
 
 ## Log
 
 - 2026-10-10 — Jazzer was under JDK 24 (void); openjdk@21 installed; F-119 fixed; Java M1.2 encrypted seed 9334 diverges, not reproduced locally. Earlier sessions: git history.
 - 2026-10-11 — F-120 fixed in spec (option a); F-121 (Java verify horizon mix) found via seed 9334 and fixed; final Java M1.2 encrypted run started.
 - 2026-10-11 — Jazzer openFile/openEncrypted/cveDecode/analyzer 2 h clean under 21; last 3 targets started.
+- 2026-10-11 — M1.2 Java encrypted 0..10000 clean; last 3 Jazzer targets clean, M3 Rust/Java done.
