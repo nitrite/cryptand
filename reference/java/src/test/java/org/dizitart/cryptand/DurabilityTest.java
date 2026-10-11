@@ -13,12 +13,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -201,5 +205,33 @@ class DurabilityTest {
         }
         System.out.println("F-080 java pages=" + pages + " bytes=" + java.nio.file.Files.size(p));
         assertTrue(pages < 200, "1000 commits of ~10 bytes made " + pages + " pages");
+    }
+
+    /**
+     * F-129, {@code 01-container.md} §2.1: only magic, checksum and
+     * {@code version_major} decide whether a slot is valid (step 2). An unknown
+     * required feature in the <em>chosen</em> slot refuses the file (step 5).
+     * Treating it as an invalid slot instead opened the older slot: a newer
+     * writer's last commit silently dropped, then overwritten by this one.
+     */
+    @Test
+    @DisplayName("an unknown required feature in the newest slot refuses the file, not falls back")
+    void unknownFeatureInNewestSlotRefuses(@TempDir Path dir) throws Exception {
+        Path f = dir.resolve("f.cryptand");
+        try (Engine e = Engine.create(f, sync())) {
+            e.batch().put(TREE, key(1), val("v")).commit();
+        }
+        try (Engine e = Engine.open(f, sync())) {
+            e.batch().put(TREE, key(2), val("w")).commit();
+        }
+        byte[] b = Files.readAllBytes(f);
+        int ps = 1 << b[14];
+        ByteBuffer bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN);
+        int newest = Long.compareUnsigned(bb.getLong(16), bb.getLong(ps + 16)) >= 0 ? 0 : ps;
+        assertTrue(bb.getLong(newest + 16) > 0 && bb.getLong((ps - newest) + 16) > 0, "both slots valid");
+        bb.putLong(newest + 24, bb.getLong(newest + 24) | (1L << 40));
+        bb.putInt(newest + 4092, org.dizitart.cryptand.util.Crc32c.of(b, newest, 4092));
+        Files.write(f, b);
+        assertThrows(org.dizitart.cryptand.UnsupportedFeatureException.class, () -> Engine.open(f, sync()).close());
     }
 }

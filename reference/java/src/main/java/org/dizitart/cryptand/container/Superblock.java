@@ -297,6 +297,17 @@ public final class Superblock {
      * superblock is refused rather than trusted.
      */
     public static Superblock decode(byte[] slot) {
+        Superblock sb = decodeSlot(slot);
+        sb.checkFeatures();
+        return sb;
+    }
+
+    /**
+     * {@link #decode} without §2.1 step 5. Choosing a slot (steps 2 and 3) must
+     * not use the feature bits: an unknown required bit refuses the file, it
+     * does not make the slot invalid and hand the open to the older one (F-129).
+     */
+    public static Superblock decodeSlot(byte[] slot) {
         if (slot.length < BYTES) {
             throw new LimitException("superblock slot is " + slot.length + " bytes, need " + BYTES);
         }
@@ -373,7 +384,17 @@ public final class Superblock {
         return sb;
     }
 
-    /** Steps 2, 5, 6 of §2.1, plus the invariants of {@code 00-conventions.md} §8. */
+    /** §2.1 step 5: an unknown required feature bit refuses the file, and names the bit. */
+    public void checkFeatures() {
+        long unknown = featuresRequired & ~Feature.KNOWN_REQUIRED;
+        if (unknown != 0) {
+            int bit = Long.numberOfTrailingZeros(unknown);
+            throw new UnsupportedFeatureException(
+                    "required feature bit " + bit + " (" + Feature.name(bit) + ") is not supported; refusing to open");
+        }
+    }
+
+    /** Steps 2 and 6 of §2.1, plus the invariants of {@code 00-conventions.md} §8. */
     void check() {
         if (versionMajor != VERSION_MAJOR) {
             throw new UnsupportedFeatureException(
@@ -381,12 +402,6 @@ public final class Superblock {
         }
         if (pageSizeLog2 < 12 || pageSizeLog2 > 16) {
             throw new CorruptionException("page_size_log2 " + pageSizeLog2 + " outside 12..16");
-        }
-        long unknown = featuresRequired & ~Feature.KNOWN_REQUIRED;
-        if (unknown != 0) {
-            int bit = Long.numberOfTrailingZeros(unknown);
-            throw new UnsupportedFeatureException(
-                    "required feature bit " + bit + " (" + Feature.name(bit) + ") is not supported; refusing to open");
         }
         if (commitId < 1) {
             throw new CorruptionException("commit_id must be at least 1, got " + commitId);

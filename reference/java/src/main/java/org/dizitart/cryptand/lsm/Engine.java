@@ -526,6 +526,8 @@ public final class Engine implements AutoCloseable {
                         "a key was supplied but the file is not encrypted");
             }
         }
+        // §2.1 step 5, on the chosen slot and after step 4's MAC (F-129).
+        sb.checkFeatures();
         if (!options.readOnly) {
             sb.durabilityAchieved = file.achieved();
             // `writer_id` names the SDK that created the file and is left
@@ -612,7 +614,7 @@ public final class Engine implements AutoCloseable {
         Superblock sbA = null;
         RuntimeException failA = null;
         try {
-            sbA = Superblock.decode(a);
+            sbA = Superblock.decodeSlot(a);
         } catch (RuntimeException ex) {
             failA = ex;
         }
@@ -634,7 +636,7 @@ public final class Engine implements AutoCloseable {
             byte[] cand = new byte[Superblock.BYTES];
             file.readFully(pageSize, cand, 0, Superblock.BYTES);
             try {
-                Superblock sb = Superblock.decode(cand);
+                Superblock sb = Superblock.decodeSlot(cand);
                 if (sb.pageSize() == pageSize
                         && (sbB == null || Long.compareUnsigned(sb.commitId, sbB.commitId) > 0)) {
                     sbB = sb;
