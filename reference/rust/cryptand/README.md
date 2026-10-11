@@ -76,6 +76,17 @@ cargo test --release    # run BOTH profiles — they test different arithmetic
 predictions; `REPORT.md` records every spec defect this implementation has
 found.
 
+## What encryption does not protect against
+
+An encrypted file detects edits to its pages and its superblock, but not
+**rollback**: someone who replaces the whole file with a genuine older copy
+of itself gets a file that verifies, because every byte of it was once valid
+(`spec/14-security.md` §1.2 N2, §6.3). If your threat model includes this,
+record the last `commit_id` you saw somewhere the attacker cannot write (an OS
+keychain, a server) and refuse to open a file whose `commit_id` is lower. An
+unencrypted file has no tamper detection at all: CRC-32C catches accidents, not
+edits (§9.4).
+
 ## License
 
 Apache License 2.0.

@@ -1,41 +1,27 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-11, evening IST)
+## State (2026-10-11, night IST)
 
 - Branch `packaging/v1.0.0`. Manifests 1.0.0, nothing published, no tags.
-  `tools/gate.sh quick` green at d057be4.
-- Done: M0, M2.1, M2.2 (Rust, Java), M2.3. Dart halves wait for M5.
-- M1.2: Rust 10 000 plain + encrypted clean. Java plain 10 000/0. Java
-  encrypted seed 9334 was F-121 (verify false positive, fixed d057be4; 1000
-  remote replays clean after, it failed within 473 before). Final Java
-  `--encrypted` 0..10000 at d057be4: 0 divergences (log
-  `m12-java-enc.log` in the remote `cryptand` clone; F-115 debug
-  instrumentation sits in its `git stash`).
-- M3: Rust 8 cargo-fuzz targets x 4 h clean. Jazzer (7 targets) in remote
-  clone `~/Documents/codebase/cryptand-fuzz`, logs
-  `reference/bench/runs/fuzz/jz-*.log`, 2 h each, 4 at a time. Every run
-  before 10-10 23:30 IST was under JDK 24, where instrumentation fails
-  (`class file major version 68`) yet the run reports a pass: void.
-  Under 21: openFile found F-119 (fixed 420d2d2); ckeRoundtrip found F-120
-  (spec, fixed 3d93fec, option a). openFile, openEncrypted, cveDecode,
-  analyzer 2 h each at 6f701f5: clean (BUILD SUCCESS, 0 failures, no
-  JDK-68 errors). wkb, superblockKeyslot, ckeRoundtrip 2 h at 5da815b:
-  clean too, so all 7 Jazzer targets are clean under 21. Old logs in `fuzz/old/`.
-  Launch: `JAZZER_FUZZ=1 mvn -B surefire:test -Dtest=JazzerTest#<t>` in
-  `reference/java` (maxDuration 2h in the annotation). Old crash inputs in `~/fuzz-crashes`.
-- M4.1 done: `reference/SECURITY-REVIEW.md`, 40 rows, no `?` left. F-122..F-125
-  fixed (missing tests and docs; each new test shown failing with its guard
-  removed). F-123 added `v1.0-security-converting`; spec 14 §13 reworded so it
-  must read, not fail (human, 1c28a0c). Left for M4.5: Java wiping the
-  caller's password array (row 29), the never-log marker test (row 40).
-- M4.2 done: shared KATs in `reference/conformance/vectors/kat` (Wycheproof
-  AEAD/HKDF/HMAC extracted from local RustCrypto crate test data with
-  `blb2json.py`, BLAKE2 reference keyed KAT, CPython unkeyed edges, Argon2id
-  RFC 9106 + phc test.c + 2 RustCrypto rows). Tests: R `kat_test.rs`, J
-  `KatTest`, D `kat_test.dart`. Found F-126 (S0): Java and Dart Argon2id were
-  not RFC 9106 past segment length 2; fixed. Interop gate is raw-key only:
-  a password-slot leg is the follow-up (task chip offered).
-- Remote JDKs: `openjdk@18` links to 24.0.1. Jazzer: `JAVA_HOME=/opt/homebrew/opt/openjdk@21`.
+  `tools/gate.sh quick` green at the M4.3 commit.
+- Done: M0, M1.1, M1.2 (Rust, Java), M2.1–2.3 (Rust, Java), M3 (8 cargo-fuzz
+  targets x 4 h, 7 Jazzer targets x 2 h under JDK 21: clean), M4.1, M4.2.
+  Dart halves wait for M5. Details: git log and PLAN status table.
+- Jazzer: remote clone `~/Documents/codebase/cryptand-fuzz`, run under
+  `JAVA_HOME=/opt/homebrew/opt/openjdk@21` (JDK 24 silently voids the run):
+  `JAZZER_FUZZ=1 mvn -B surefire:test -Dtest=JazzerTest#<t>` in `reference/java`.
+- M4.1/M4.2 left for M4.5: Java wiping the caller's password array (review
+  row 29), the never-log marker test (row 40). KATs in
+  `reference/conformance/vectors/kat`; F-126 Argon2id J+D fixed; interop has a
+  password-slot leg (5b).
+- M4.3 in progress: `tools/security_attack.py` (stdlib Python, no shared code):
+  CRC-repaired attacks on live pages, superblock, keyslots, file length; 3
+  writers x 3 readers, 1197 runs, ~100 s, in `gate.sh full`. Green except two
+  spec gaps it reports as GAP: F-127 (forged plaintext page accepted, S0) and
+  F-128 (older page replayed in place). Found and fixed F-129 (Java slot choice
+  on unknown feature), F-130 (Rust typed errors). Rollback documented in the
+  three READMEs. Not yet attacked: value-log records and blob/vector chunks
+  (the interop files have none) — extend before ticking 4.3.
 - Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
   `reference/conformance/files/fuzz-regress/fNNN-*.cryptand`
   (`CRYPTAND_FUZZ_DUMP` keeps only the last input replayed). Replaying
@@ -64,12 +50,23 @@
 
 ## Open questions for the human
 
-- None.
+- **F-127 (S0, format change):** a reader trusts each page's `ENCRYPTED` flag
+  (14 §8.3, for conversion), so plaintext pages forged into an encrypted file
+  are read as authentic. Proposal: a MAC'd superblock state "conversion in
+  progress" (a `features_optional` bit or a reserved byte); when `cipher = 1`
+  and it is clear, a page, record or chunk without `ENCRYPTED` MUST be
+  tampering. The writer sets it at encrypt/decrypt start, clears it when
+  `unencrypted_pages` reaches 0. Approve, or choose another fix?
+- **F-128 (S1):** an older authentic page copied back over its own position
+  verifies. (a) For 1.0: declare per-page replay part of N2 in 14 §1.2/§6.3 and
+  the READMEs, harness expects corruption-or-stale; (b) bind each child's nonce
+  in its parent pointer (format change, larger). Recommend (a) now, (b) in 1.1.
 
 ## Next action
 
-M4.3: file-attacker harness (`security_attack`), per PLAN. Before it, or in
-parallel: the interop password-slot leg (F-126 follow-up).
+Extend `tools/security_attack.py` to value-log records and blob/vector chunks
+(a writer with values above `vlog_min`); then apply the human's F-127/F-128
+decisions. M4.4 (nonces) can start meanwhile.
 
 ## Log
 
@@ -80,3 +77,4 @@ parallel: the interop password-slot leg (F-126 follow-up).
 - 2026-10-11 — M4 started: SECURITY-REVIEW.md first pass; F-122 fixed (R+J tests), F-123 converting vector added after approval.
 - 2026-10-11 — spec 14 §13 reworded for security-converting; M4.1 done (F-124 tests, F-125 docs).
 - 2026-10-11 — M4.2 KATs in all three; F-126 Argon2id (J+D) found and fixed.
+- 2026-10-11 — interop password leg; M4.3 harness (1197 runs); F-129, F-130 fixed; F-127/F-128 to the human.

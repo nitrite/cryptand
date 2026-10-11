@@ -36,6 +36,7 @@ stage "oplog hop (3 langs)"  "$root" sh -c 'tools/oplog_hop.sh --logs reference/
 [[ -d $ref/conformance/files/fuzz-regress ]] || pending "fuzz regress replay" "M3.5"
 
 if [[ $mode == full ]]; then
+  stage "security attack (3x3)" "$root" python3 -I tools/security_attack.py
   pending "fuzz 60 s/target" "M3.1"
   pending "scale rung 10^6" "M6.1"
   pending "kill -9 x200/impl" "M2.2"
