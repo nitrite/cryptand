@@ -688,6 +688,11 @@ fn add_key_remove_key_and_crypto_erase() {
     drop(e);
     assert!(matches!(Engine::open(&t.path, Some(&k1)), Err(cryptand::Error::CannotUnlock)));
 
+    // §8.2: no crypto-erase, and no keyslot removal, on a plaintext file.
+    let tp = TempDb::new("keyapi-plain");
+    let mut p = Engine::create(&tp.path, Profile::Desktop).unwrap();
+    assert!(p.crypto_erase().is_err() && p.remove_key(0).is_err());
+
     let mut e = Engine::open(&t.path, Some(&k2)).unwrap();
     e.crypto_erase().unwrap();
     drop(e);

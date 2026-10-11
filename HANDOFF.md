@@ -1,6 +1,6 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-11, 11:20 IST)
+## State (2026-10-11, evening IST)
 
 - Branch `packaging/v1.0.0`. Manifests 1.0.0, nothing published, no tags.
   `tools/gate.sh quick` green at d057be4.
@@ -23,6 +23,10 @@
   clean too, so all 7 Jazzer targets are clean under 21. Old logs in `fuzz/old/`.
   Launch: `JAZZER_FUZZ=1 mvn -B surefire:test -Dtest=JazzerTest#<t>` in
   `reference/java` (maxDuration 2h in the annotation). Old crash inputs in `~/fuzz-crashes`.
+- M4 started: `reference/SECURITY-REVIEW.md`, 39 rows (spec 14 MUSTs →
+  test per language). F-122 fixed (crypto-erase / last-slot tests, R+J).
+  F-123 fixed: `v1.0-security-converting` added (approved), read clean by all three.
+  Rows with `?` (5, 10, 11, 13, 26, 27, 28 J, 30, 31) still need a test located or written.
 - Remote JDKs: `openjdk@18` links to 24.0.1. Jazzer: `JAVA_HOME=/opt/homebrew/opt/openjdk@21`.
 - Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
   `reference/conformance/files/fuzz-regress/fNNN-*.cryptand`
@@ -32,7 +36,8 @@
 - Open outside M5: none. M5 (Dart): F-035, F-038, F-072,
   M2.2 Dart, Dart checks of F-079, F-081, F-084, F-087, F-088, F-094..F-121
   (`?`/`M5` in FINDINGS), Dart corpus replay (M3.4).
-- Traps: Rust `stall_test` fails while another job fsyncs on /Volumes/External;
+- Traps: corpus test without `--features harness` reuses a stale `interop`
+  binary (the gate passes the feature); Rust `stall_test` fails while another job fsyncs on /Volumes/External;
   never build Java in a clone where a hop, torture or Jazzer runs; rebuilding
   classes under a running Jazzer breaks it.
 
@@ -51,12 +56,14 @@
 
 ## Open questions for the human
 
-- None.
+- Spec 14 §13 says each `security-*` file MUST raise a named security error,
+  but `security-converting` is a valid file (§8.4) and must read clean. Reword
+  §13 to exclude it (text only, no bytes)? Until then the manifest says `read`.
 
 ## Next action
 
-M3 for Rust/Java is done (Dart corpus replay waits for M5). Start M4
-(security review + pentest) per PLAN.
+M4.1: resolve the `?` rows of `reference/SECURITY-REVIEW.md` (find or write
+each test, show it failing with the guard removed), then M4.2 KATs.
 
 ## Log
 
@@ -64,3 +71,4 @@ M3 for Rust/Java is done (Dart corpus replay waits for M5). Start M4
 - 2026-10-11 — F-120 fixed in spec (option a); F-121 (Java verify horizon mix) found via seed 9334 and fixed; final Java M1.2 encrypted run started.
 - 2026-10-11 — Jazzer openFile/openEncrypted/cveDecode/analyzer 2 h clean under 21; last 3 targets started.
 - 2026-10-11 — M1.2 Java encrypted 0..10000 clean; last 3 Jazzer targets clean, M3 Rust/Java done.
+- 2026-10-11 — M4 started: SECURITY-REVIEW.md first pass; F-122 fixed (R+J tests), F-123 converting vector added after approval.

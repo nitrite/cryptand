@@ -78,6 +78,21 @@ class ConvertTest {
         return o;
     }
 
+    /**
+     * 14 §3.3 and §8.2: removing the last keyslot is crypto-erase and is
+     * refused unless asked for by name; neither is offered on a plaintext file.
+     */
+    @Test
+    void lastKeyslotAndCryptoEraseAreRefusedUnlessByName(@TempDir Path dir) {
+        try (Engine e = Engine.create(dir.resolve("enc.cryptand"), opts(k()))) {
+            assertThrows(RuntimeException.class, () -> e.removeKey(0));
+        }
+        try (Engine e = Engine.create(dir.resolve("plain.cryptand"), opts(null))) {
+            assertThrows(RuntimeException.class, e::cryptoErase);
+            assertThrows(RuntimeException.class, () -> e.removeKey(0));
+        }
+    }
+
     @Test
     void encryptInPlaceConvertsEverythingAndSurvivesReopenMidway(@TempDir Path dir) {
         Path f = dir.resolve("encrypt.cryptand");
