@@ -337,9 +337,10 @@ Defined here once, for all SDKs, ending the current divergence.
    two maps are equal. Comparing the value second settles it.
 
    Sorting by this section's order and not by `CKE` matters for the same pair:
-   `CKE` order refines this one (`03-key-encoding.md` §1), so the two orders
-   agree everywhere except exactly where a comparison here returns equal — which
-   is the case being tied.
+   `CKE` order refines this one (`03-key-encoding.md`, opening clauses), so the
+   two orders agree everywhere except where a comparison here returns equal —
+   which is the case being tied — and, inside an `ARRAY`, after such a tie
+   (clause 3 there).
 
    Entry order is therefore **not part of a map's or a document's value**: the
    same entries written in a different order compare equal, even though the two

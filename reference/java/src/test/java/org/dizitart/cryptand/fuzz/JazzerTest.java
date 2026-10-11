@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -145,6 +146,23 @@ class JazzerTest {
         return e;
     }
 
+    /** 03's opening clauses: §8 order, clause-2 ties broken by the CKE bytes, recursively inside arrays. */
+    private static int refined(Value a, Value b) {
+        if (a instanceof Value.Array && b instanceof Value.Array) {
+            List<Value> x = ((Value.Array) a).items();
+            List<Value> y = ((Value.Array) b).items();
+            for (int i = 0; i < Math.min(x.size(), y.size()); i++) {
+                int r = refined(x.get(i), y.get(i));
+                if (r != 0) {
+                    return r;
+                }
+            }
+            return Integer.signum(Integer.compare(x.size(), y.size()));
+        }
+        int l = Integer.signum(Compare.compare(a, b));
+        return l != 0 ? l : Integer.signum(Cke.compare(Cke.encode(a), Cke.encode(b)));
+    }
+
     @FuzzTest(maxDuration = "2h")
     void ckeRoundtrip(byte[] data) {
         int mid = data.length == 0 ? 0 : (data[0] & 0xFF) % data.length;
@@ -153,15 +171,14 @@ class JazzerTest {
         if (ea == null || eb == null) {
             return;
         }
-        int logical;
+        int want;
         try {
-            logical = Integer.signum(Compare.compare(Cke.decode(ea), Cke.decode(eb)));
+            want = refined(Cke.decode(ea), Cke.decode(eb));
         } catch (CryptandException unordered) {
             return;
         }
-        if (logical != 0) {
-            assertEquals(logical, Integer.signum(Cke.compare(ea, eb)), "memcmp order disagrees with §8");
-        }
+        // F-120: memcmp order is exactly 03's refined order, not §8's alone.
+        assertEquals(want, Integer.signum(Cke.compare(ea, eb)), "memcmp order disagrees with 03 §1");
     }
 
     @FuzzTest(maxDuration = "2h")

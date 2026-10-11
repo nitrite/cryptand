@@ -8,11 +8,20 @@ CKE turns a Nitrite value into a byte string with one property:
 > keys *a* and *b*, writing `L` for the logical comparison of
 > `02-value-encoding.md` §8 and `M` for `memcmp(CKE(a), CKE(b))`:
 >
-> 1. if `L != 0` then `M` has the same sign as `L`; and
+> 1. if `L != 0` then `M` has the same sign as `L`, except as clause 3 says;
 > 2. if `L == 0` then either `CKE(a) == CKE(b)`, or *a* and *b* are numerically
 >    equal values of different declared types whose keys differ **only** in the
 >    trailing type code of §4.3 — so both lie inside
->    `[N(v), successor(N(v)))` and are adjacent there.
+>    `[N(v), successor(N(v)))` and are adjacent there; and
+> 3. two `ARRAY`s (§6) compare in CKE element by element. If the first element
+>    pair whose CKE differs is a clause-2 pair, `M` is that pair's type-code
+>    order, even where `L` goes on to later elements or to length and returns
+>    the opposite sign. Example: `[I64(5)]` against `[I32(5), I8(0)]` is
+>    `L < 0` (equal first elements, shorter array) but `M > 0` (`I64`'s type
+>    code is above `I32`'s).
+
+In one sentence: CKE order is the logical order with every clause-2 tie broken
+by type code, applied recursively inside arrays.
 
 Clause 2 is not a caveat bolted on. It is the entire purpose of the type code,
 and it is what lets an exact-type point lookup stay a point lookup while `eq(5)`
