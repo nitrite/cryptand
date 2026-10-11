@@ -94,8 +94,15 @@ fn load_dict(e: &mut Engine, dict: u32) -> (std::collections::BTreeMap<String, u
 /// over an encrypted file. A fixed key rather than a password because the
 /// subject is the *format*, not Argon2id, which the vectors already pin.
 fn key_arg() -> Option<Vec<u8>> {
+    hex_arg("--key").or_else(|| hex_arg("--password"))
+}
+
+/// `--password <hex>`: the writer makes an Argon2id slot (kdf = 1) instead,
+/// so the gate also crosses the KDF (F-126). Opening needs nothing new: the
+/// credential is tried against every slot as its kdf says.
+fn hex_arg(flag: &str) -> Option<Vec<u8>> {
     let args: Vec<String> = std::env::args().collect();
-    let i = args.iter().position(|a| a == "--key")?;
+    let i = args.iter().position(|a| a == flag)?;
     let hex = args.get(i + 1)?;
     Some((0..hex.len() / 2).map(|j| u8::from_str_radix(&hex[j * 2..j * 2 + 2], 16).unwrap()).collect())
 }
@@ -191,6 +198,9 @@ fn rows(db: &mut Db) -> cryptand::Result<Vec<(i64, String, Vec<u8>)>> {
 fn cmd_write(path: &str) -> cryptand::Result<()> {
     let _ = std::fs::remove_file(path);
     let mut e = match key_arg() {
+        Some(k) if hex_arg("--password").is_some() => {
+            Engine::create_encrypted(&PathBuf::from(path), Profile::Desktop, &k, 1, 2, 16384, 2)?
+        }
         Some(k) => Engine::create_encrypted(&PathBuf::from(path), Profile::Desktop, &k, 0, 0, 0, 0)?,
         None => Engine::create(&PathBuf::from(path), Profile::Desktop)?,
     };

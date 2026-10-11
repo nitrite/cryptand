@@ -155,7 +155,12 @@ void cmdWrite(String path) {
   final db = keyArg == null
       ? Database(engine: Engine(memtableEntries: 120, vlogMin: 256))
       : DatabaseFile.create(path,
-          credential: keyArg!, kdf: Keyslot.kdfRaw, memtableEntries: 120);
+          credential: keyArg!,
+          kdf: passwordArg ? Keyslot.kdfArgon2id : Keyslot.kdfRaw,
+          tCost: 2,
+          mCostKib: 16384,
+          parallelism: 2,
+          memtableEntries: 120);
   final dictDesc = db.catalog.create(nameDictName,
       kind: TreeKind.nameDict, owner: collectionName, keyKind: 'u32');
   final dataDesc = db.catalog.create(collectionName,
@@ -282,7 +287,16 @@ int cmdVerify(String path) {
 /// subject is the *format*, not Argon2id, which the vectors already pin.
 List<int>? keyArg;
 
+/// `--password <hex>`: the writer makes an Argon2id slot (kdf = 1), so the
+/// gate also crosses the KDF (F-126). Opening takes it as [keyArg].
+bool passwordArg = false;
+
 void main(List<String> args) {
+  final pw = args.indexOf('--password');
+  if (pw >= 0) {
+    passwordArg = true;
+    args = [...args]..[pw] = '--key';
+  }
   final at = args.indexOf('--key');
   if (at >= 0 && at + 1 < args.length) {
     final hex = args[at + 1];

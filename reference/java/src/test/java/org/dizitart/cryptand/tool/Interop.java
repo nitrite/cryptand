@@ -175,8 +175,14 @@ public final class Interop {
         return null;
     }
 
+    /** {@code --password <hex>}: an Argon2id slot (kdf = 1) instead of a raw key (F-126). */
+    private static byte[] password;
+
     private static Engine.Options options(byte[] key) {
         Engine.Options o = new Engine.Options();
+        if (password != null) {
+            o.password = password.clone();
+        }
         o.profile = Profile.DESKTOP;
         o.writerId = "nitrite-java/1.0.0";
         o.durability = Superblock.Durability.SYNC;
@@ -287,7 +293,7 @@ public final class Interop {
     private static void write(String path, byte[] key) throws Exception {
         Files.deleteIfExists(Path.of(path));
         Engine.Options o = options(key);
-        o.encrypt = key != null;
+        o.encrypt = key != null || password != null;
         Database database = Database.create(Path.of(path), o);
         long now = database.engine().options().clock.getAsLong();
 
@@ -455,7 +461,7 @@ public final class Interop {
     private static void writeIndexed(String path, byte[] key) {
         Engine.Options o = options(key);
         o.durability = Superblock.Durability.OS;
-        o.encrypt = key != null;
+        o.encrypt = key != null || password != null;
         try (Database db = Database.create(Path.of(path), o)) {
             org.dizitart.cryptand.Collection c = db.collection("places");
             c.createSpatialIndex("at", 2, null);
@@ -704,6 +710,11 @@ public final class Interop {
 
     public static void main(String[] args) {
         byte[] key = keyArg(args);
+        for (int i = 0; i < args.length - 1; i++) {
+            if (args[i].equals("--password")) {
+                password = org.dizitart.cryptand.util.Hex.parse(args[i + 1]);
+            }
+        }
         try {
             if (args.length >= 2 && args[0].equals("write")) {
                 write(args[1], key);

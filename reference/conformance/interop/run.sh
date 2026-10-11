@@ -31,11 +31,14 @@ bad()  { printf '   \033[31mFAIL\033[0m %s\n' "$*"; fail=1; }
 # `spec/14-security.md` §3.3's `kdf = 0` credential. Empty for the plaintext
 # directions; set for the encrypted ones.
 KEY=""
+# Set instead of KEY for the password leg: an Argon2id slot (kdf = 1).
+PASSWORD=""
 
 run_impl() {
   local impl="$1"; shift
   local extra=()
   [[ -n "$KEY" ]] && extra=(--key "$KEY")
+  [[ -n "$PASSWORD" ]] && extra=(--password "$PASSWORD")
   case "$impl" in
     rust) "$RUST" "$@" ${extra[@]+"${extra[@]}"} ;;
     dart) (cd "$dart" && dart run tool/interop.dart "$@" ${extra[@]+"${extra[@]}"}) ;;
@@ -173,6 +176,29 @@ for impl in rust dart java; do
     ok "$impl refused the wrong key: $(head -1 <<<"$out")"
 done
 KEY=""
+
+# F-126: the legs above use `kdf = 0`, so Java's and Dart's Argon2id could
+# disagree with Rust's for weeks and nothing here noticed. Each writer makes a
+# password slot (Rust and Dart: t=2, m=16 MiB, p=2; Java: its profile's cost)
+# and the other two must open it and agree on the digest. Read-only: the
+# round trip above already covers mutation; this leg is about the KDF.
+say "5b. a password (Argon2id) slot opens in every implementation"
+PASSWORD=70617373776f7264c3a9  # "password" + U+00E9 in UTF-8
+for w in rust dart java; do
+  pf="$work/password-$w.cryptand"
+  run_impl "$w" write "$pf" >/dev/null || { bad "$w could not write with a password"; continue; }
+  want="$(field "$(run_impl "$w" read "$pf")" digest)"
+  [[ -n "$want" ]] || { bad "$w could not reopen its own password file"; continue; }
+  for r in rust dart java; do
+    [[ "$r" == "$w" ]] && continue
+    got="$(field "$(run_impl "$r" read "$pf" 2>&1)" digest)"
+    if [[ "$got" == "$want" ]]; then ok "$r opened ${w}'s password file: digest $got"
+    else bad "$r could not open ${w}'s password file (digest '$got', want '$want')"; fi
+  done
+  out="$(PASSWORD=77726f6e67 run_impl rust read "$pf" 2>&1)" && bad "rust opened ${w}'s file with the wrong password" \
+    || ok "the wrong password is refused"
+done
+PASSWORD=""
 
 # F-067 / `01-container.md` §10: every writer locks the one byte at 2^62. A
 # plain POSIX `fcntl` lock on that byte (what Java and Dart take) must keep
