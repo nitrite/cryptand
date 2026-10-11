@@ -403,6 +403,19 @@ public final class Pager {
     }
 
     private volatile boolean writeClear;
+    /**
+     * F-127, 14 §8.3: {@code cipher = 1} and {@code CONVERTING} clear, so a
+     * plaintext page is not a converting file's mixture but a forgery.
+     */
+    private volatile boolean strict;
+
+    public void setStrict(boolean strict) {
+        this.strict = strict;
+    }
+
+    public boolean strict() {
+        return strict;
+    }
 
     public PageCrypto crypto() {
         return crypto;
@@ -1049,6 +1062,10 @@ public final class Pager {
         int stored = h.storedBytes();
         byte[] body = new byte[stored];
         System.arraycopy(page, PageHeader.BYTES, body, 0, Math.min(stored, page.length - PageHeader.BYTES));
+        if (strict && !h.isSet(PageHeader.Flags.ENCRYPTED) && h.pageType != PageHeader.Type.VLOG_SEGMENT) {
+            throw new org.dizitart.cryptand.TamperingException(
+                    "page " + pageId + " is plaintext in a fully encrypted file", pageId);
+        }
         if (h.isSet(PageHeader.Flags.ENCRYPTED)) {
             if (crypto == null) {
                 throw new CannotUnlockException("page " + pageId + " is encrypted and no key is available");

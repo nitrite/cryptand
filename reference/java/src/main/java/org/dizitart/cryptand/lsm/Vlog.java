@@ -831,10 +831,12 @@ public final class Vlog {
      * undecrypted without also leaving it unauthenticated.
      */
     public VlogSegment.Record decodeAt(VlogSegment seg, byte[] buf, long offset, boolean keysOnly) {
-        if (seg.encrypted != 0 && cipher != null && readOnlyCiphers.isEmpty()) {
+        // F-127: a strict file has no plaintext segment, whatever byte 39 says.
+        boolean enc = seg.encrypted != 0 || pager.strict();
+        if (enc && cipher != null && readOnlyCiphers.isEmpty()) {
             return VlogSegment.decodeEncryptedRecord(buf, 0, buf.length, seg.segmentId, offset, cipher);
         }
-        if (seg.encrypted != 0) {
+        if (enc) {
             List<FileCipher> rings = new ArrayList<>();
             if (cipher != null) {
                 rings.add(cipher);

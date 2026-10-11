@@ -54,6 +54,8 @@ public final class Feature {
     public static final int CHANGEFEED = 14;
     /** Tree 8 holds retained snapshots. Optional. */
     public static final int CHECKPOINTS = 15;
+    /** 14 §8.3 (F-127): encrypt()/decrypt() conversion under way. Optional. */
+    public static final int CONVERTING = 16;
 
     /**
      * Every required bit this implementation understands. A file whose
@@ -90,6 +92,7 @@ public final class Feature {
             case TTL: return "TTL";
             case CHANGEFEED: return "CHANGEFEED";
             case CHECKPOINTS: return "CHECKPOINTS";
+            case CONVERTING: return "CONVERTING";
             default: return n >= 48 ? "vendor bit " + n : "reserved bit " + n;
         }
     }

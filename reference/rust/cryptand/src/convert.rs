@@ -225,6 +225,8 @@ impl ConvertApi for Engine {
         self.sb.keyslots[..keyslot::SIZE].copy_from_slice(&slot.encode());
         self.sb.cipher = 1;
         self.sb.set_feature(feature::CIPHER, true);
+        self.sb.set_feature(feature::CONVERTING, false);
+        self.refresh_strict();
         self.keys = Some(KeyRing::from_master(master, self.sb.database_uuid, 0));
         self.commit(Durability::Sync)?;
         Ok(())
@@ -241,6 +243,8 @@ impl ConvertApi for Engine {
         self.seal_unsealed_vlog_segments()?;
         self.arm()?; // the cipher stays installed: encrypted pages must still read
         self.pager.write_clear = true;
+        self.sb.set_feature(feature::CONVERTING, false);
+        self.refresh_strict();
         self.commit(Durability::Sync)?;
         Ok(())
     }
@@ -317,7 +321,7 @@ impl ConvertApi for Engine {
             self.sb.keyslots.fill(0);
             self.sb.cipher = 0;
             self.sb.features_required &= !feature::bit(feature::CIPHER);
-            self.sb.features_optional &= !feature::bit(feature::CIPHER);
+            self.sb.features_optional &= !(feature::bit(feature::CIPHER) | feature::bit(feature::CONVERTING));
             // Key dropped first: with `cipher = 0`, `sb_mac` is written as
             // zero (14 §6.2), and Dart refuses a plaintext superblock with one.
             let ring = self.keys.take();
@@ -328,14 +332,23 @@ impl ConvertApi for Engine {
             self.sb.sb_mac = [0; 32];
             self.pager.crypto = None;
             self.pager.write_clear = false;
+            self.refresh_strict();
             self.commit(Durability::Sync)?;
             self.commit(Durability::Sync)?;
             return Ok(Step::Done);
         } else {
+            // F-127: nothing plaintext remains; the MAC'd superblock now says
+            // so, and from here a plaintext object is tampering.
+            if self.sb.features_optional & feature::bit(feature::CONVERTING) != 0 {
+                self.sb.features_optional &= !feature::bit(feature::CONVERTING);
+                self.refresh_strict();
+                self.commit(Durability::Sync)?;
+            }
             return Ok(Step::Done);
         }
         self.commit(Durability::Sync)?;
-        Ok(if self.conversion()?.done() && !self.pager.write_clear { Step::Done } else { Step::More })
+        let converting = self.sb.features_optional & feature::bit(feature::CONVERTING) != 0;
+        Ok(if self.conversion()?.done() && !self.pager.write_clear && !converting { Step::Done } else { Step::More })
     }
 
     fn conversion(&mut self) -> Result<Conversion> {
@@ -349,6 +362,6 @@ impl ConvertApi for Engine {
     }
 
     fn fully_encrypted(&mut self) -> Result<bool> {
-        Ok(self.sb.cipher != 0 && !self.pager.write_clear && self.conversion()?.done())
+        Ok(self.pager.strict && !self.pager.write_clear && self.conversion()?.done())
     }
 }

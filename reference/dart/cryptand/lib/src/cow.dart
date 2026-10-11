@@ -115,6 +115,10 @@ final class PageStore {
   /// §5.2's page cipher. `null` on an unencrypted database.
   PageCrypto? crypto;
 
+  /// F-127, `14-security.md` §8.3: `cipher = 1` and `CONVERTING` clear, so a
+  /// plaintext page is not a converting file's mixture but a forgery.
+  bool strict = false;
+
   /// `spec/01-container.md` §7's `page_codec`: the **default** for newly
   /// written pages, never a property of the file. A page's own state is in its
   /// `flags.COMPRESSED` and `codec_or_reserved`, so a file may hold a mixture
@@ -561,6 +565,11 @@ final class PageStore {
       return page;
     }
     if (!h.isEncrypted) {
+      if (strict && h.pageType != PageType.vlogSegment) {
+        throw TamperException(
+            'page $pageId is plaintext in a fully encrypted file',
+            pageId: pageId);
+      }
       unencryptedPages++;
       return page;
     }

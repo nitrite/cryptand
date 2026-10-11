@@ -205,7 +205,17 @@
       "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
       "at_open_or_read": true,
       "tolerated_clean": false,
-      "note": "v1.0-core encrypted in place and stopped half-way: cipher = 1 and a keyslot, with encrypted and plaintext pages side by side. Section 8.3: a reader MUST use each page's own flags.ENCRYPTED, so this reads exactly as v1.0-core does; section 8.4: a half-converted file is a valid file. Unlike the other security-* files it is not an attack, and refusing it is the failure."
+      "note": "v1.0-core encrypted in place and stopped half-way: cipher = 1, a keyslot and features_optional bit 16 CONVERTING, with encrypted and plaintext pages side by side. Section 8.3: while CONVERTING is set a reader MUST use each page's own flags.ENCRYPTED, so this reads exactly as v1.0-core does; section 8.4: a half-converted file is a valid file. Unlike the other security-* files it is not an attack, and refusing it is the failure."
+    },
+    {
+      "name": "v1.0-security-forged-plaintext.cryptand",
+      "page_size": 4096,
+      "expect": "error",
+      "error_class": "tampering",
+      "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "at_open_or_read": true,
+      "tolerated_clean": false,
+      "note": "v1.0-security-converting with CONVERTING cleared and sb_mac resealed (F-127): the superblock now says conversion is over, so its plaintext pages are what a forged page in a finished file looks like. Section 8.3: with cipher = 1 and CONVERTING clear, a page, record or chunk without ENCRYPTED MUST be reported as tampering."
     }
   ]
 }

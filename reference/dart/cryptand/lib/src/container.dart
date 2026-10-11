@@ -72,6 +72,9 @@ class Feature {
   static const int changefeed = 14;
   static const int checkpoints = 15;
 
+  /// `14-security.md` §8.3 (F-127): conversion under way. Optional.
+  static const int converting = 16;
+
   static const Map<int, String> names = {
     core: 'CORE',
     documents: 'DOCUMENTS',
@@ -89,6 +92,7 @@ class Feature {
     ttl: 'TTL',
     changefeed: 'CHANGEFEED',
     checkpoints: 'CHECKPOINTS',
+    converting: 'CONVERTING',
   };
 
   /// Every bit this implementation understands, as a mask.

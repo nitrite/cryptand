@@ -46,7 +46,8 @@ const List<String> countries = ['de', 'fr', 'uk', 'in', 'us'];
 final Uint8List corpusKey = Uint8List.fromList(List.generate(32, (i) => i + 1));
 
 /// A foreign database's key, for `security-foreign-slot`.
-final Uint8List foreignKey = Uint8List.fromList(List.generate(32, (i) => 200 - i));
+final Uint8List foreignKey =
+    Uint8List.fromList(List.generate(32, (i) => 200 - i));
 
 const int pageSize = 4096;
 
@@ -83,7 +84,8 @@ int digest(List<(int, String, Uint8List)> rows) {
       ..u32(c.length)
       ..bytes(c)
       ..u32(note.length)
-      ..bytes(Uint8List.sublistView(note, 0, note.length < 8 ? note.length : 8));
+      ..bytes(
+          Uint8List.sublistView(note, 0, note.length < 8 ? note.length : 8));
   }
   return crc32c(w.view);
 }
@@ -228,9 +230,8 @@ final class LivePages {
     if (refs.isEmpty) throw StateError('the fixture has no live segments');
     final ref = refs.first;
     if (ref.pages < 2) throw StateError('the live segment is one page');
-    final vlog = db.engine.vlog.segments.values
-        .where((s) => s.startPage != 0)
-        .toList();
+    final vlog =
+        db.engine.vlog.segments.values.where((s) => s.startPage != 0).toList();
     // The dictionary's strings are in whichever live segment holds tree 2's
     // entries; on a fixture this size that is the same extent, so scan the live
     // extent for the needle rather than the whole file.
@@ -327,8 +328,7 @@ final class Entry {
         'expect': expect,
         if (errorClass != null) 'error_class': errorClass,
         if (documents != null) 'documents': documents,
-        if (digest != null)
-          'digest': digest!.toRadixString(16).padLeft(8, '0'),
+        if (digest != null) 'digest': digest!.toRadixString(16).padLeft(8, '0'),
         'key': key?.map((b) => b.toRadixString(16).padLeft(2, '0')).join(),
         'at_open_or_read': atOpenOrRead,
         'tolerated_clean': tolerated,
@@ -367,9 +367,7 @@ void main(List<String> args) {
     if (broken) {
       try {
         final probe = readAll(path, key);
-        detected = probe == 0
-            ? 'NOTHING'
-            : '$probe finding(s)';
+        detected = probe == 0 ? 'NOTHING' : '$probe finding(s)';
         if (probe == 0 && !tolerated) {
           throw StateError(
               '$name claims to be broken and this reader read it cleanly. '
@@ -415,7 +413,8 @@ void main(List<String> args) {
     entries.add(Entry('v1.0-corrupt-crc.cryptand', 'error',
         errorClass: 'corruption',
         key: null,
-        note: 'one payload byte flipped on live page $leaf with the checksum left '
+        note:
+            'one payload byte flipped on live page $leaf with the checksum left '
             'stale. Section 3: the checksum "verifies before decompression and '
             'before decryption", so this must be refused before any decoder '
             'runs.'));
@@ -470,7 +469,8 @@ void main(List<String> args) {
     // bytes alone.
     putU32(b, vlog * pageSize + PageHeader.size + 32, 0x7FFF0000);
     repairChecksum(b, vlog, pageSize);
-    emit('v1.0-corrupt-dangling-vlog.cryptand', b, broken: true, tolerated: true);
+    emit('v1.0-corrupt-dangling-vlog.cryptand', b,
+        broken: true, tolerated: true);
     entries.add(Entry('v1.0-corrupt-dangling-vlog.cryptand', 'error',
         errorClass: 'corruption',
         atOpenOrRead: false,
@@ -598,7 +598,8 @@ void main(List<String> args) {
     emit('v1.0-future-required.cryptand', b, broken: true);
     entries.add(Entry('v1.0-future-required.cryptand', 'error',
         errorClass: 'unsupported',
-        note: 'an unknown REQUIRED feature bit. Section 3: a reader MUST refuse '
+        note:
+            'an unknown REQUIRED feature bit. Section 3: a reader MUST refuse '
             'this, and the error must say the feature is unsupported rather '
             'than that the file is corrupt — the file is not corrupt, it is '
             'newer. The pair with v1.0-future.cryptand is the whole of section '
@@ -646,7 +647,8 @@ void main(List<String> args) {
     final b = Uint8List.fromList(encImage);
     putU32(b, encData * pageSize + 8, 0x0000BEEF); // tree_id, inside the AAD
     repairChecksum(b, encData, pageSize);
-    emit('v1.0-security-tamper-header.cryptand', b, broken: true, key: corpusKey);
+    emit('v1.0-security-tamper-header.cryptand', b,
+        broken: true, key: corpusKey);
     entries.add(Entry('v1.0-security-tamper-header.cryptand', 'error',
         errorClass: 'tampering',
         key: corpusKey,
@@ -682,7 +684,8 @@ void main(List<String> args) {
       final sb = Uint8List.sublistView(b, slot, slot + Sb.size);
       putU32(b, slot + Sb.checksum, crc32c(sb, 0, Sb.checksum));
     }
-    emit('v1.0-security-downgrade-kdf.cryptand', b, broken: true, key: corpusKey);
+    emit('v1.0-security-downgrade-kdf.cryptand', b,
+        broken: true, key: corpusKey);
     entries.add(Entry('v1.0-security-downgrade-kdf.cryptand', 'error',
         errorClass: 'tampering',
         key: corpusKey,
@@ -696,8 +699,8 @@ void main(List<String> args) {
     // A page copied to another page's offset: the ciphertext is authentic, the
     // nonce and the page id are not the ones it was sealed under.
     final other = encLive.segmentBody + 1;
-    b.setRange(other * pageSize, (other + 1) * pageSize, encImage,
-        encData * pageSize);
+    b.setRange(
+        other * pageSize, (other + 1) * pageSize, encImage, encData * pageSize);
     emit('v1.0-security-splice.cryptand', b, broken: true, key: corpusKey);
     entries.add(Entry('v1.0-security-splice.cryptand', 'error',
         errorClass: 'tampering',
@@ -723,7 +726,8 @@ void main(List<String> args) {
       final sb = Uint8List.sublistView(b, slot, slot + Sb.size);
       putU32(b, slot + Sb.checksum, crc32c(sb, 0, Sb.checksum));
     }
-    emit('v1.0-security-foreign-slot.cryptand', b, broken: true, key: foreignKey);
+    emit('v1.0-security-foreign-slot.cryptand', b,
+        broken: true, key: foreignKey);
     entries.add(Entry('v1.0-security-foreign-slot.cryptand', 'error',
         errorClass: 'tampering',
         key: foreignKey,
@@ -750,13 +754,28 @@ void main(List<String> args) {
         documents: coreRows.length,
         digest: coreDigest,
         key: corpusKey,
-        note: 'v1.0-core encrypted in place and stopped half-way: cipher = 1 '
-            'and a keyslot, with encrypted and plaintext pages side by side. '
-            "Section 8.3: a reader MUST use each page's own flags.ENCRYPTED, "
-            'so this reads exactly as v1.0-core does; section 8.4: a '
-            'half-converted file is a valid file. Unlike the other '
-            'security-* files it is not an attack, and refusing it is the '
-            'failure.'));
+        note: 'v1.0-core encrypted in place and stopped half-way: cipher = '
+            '1, a keyslot and features_optional bit 16 CONVERTING, with '
+            'encrypted and plaintext pages side by side. Section 8.3: '
+            'while CONVERTING is set a reader MUST use each page\'s own '
+            'flags.ENCRYPTED, so this reads exactly as v1.0-core does; '
+            'section 8.4: a half-converted file is a valid file. Unlike '
+            'the other security-* files it is not an attack, and refusing'
+            ' it is the failure.'));
+  }
+  {
+    // F-127's negative twin, also written by `make_converting_vector`.
+    const name = 'v1.0-security-forged-plaintext.cryptand';
+    stdout.writeln('  ${name.padRight(36)} (from Rust)');
+    entries.add(Entry(name, 'error',
+        errorClass: 'tampering',
+        key: corpusKey,
+        note: 'v1.0-security-converting with CONVERTING cleared and sb_mac '
+            'resealed (F-127): the superblock now says conversion is '
+            'over, so its plaintext pages are what a forged page in a '
+            'finished file looks like. Section 8.3: with cipher = 1 and '
+            'CONVERTING clear, a page, record or chunk without ENCRYPTED '
+            'MUST be reported as tampering.'));
   }
 
   // -------------------------------------------------------------------------

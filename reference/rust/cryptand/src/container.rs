@@ -127,6 +127,9 @@ pub mod feature {
     pub const TTL: u32 = 13;
     pub const CHANGEFEED: u32 = 14;
     pub const CHECKPOINTS: u32 = 15;
+    /// 14 §8.3 (F-127): optional; set while encrypt()/decrypt() conversion
+    /// is under way. Clear with `cipher = 1`, every object must be encrypted.
+    pub const CONVERTING: u32 = 16;
 
     pub fn bit(b: u32) -> u64 {
         1u64 << b
@@ -139,7 +142,7 @@ pub mod feature {
 pub const KNOWN_FEATURES: u64 = {
     let mut m = 0u64;
     let mut b = 0;
-    while b <= 15 {
+    while b <= 16 {
         m |= 1u64 << b;
         b += 1;
     }

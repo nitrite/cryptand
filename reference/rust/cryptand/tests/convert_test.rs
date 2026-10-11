@@ -3,7 +3,7 @@
 mod support;
 use support::*;
 
-use cryptand::container::{Durability, Profile};
+use cryptand::container::{feature, Durability, Profile};
 use cryptand::convert::ConvertApi;
 use cryptand::engine::Engine;
 use cryptand::spaceapi::Step;
@@ -317,6 +317,17 @@ fn make_converting_vector() {
     assert_eq!(e.convert_step().unwrap(), Step::More);
     let c = e.conversion().unwrap();
     assert!(c.converted > 0 && c.remaining > 0, "not half-converted: {c:?}");
+    assert!(e.sb.features_optional & feature::bit(feature::CONVERTING) != 0, "F-127: CONVERTING set");
     e.close(true).unwrap();
     println!("{c:?}");
+    // F-127: the same mixture under a MAC'd superblock that says conversion
+    // is over -- what a forged plaintext page in a finished file looks like.
+    let forged = dir.join("v1.0-security-forged-plaintext.cryptand");
+    std::fs::copy(&out, &forged).unwrap();
+    let mut e = Engine::open(&forged, Some(&key)).unwrap();
+    e.sb.features_optional &= !feature::bit(feature::CONVERTING);
+    e.commit(Durability::Sync).unwrap();
+    e.commit(Durability::Sync).unwrap(); // both slots
+    drop(e);
+    assert!(matches!(Engine::open(&forged, Some(&key)).map(|_| ()), Err(cryptand::error::Error::Tamper(_))));
 }

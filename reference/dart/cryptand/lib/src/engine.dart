@@ -530,6 +530,9 @@ final class Engine {
     keys = ring;
     _nonces = nonces;
     store.crypto = PageCrypto(ring, nonces);
+    // F-127: the read rule follows the MAC'd superblock, never the pages.
+    store.strict =
+        (superblock?.featuresOptional ?? 0) & (1 << Feature.converting) == 0;
     vlog.crypto = VlogCrypto(ring, nonces.allocate);
   }
 
@@ -546,6 +549,7 @@ final class Engine {
     keys?.destroy();
     keys = null;
     store.crypto = null;
+    store.strict = false;
     vlog.crypto = null;
     _nonces = null;
   }

@@ -735,6 +735,7 @@ impl Engine {
             let ring = k.clone();
             e.pager.crypto = Some(crate::pager::PageCrypto { ring, next: 0, limit: 0 });
         }
+        e.refresh_strict();
         e.reload_freelist()?;
         e.reload_vlog_stats()?;
         e.reload_tree_index()?;
@@ -962,6 +963,12 @@ impl Engine {
     /// Installs the page cipher (idempotent) and arms the nonce window.
     /// Encryption can be switched on after open — `14-security.md` §8.3's
     /// conversion — so this cannot live in `open` alone.
+    /// F-127: the read rule follows the MAC'd superblock, never the pages.
+    pub(crate) fn refresh_strict(&mut self) {
+        self.pager.strict = self.sb.cipher != 0
+            && self.sb.features_optional & feature::bit(feature::CONVERTING) == 0;
+    }
+
     pub(crate) fn arm(&mut self) -> Result<()> {
         // Every write path passes through here, so refusing here is exhaustive.
         if self.read_only {
@@ -1455,6 +1462,11 @@ impl Engine {
     pub fn vlog_encrypted(&mut self, id: u64) -> Result<bool> {
         if let Some(&e) = self.vlog_enc.get(&id) {
             return Ok(e);
+        }
+        // F-127: no plaintext segment in a strict file, whatever byte 39 says;
+        // the AEAD tag then rejects a forged one.
+        if self.pager.strict {
+            return Ok(true);
         }
         let Some(start) = self.vlog_stats.get(&id).map(|s| s.start_page) else {
             return corrupt(format!("unknown value-log segment {id}"));
@@ -1978,7 +1990,7 @@ impl Engine {
     /// A blob is chunked per its own head page's `flags.ENCRYPTED`, never
     /// per `cipher` or the key in hand (14 §5.2, F-073).
     fn blob_encrypted(&mut self, start: u64) -> bool {
-        self.pager
+        self.pager.strict || self.pager
             .read_page_clear(start)
             .and_then(|b| PageHeader::parse(&b))
             .map_or(self.pager.crypto.is_some(), |h| h.encrypted())

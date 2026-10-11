@@ -165,7 +165,8 @@ public final class Blob {
     public boolean encrypted(Pager pager) {
         byte[] head = new byte[PageHeader.BYTES];
         pager.file().readFully(pager.offsetOf(startPage), head, 0, head.length);
-        return PageHeader.parse(head, 0).isSet(PageHeader.Flags.ENCRYPTED);
+        // F-127: a strict file has no plaintext blob; the tag rejects a forged one.
+        return pager.strict() || PageHeader.parse(head, 0).isSet(PageHeader.Flags.ENCRYPTED);
     }
 
     /** Pages the extent occupies, so it can be freed. */

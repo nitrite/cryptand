@@ -450,6 +450,13 @@ public final class Engine implements AutoCloseable {
     private void installCipher(FileCipher c) {
         this.cipher = c;
         pager.setCrypto(c);
+        refreshStrict();
+    }
+
+    /** F-127: the read rule follows the MAC'd superblock, never the pages. */
+    private void refreshStrict() {
+        pager.setStrict(sb.cipher != Superblock.Cipher.NONE
+                && !Feature.isSet(sb.featuresOptional, Feature.CONVERTING));
     }
 
     public static Engine open(Path path, Options options) {
@@ -4292,6 +4299,7 @@ public final class Engine implements AutoCloseable {
             }
             options.password = password;
             options.rawKey = rawKey;
+            sb.featuresOptional |= Feature.bit(Feature.CONVERTING);
             enableEncryption();
             // enableEncryption installed the cipher on the pager; the value
             // log switches with its open segments sealed, so none mixes framings.
@@ -4319,6 +4327,8 @@ public final class Engine implements AutoCloseable {
         structure.lock();
         try {
             pager.setWriteClear(true);
+            sb.featuresOptional |= Feature.bit(Feature.CONVERTING);
+            refreshStrict();
             vlog.switchMode(cipher, true);
             publishSuperblock(visibleSeq);
         } finally {
@@ -4389,12 +4399,13 @@ public final class Engine implements AutoCloseable {
                 sb.keyslots = new byte[Keyslot.COUNT * Keyslot.BYTES];
                 sb.cipher = Superblock.Cipher.NONE;
                 sb.featuresRequired &= ~Feature.bit(Feature.CIPHER);
-                sb.featuresOptional &= ~Feature.bit(Feature.CIPHER);
+                sb.featuresOptional &= ~(Feature.bit(Feature.CIPHER) | Feature.bit(Feature.CONVERTING));
                 sb.sbMac = new byte[32];
                 FileCipher was = cipher;
                 cipher = null;
                 pager.setCrypto(null);
                 pager.setWriteClear(false);
+                refreshStrict();
                 vlog.switchMode(null, false);
                 options.password = null;
                 options.rawKey = null;
@@ -4407,9 +4418,17 @@ public final class Engine implements AutoCloseable {
                 }
                 return false;
             } else {
+                // F-127: nothing plaintext remains; the MAC'd superblock now
+                // says so, and from here a plaintext object is tampering.
+                if (Feature.isSet(sb.featuresOptional, Feature.CONVERTING)) {
+                    sb.featuresOptional &= ~Feature.bit(Feature.CONVERTING);
+                    refreshStrict();
+                    publishSuperblock(visibleSeq);
+                }
                 return false;
             }
-            return !conversion().done() || !pager.seals();
+            return !conversion().done() || !pager.seals()
+                    || Feature.isSet(sb.featuresOptional, Feature.CONVERTING);
         } finally {
             structure.unlock();
         }
@@ -4430,7 +4449,7 @@ public final class Engine implements AutoCloseable {
 
     /** True only when the file is encrypted and nothing plaintext remains (14 §8.3). */
     public boolean fullyEncrypted() {
-        return sb.cipher != Superblock.Cipher.NONE && pager.seals() && conversion().done();
+        return pager.strict() && pager.seals() && conversion().done();
     }
 
     /** A vector region and the catalog entry that names it (F-072 g). */

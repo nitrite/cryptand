@@ -95,6 +95,9 @@ pub struct Pager {
     /// `decrypt()`'s mode (14 §8.3): the key stays loaded so encrypted pages
     /// still read, but every page written is plaintext.
     pub write_clear: bool,
+    /// F-127, 14 §8.3: `cipher = 1` and `CONVERTING` clear, so a plaintext
+    /// page is not a converting file's mixture but a forgery.
+    pub strict: bool,
 }
 
 impl Pager {
@@ -181,6 +184,7 @@ impl Pager {
             unencrypted_pages: 0,
             low_first: false,
             write_clear: false,
+            strict: false,
         }
     }
 
@@ -693,6 +697,11 @@ impl Pager {
             Err(_) => return Ok(page),
         };
         if !h.encrypted() {
+            if self.strict && h.page_type != page_type::VLOG_SEGMENT {
+                return Err(crate::error::Error::Tamper(format!(
+                    "page {page_id} is plaintext in a fully encrypted file"
+                )));
+            }
             self.unencrypted_pages += 1;
             return Ok(page);
         }

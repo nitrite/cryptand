@@ -417,7 +417,9 @@ ciphertext = XChaCha20-Poly1305-Encrypt(
   between trees.
 - `flags.ENCRYPTED` MUST be set. A reader MUST NOT infer encryption from
   `cipher` alone: a file may hold a mixture while conversion is in progress
-  (§8.3).
+  (§8.3). The reverse inference is the one that is safe, and it is required:
+  with `cipher = 1` and `CONVERTING` clear, a page without `ENCRYPTED` is
+  tampering (§8.3).
 
 ### 5.3 Value-log records
 
@@ -645,7 +647,21 @@ deleting the keyslots of one copy as erasing a database that has been backed up.
 
 **A converting file is honest about its state.** While a conversion is
 incomplete, some pages are encrypted and some are not, and a reader MUST use
-each page's own `flags.ENCRYPTED`. An implementation MUST expose the fraction
+each page's own `flags.ENCRYPTED`.
+
+**Only an authenticated superblock may say so.** Feature bit 16 `CONVERTING`
+(`features_optional`, `11-conformance.md` §2) is set by the commit that starts
+`encrypt()` or `decrypt()` and cleared by the commit that finds nothing left in
+the old mode; a writer MUST NOT leave plaintext objects in a file with
+`cipher = 1` and `CONVERTING` clear. **With `cipher = 1` and `CONVERTING`
+clear, a reader MUST report as tampering** any page without `flags.ENCRYPTED`
+(a value-log segment's head page excepted, §5.1), and MUST decrypt every
+value-log record and every blob or vector-region chunk as encrypted whatever
+its segment's or head page's flag says, so a plaintext one fails its tag.
+Without this rule a page's own flag decides whether it is authenticated, and an
+attacker who swaps in a plaintext page with a valid CRC is read as the
+application (F-127). `sb_mac` covers the bit, so it cannot be set by an
+attacker; with `cipher = 0` there is no key and nothing to authenticate (§6.2). An implementation MUST expose the fraction
 converted, and MUST NOT report a database as encrypted while plaintext pages
 remain — that is the one place where a reassuring answer is a dangerous one.
 
@@ -814,7 +830,8 @@ conformance/
     v1.0-security-downgrade-kdf     t_cost lowered in a keyslot
     v1.0-security-splice            a page moved to another offset
     v1.0-security-foreign-slot      a keyslot copied from another database
-    v1.0-security-converting        a half-encrypted file, mixed page flags
+    v1.0-security-converting        a half-encrypted file, mixed page flags, CONVERTING set
+    v1.0-security-forged-plaintext  the same with CONVERTING cleared (F-127)
 ```
 
 Each `security-*` file except `security-converting` MUST produce a

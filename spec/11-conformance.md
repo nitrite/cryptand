@@ -128,7 +128,8 @@ draft's column header and its own following paragraph disagreed:
 | 13 | `TTL` | any entry carries an expiry | required | `04-segments.md` §9 |
 | 14 | `CHANGEFEED` | tree 9 is in use | optional | `13-operations.md` §7 |
 | 15 | `CHECKPOINTS` | tree 8 holds retained snapshots | optional | `13-operations.md` §1 |
-| 16–47 | reserved for future minor versions | | | |
+| 16 | `CONVERTING` | `encrypt()` or `decrypt()` has started and not finished (`14-security.md` §8.3) | optional | encryption |
+| 17–47 | reserved for future minor versions | | | |
 | 48–63 | **vendor** | never `required` in a portable writer's file | | |
 
 Working through the interesting ones:

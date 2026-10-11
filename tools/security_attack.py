@@ -44,7 +44,6 @@ ENCRYPTED, EXTENT_HEAD = 2, 8
 # Spec gaps awaiting the human (FINDINGS.md). The attack still runs and is
 # reported as GAP; the gate fails only on outcomes outside these sets, so a
 # crash or an unnamed error on these inputs is still a failure.
-GAP_F127 = frozenset({'gap'})   # forged plaintext page in an encrypted file
 GAP_F128 = frozenset({'gap'})   # older authentic page replayed at its own position
 GAP_OUTCOMES = {'tamper', 'corrupt', 'ok-same', 'ok-DIFFERENT'}
 
@@ -206,7 +205,7 @@ def variants(base, cred, twin, other, older, live):
                 for q in range(p, p + n):
                     fix_page(b, q)
             yield loc, 'replaced by a forged plaintext page' + (f' extent ({n} pages)' if n > 1 else ''), \
-                edit(forge), GAP_F127
+                edit(forge), SEC
 
     s = newest_sb(base)
     so = sb_at(base, s)
@@ -336,7 +335,7 @@ def main():
                 if 'gap' in allowed:
                     if got in GAP_OUTCOMES:
                         if got != 'tamper':
-                            gaps.add((attack, 'F-127' if allowed is GAP_F127 else 'F-128'))
+                            gaps.add((attack, 'F-128'))
                         continue
                     allowed = GAP_OUTCOMES
                 if got not in allowed:
