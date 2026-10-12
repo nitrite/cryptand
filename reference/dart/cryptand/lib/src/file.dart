@@ -93,11 +93,9 @@ abstract final class DatabaseFile {
       store.free(p);
     }
     e.outerTrees['tree 7'] = stats;
+    // M5 step 3: the records are already in place (one positioned write per
+    // append); only tree 7's mutable state is written here.
     for (final v in e.vlog.segments.values) {
-      if (v.startPage == 0) {
-        v.startPage = store.allocExtent(v.pageCount);
-      }
-      store.writeExtentClear(v.startPage, v.extent);
       stats.put(
         encodeKey(CInt.of(NumType.u64, v.id)),
         encodeVlogStats(v, startPage: v.startPage),
@@ -664,10 +662,10 @@ abstract final class DatabaseFile {
           int u(String f) => ((d[f]! as CInt).magnitude).lo;
           bool b(String f) => (d[f] as CBool?)?.value ?? false;
           Uint8List? by(String f) => (d[f] as CBytes?)?.value;
-          final extent = store.readExtentClear(u('start_page'), u('pages'));
           seg = VlogSegment.fromExtent(
-            extent,
-            sb.pageSize,
+            store,
+            u('start_page'),
+            u('pages'),
             bytes: u('bytes'),
             records: u('records'),
             sealed: b('sealed'),
@@ -676,7 +674,7 @@ abstract final class DatabaseFile {
             maxKey: by('max_key'),
             liveBytes: u('live_bytes'),
             liveRecords: u('live_records'),
-          )..startPage = u('start_page');
+          );
         } on TypeError catch (e) {
           throw CorruptionException(
               'value-log stats entry has the wrong shape: $e');

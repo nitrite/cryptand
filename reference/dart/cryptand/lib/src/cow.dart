@@ -390,6 +390,47 @@ final class PageStore {
     return out;
   }
 
+  /// M5 step 3: [len] raw bytes at file offset [pos], no cipher, for the
+  /// value log's records (Rust `read_vlog`). Spans pages in memory mode.
+  Uint8List readAt(int pos, int len) {
+    if (pos < pageSize * 2 || len < 0 || pos + len > _pageCount * pageSize) {
+      throw CorruptionException('bytes $pos+$len are outside the store');
+    }
+    final out = Uint8List(len);
+    if (file != null) {
+      file!
+        ..setPositionSync(pos)
+        ..readIntoSync(out);
+      return out;
+    }
+    for (var o = 0; o < len;) {
+      final p = (pos + o) ~/ pageSize, in_ = (pos + o) % pageSize;
+      final n = (pageSize - in_) < (len - o) ? pageSize - in_ : len - o;
+      out.setRange(o, o + n, _pages[p], in_);
+      o += n;
+    }
+    return out;
+  }
+
+  /// One positioned write of raw bytes (Rust `append_into`).
+  void writeAt(int pos, Uint8List bytes) {
+    if (file != null) {
+      file!
+        ..setPositionSync(pos)
+        ..writeFromSync(bytes);
+      return;
+    }
+    for (var o = 0; o < bytes.length;) {
+      final p = (pos + o) ~/ pageSize, in_ = (pos + o) % pageSize;
+      final n = (pageSize - in_) < (bytes.length - o)
+          ? pageSize - in_
+          : bytes.length - o;
+      // Copy, not in place: [readClear] hands out the stored page itself.
+      _pages[p] = Uint8List.fromList(_pages[p])..setRange(in_, in_ + n, bytes, o);
+      o += n;
+    }
+  }
+
   Uint8List _rawRead(int pageId) {
     if (file == null) return _pages[pageId];
     final buf = Uint8List(pageSize);

@@ -209,12 +209,13 @@ final class Engine {
     int changefeedRoot = 0,
     List<int> rootNonces = const [0, 0, 0, 0, 0, 0, 0],
   })  : segmentEntries = segmentEntries ?? memtableEntries,
-        store = store ?? PageStore(pageSize: pageSize),
-        vlog = ValueLog(
-          pageSize: pageSize,
-          segmentBytes: vlogSegmentBytes ?? (4 << 20),
-          cachePages: cachePages,
-        ) {
+        store = store ?? PageStore(pageSize: pageSize) {
+    vlog = ValueLog(
+      pageSize: pageSize,
+      segmentBytes: vlogSegmentBytes ?? (4 << 20),
+      cachePages: cachePages,
+      store: this.store,
+    );
     manifest =
         Manifest(this.store, root: manifestRoot, rootNonce: rootNonces[3]);
     freelist = CowTree(this.store,
@@ -296,7 +297,7 @@ final class Engine {
   /// injectable field is what lets that rule be tested rather than asserted.
   int nowMs = 0;
 
-  final ValueLog vlog;
+  late final ValueLog vlog;
 
   /// `database_uuid` (`spec/01-container.md` §2).
   ///

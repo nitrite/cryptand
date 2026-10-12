@@ -17,8 +17,8 @@ void main() {
       final seg = VlogSegment(
           id: 1, tier: 0, heatClass: 0, pageSize: 4096, capacity: 4096);
       seg.append(16, Uint8List.fromList([1, 2]), Uint8List(300));
-      seg.extent.setRange(VlogSegment.dataOffset,
-          VlogSegment.dataOffset + hostile.length, hostile);
+      seg.store.writeAt(seg.startPage * 4096 + VlogSegment.dataOffset,
+          Uint8List.fromList(hostile));
       expect(() => seg.scan().toList(), throwsA(isA<CorruptionException>()));
     });
     test('F-138: record_len ${hostile.length}-byte uvar behind a valid pointer',
@@ -26,8 +26,8 @@ void main() {
       final seg = VlogSegment(
           id: 1, tier: 0, heatClass: 0, pageSize: 4096, capacity: 4096);
       final ptr = seg.append(16, Uint8List.fromList([1, 2]), Uint8List(300))!;
-      seg.extent.setRange(VlogSegment.dataOffset,
-          VlogSegment.dataOffset + hostile.length, hostile);
+      seg.store.writeAt(seg.startPage * 4096 + VlogSegment.dataOffset,
+          Uint8List.fromList(hostile));
       expect(() => seg.read(ptr, (_) {}), throwsA(isA<CorruptionException>()));
     });
   }

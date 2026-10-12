@@ -20,6 +20,7 @@ import 'dart:typed_data';
 import 'bytes.dart';
 import 'cke.dart';
 import 'container.dart';
+import 'cow.dart';
 import 'crc32c.dart';
 import 'errors.dart';
 import 'security.dart';
@@ -89,6 +90,8 @@ const List<int> _vlogMagic = [0x43, 0x52, 0x59, 0x5F, 0x56, 0x4C, 0x47, 0x1A];
 /// One value-log segment: a page-aligned extent plus the mutable state that
 /// section 6.2 puts in tree 7 rather than in the head page.
 final class VlogSegment {
+  /// A new segment: M5 step 3 allocates its extent in [store] now and writes
+  /// the head page, so every append is one positioned write into the file.
   VlogSegment({
     required this.id,
     required this.tier,
@@ -96,15 +99,16 @@ final class VlogSegment {
     required this.pageSize,
     required this.capacity,
     this.createdSeq = 0,
-  }) : _buf = Uint8List(
-            ((dataOffset + capacity + pageSize - 1) ~/ pageSize) * pageSize) {
+    PageStore? store,
+  }) : store = store ?? PageStore(pageSize: pageSize) {
+    startPage = this.store.allocExtent(pageCount);
     _writeHeadPage();
   }
 
-  /// Rebuilds a segment from the extent bytes a file holds, for
-  /// `DatabaseFile.open`. The mutable state comes from tree 7, which
-  /// section 6.7 makes the authority for it.
-  factory VlogSegment.fromExtent(Uint8List extent, int pageSize,
+  /// A segment a file holds, for `DatabaseFile.open`: reads the head page
+  /// only. The mutable state comes from tree 7, which section 6.7 makes the
+  /// authority for it.
+  factory VlogSegment.fromExtent(PageStore store, int startPage, int pages,
       {required int bytes,
       required int records,
       required bool sealed,
@@ -113,11 +117,16 @@ final class VlogSegment {
       Uint8List? maxKey,
       required int liveBytes,
       required int liveRecords}) {
-    final head = PageHeader.read(extent);
+    if (startPage < 2 || pages < 1 || startPage + pages > store.pageCount) {
+      throw CorruptionException(
+          'value-log extent $startPage+$pages is outside the store');
+    }
+    final page = store.readClear(startPage);
+    final head = PageHeader.read(page);
     if (head.pageType != PageType.vlogSegment) {
       throw const CorruptionException('not a value-log head page');
     }
-    final r = ByteReader(extent, PageHeader.size, extent.length);
+    final r = ByteReader(page, PageHeader.size, page.length);
     final magic = r.bytesView(8);
     for (var i = 0; i < 8; i++) {
       if (magic[i] != _vlogMagic[i]) {
@@ -137,10 +146,19 @@ final class VlogSegment {
         id: id,
         tier: tier,
         heatClass: heat,
-        pageSize: pageSize,
+        pageSize: store.pageSize,
         capacity: capacity,
         createdSeq: createdSeq,
-        buf: extent);
+        store: store)
+      ..startPage = startPage;
+    if (capacity < 0 || s.pageCount != pages) {
+      throw CorruptionException(
+          'value-log segment $id: capacity $capacity does not fit $pages pages');
+    }
+    if (bytes < 0 || bytes > capacity) {
+      throw CorruptionException(
+          'value-log segment $id: watermark $bytes past capacity $capacity');
+    }
     s.bytes = bytes;
     s.records = records;
     s.sealed = sealed;
@@ -159,8 +177,8 @@ final class VlogSegment {
     required this.pageSize,
     required this.capacity,
     required this.createdSeq,
-    required Uint8List buf,
-  }) : _buf = buf;
+    required this.store,
+  });
 
   /// Head page header (40) + the 64-byte segment header, rounded up to 8.
   static const int dataOffset = 104;
@@ -172,10 +190,15 @@ final class VlogSegment {
   final int capacity;
   final int createdSeq;
 
-  final Uint8List _buf;
+  /// Where the records live. Owned by the engine (or a private in-memory
+  /// store for a bare segment).
+  final PageStore store;
 
-  /// The extent as a file holds it: a whole number of pages, head page first.
-  Uint8List get extent => _buf;
+  /// The extent as the store holds it, head page first. Reads it whole: for
+  /// tests and tools, not the read path.
+  Uint8List get extent => store.readExtentClear(startPage, pageCount);
+
+  int get _base => startPage * pageSize;
 
   /// Tree-7 state, section 6.7. `bytes` is the durable contiguous watermark.
   int bytes = 0;
@@ -187,9 +210,7 @@ final class VlogSegment {
   int liveBytes = 0;
   int liveRecords = 0;
 
-  /// Where a file holds this extent, or 0 when it has never been written.
-  /// Keeping it means a re-save reuses the placement rather than appending a
-  /// second copy of every segment.
+  /// First page of the extent in [store]; set at construction.
   int startPage = 0;
 
   Uint8List? _lastKey;
@@ -213,7 +234,8 @@ final class VlogSegment {
       ..u8(0) // encrypted
       ..u64(0) // nonce_base
       ..bytes(Uint8List(16));
-    _buf.setRange(PageHeader.size, PageHeader.size + w.length, w.view);
+    final page = Uint8List(pageSize)
+      ..setRange(PageHeader.size, PageHeader.size + w.length, w.view);
     // The head page is a page, so it carries the 40-byte header of
     // `spec/01-container.md` section 3 like every other page. Without it a
     // repair pass that scans the file for `VLOG_SEGMENT` pages
@@ -226,7 +248,8 @@ final class VlogSegment {
       treeId: TreeId.noTree,
       extentPages: pageCount,
       payloadLen: 64,
-    ).writeInto(_buf);
+    ).writeInto(page);
+    store.writeClear(startPage, page);
   }
 
   /// Appends one record, returning its pointer, or null when full.
@@ -286,12 +309,11 @@ final class VlogSegment {
     if (total > remaining) return null;
 
     final offset = dataOffset + bytes;
-    var p = offset;
-    _buf.setRange(p, p + head.length, head.view);
-    p += head.length;
-    _buf.setRange(p, p + body.length, body.view);
-    p += body.length;
-    ByteData.view(_buf.buffer).setUint32(p, crc, Endian.little);
+    final rec = Uint8List(total)
+      ..setRange(0, head.length, head.view)
+      ..setRange(head.length, head.length + body.length, body.view);
+    ByteData.view(rec.buffer).setUint32(total - 4, crc, Endian.little);
+    store.writeAt(_base + offset, rec);
 
     bytes += total;
     records++;
@@ -335,7 +357,8 @@ final class VlogSegment {
         p++) {
       pageOf(p);
     }
-    final r = ByteReader(_buf, ptr.offset, ptr.offset + ptr.len);
+    final buf = store.readAt(_base + ptr.offset, ptr.len);
+    final r = ByteReader(buf, 0, buf.length);
     final recordLen = r.uvar();
     if (recordLen < 5 || recordLen > r.remaining) {
       // F-138: a file value, checked before it places the CRC.
@@ -344,16 +367,16 @@ final class VlogSegment {
     }
     final bodyStart = r.position;
     final crcAt = bodyStart + recordLen - 4;
-    final stored = ByteData.view(_buf.buffer).getUint32(crcAt, Endian.little);
+    final stored = ByteData.view(buf.buffer).getUint32(crcAt, Endian.little);
     // F-132: a converting file mixes plaintext and encrypted segments, and
     // byte 39 cannot tell them apart (F-076: Dart writes 0). A record whose
     // clear CRC holds without the counter is plaintext; the tag stays the
     // authority on the rest. ponytail: per-record probe, per-segment once M5
     // writes byte 39.
     final plain = crypto == null ||
-        (!crypto.strict && crc32c(_buf, bodyStart, crcAt) == stored);
+        (!crypto.strict && crc32c(buf, bodyStart, crcAt) == stored);
     final crcFrom = plain ? bodyStart : bodyStart + 8;
-    if (crc32c(_buf, crcFrom, crcAt) != stored) {
+    if (crc32c(buf, crcFrom, crcAt) != stored) {
       throw CorruptionException('value-log record CRC mismatch at $ptr');
     }
     if (plain) {
@@ -364,7 +387,7 @@ final class VlogSegment {
     }
     final counter = r.u64();
     final treeId = r.u32();
-    final sealed = Uint8List.sublistView(_buf, r.position, crcAt);
+    final sealed = Uint8List.sublistView(buf, r.position, crcAt);
     final pt = decryptVlogRecord(
       keys: crypto.ring,
       segmentId: id,
@@ -392,9 +415,10 @@ final class VlogSegment {
     var off = dataOffset;
     final end = dataOffset + bytes;
     while (off < end) {
-      final r = ByteReader(_buf, off, end);
+      final hdr = store.readAt(_base + off, end - off < 10 ? end - off : 10);
+      final r = ByteReader(hdr, 0, hdr.length);
       final recordLen = r.uvar();
-      final total = (r.position - off) + recordLen;
+      final total = r.position + recordLen;
       final ptr = VlogPointer(id, off, total);
       // The framing walks without the key either way (section 5.3 keeps
       // `record_len`, the counter and the CRC in the clear); only the payload
@@ -412,9 +436,13 @@ final class ValueLog {
     required this.pageSize,
     required this.segmentBytes,
     this.cachePages = 256,
-  });
+    PageStore? store,
+  }) : store = store ?? PageStore(pageSize: pageSize);
 
   final int pageSize;
+
+  /// The page space every segment's extent is allocated in.
+  final PageStore store;
 
   /// `spec/14-security.md` section 5.3's record cipher. `null` on an
   /// unencrypted database; set by the engine when the ring is installed.
@@ -486,6 +514,7 @@ final class ValueLog {
       heatClass: heat,
       pageSize: pageSize,
       capacity: need > segmentBytes ? need : segmentBytes,
+      store: store,
     );
     segments[seg.id] = seg;
     _open[k] = seg;
@@ -701,7 +730,7 @@ final class ValueLog {
       // A segment a file placed keeps its extent there, and nothing else
       // frees it: without this the file leaked the whole preallocated extent
       // of every segment collected after a reopen.
-      if (s.startPage != 0) freeExtent?.call(s.startPage, s.pageCount);
+      freeExtent?.call(s.startPage, s.pageCount);
     }
     return dead.length;
   }
