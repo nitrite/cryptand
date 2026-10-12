@@ -43,6 +43,11 @@
   restore target `0600`; sidecar `O_NOFOLLOW`. Dart sets the mode by libc
   `chmod` over FFI (`_writeOwnerOnly`). F-140 (Dart default `vlogMin` 2048
   unsaveable at 4096 pages) open for M5. **M5 keeps `_writeOwnerOnly`.**
+- M4.8 done: `cargo deny check` + `cargo audit` clean on remote (tools in
+  remote `~/.cargo/bin`); release workflows pinned like CI; Rust/Java attach
+  CycloneDX SBOMs to the tag's GitHub release (`gh release create` if absent);
+  Dart has no SBOM step (no tool in PLAN). `SECURITY.md` uses GitHub private
+  reporting: **[H] enable it in repo settings.**
 - Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
   `reference/conformance/files/fuzz-regress/fNNN-*.cryptand`
   (`CRYPTAND_FUZZ_DUMP` keeps only the last input replayed). Replaying
@@ -71,12 +76,12 @@
 
 ## Open questions for the human
 
-- None.
+- Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
 
 ## Next action
 
-M4.8: supply chain — `cargo deny` + `cargo audit` clean, release workflows
-pinned by SHA, SBOMs, `SECURITY.md` (PLAN 4.8).
+M4.9: Rust `unsafe` — `// SAFETY:` at each site in `compare.rs`, `hash.rs`,
+`security.rs`, `#![deny(unsafe_op_in_unsafe_fn)]`; then M4 Verify.
 
 ## Log
 
@@ -95,3 +100,4 @@ pinned by SHA, SBOMs, `SECURITY.md` (PLAN 4.8).
 - 2026-10-12 — F-137 fixed R+D + spec MUST after the human's decision; F-135 raw-key ownership noted in 14 §11; gate quick green.
 - 2026-10-12 — M4.6 done: F-138 length checks (R+J+D), tests fail reverted; gate quick green.
 - 2026-10-12 — M4.7 done: F-139 file modes 0600 + sidecar no-follow (R+J+D), tests fail reverted; F-140 (Dart) for M5; gate quick green.
+- 2026-10-12 — M4.8 done: deny/audit clean, release workflows pinned, SBOMs, SECURITY.md.
