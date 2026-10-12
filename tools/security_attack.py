@@ -40,6 +40,7 @@ SB_CIPHER, SB_COMMIT, SB_FEATURES_REQ, SB_CATALOG = 178, 16, 24, 64
 SB_NEXT_NONCE, SB_MAC, SB_KEYSLOTS, SB_CRC, SB_UUID = 288, 296, 3512, 4092, 160
 SLOT = 144
 ENCRYPTED, EXTENT_HEAD = 2, 8
+VLOG_SEGMENT, VLOG_DATA = 7, 104
 
 # F-128 (14 §5.5): an older page replayed at its own position is tampering
 # when anything reads it; one at a position nothing reaches reads the same.
@@ -70,7 +71,10 @@ def fix_sb(b, s):
 def fix_page(b, p):
     ps = page_size(b)
     o = p * ps
-    struct.pack_into('<I', b, o, crc32c(b[o + 4:o + ps]))
+    # A value-log head is written once and records are appended after it, so its
+    # checksum stops at its 64-byte header (04-segments.md §6.2).
+    end = o + 40 + (struct.unpack_from('<I', b, o + 28)[0] or struct.unpack_from('<I', b, o + 24)[0]) if b[o + 4] == VLOG_SEGMENT else o + ps
+    struct.pack_into('<I', b, o, crc32c(b[o + 4:end]))
 
 def pages(b):
     """(page_id, header fields) for every headed page, walking extents."""
@@ -83,6 +87,37 @@ def pages(b):
         out.append(dict(id=p, type=typ, flags=fl, tree=tree, ext=ext, stored=sl or pl, nonce=nonce))
         p += max(ext, 1)
     return out
+
+def vlog_records(b, encrypted=True):
+    """(offset of the field after record_len, record_len) for every record in
+    every encrypted value-log segment, walked up to the first zero length
+    (04-segments.md §6.2). The tail above tree 7's watermark is debris, and
+    reads of it are not attacked."""
+    ps, out = page_size(b), []
+    for h in pages(b):
+        o = h['id'] * ps
+        if h['type'] != VLOG_SEGMENT:
+            continue
+        c = 8 if encrypted else 0   # the clear nonce, outside the CRC
+        at, end = o + VLOG_DATA, o + h['ext'] * ps
+        while at < end:
+            n, sh, q = 0, 0, at
+            while True:
+                n |= (b[q] & 0x7F) << sh
+                sh += 7
+                q += 1
+                if not b[q - 1] & 0x80:
+                    break
+            if n < c + 8 or q + n > end:
+                break
+            if crc32c(b[q + c:q + n - 4]) != struct.unpack_from('<I', b, q + n - 4)[0]:
+                break
+            out.append((q, n))
+            at = q + n
+    return out
+
+def fix_record(b, q, n):
+    struct.pack_into('<I', b, q + n - 4, crc32c(b[q + 8:q + n - 4]))
 
 # --- the implementations, as conformance/interop/run.sh drives them ----------
 
@@ -156,7 +191,7 @@ def classify(rc, out, want):
 def flip(b, o):
     b[o] ^= 0x01
 
-def variants(base, cred, twin, other, older, live):
+def variants(base, cred, twin, other, older, live, live_recs=()):
     """Yield (location, attack, bytes, allowed outcomes)."""
     ps = page_size(base)
     hdr = {p['id']: p for p in pages(base)}
@@ -204,6 +239,46 @@ def variants(base, cred, twin, other, older, live):
                     fix_page(b, q)
             yield loc, 'replaced by a forged plaintext page' + (f' extent ({n} pages)' if n > 1 else ''), \
                 edit(forge), SEC
+
+    # Value-log records (14 §5.3): an attacker repairs the record's CRC too.
+    recs = vlog_records(base)
+    plain = vlog_records(twin, encrypted=False) if twin else []
+    for q, n in live_recs:
+        loc = f'vlog record @{q}'
+        def rec_edit(fn, q=q, n=n):
+            return edit(lambda b: (fn(b), fix_record(b, q, n)))
+        yield loc, 'nonce', rec_edit(lambda b: flip(b, q)), SEC
+        yield loc, 'tree_id', rec_edit(lambda b: flip(b, q + 8)), SEC
+        yield loc, 'ciphertext byte', rec_edit(lambda b: flip(b, q + 12 + (n - 32) // 2)), SEC
+        yield loc, 'tag byte', rec_edit(lambda b: flip(b, q + n - 5)), SEC
+        yield loc, 'ciphertext byte, CRC not repaired', edit(lambda b: flip(b, q + 12 + (n - 32) // 2)), HDR
+        # Splice: another record of the same length, moved here (offset is in the AAD).
+        for q2, n2 in recs:
+            if q2 != q and n2 == n:
+                yield loc, f'spliced from record @{q2}', edit(lambda b, q2=q2: b.__setitem__(
+                    slice(q, q + n), base[q2:q2 + n])), SEC
+                break
+        # Forgery (F-127): a plaintext record with a valid CRC at a referenced offset.
+        # It is shorter than the pointer's record (no nonce, no tag), so a reader
+        # may refuse it on structure before any AEAD runs; it must never read it.
+        # Both lengths are two-byte varints (128..16383), so the record starts where it did.
+        fit = [(q2, n2) for q2, n2 in plain if 128 <= n2 <= n] if 128 <= n < 16384 else []
+        if fit:
+            q2, n2 = fit[0]
+            yield loc, 'replaced by a forged plaintext record', edit(
+                lambda b: b.__setitem__(slice(q - 2, q + n2), twin[q2 - 2:q2 + n2])), HDR
+        if len(other) >= q + n and (q, n) in vlog_records(other):
+            yield loc, 'spliced from another database', edit(lambda b: b.__setitem__(slice(q, q + n),
+                                                                                   other[q:q + n])), SEC
+    for h in pages(base):
+        o = h['id'] * ps
+        if live_recs and h['type'] == VLOG_SEGMENT:
+            # 14 §8.3: a strict reader decrypts every record whatever byte 39 says.
+            yield f'vlog segment page {h["id"]}', 'encrypted byte flipped', edit(
+                lambda b, o=o, p=h['id']: (b.__setitem__(o + 40 + 39, b[o + 79] ^ 1), fix_page(b, p))), \
+                {'tamper', 'ok-same'}
+            yield f'vlog segment page {h["id"]}', 'nonce_base', edit(
+                lambda b, o=o, p=h['id']: (flip(b, o + 40 + 40), fix_page(b, p))), HDR | {'ok-same'}  # records carry their own nonce
 
     s = newest_sb(base)
     so = sb_at(base, s)
@@ -316,11 +391,24 @@ def main():
             fix_page(b, h['id'])
             if classify(*im.digest('rust', bytes(b), KEY), want) != 'ok-same':
                 live.append(h['id'])
-        print(f'\n== {w}-written file: {len(base) // ps} pages, live pages attacked {live}', flush=True)
+        # Live records the same way: first, middle and last whose change the reader sees.
+        recs, live_recs = vlog_records(base), []
+        for q, n in recs[::-1]:   # newest first: mutate supersedes the oldest
+            if len(live_recs) >= 3:
+                break
+            b = bytearray(base)
+            flip(b, q + 12 + (n - 32) // 2)
+            fix_record(b, q, n)
+            if classify(*im.digest('rust', bytes(b), KEY), want) != 'ok-same':
+                live_recs.append((q, n))
+        print(f'\n== {w}-written file: {len(base) // ps} pages, live pages attacked {live}, '
+              f'{len(recs)} vlog records, live attacked {[q for q, _ in live_recs]}', flush=True)
         if not live:
             failures.append((w, '-', 'file', 'no live encrypted page found', 'the harness proves nothing'))
+        if not live_recs:
+            failures.append((w, '-', 'file', 'no live value-log record found', 'the vlog attacks prove nothing'))
 
-        cases = [(c, KEY, want) for c in variants(base, KEY, twin, other, base_old, live)]
+        cases = [(c, KEY, want) for c in variants(base, KEY, twin, other, base_old, live, live_recs)]
         cases += [(c, 'pw', want_pw) for c in variants(pw, 'pw', b'', b'', b'', [])
                   if c[0].startswith('keyslot') and c[1] != 'copied from another database']
         for (loc, attack, data, allowed), cred, d0 in cases:
