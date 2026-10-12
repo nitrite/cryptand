@@ -9,8 +9,6 @@
 - Jazzer: remote clone `~/Documents/codebase/cryptand-fuzz`, run under
   `JAVA_HOME=/opt/homebrew/opt/openjdk@21` (JDK 24 silently voids the run):
   `JAZZER_FUZZ=1 mvn -B surefire:test -Dtest=JazzerTest#<t>` in `reference/java`.
-- M4.1/M4.2 left for M4.5: Java wiping the caller's password array (review
-  row 29), the never-log marker test (row 40).
 - **Format changes approved 10-12, both in all three, corpus regenerated:**
   F-127: optional bit 16 `CONVERTING` (14 §8.3); F-128: parent-recorded
   nonces (14 §5.5: superblock `root_nonces` at 328, descriptor `root_nonce`,
@@ -30,6 +28,9 @@
   Concurrency: Java 32-thread test; Rust cursor behind `&mut Engine`; Dart
   one isolate. Crash reuse: existing row 9 tests + M2.2 kills.
   **M5's Dart rewrite must keep `_cmpU64`/`_addSaturating` semantics.**
+- M4.5 done: passwords zeroed by every Java/Dart entry point (F-135; raw
+  keys left to the host: zeroing them broke every reusing caller); failed
+  opens zero the cipher/ring (F-136); marker tests R+J+D. **M5 keeps both.**
 - F-132 (Dart, fixed): converting files mix plaintext/encrypted vlog records;
   Dart probes per record (ponytail) until M5 writes byte 39 (F-076).
 - Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
@@ -60,13 +61,15 @@
 
 ## Open questions for the human
 
-- None.
+- F-137: opening a plaintext file with a key. Java refuses, Rust and Dart
+  open silently. Make the refusal a MUST in 14 (and fix R+D)? No format change.
+- F-135 API choice: passwords are zeroed, raw keys are not (both Java and
+  Dart). OK for the API freeze?
 
 ## Next action
 
-M4.5 (key material): zeroize on every exit path; Java wipes the caller's
-`char[]`/`byte[]` (review row 29); marker-password grep of every error
-message (row 40); document Dart's best-effort limit.
+M4.6: length arithmetic sweep — list every `count × size`, `offset + len`
+and narrowing cast on a file-derived value in all three, and test each.
 
 ## Log
 
@@ -81,3 +84,4 @@ message (row 40); document Dart's best-effort limit.
 - 2026-10-12 — F-127 (CONVERTING bit) and F-128 (parent-recorded nonces, option b) fixed in R+J+D after the human's decisions; corpus regenerated, `v1.0-security-replay` added; F-131 (Java segment commit race) found by interop and fixed; gate quick green.
 - 2026-10-12 — M4.3 done: vlog record/head attacks (1479 runs clean); interop fixture now separates values in all three, exposing F-132 (Dart converting-file vlog read), fixed; gate quick green.
 - 2026-10-12 — M4.4 done: F-133 nonce exhaustion wrap (R+J+D), F-134 (J nonce_base); gate quick green.
+- 2026-10-12 — M4.5 done: F-135/F-136 (J+D), marker tests R+J+D; F-137 to the human; gate quick green.
