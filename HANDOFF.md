@@ -83,17 +83,18 @@
 ## Next action
 
 M5 on branch `dart-storage`; design = top of `reference/dart/cryptand/REPORT.md`.
-Steps (1)–(6) done. `Engine.commit(durability)` = Rust commit: barriers
-sync per mode (`full` recorded as `sync`), then `Engine.publisher` (set by
-`DatabaseFile` on writable files and on `create`, which is now on its file)
-writes tree 3, dirty tree-7 entries only, the free tree, and the superblock to
-the `commit_id`-parity slot. `save()` on the open path = `commit(sync)`; to
-another path it still writes a full copy. Writer lock held on the store's
-handle until close; the nonce floor writes through that handle (a second
-fd's close would drop the fcntl lock) using the latest superblock. Close
-commits once more to publish the seals.
-Next: M2.2 Dart, 1 000 kill -9 runs on the remote Mac (`test/torture.dart`),
-then the 10^7 RSS check (5.5 Verify), F-140.
+Steps (1)–(6) done (commit in place, write-through, lock held). Writer lock
+now matches R/J: a second in-process writer is refused (process registry),
+a reader's close re-takes the fcntl lock, `Engine.close` releases the handle
+even if its last commit throws; `created_utc_ms` carried. F-141 fixed (Dart
+verify: locality debt is a warning). **M2.2 Dart done:** `tools/torture.py
+dart`, 1 000 kills (201000..202000, half `--encrypted`, default mix + gc),
+0 failures; `TORTURE_FAULT` control 16/30 caught. Remote clones
+`cryptand-kill-plain`/`-enc` (git clones of `dart-storage`).
+Dart cannot run the maint ops encrypt/decrypt/rotate/backup/erase yet
+(F-072f); add them to the Dart mix when they exist.
+Not tested: Windows (registry makes it behave as POSIX does).
+Next: 10^7 RSS check (5.5 Verify), F-140, F-072f.
 
 ## Log
 
@@ -120,3 +121,4 @@ then the 10^7 RSS check (5.5 Verify), F-140.
 - 2026-10-12 — M5 step 3: value log on positioned I/O; 694 Dart tests, interop gate green.
 - 2026-10-12 — M5 step 5 core: save on the open file commits in place, slots alternate; 695 Dart tests, interop gate green.
 - 2026-10-12 — M5 steps 4+5 done: Engine.commit publishes in place, lock held for the session, create on file; 698 Dart tests, interop gate green.
+- 2026-10-13 — lock/created parity with R/J; F-141; M2.2 Dart 1 000 kills 0 failures (fault control caught); 699 Dart tests, interop green.
