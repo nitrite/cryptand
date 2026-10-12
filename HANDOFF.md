@@ -82,9 +82,11 @@
 
 ## Next action
 
-M4 is done for R+J (M4.9: `unsafe` documented + lint, gate green). Track A is
-done until M5. Next: M6 scale runs (track C, remote) or start M5 on
-`dart-storage`; the human picks the order if it matters.
+M5 started on branch `dart-storage` (off `packaging/v1.0.0`); 5.1 design is
+the top section of `reference/dart/cryptand/REPORT.md`. Next: its step (2),
+replace `Engine.extents` with a budgeted whole-segment LRU `segment(ref)`
+(Rust `Engine::admit`), all Dart tests green, then step (1) open on
+`PageStore.onFile`. M6 (track C, remote) can run in parallel.
 
 ## Log
 
@@ -105,3 +107,4 @@ done until M5. Next: M6 scale runs (track C, remote) or start M5 on
 - 2026-10-12 — M4.7 done: F-139 file modes 0600 + sidecar no-follow (R+J+D), tests fail reverted; F-140 (Dart) for M5; gate quick green.
 - 2026-10-12 — M4.8 done: deny/audit clean, release workflows pinned, SBOMs, SECURITY.md.
 - 2026-10-12 — M4.9 done (SAFETY comments + lints, bench unsafe removed); M4 done R+J; gate quick green.
+- 2026-10-12 — M5 started: branch `dart-storage`, 5.1 design (mirror Rust: segment LRU, vlog positioned writes, commit = Rust commit).

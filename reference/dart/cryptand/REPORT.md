@@ -24,6 +24,68 @@ audit, both of which are now in the documents. Section 0.1 is the whole of it.
 
 ---
 
+## M5.1 — storage rewrite design (1.0, branch `dart-storage`)
+
+**Today.** `DatabaseFile.open` copies the whole file into `PageStore.fromBytes`
+(one `Uint8List` per page), reads every segment extent into `Engine.extents`
+and every value-log extent into `VlogSegment._buf`. Nothing reaches the file
+until `save()`, which writes the whole image again. RSS = file size; a crash
+loses everything since the last save; `durabilityAchieved` is `sync` only
+because `save` wrote with `flush`.
+
+**Target: Rust's path, not a new design.** Each item names the Rust code it
+copies, so a reviewer diffs two implementations, not an idea.
+
+1. **One file-backed store.** `PageStore.onFile` (exists, unused) becomes the
+   only mode for a file database; `fromBytes`/`toBytes` stay for in-memory
+   databases and `backup`. Superblock slots, `readClear`/`read`/`write` and the
+   cipher are unchanged: they already address pages by id. (Rust `Pager`.)
+2. **Segments: a bounded, whole-segment LRU** keyed by `segment_id`,
+   budget = profile `page_cache_bytes` (12 §1: 4 MiB mobile … 512 MiB server).
+   `Engine.extents` (a `Map<int, Segment>`, 13 call sites) becomes
+   `segment(SegmentRef)`: hit → touch; miss → `readSegment(start, pages,
+   nonce)` → admit; evict least-recently-used until under budget, never the
+   segment just admitted. Same rule and counters as Rust `Engine::admit`/
+   `segment` (hits, misses, evictions). Open reads the manifest only.
+   *Ponytail:* whole segments, not pages: mobile segments are 2 MiB, so a
+   4 MiB budget holds 2. Page-granular reads (header + filter + node pages,
+   PLAN 5.2) are the upgrade if M6's 10^7 Dart rung misses RSS; the Segment
+   reader already fetches nodes by page index, so only its byte source changes.
+3. **Value log: records written at their file offset.** A new segment gets
+   its extent allocated when opened (not at save); `append` writes the record
+   with one positioned write at `start_page*ps + DATA_OFFSET + tail` (Rust
+   `append_into`); the head page is written when the segment opens and
+   rewritten when it seals. Reads are positioned reads of `ptr.len` bytes
+   (Rust `read_vlog`); `_buf` goes. Record encryption binding (segment,
+   offset) is unchanged.
+4. **Flush, compaction, GC, shrink write through.** A built segment is placed
+   (`allocExtent` + `writeExtent`) when published, not at save; freed extents
+   go to the free list at the current commit, as now.
+5. **Commit = Rust `Engine::commit`.** `Database.commit(durability)`:
+   publish tree-index root, write dirty tree-7 entries, persist the free tree,
+   `sync` data per mode, write the superblock to slot `commit_id` parity,
+   `sync` again. `none`/`os` skip the fsyncs; `full` uses
+   `RandomAccessFile.flushSync` (Dart exposes no `F_FULLFSYNC`, so `full` is
+   recorded as `sync`: 10 §7 forbids claiming more). `durabilityAchieved`
+   records what was performed.
+6. **`save()` stays** as `commit(sync)` plus the current "copy to another
+   path" behaviour when the path differs (API compatibility, PLAN 5.4).
+7. **Synchronous API kept** (5.5). README documents running the engine in a
+   background isolate in Flutter; no async facade.
+
+**Must survive the rewrite** (HANDOFF): F-127 `CONVERTING`, F-128
+parent-recorded nonces, `_cmpU64`/`_addSaturating`, F-135/F-136 zeroing,
+F-137 refusal, F-138 `uvar() < 0 ||` checks, `_writeOwnerOnly` (F-139), and
+F-140 (`vlogMin` 2048 at 4096 pages) fixed on the way. F-132's per-record
+probe goes once byte 39 is written (F-076).
+
+**Order, each green before the next:** (2) segment cache on the existing
+in-memory store, so the 655 tests prove the indirection; (1) open on
+`onFile`; (3) value log; (4)+(5) write-through and commit; then M2.2's
+1 000 kill -9 runs and the 10^7 RSS check (5.5 Verify).
+
+---
+
 ## 0.-12 Phase 18 — encryption that happens, space that comes back, and a lock
 
 Phase 18 has one shape: **every defect in it was invisible to the
