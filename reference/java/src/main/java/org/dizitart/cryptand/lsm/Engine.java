@@ -4833,6 +4833,7 @@ public final class Engine implements AutoCloseable {
             oldMaster = e.currentMasterKey();
             // The copy under the lock, so it is the commit just published.
             Files.copy(path, tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            org.dizitart.cryptand.container.PageFile.chmodOwnerOnly(tmp);
         } catch (java.io.IOException x) {
             throw new java.io.UncheckedIOException(x);
         } finally {

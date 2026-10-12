@@ -20,6 +20,8 @@
 /// rather than about databases.
 library;
 
+import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -240,7 +242,7 @@ abstract final class DatabaseFile {
     // between one valid slot and one absent one on every later open.
     bytes.setRange(0, Sb.size, image);
     bytes.setRange(store.pageSize, store.pageSize + Sb.size, image);
-    File(path).writeAsBytesSync(bytes, flush: true);
+    _writeOwnerOnly(path, bytes);
   }
 
   /// Creates an **encrypted** database that is encrypted from its first page.
@@ -365,7 +367,7 @@ abstract final class DatabaseFile {
           '$path already exists and is not empty; use open '
           '(spec/01-container.md section 2)');
     }
-    File(path).writeAsBytesSync(blank, flush: true);
+    _writeOwnerOnly(path, blank);
 
     // §4.1 rule 1, now that there is somewhere durable to publish to — and
     // before the [Database] below, whose constructor writes the catalog and
@@ -823,3 +825,40 @@ SegmentRef _withPlacement(SegmentRef r, int startPage, int pages, int nonce) =>
       trees: r.trees,
       nonce: nonce,
     );
+
+/// PLAN 4.7: every file the engine creates is owner-only (`0600`); the umask
+/// can only narrow it. `dart:io` has no mode setter, so libc `chmod` through
+/// FFI, before any byte is written. No-op on Windows.
+void _writeOwnerOnly(String path, Uint8List bytes) {
+  final f = File(path)..createSync();
+  if (!Platform.isWindows) {
+    final p = path.toNativeUtf8z();
+    try {
+      if (_chmod(p, 384 /* 0600 */) != 0) {
+        throw FileSystemException('chmod 0600 failed', path);
+      }
+    } finally {
+      _free(p);
+    }
+  }
+  f.writeAsBytesSync(bytes, flush: true);
+}
+
+final _libc = DynamicLibrary.process();
+final _chmod = _libc
+    .lookupFunction<Int32 Function(Pointer<Uint8>, Uint32 /* mode_t: u16 on Darwin, u32 on Linux */), int Function(Pointer<Uint8>, int)>('chmod');
+final _malloc = _libc
+    .lookupFunction<Pointer<Uint8> Function(IntPtr), Pointer<Uint8> Function(int)>('malloc');
+final _free = _libc
+    .lookupFunction<Void Function(Pointer<Uint8>), void Function(Pointer<Uint8>)>('free');
+
+extension on String {
+  Pointer<Uint8> toNativeUtf8z() {
+    final units = const Utf8Encoder().convert(this);
+    final p = _malloc(units.length + 1);
+    p.asTypedList(units.length + 1)
+      ..setAll(0, units)
+      ..[units.length] = 0;
+    return p;
+  }
+}

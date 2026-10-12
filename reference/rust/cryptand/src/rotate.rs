@@ -114,6 +114,7 @@ pub fn rotate_master_key(
     let tmp = sibling(&path);
     let _ = std::fs::remove_file(&tmp);
     std::fs::copy(&path, &tmp)?;
+    crate::pager::chmod_owner_only(&tmp)?;
     {
         let f = OpenOptions::new().read(true).write(true).open(&tmp)?;
         let mut buf = vec![0u8; ps as usize];

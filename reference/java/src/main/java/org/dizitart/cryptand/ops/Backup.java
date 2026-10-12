@@ -276,6 +276,7 @@ public final class Backup {
     public static Verify.Report restore(Path backup, Path destination, Engine.Options options) {
         try {
             Files.copy(backup, destination, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            org.dizitart.cryptand.container.PageFile.chmodOwnerOnly(destination);
         } catch (java.io.IOException e) {
             throw new java.io.UncheckedIOException("restore could not copy " + backup, e);
         }

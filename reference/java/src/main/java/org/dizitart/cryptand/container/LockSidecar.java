@@ -118,8 +118,10 @@ public final class LockSidecar implements AutoCloseable {
         this.slotCount = slotCount;
         this.heartbeatMs = heartbeatMs;
         try {
-            this.channel = FileChannel.open(this.path, StandardOpenOption.CREATE,
-                    StandardOpenOption.READ, StandardOpenOption.WRITE);
+            // PLAN 4.7: the sidecar path is predictable; never follow a planted symlink.
+            this.channel = FileChannel.open(this.path, java.util.Set.of(StandardOpenOption.CREATE,
+                    StandardOpenOption.READ, StandardOpenOption.WRITE, java.nio.file.LinkOption.NOFOLLOW_LINKS),
+                    PageFile.ownerOnly(this.path));
             if (channel.size() < HEADER_BYTES + (long) slotCount * SLOT_BYTES) {
                 initialize();
             }

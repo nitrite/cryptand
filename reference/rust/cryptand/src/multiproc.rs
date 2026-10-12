@@ -17,6 +17,15 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
+use crate::pager::owner_only;
+
+/// PLAN 4.7: the sidecar path is predictable, so a planted symlink would
+/// redirect the truncate-and-write of `create`. Refuse to follow one.
+fn no_follow(o: &mut OpenOptions) -> &mut OpenOptions {
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(o, libc::O_NOFOLLOW);
+    o
+}
 
 /// Windows byte-range locks are mandatory: while another process's claim
 /// holds the sidecar lock (milliseconds), plain reads and writes fail with
@@ -139,7 +148,7 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 impl Sidecar {
     /// The writing process creates the sidecar and publishes its own identity.
     pub fn create(path: &Path, slot_count: u32, heartbeat_interval_ms: u64) -> Result<Sidecar> {
-        let file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
+        let file = no_follow(owner_only(OpenOptions::new().read(true).write(true).create(true).truncate(true))).open(path)?;
         let mut header = [0u8; HEADER_BYTES as usize];
         header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
         header[4..8].copy_from_slice(&slot_count.to_le_bytes());
@@ -155,10 +164,10 @@ impl Sidecar {
     /// a filesystem that refuses is rule 4's volatile case and is reported by
     /// `attach` rather than by an error here.
     pub fn open(path: &Path, heartbeat_interval_ms: u64) -> Result<Sidecar> {
-        let (file, read_only) = match OpenOptions::new().read(true).write(true).open(path) {
+        let (file, read_only) = match no_follow(OpenOptions::new().read(true).write(true)).open(path) {
             Ok(f) => (f, false),
             Err(e) if e.kind() == ErrorKind::PermissionDenied => {
-                (OpenOptions::new().read(true).open(path)?, true)
+                (no_follow(OpenOptions::new().read(true)).open(path)?, true)
             }
             Err(e) => return Err(Error::Io(e.to_string())),
         };

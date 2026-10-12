@@ -39,6 +39,10 @@
 - M4.6 done: F-138 (all three: value-log `record_len` / Dart cell suffix
   used before checked; Rust rotate aborted). Dart `uvar()` returns >= 2^63
   as negative: every length check needs `< 0 ||`. **M5 keeps both.**
+- M4.7 done: F-139 (all three): created db, sidecar, rotation temp and
+  restore target `0600`; sidecar `O_NOFOLLOW`. Dart sets the mode by libc
+  `chmod` over FFI (`_writeOwnerOnly`). F-140 (Dart default `vlogMin` 2048
+  unsaveable at 4096 pages) open for M5. **M5 keeps `_writeOwnerOnly`.**
 - Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
   `reference/conformance/files/fuzz-regress/fNNN-*.cryptand`
   (`CRYPTAND_FUZZ_DUMP` keeps only the last input replayed). Replaying
@@ -71,9 +75,8 @@
 
 ## Next action
 
-M4.7: filesystem — created files, lock sidecar, backups and temp files are
-`0600`; no symlink following on the sidecar; temp files never hold plaintext
-of an encrypted database (PLAN 4.7).
+M4.8: supply chain — `cargo deny` + `cargo audit` clean, release workflows
+pinned by SHA, SBOMs, `SECURITY.md` (PLAN 4.8).
 
 ## Log
 
@@ -91,3 +94,4 @@ of an encrypted database (PLAN 4.7).
 - 2026-10-12 — M4.5 done: F-135/F-136 (J+D), marker tests R+J+D; F-137 to the human; gate quick green.
 - 2026-10-12 — F-137 fixed R+D + spec MUST after the human's decision; F-135 raw-key ownership noted in 14 §11; gate quick green.
 - 2026-10-12 — M4.6 done: F-138 length checks (R+J+D), tests fail reverted; gate quick green.
+- 2026-10-12 — M4.7 done: F-139 file modes 0600 + sidecar no-follow (R+J+D), tests fail reverted; F-140 (Dart) for M5; gate quick green.

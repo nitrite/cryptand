@@ -172,6 +172,7 @@ impl Backup for Engine {
 /// the verification pass over a restored file before reporting success.
 pub fn restore(src: &Path, dest: &Path, key: Option<&[u8]>) -> Result<crate::verify::VerifyReport> {
     std::fs::copy(src, dest)?;
+    crate::pager::chmod_owner_only(dest)?;
     let mut e = Engine::open(dest, key)?;
     use crate::verify::EngineVerify;
     let r = e.verify()?;

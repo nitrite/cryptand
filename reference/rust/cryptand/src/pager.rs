@@ -18,6 +18,23 @@ use crate::security::{KeyRing, AEAD_TAG_BYTES};
 use crate::error::{corrupt, invalid, Result};
 use crate::limits::check_page_size;
 
+/// 14 §11 / PLAN 4.7: every file the engine creates is owner-only (`0600`).
+/// The umask can only narrow it. No-op off unix.
+pub(crate) fn owner_only(o: &mut OpenOptions) -> &mut OpenOptions {
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(o, 0o600);
+    o
+}
+
+/// `0600` on a file made by `fs::copy`, which copies the source's mode.
+pub(crate) fn chmod_owner_only(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// §6 — one entry of the free tree (tree 1), keyed `(commit_id, start_page)`
 /// so a scan from the beginning yields the oldest, most-reclaimable extents
 /// first.
@@ -120,7 +137,7 @@ impl Pager {
     /// between "someone else made this database" and "I deleted it".
     pub fn create(path: &Path, page_size: usize) -> Result<Pager> {
         check_page_size(page_size)?;
-        let file = match OpenOptions::new().read(true).write(true).create_new(true).open(path) {
+        let file = match owner_only(OpenOptions::new().read(true).write(true).create_new(true)).open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 return invalid(format!(

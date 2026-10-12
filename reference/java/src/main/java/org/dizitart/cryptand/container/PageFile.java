@@ -51,6 +51,30 @@ public final class PageFile implements AutoCloseable {
 
     static volatile Hook hook;
 
+    /**
+     * PLAN 4.7: every file the engine creates is owner-only ({@code 0600});
+     * the umask can only narrow it. Empty where the file system has no POSIX
+     * permissions.
+     */
+    public static java.nio.file.attribute.FileAttribute<?>[] ownerOnly(Path path) {
+        return posix(path)
+                ? new java.nio.file.attribute.FileAttribute<?>[] {java.nio.file.attribute.PosixFilePermissions
+                        .asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))}
+                : new java.nio.file.attribute.FileAttribute<?>[0];
+    }
+
+    /** {@code 0600} on a file made by {@code Files.copy}, which keeps the source's mode. */
+    public static void chmodOwnerOnly(Path path) throws IOException {
+        if (posix(path)) {
+            java.nio.file.Files.setPosixFilePermissions(path,
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+        }
+    }
+
+    private static boolean posix(Path path) {
+        return path.getFileSystem().supportedFileAttributeViews().contains("posix");
+    }
+
     public PageFile(Path path, boolean readOnly, int requestedDurability) {
         this.path = path;
         this.readOnly = readOnly;
@@ -62,8 +86,8 @@ public final class PageFile implements AutoCloseable {
         try {
             this.channel = readOnly
                     ? FileChannel.open(path, StandardOpenOption.READ)
-                    : FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE,
-                            StandardOpenOption.CREATE);
+                    : FileChannel.open(path, java.util.EnumSet.of(StandardOpenOption.READ,
+                            StandardOpenOption.WRITE, StandardOpenOption.CREATE), ownerOnly(path));
         } catch (IOException e) {
             throw new UncheckedIOException("cannot open " + path, e);
         }
