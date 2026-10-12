@@ -200,11 +200,26 @@ abstract final class DatabaseFile {
       modifiedUtcMs: DateTime.now().millisecondsSinceEpoch,
     );
 
-    final bytes = store.toBytes();
     final image = sb.encode();
     // §6.2 — `sb_mac` authenticates the superblock; without it anyone can set
     // `cipher = 0` or weaken an Argon2id cost and no reader can tell.
     sealSuperblock(image, e.keys);
+    // M5 step 5: saving to the file the store is open on is a commit in
+    // place (Rust `Engine::commit`): every page is already there, so sync
+    // them, write the superblock to the slot `commit_id`'s parity names, and
+    // sync again. The other slot keeps the previous commit for a crash.
+    final raf = store.file;
+    if (raf != null && _samePath(raf.path, path)) {
+      final want = store.pageCount * store.pageSize;
+      if (raf.lengthSync() < want) raf.truncateSync(want);
+      store.sync();
+      raf
+        ..setPositionSync(sb.commitId.isOdd ? 0 : store.pageSize)
+        ..writeFromSync(image)
+        ..flushSync();
+      return;
+    }
+    final bytes = store.toBytes();
     // §1: slot A when `commit_id` is odd, slot B when it is even, so a crash
     // during a superblock write leaves the previous superblock intact. Both
     // slots are written here because a fresh file has no previous superblock
@@ -784,6 +799,15 @@ Uint8List encodeVlogStats(VlogSegment v, {required int startPage}) {
     if (v.maxKey != null) f['max_key'] = CBytes(v.maxKey!);
   }
   return encodeValue(CDoc(f));
+}
+
+bool _samePath(String a, String b) {
+  try {
+    return File(a).resolveSymbolicLinksSync() ==
+        File(b).resolveSymbolicLinksSync();
+  } on FileSystemException {
+    return false;
+  }
 }
 
 /// PLAN 4.7: every file the engine creates is owner-only (`0600`); the umask

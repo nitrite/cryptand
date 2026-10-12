@@ -83,14 +83,13 @@
 ## Next action
 
 M5 on branch `dart-storage`; design = top of `reference/dart/cryptand/REPORT.md`.
-Steps (2), (1), (3) done: segments placed on publish + LRU; open on
-`PageStore.onFile`; value-log segments allocate their extent when opened,
-write the head page then, and append/read records by positioned I/O
-(`PageStore.writeAt`/`readAt`); open reads only head pages. `save()` still
-rewrites tree 7 and the free tree, and the writer lock is still released
-right after open (01 §10: fix with step 5 by locking the store's handle).
-Next: steps (4)+(5), write-through flush/compaction/GC and
-`Database.commit(durability)` = Rust `Engine::commit`.
+Steps (2), (1), (3) done, and (5)'s core: `DatabaseFile.save` on the
+file the store is open on syncs, writes the superblock to the slot of
+`commit_id` parity only, syncs (no whole-image rewrite). Still open in (4)+(5):
+`Engine.commit(durability)` writing that superblock itself (its `_barrier`
+still records `none`), tree 7 / free tree written incrementally, writer lock
+held on the store's handle (01 §10). Next: move the in-place block from
+`save` into `Engine.commit`, then M2.2's 1 000 kills.
 
 ## Log
 
@@ -115,3 +114,4 @@ Next: steps (4)+(5), write-through flush/compaction/GC and
 - 2026-10-12 — M5 step 2: segment LRU + place-on-publish; 694 Dart tests, interop gate green.
 - 2026-10-12 — M5 step 1: open on `onFile`; rebuildManifest scans pages; 694 Dart tests, interop gate green.
 - 2026-10-12 — M5 step 3: value log on positioned I/O; 694 Dart tests, interop gate green.
+- 2026-10-12 — M5 step 5 core: save on the open file commits in place, slots alternate; 695 Dart tests, interop gate green.

@@ -96,6 +96,37 @@ void main() {
     expect(back.engine.scanTree(t).length, 500);
   });
 
+  test('M5 step 5: save on the open file commits in place, slots alternate',
+      () {
+    final path = tmp('inplace');
+    final db = fresh();
+    db.engine.put(t, CNitriteId(1), Uint8List.fromList('one'.codeUnits));
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+    final back = DatabaseFile.open(path);
+    back.engine.put(t, CNitriteId(2), Uint8List.fromList('two'.codeUnits));
+    back.engine.flush();
+    DatabaseFile.save(back, path);
+    back.engine.close();
+    int cid(int at) {
+      final f = File(path).openSync()..setPositionSync(at + Sb.commitId);
+      final b = f.readSync(8);
+      f.closeSync();
+      return ByteData.sublistView(b).getUint64(0, Endian.little);
+    }
+    final a = cid(0), b = cid(4096);
+    expect(a, isNot(b), reason: 'the in-place commit wrote one slot only');
+    // Destroy the newer slot: the older commit is still whole.
+    final raf = File(path).openSync(mode: FileMode.append)
+      ..setPositionSync(a > b ? 0 : 4096)
+      ..writeFromSync(Uint8List(Sb.size));
+    raf.closeSync();
+    final old = DatabaseFile.open(path);
+    expect(String.fromCharCodes(old.engine.get(t, CNitriteId(1))!), 'one');
+    expect(old.engine.get(t, CNitriteId(2)), isNull);
+    old.engine.close();
+  });
+
   test('F-069: a file whose slot A is invalid opens from slot B', () {
     // Slot B sits at offset page_size, which a reader cannot know when slot A
     // is invalid; all three readers assumed 4096 and lost an 8 KiB file.
