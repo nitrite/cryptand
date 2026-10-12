@@ -107,7 +107,8 @@ void main() {
     back.engine.put(t, CNitriteId(2), Uint8List.fromList('two'.codeUnits));
     back.engine.flush();
     DatabaseFile.save(back, path);
-    back.engine.close();
+    // Without close's own commit, which would fill the other slot too.
+    back.engine.close(flushMemtable: false);
     int cid(int at) {
       final f = File(path).openSync()..setPositionSync(at + Sb.commitId);
       final b = f.readSync(8);
@@ -125,6 +126,37 @@ void main() {
     expect(String.fromCharCodes(old.engine.get(t, CNitriteId(1))!), 'one');
     expect(old.engine.get(t, CNitriteId(2)), isNull);
     old.engine.close();
+  });
+
+  test('M5 step 5: Engine.commit is durable on its own, no save', () {
+    final path = tmp('commit');
+    DatabaseFile.save(fresh(), path);
+    final db = DatabaseFile.open(path);
+    db.engine.put(t, CNitriteId(1), Uint8List(600)); // through the value log
+    db.engine.commit(durability: Durability.os);
+    expect(db.engine.durabilityAchieved, Durability.os);
+    db.engine.put(t, CNitriteId(2), Uint8List.fromList('two'.codeUnits));
+    db.engine.commit(durability: Durability.full);
+    // §7: Dart has no F_FULLFSYNC, so `full` is performed as `sync`.
+    expect(db.engine.durabilityAchieved, Durability.sync);
+    // As after a kill: the handle is never closed.
+    final back = DatabaseFile.openReadOnly(path);
+    expect(back.engine.get(t, CNitriteId(1)), Uint8List(600));
+    expect(String.fromCharCodes(back.engine.get(t, CNitriteId(2))!), 'two');
+    expect(back.engine.durabilityAchieved, Durability.sync);
+    db.engine.close();
+  });
+
+  test('M5: an encrypted database is on its file from create', () {
+    final path = tmp('createfile');
+    Uint8List pw() => Uint8List.fromList(List.filled(32, 7));
+    final db = DatabaseFile.create(path,
+        credential: pw(), kdf: Keyslot.kdfRaw, vlogSegmentBytes: 1 << 16);
+    db.engine.put(t, CNitriteId(1), Uint8List.fromList('one'.codeUnits));
+    db.engine.commit();
+    final back = DatabaseFile.openReadOnly(path, key: pw());
+    expect(String.fromCharCodes(back.engine.get(t, CNitriteId(1))!), 'one');
+    db.engine.close();
   });
 
   test('F-069: a file whose slot A is invalid opens from slot B', () {
@@ -664,6 +696,20 @@ void lockTests() {
         Platform.resolvedExecutable, ['run', 'tool/lock_probe.dart', path]);
     expect(after.stdout.toString().trim(), 'opened');
     expect(DatabaseFile.open(path).engine.get(t, const CNitriteId(1)), [1]);
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('M5: an open database holds the writer lock until close', () {
+    final path = tmp('heldlock');
+    DatabaseFile.save(fresh(), path);
+    final db = DatabaseFile.open(path);
+    String probe() => Process.runSync(
+            Platform.resolvedExecutable, ['run', 'tool/lock_probe.dart', path])
+        .stdout
+        .toString()
+        .trim();
+    expect(probe(), 'locked');
+    db.engine.close();
+    expect(probe(), 'opened');
   }, timeout: const Timeout(Duration(minutes: 2)));
 
   test('an encrypted database reports what it observed, never a plausible 0',

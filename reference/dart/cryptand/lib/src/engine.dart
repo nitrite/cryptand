@@ -395,6 +395,11 @@ final class Engine {
   /// failure the chapter exists to prevent.
   Durability durabilityAchieved = Durability.none;
 
+  /// M5 step 5: set by `DatabaseFile` on a writable file. [commit] calls it
+  /// after the barriers to write the trees and the superblock (Rust
+  /// `Engine::commit` step G). `null` in memory and read-only.
+  void Function(Durability)? publisher;
+
   bool _closed = false;
 
   /// M5: resident segments by `segment_id`, a cache over the store. Every
@@ -1069,6 +1074,7 @@ final class Engine {
     commitId++;
     visibleSeq = sequenced;
     _refreshRetention();
+    publisher?.call(durability);
     _pruneWrittenAt();
     _emit(StoreEvent(StoreEventKind.commit,
         commitId: commitId, visibleSeq: visibleSeq));
@@ -1077,12 +1083,22 @@ final class Engine {
 
   /// §7: an implementation records what it actually performed.
   ///
-  /// There is no file under this implementation, so no barrier reaches stable
-  /// storage and the honest record is `none` whatever was requested. Claiming
-  /// the requested mode here is precisely the silent failure §7 exists to
-  /// prevent.
+  /// In memory no barrier reaches stable storage, so the record is `none`
+  /// whatever was requested. Claiming the requested mode here is precisely the
+  /// silent failure §7 exists to prevent.
   void _barrier(Durability requested) {
-    durabilityAchieved = Durability.none;
+    if (store.file == null || requested == Durability.none) {
+      durabilityAchieved = Durability.none;
+      return;
+    }
+    // `os`: the positioned writes are already in the OS. `full`: Dart has no
+    // `F_FULLFSYNC`, so it is performed, and recorded, as `sync` (§7).
+    if (requested == Durability.os) {
+      durabilityAchieved = Durability.os;
+      return;
+    }
+    store.sync();
+    durabilityAchieved = Durability.sync;
   }
 
   void _emit(StoreEvent e) => events.add(e);
@@ -1094,6 +1110,9 @@ final class Engine {
     _emit(const StoreEvent(StoreEventKind.closing));
     if (flushMemtable && _memtable.isNotEmpty) commit();
     vlog.sealOpen();
+    // The seals go into tree 7 with one last commit, so a clean close leaves
+    // nothing for the next open to repair.
+    if (flushMemtable && publisher != null) commit();
     store.file?.closeSync();
     store.file = null;
     _closed = true;

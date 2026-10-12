@@ -44,6 +44,18 @@ import 'vlog.dart';
 /// in-memory engine has none.
 final Expando<Uint8List> _keyslots = Expando('cryptand keyslots');
 
+/// The tree-7 record last written per value-log segment, so a commit writes
+/// only the ones that changed.
+final Expando<Map<int, Uint8List>> _vlogWritten = Expando('cryptand tree 7');
+
+bool _sameBytes(Uint8List a, Uint8List b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
 abstract final class DatabaseFile {
   /// Lays the engine out as a file and writes it.
   ///
@@ -58,11 +70,67 @@ abstract final class DatabaseFile {
   static void save(Database db, String path,
       {String? writerId, Uint8List? keyslots}) {
     final e = db.engine;
-    final store = e.store;
+    // M5 step 6: saving to the file the database is open on is a commit.
+    final raf = e.store.file;
+    if (raf != null && e.publisher != null && _samePath(raf.path, path)) {
+      if (writerId != null) e.writerId = writerId;
+      if (keyslots != null) _keyslots[e] = keyslots;
+      e.commit();
+      return;
+    }
     // Publishing a superblock is a commit, and §6's reclamation rule is
     // stated over commit ids: this is what makes the previous session's freed
     // extents reallocatable and attributes this one's to a new id.
     e.beginPublish();
+    final image = _superblock(db,
+            writerId: writerId,
+            keyslots: keyslots,
+            // The file is written with `flush: true` below.
+            achieved: Durability.sync)
+        .encode();
+    // §6.2 — `sb_mac` authenticates the superblock; without it anyone can set
+    // `cipher = 0` or weaken an Argon2id cost and no reader can tell.
+    sealSuperblock(image, e.keys);
+    final bytes = e.store.toBytes();
+    // §1: slot A when `commit_id` is odd, slot B when it is even, so a crash
+    // during a superblock write leaves the previous superblock intact. Both
+    // slots are written here because a fresh file has no previous superblock
+    // to leave intact, and an unreadable slot B would make §2.1 step 3 pick
+    // between one valid slot and one absent one on every later open.
+    bytes.setRange(0, Sb.size, image);
+    bytes.setRange(e.store.pageSize, e.store.pageSize + Sb.size, image);
+    _writeOwnerOnly(path, bytes);
+  }
+
+  /// M5 step 5, Rust `Engine::commit` step G: [Engine.commit] has written and
+  /// synced the data; write the trees, sync them, write the superblock to
+  /// the slot `commit_id`'s parity names, and sync again. The other slot
+  /// keeps the previous commit for a crash in between.
+  static void _publishInPlace(Database db) {
+    final e = db.engine;
+    final store = e.store;
+    final raf = store.file!;
+    final sb = _superblock(db, achieved: e.durabilityAchieved);
+    final image = sb.encode();
+    sealSuperblock(image, e.keys);
+    final want = store.pageCount * store.pageSize;
+    if (raf.lengthSync() < want) raf.truncateSync(want);
+    final durable = e.durabilityAchieved == Durability.sync;
+    if (durable) store.sync();
+    raf
+      ..setPositionSync(sb.commitId.isOdd ? 0 : store.pageSize)
+      ..writeFromSync(image);
+    if (durable) store.sync();
+    // The nonce floor rewrites both slots from this, so it must be the latest.
+    e.superblock = sb;
+  }
+
+  /// Writes trees 3, 7 and 1 into the store and returns the superblock that
+  /// publishes them, for the commit `e.commitId` already names.
+  static Superblock _superblock(Database db,
+      {String? writerId, Uint8List? keyslots, required Durability achieved}) {
+    final e = db.engine;
+    final store = e.store;
     // §2 of `spec/05-catalog.md`: tree 3's root lives in its own catalog
     // descriptor. Publishing it is what stops the next open from rebuilding
     // the tree and orphaning this one — a leak per open, and the only thing
@@ -84,22 +152,24 @@ abstract final class DatabaseFile {
     // 3. The value log: one extent each, and tree 7 for everything mutable
     //    about them (§6.7 — "This tree is the **authority** for everything
     //    mutable about a value-log segment").
-    //    Tree 7 is rebuilt whole, so the copy the file already holds is
-    //    released first; nothing freed it, and every open-and-save of a
-    //    database with a value log leaked its pages.
-    final stats = CowTree(store, treeId: TreeId.vlogStats);
-    for (final p
-        in e.outerTrees['tree 7']?.reachablePages().toList() ?? const <int>[]) {
-      store.free(p);
+    //    M5 step 5: edited, not rebuilt — only the entries whose record
+    //    changed since the last commit are written (Rust writes dirty tree-7
+    //    entries the same way); the copy-on-write path frees what it replaces.
+    final stats = e.outerTrees['tree 7'] ??=
+        CowTree(store, treeId: TreeId.vlogStats);
+    final written = _vlogWritten[e] ??= {};
+    for (final id in written.keys.toList()) {
+      if (!e.vlog.segments.containsKey(id)) {
+        stats.remove(encodeKey(CInt.of(NumType.u64, id)));
+        written.remove(id);
+      }
     }
-    e.outerTrees['tree 7'] = stats;
-    // M5 step 3: the records are already in place (one positioned write per
-    // append); only tree 7's mutable state is written here.
     for (final v in e.vlog.segments.values) {
-      stats.put(
-        encodeKey(CInt.of(NumType.u64, v.id)),
-        encodeVlogStats(v, startPage: v.startPage),
-      );
+      final rec = encodeVlogStats(v, startPage: v.startPage);
+      final was = written[v.id];
+      if (was != null && _sameBytes(was, rec)) continue;
+      stats.put(encodeKey(CInt.of(NumType.u64, v.id)), rec);
+      written[v.id] = rec;
     }
 
     // 3b. Tree 1, the free tree (§6). Written last of the trees, because
@@ -137,7 +207,7 @@ abstract final class DatabaseFile {
     ]..sort((a, b) => compareKeys(a.$1, b.$1)));
 
     // 4. The superblock, last.
-    final sb = Superblock(
+    return Superblock(
       pageSize: store.pageSize,
       commitId: e.commitId,
       pageCount: store.pageCount,
@@ -166,10 +236,9 @@ abstract final class DatabaseFile {
       databaseUuid: e.databaseUuid,
       minRetainedCommit: e.minRetainedCommit,
       minRetainedSeq: e.minRetainedSeq,
-      // §7 of `spec/10-transactions.md`: record what was **performed**. The
-      // file is written with `flush: true` below, which is `Durability.sync`;
+      // §7 of `spec/10-transactions.md`: record what was **performed**;
       // claiming more than that is the one thing §7 forbids.
-      durabilityAchieved: Durability.sync.code,
+      durabilityAchieved: achieved.code,
       levelCount: e.levels.levelCount,
       // `spec/12-profiles.md` §3 — advisory, but it must name the profile
       // this database actually runs, not a constant. A `mobile` database
@@ -199,35 +268,6 @@ abstract final class DatabaseFile {
       createdUtcMs: DateTime.now().millisecondsSinceEpoch,
       modifiedUtcMs: DateTime.now().millisecondsSinceEpoch,
     );
-
-    final image = sb.encode();
-    // §6.2 — `sb_mac` authenticates the superblock; without it anyone can set
-    // `cipher = 0` or weaken an Argon2id cost and no reader can tell.
-    sealSuperblock(image, e.keys);
-    // M5 step 5: saving to the file the store is open on is a commit in
-    // place (Rust `Engine::commit`): every page is already there, so sync
-    // them, write the superblock to the slot `commit_id`'s parity names, and
-    // sync again. The other slot keeps the previous commit for a crash.
-    final raf = store.file;
-    if (raf != null && _samePath(raf.path, path)) {
-      final want = store.pageCount * store.pageSize;
-      if (raf.lengthSync() < want) raf.truncateSync(want);
-      store.sync();
-      raf
-        ..setPositionSync(sb.commitId.isOdd ? 0 : store.pageSize)
-        ..writeFromSync(image)
-        ..flushSync();
-      return;
-    }
-    final bytes = store.toBytes();
-    // §1: slot A when `commit_id` is odd, slot B when it is even, so a crash
-    // during a superblock write leaves the previous superblock intact. Both
-    // slots are written here because a fresh file has no previous superblock
-    // to leave intact, and an unreadable slot B would make §2.1 step 3 pick
-    // between one valid slot and one absent one on every later open.
-    bytes.setRange(0, Sb.size, image);
-    bytes.setRange(store.pageSize, store.pageSize + Sb.size, image);
-    _writeOwnerOnly(path, bytes);
   }
 
   /// Creates an **encrypted** database that is encrypted from its first page.
@@ -353,6 +393,17 @@ abstract final class DatabaseFile {
           '(spec/01-container.md section 2)');
     }
     _writeOwnerOnly(path, blank);
+    // M5: from here the store is the file, locked for this session. The
+    // store holds only the two blank superblock pages, so handing it the
+    // handle is the same as `PageStore.onFile(pageCount: 2)`.
+    final raf = File(path).openSync(mode: FileMode.append);
+    try {
+      _takeWriterLock(raf, path);
+    } catch (_) {
+      raf.closeSync();
+      rethrow;
+    }
+    e.store.file = raf;
 
     // §4.1 rule 1, now that there is somewhere durable to publish to — and
     // before the [Database] below, whose constructor writes the catalog and
@@ -364,8 +415,11 @@ abstract final class DatabaseFile {
       ..installKeys(
           ring,
           NonceAllocator.open(
-              0, (floor) => _publishNonceFloor(path, sb, ring, floor)));
-    return Database(engine: e);
+              0,
+              (floor) => _publishNonceFloor(raf, e.superblock!, ring, floor)));
+    final db = Database(engine: e);
+    e.publisher = (_) => _publishInPlace(db);
+    return db;
   }
 
   /// Reads a file back into an engine.
@@ -392,14 +446,7 @@ abstract final class DatabaseFile {
   /// Practically: a heap snapshot of a process that has ever opened an
   /// encrypted database may contain the master key even after a clean close.
   /// Treat process memory as in scope for whatever protects the key file.
-  static Database open(String path, {List<int>? key}) {
-    final lock = _takeWriterLock(path);
-    try {
-      return _open(path, key);
-    } finally {
-      lock.closeSync();
-    }
-  }
+  static Database open(String path, {List<int>? key}) => _open(path, key);
 
   /// Opens a database **without writing to the file**.
   ///
@@ -447,8 +494,11 @@ abstract final class DatabaseFile {
   /// writer's database openable again with no cleanup step.
   static const int _lockByte = 1 << 62;
 
-  static RandomAccessFile _takeWriterLock(String path) {
-    final f = File(path).openSync(mode: FileMode.append);
+  ///
+  /// M5: taken on the store's own handle and held until [Engine.close]
+  /// closes it. A second handle would do no good on POSIX: closing *any*
+  /// descriptor of the file drops the process's `fcntl` locks on it.
+  static void _takeWriterLock(RandomAccessFile f, String path) {
     try {
       // One byte far past any data, not the whole file: on Windows a
       // LockFileEx range is mandatory, and a whole-file lock on this handle
@@ -457,11 +507,9 @@ abstract final class DatabaseFile {
       // each other.
       f.lockSync(FileLock.exclusive, _lockByte, _lockByte + 1);
     } on FileSystemException catch (e) {
-      f.closeSync();
       throw LockedException('$path is open for writing by another process, '
           'or lies on a filesystem that cannot lock it (${e.osError?.message ?? e.message})');
     }
-    return f;
   }
 
   static Database _open(String path, List<int>? key, {bool readOnly = false}) {
@@ -469,6 +517,7 @@ abstract final class DatabaseFile {
     // region (slot B is at most 64 KiB in) is read up front.
     final raf = File(path).openSync(mode: readOnly ? FileMode.read : FileMode.append);
     try {
+      if (!readOnly) _takeWriterLock(raf, path);
       return _openOn(raf, path, key, readOnly: readOnly);
     } catch (_) {
       raf.closeSync();
@@ -626,7 +675,8 @@ abstract final class DatabaseFile {
             readOnly
                 ? NonceAllocator.readOnly(sb.nextNonce)
                 : NonceAllocator.open(sb.nextNonce,
-                    (floor) => _publishNonceFloor(path, sb, ring, floor)));
+                    (floor) =>
+                        _publishNonceFloor(raf, e.superblock!, ring, floor)));
       }
 
       // §6: the free tree, read back so this session reuses space rather than
@@ -706,6 +756,7 @@ abstract final class DatabaseFile {
               'value-log head page says segment ${seg.id}, tree 7 says $id');
         }
         e.vlog.adopt(seg);
+        (_vlogWritten[e] ??= {})[id] = v;
       }
       // F-045: ids are "globally unique, never reused" (04 §2.1). A collected
       // segment has no tree-7 entry, so the highest adopted id can be below the
@@ -713,7 +764,7 @@ abstract final class DatabaseFile {
       e.vlog.reserveIdsBelow(sb.nextVlogSegmentId);
 
       // Trees 0, 2 and 3, rooted from the superblock like everything else.
-      return Database(
+      final db = Database(
         engine: e,
         catalogRoot: sb.catalogRoot,
         catalogNonce: sb.rootNonces[0],
@@ -725,6 +776,8 @@ abstract final class DatabaseFile {
         // wrote.
         initStoreMetadata: false,
       )..catalog.loadTreeIndex();
+      if (!readOnly) e.publisher = (_) => _publishInPlace(db);
+      return db;
     } catch (_) {
       ring?.destroy();
       rethrow;
@@ -758,22 +811,17 @@ abstract final class DatabaseFile {
   /// backwards, and a slot that still holds the old value is a slot §2.1 step
   /// 3 could pick.
   static void _publishNonceFloor(
-      String path, Superblock sb, KeyRing? ring, int floor) {
+      RandomAccessFile f, Superblock sb, KeyRing? ring, int floor) {
     final image = sb.encode();
     final bd = ByteData.view(image.buffer, image.offsetInBytes, image.length);
     bd.setUint64(Sb.nextNonce, floor, Endian.little);
     sealSuperblock(image, ring);
-    final f = File(path).openSync(mode: FileMode.writeOnlyAppend);
-    try {
-      f
-        ..setPositionSync(0)
-        ..writeFromSync(image)
-        ..setPositionSync(sb.pageSize)
-        ..writeFromSync(image)
-        ..flushSync();
-    } finally {
-      f.closeSync();
-    }
+    f
+      ..setPositionSync(0)
+      ..writeFromSync(image)
+      ..setPositionSync(sb.pageSize)
+      ..writeFromSync(image)
+      ..flushSync();
   }
 }
 

@@ -83,13 +83,17 @@
 ## Next action
 
 M5 on branch `dart-storage`; design = top of `reference/dart/cryptand/REPORT.md`.
-Steps (2), (1), (3) done, and (5)'s core: `DatabaseFile.save` on the
-file the store is open on syncs, writes the superblock to the slot of
-`commit_id` parity only, syncs (no whole-image rewrite). Still open in (4)+(5):
-`Engine.commit(durability)` writing that superblock itself (its `_barrier`
-still records `none`), tree 7 / free tree written incrementally, writer lock
-held on the store's handle (01 §10). Next: move the in-place block from
-`save` into `Engine.commit`, then M2.2's 1 000 kills.
+Steps (1)–(6) done. `Engine.commit(durability)` = Rust commit: barriers
+sync per mode (`full` recorded as `sync`), then `Engine.publisher` (set by
+`DatabaseFile` on writable files and on `create`, which is now on its file)
+writes tree 3, dirty tree-7 entries only, the free tree, and the superblock to
+the `commit_id`-parity slot. `save()` on the open path = `commit(sync)`; to
+another path it still writes a full copy. Writer lock held on the store's
+handle until close; the nonce floor writes through that handle (a second
+fd's close would drop the fcntl lock) using the latest superblock. Close
+commits once more to publish the seals.
+Next: M2.2 Dart, 1 000 kill -9 runs on the remote Mac (`test/torture.dart`),
+then the 10^7 RSS check (5.5 Verify), F-140.
 
 ## Log
 
@@ -115,3 +119,4 @@ held on the store's handle (01 §10). Next: move the in-place block from
 - 2026-10-12 — M5 step 1: open on `onFile`; rebuildManifest scans pages; 694 Dart tests, interop gate green.
 - 2026-10-12 — M5 step 3: value log on positioned I/O; 694 Dart tests, interop gate green.
 - 2026-10-12 — M5 step 5 core: save on the open file commits in place, slots alternate; 695 Dart tests, interop gate green.
+- 2026-10-12 — M5 steps 4+5 done: Engine.commit publishes in place, lock held for the session, create on file; 698 Dart tests, interop gate green.
