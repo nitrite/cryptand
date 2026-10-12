@@ -44,6 +44,9 @@ import 'vlog.dart';
 /// in-memory engine has none.
 final Expando<Uint8List> _keyslots = Expando('cryptand keyslots');
 
+/// The writer handles this process holds, by resolved path (01 §10).
+final Map<String, RandomAccessFile> _writers = {};
+
 /// The tree-7 record last written per value-log segment, so a commit writes
 /// only the ones that changed.
 final Expando<Map<int, Uint8List>> _vlogWritten = Expando('cryptand tree 7');
@@ -265,7 +268,9 @@ abstract final class DatabaseFile {
       vlogSpaceTargetPct: e.vlogSpaceTargetPct,
       localityDebtPct: e.localityDebtPct,
       writerId: writerId ?? e.writerId,
-      createdUtcMs: DateTime.now().millisecondsSinceEpoch,
+      // Set once at creation and carried, as Rust and Java do.
+      createdUtcMs: e.superblock?.createdUtcMs ??
+          DateTime.now().millisecondsSinceEpoch,
       modifiedUtcMs: DateTime.now().millisecondsSinceEpoch,
     );
   }
@@ -400,10 +405,12 @@ abstract final class DatabaseFile {
     try {
       _takeWriterLock(raf, path);
     } catch (_) {
-      raf.closeSync();
+      _close(raf);
       rethrow;
     }
-    e.store.file = raf;
+    e
+      ..store.file = raf
+      ..onClose = () => _close(raf);
 
     // §4.1 rule 1, now that there is somewhere durable to publish to — and
     // before the [Database] below, whose constructor writes the catalog and
@@ -496,9 +503,16 @@ abstract final class DatabaseFile {
 
   ///
   /// M5: taken on the store's own handle and held until [Engine.close]
-  /// closes it. A second handle would do no good on POSIX: closing *any*
-  /// descriptor of the file drops the process's `fcntl` locks on it.
+  /// closes it, and registered in [_writers] so this process behaves like
+  /// Rust (an open-file-description lock) and Java (`tryLock` throws
+  /// `OverlappingFileLockException`): a second writer in the same process is
+  /// refused too. POSIX `fcntl` locks are per process, so without the
+  /// registry it would be granted; on Windows `LockFileEx` would refuse it.
   static void _takeWriterLock(RandomAccessFile f, String path) {
+    final key = File(path).resolveSymbolicLinksSync();
+    if (_writers.containsKey(key)) {
+      throw LockedException('$path is already open for writing in this process');
+    }
     try {
       // One byte far past any data, not the whole file: on Windows a
       // LockFileEx range is mandatory, and a whole-file lock on this handle
@@ -510,6 +524,34 @@ abstract final class DatabaseFile {
       throw LockedException('$path is open for writing by another process, '
           'or lies on a filesystem that cannot lock it (${e.osError?.message ?? e.message})');
     }
+    _writers[key] = f;
+  }
+
+  /// Closes a handle [_open] or [create] made, and keeps the lock right.
+  ///
+  /// A writer leaves [_writers]. Any other handle's close drops *every*
+  /// `fcntl` lock this process holds on the file (POSIX), so a reader opened
+  /// beside a writer in this process takes the writer's lock back — what
+  /// Rust's open-file-description lock gives for free. Re-taking it cannot
+  /// conflict with ourselves; another process that slipped into the window
+  /// makes it throw, which is reported rather than silently writing unlocked.
+  static void _close(RandomAccessFile f) {
+    final key = _writers.entries
+        .where((w) => identical(w.value, f))
+        .map((w) => w.key)
+        .firstOrNull;
+    f.closeSync();
+    if (key != null) {
+      _writers.remove(key);
+      return;
+    }
+    final String path;
+    try {
+      path = File(f.path).resolveSymbolicLinksSync();
+    } on FileSystemException {
+      return; // erased: nothing left to lock
+    }
+    _writers[path]?.lockSync(FileLock.exclusive, _lockByte, _lockByte + 1);
   }
 
   static Database _open(String path, List<int>? key, {bool readOnly = false}) {
@@ -518,9 +560,10 @@ abstract final class DatabaseFile {
     final raf = File(path).openSync(mode: readOnly ? FileMode.read : FileMode.append);
     try {
       if (!readOnly) _takeWriterLock(raf, path);
-      return _openOn(raf, path, key, readOnly: readOnly);
+      return _openOn(raf, path, key, readOnly: readOnly)
+        ..engine.onClose = () => _close(raf);
     } catch (_) {
-      raf.closeSync();
+      _close(raf);
       rethrow;
     }
   }

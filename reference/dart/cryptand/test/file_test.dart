@@ -37,6 +37,7 @@ void main() {
     expect(wiped(c), isTrue, reason: 'create left the credential');
     DatabaseFile.save(db, path);
     texts.add(db.toString());
+    db.engine.close();
 
     final wrong = Uint8List.fromList('${marker}x'.codeUnits);
     try {
@@ -145,6 +146,24 @@ void main() {
     expect(String.fromCharCodes(back.engine.get(t, CNitriteId(2))!), 'two');
     expect(back.engine.durabilityAchieved, Durability.sync);
     db.engine.close();
+  });
+
+  test('created_utc_ms is set once and carried, as Rust and Java', () {
+    final path = tmp('created');
+    DatabaseFile.save(fresh(), path);
+    List<int> created() {
+      final b = ByteData.sublistView(File(path).readAsBytesSync());
+      return [
+        for (final slot in [0, 4096])
+          b.getUint64(slot + Sb.createdUtcMs, Endian.little)
+      ];
+    }
+    final first = created()[0];
+    sleep(const Duration(milliseconds: 5));
+    final db = DatabaseFile.open(path);
+    db.engine.put(t, CNitriteId(1), Uint8List(1));
+    db.engine.close();
+    expect(created(), [first, first]);
   });
 
   test('M5: an encrypted database is on its file from create', () {
@@ -379,10 +398,12 @@ void main() {
       back.engine.flush();
       back.createCollection('d$round');
       DatabaseFile.save(back, path);
+      back.engine.close();
 
       final check = DatabaseFile.open(path);
       final leaks = check.engine.verifyStructure().of(FindingClass.leak);
       expect(leaks, isEmpty, reason: 'round $round: ${leaks.join('\n')}');
+      check.engine.close();
     }
 
     // And a value-log segment the file placed, emptied and collected after a
@@ -396,6 +417,7 @@ void main() {
     expect(back.engine.vlog.segments.length, lessThan(placed),
         reason: 'a placed segment was collected');
     DatabaseFile.save(back, path);
+    back.engine.close();
     final leaks =
         DatabaseFile.open(path).engine.verifyStructure().of(FindingClass.leak);
     expect(leaks, isEmpty, reason: leaks.join('\n'));
@@ -467,6 +489,7 @@ void encryptionTests() {
     db.engine.put(t, CNitriteId(1), Uint8List.fromList('keep me'.codeUnits));
     db.engine.flush();
     DatabaseFile.save(db, path);
+    db.engine.close();
     final before = File(path).lengthSync();
     expect(before, greaterThan(0));
 
@@ -491,6 +514,7 @@ void encryptionTests() {
     }
     db.engine.flush();
     DatabaseFile.save(db, path);
+    db.engine.close();
 
     final back = DatabaseFile.open(path, key: key);
     for (var i = 0; i < 300; i++) {
@@ -498,6 +522,7 @@ void encryptionTests() {
     }
     // §3.3 and `spec/00-conventions.md` §9: "cannot unlock", reported
     // identically for a missing keyslot and a wrong key.
+    back.engine.close();
     expect(() => DatabaseFile.open(path, key: List.filled(32, 8)),
         throwsA(isA<CannotUnlockException>()));
     expect(
@@ -516,6 +541,7 @@ void encryptionTests() {
     }
     db.engine.flush();
     DatabaseFile.save(db, path);
+    db.engine.close();
 
     final raw = File(path).readAsBytesSync();
     for (final needle in ['VALUENEEDLE', 'KEYNEEDLE-0007']) {
@@ -550,6 +576,7 @@ void encryptionTests() {
     }
     db.engine.flush();
     DatabaseFile.save(db, path);
+    db.engine.close();
 
     final raw = File(path).readAsBytesSync();
     var run = 0, longest = 0;
@@ -615,6 +642,7 @@ void encryptionTests() {
     }
     db.engine.flush();
     DatabaseFile.save(db, path);
+    db.engine.close();
 
     final floors = <int>[];
     for (var round = 1; round < 4; round++) {
@@ -625,6 +653,7 @@ void encryptionTests() {
         e.engine.put(t, CNitriteId(round * 1000 + i), Uint8List.fromList([i]));
       }
       e.engine.flush();
+      e.engine.close(flushMemtable: false); // the kill: nothing published
     }
     for (var i = 1; i < floors.length; i++) {
       expect(floors[i], greaterThanOrEqualTo(floors[i - 1] + kNonceGap),
@@ -642,6 +671,7 @@ void encryptionTests() {
         .put(t, const CNitriteId(1), Uint8List.fromList('secret'.codeUnits));
     db.engine.flush();
     DatabaseFile.save(db, path);
+    db.engine.close();
 
     final raw = File(path).readAsBytesSync();
     for (final slot in [0, 8192]) {
@@ -708,6 +738,11 @@ void lockTests() {
         .toString()
         .trim();
     expect(probe(), 'locked');
+    // Refused in this process too, as Rust and Java refuse it.
+    expect(() => DatabaseFile.open(path), throwsA(isA<LockedException>()));
+    // A reader's close here must not drop the writer's fcntl lock.
+    DatabaseFile.openReadOnly(path).engine.close();
+    expect(probe(), 'locked');
     db.engine.close();
     expect(probe(), 'opened');
   }, timeout: const Timeout(Duration(minutes: 2)));
@@ -730,6 +765,7 @@ void lockTests() {
     }
     db.engine.flush();
     DatabaseFile.save(db, path);
+    db.engine.close();
 
     final back = DatabaseFile.open(path, key: key);
     for (var i = 0; i < 200; i++) {

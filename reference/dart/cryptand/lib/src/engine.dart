@@ -400,6 +400,10 @@ final class Engine {
   /// `Engine::commit` step G). `null` in memory and read-only.
   void Function(Durability)? publisher;
 
+  /// Closes the store's handle in place of `closeSync`, set by `DatabaseFile`
+  /// so the writer lock is released (or kept) correctly.
+  void Function()? onClose;
+
   bool _closed = false;
 
   /// M5: resident segments by `segment_id`, a cache over the store. Every
@@ -1108,14 +1112,23 @@ final class Engine {
   void close({bool flushMemtable = true}) {
     if (_closed) return;
     _emit(const StoreEvent(StoreEventKind.closing));
-    if (flushMemtable && _memtable.isNotEmpty) commit();
-    vlog.sealOpen();
-    // The seals go into tree 7 with one last commit, so a clean close leaves
-    // nothing for the next open to repair.
-    if (flushMemtable && publisher != null) commit();
-    store.file?.closeSync();
-    store.file = null;
-    _closed = true;
+    try {
+      if (flushMemtable && _memtable.isNotEmpty) commit();
+      vlog.sealOpen();
+      // The seals go into tree 7 with one last commit, so a clean close
+      // leaves nothing for the next open to repair.
+      if (flushMemtable && publisher != null) commit();
+    } finally {
+      // The handle, and with it the writer lock, goes even when the last
+      // commit fails, as Rust's drop releases it.
+      if (onClose != null) {
+        onClose!();
+      } else {
+        store.file?.closeSync();
+      }
+      store.file = null;
+      _closed = true;
+    }
     _emit(const StoreEvent(StoreEventKind.closed));
   }
 

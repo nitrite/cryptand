@@ -5,7 +5,7 @@ acks plus a random delay, then reopen in the same language and check: it opens,
 verify is clean, and the data equals the model at some op boundary at or after
 the last acknowledged one (no acked write lost; every op all-or-nothing).
 
-  tools/torture.py rust|java A B [oplog_gen knobs...]   seeds A..B-1
+  tools/torture.py rust|java|dart A B [oplog_gen knobs...]   seeds A..B-1
 Failing logs and files are kept in reference/bench/runs/torture/.
 """
 import os, random, signal, subprocess, sys, time
@@ -20,6 +20,12 @@ def build(lang):
                     "--bin", "oplog_gen", "--bin", "oplog_check"], cwd=f"{root}/reference/rust", check=True)
     if lang == "rust":
         return [f"{rel}/oplog_check"]
+    if lang == "dart":
+        dart = f"{root}/reference/dart/cryptand"
+        exe = f"{out}/oplog_dart"
+        subprocess.run(["dart", "compile", "exe", "-o", exe, "test/oplog_check_test.dart"],
+                       cwd=dart, check=True, stdout=subprocess.DEVNULL)
+        return [exe]
     java = f"{root}/reference/java"
     subprocess.run(["mvn", "-B", "-q", "test-compile", "-Djacoco.skip=true"], cwd=java, check=True)
     cp = f"{out}/cp"

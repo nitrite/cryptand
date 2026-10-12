@@ -56,6 +56,18 @@ Uint8List fixtureImage(String path) {
 int readEverything(Uint8List mutant, String path) {
   File(path).writeAsBytesSync(mutant, flush: true);
   final db = DatabaseFile.open(path);
+  try {
+    return _readAll(db);
+  } finally {
+    try {
+      db.engine.close(flushMemtable: false);
+    } on CryptandException {
+      // a mutant may fail its close too; the handle is released regardless
+    }
+  }
+}
+
+int _readAll(Database db) {
   var findings = db.engine.verifyStructure().findings.length;
   final c = db.collection('orders');
   if (c == null) return findings + 1;
@@ -167,8 +179,16 @@ bool _opens(Uint8List image, String path) {
     // M5: segments are read on demand, so read them all, as the eager open
     // did: the container gate is crossed when a segment is fetched.
     final e = DatabaseFile.open(path).engine;
-    for (final r in e.manifest.all) {
-      e.segment(r);
+    try {
+      for (final r in e.manifest.all) {
+        e.segment(r);
+      }
+    } finally {
+      try {
+        e.close(flushMemtable: false);
+      } on CryptandException {
+        // released regardless
+      }
     }
     return true;
   } on CryptandException {

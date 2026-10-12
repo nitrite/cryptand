@@ -84,12 +84,16 @@ class _Run {
     if (encrypted) {
       db = DatabaseFile.create(path, credential: _key, kdf: Keyslot.kdfRaw, profile: profile);
     } else {
-      db = Database(
-          engine: Engine(
-              pageSize: profile.pageSize,
-              vlogMin: profile.vlogMin,
-              vlogSegmentBytes: profile.vlogSegmentBytes)
-            ..setProfile(profile));
+      // M5: on its file from the start, as Rust's `Engine::create`.
+      DatabaseFile.save(
+          Database(
+              engine: Engine(
+                  pageSize: profile.pageSize,
+                  vlogMin: profile.vlogMin,
+                  vlogSegmentBytes: profile.vlogSegmentBytes)
+                ..setProfile(profile)),
+          path);
+      db = DatabaseFile.open(path);
     }
     e.nowMs = clock;
   }
@@ -213,8 +217,19 @@ class _Run {
         final s = snaps.remove(j['id']) ?? (throw ArgumentError('invalid log'));
         snapModels.remove(j['id']);
         e.release(s);
-      case 'commit' || 'checkpoint':
-        e.commit(); // ponytail: durability is recorded as `none` either way (no file under it)
+      case 'commit':
+        e.commit(
+            durability: switch (j['d']) {
+          'none' => Durability.none,
+          'os' => Durability.os,
+          'sync' => Durability.sync,
+          _ => Durability.full,
+        });
+      case 'checkpoint':
+        e.flush();
+        e.commit(durability: Durability.full);
+      case 'gc':
+        if (snaps.isEmpty) e.collect(); // as Rust and Java: not under a snapshot
       case 'compact':
         e.compact();
         e.collectWhileOverDebt(); // Rust's compact runs GC while over debt
@@ -309,6 +324,88 @@ String hop(List<String> lines, String db, int from, int to) {
   return d;
 }
 
+bool _durable(Map<String, dynamic> j) => switch (j['op']) {
+      'commit' => j['d'] == 'sync' || j['d'] == 'full',
+      'checkpoint' || 'reopen' => true,
+      _ => false,
+    };
+
+_Run _header(List<String> lines, String db) {
+  final h = jsonDecode(lines[0]) as Map<String, dynamic>;
+  final profile = switch (h['profile']) {
+    'mobile' => Profile.mobile,
+    'tablet' => Profile.tablet,
+    'server' => Profile.server,
+    _ => Profile.desktop,
+  };
+  return _Run(db, h['encrypted'] == true, profile, (h['trees'] as int?) ?? 1);
+}
+
+/// M2.2 child, as Rust's `oplog_check --child`: replays the log on [db],
+/// printing `ack N` (N the 1-based line) after every durable op. The parent
+/// (`tools/torture.py dart`) kills it with SIGKILL.
+void _tortureChild(List<String> lines, String db) {
+  final r = _header(lines, db)..create();
+  print('created'); // before this, a kill may leave a file that is not yet a database
+  r.history[0] = {};
+  // The harness's own control: acknowledge a commit that never ran.
+  final fault = Platform.environment['TORTURE_FAULT'] != null;
+  for (var n = 1; n < lines.length; n++) {
+    if (lines[n].trim().isEmpty) continue;
+    final j = jsonDecode(lines[n]) as Map<String, dynamic>;
+    if (!(fault && j['op'] == 'commit')) {
+      try {
+        r.step(j);
+      } catch (x) {
+        throw Diverged('line ${n + 1}: ${j['op']} — $x');
+      }
+    }
+    if (_durable(j)) print('ack ${n + 1}');
+  }
+  r.e.close();
+}
+
+/// M2.2 check after the kill, as Rust's `torture_check`: [db] opens, verify
+/// finds nothing but warnings, and its data equals the model after some line
+/// at or past [ack]. Returns that line.
+int _tortureCheck(List<String> lines, String db, int ack) {
+  final r = _header(lines, db);
+  try {
+    r.db = DatabaseFile.open(db, key: r.encrypted ? _key : null);
+  } catch (x) {
+    throw Diverged('open: $x');
+  }
+  try {
+    final bad = r.e
+        .verifyStructure()
+        .findings
+        .where((f) => f.kind != FindingClass.warning)
+        .toList();
+    if (bad.isNotEmpty) throw Diverged('verify: $bad');
+    final m = _header(lines, db);
+    var last = '';
+    for (var p = 1; p <= lines.length; p++) {
+      if (p > 1 && lines[p - 1].trim().isNotEmpty) {
+        _modelApply(m, jsonDecode(lines[p - 1]) as Map<String, dynamic>);
+      }
+      if (p < ack) continue;
+      r
+        ..model = _copy(m.model)
+        ..clock = m.clock;
+      r.e.nowMs = m.clock;
+      try {
+        r.digestCheck();
+        return p;
+      } on Diverged catch (x) {
+        last = x.message;
+      }
+    }
+    throw Diverged('matches no state at or after line $ack; last: $last');
+  } finally {
+    r.e.close(flushMemtable: false);
+  }
+}
+
 /// Replays one log; returns the digest or throws Diverged('line N: …').
 String replay(List<String> lines, Directory dir) {
   final h = jsonDecode(lines[0]) as Map<String, dynamic>;
@@ -324,6 +421,19 @@ String replay(List<String> lines, Directory dir) {
   if (f.existsSync()) f.deleteSync();
   final r = _Run(path, h['encrypted'] == true, profile, (h['trees'] as int?) ?? 1)..create();
   r.history[0] = {};
+  try {
+    return _replayOn(r, lines);
+  } finally {
+    try {
+      r.e.close(flushMemtable: false);
+    } catch (_) {
+      // a diverged engine may fail its close; the handle is released anyway
+    }
+    if (f.existsSync()) f.deleteSync();
+  }
+}
+
+String _replayOn(_Run r, List<String> lines) {
   for (var n = 1; n < lines.length; n++) {
     if (lines[n].trim().isEmpty) continue;
     final j = jsonDecode(lines[n]) as Map<String, dynamic>;
@@ -340,8 +450,6 @@ String replay(List<String> lines, Directory dir) {
     return r.digestCheck();
   } on Diverged catch (x) {
     throw Diverged('end: $x');
-  } finally {
-    if (f.existsSync()) f.deleteSync();
   }
 }
 
@@ -366,7 +474,28 @@ void _replayAll(List<File> files) {
   expect(fails, isEmpty, reason: '${fails.length}/${files.length} logs diverge:\n${fails.join('\n')}');
 }
 
-void main() {
+/// `dart compile exe test/oplog_check_test.dart` gives the M2.2 child and
+/// checker (`--child LOG DB`, `--after-kill LOG DB ACK`); with no arguments
+/// it is the test suite.
+void main([List<String> args = const []]) {
+  if (args.isNotEmpty) {
+    final lines = File(args[1]).readAsLinesSync();
+    try {
+      if (args[0] == '--child') {
+        _tortureChild(lines, args[2]);
+        print('done');
+      } else if (args[0] == '--after-kill') {
+        print('ok state after line '
+            '${_tortureCheck(lines, args[2], int.parse(args[3]))}');
+      } else {
+        throw ArgumentError('unknown mode ${args[0]}');
+      }
+    } catch (x) {
+      print('FAIL $x');
+      exit(1);
+    }
+    exit(0);
+  }
   test('value bytes match the Rust vector', () {
     final b = ByteData(8)..setUint64(0, 0xE220A8397B1DCDAF, Endian.little);
     expect(valueBytes(8, 0), b.buffer.asUint8List());
