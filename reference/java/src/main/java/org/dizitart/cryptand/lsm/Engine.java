@@ -105,8 +105,9 @@ public final class Engine implements AutoCloseable {
          * and copying: a surviving {@code byte[]} is relocated between spaces,
          * and every relocation leaves the old bytes in a region the program can
          * no longer name and therefore cannot overwrite. {@link Engine#close}
-         * zeroes the master key and every subkey, and this array should be
-         * zeroed by the caller once the database is open — but a copy the
+         * zeroes the master key and every subkey, and every entry point that
+         * takes this array zeroes it before returning, on success or failure —
+         * so pass a fresh copy to each call. But a copy the
          * program never sees cannot be zeroed by anyone. §11: "documenting it
          * is the requirement; achieving what the runtime forbids is not."
          *
@@ -116,7 +117,7 @@ public final class Engine implements AutoCloseable {
          * whatever protects the key file itself.
          */
         public byte[] password;
-        /** 32 bytes the host already holds — an OS keychain item, a hardware-backed key. */
+        /** 32 bytes the host already holds — an OS keychain item, a hardware-backed key. Not zeroed: the host owns it. */
         public byte[] rawKey;
         /** On create: encrypt the file. On open it is inferred from {@code cipher}. */
         public boolean encrypt;
@@ -375,7 +376,22 @@ public final class Engine implements AutoCloseable {
     // open and create
     // ==================================================================
 
+    /** §11: a password parameter is zeroed after use, on every exit path. Raw keys are the host's (a keychain item) and are left alone. */
+    public static void wipe(byte[] password) {
+        if (password != null) {
+            java.util.Arrays.fill(password, (byte) 0);
+        }
+    }
+
     public static Engine create(Path path, Options options) {
+        try {
+            return create0(path, options);
+        } finally {
+            wipe(options.password);
+        }
+    }
+
+    private static Engine create0(Path path, Options options) {
         if (Files.exists(path) && sizeOf(path) > 0) {
             throw new InvalidArgumentException(path + " already exists; use open");
         }
@@ -460,6 +476,14 @@ public final class Engine implements AutoCloseable {
     }
 
     public static Engine open(Path path, Options options) {
+        try {
+            return open0(path, options);
+        } finally {
+            wipe(options.password);
+        }
+    }
+
+    private static Engine open0(Path path, Options options) {
         PageFile file = new PageFile(path, options.readOnly, options.durability);
         try {
             return openLocked(file, options);
@@ -492,6 +516,9 @@ public final class Engine implements AutoCloseable {
                 byte[] macKey = cipher.macKey();
                 try {
                     Superblock.verifyMac(macKey, image[0]);
+                } catch (RuntimeException x) {
+                    cipher.close(); // M4.5: a tampered superblock leaves no subkey behind
+                    throw x;
                 } finally {
                     java.util.Arrays.fill(macKey, (byte) 0);
                 }
@@ -533,47 +560,56 @@ public final class Engine implements AutoCloseable {
                         "a key was supplied but the file is not encrypted");
             }
         }
-        // §2.1 step 5, on the chosen slot and after step 4's MAC (F-129).
-        sb.checkFeatures();
-        if (!options.readOnly) {
-            sb.durabilityAchieved = file.achieved();
-            // `writer_id` names the SDK that created the file and is left
-            // alone here. Who has since modified it is `05-catalog.md` §7's
-            // `writers` list, which accumulates rather than replaces - and
-            // which is the field worth looking at first when a file handed
-            // between SDKs misbehaves. Overwriting the superblock field on
-            // every open would destroy the only record of where the file came
-            // from and give the accumulating list nothing to accumulate.
-        }
-        Pager pager = new Pager(file, sb.pageSize(), sb.pageCount, sb.commitId, sb.minRetainedCommit);
-        // `12-profiles.md` §1's page cache budget. Until this line the row was
-        // a decoration in every implementation: declared and unread in Rust,
-        // absent here, and this pager read through to the file on every page.
-        pager.pageCacheBytes(options.profile.pageCacheBytes());
-        Engine e = new Engine(file, pager, sb, options);
-        if (cipher != null) {
-            e.installCipher(cipher);
-        }
-        e.loadTrees();
-        if (!options.readOnly) {
-            // 10 §4: a value-log segment a previous session left open is sealed
-            // at its last durable watermark and new writes go to a fresh
-            // segment. Encrypted, re-appending would reuse a nonce; the rule is
-            // unconditional because a rule that applies sometimes gets
-            // implemented wrong.
-            e.vlog.sealOrphans();
-            e.startCommitter();
-            if (e.cipher != null) {
-                e.cipher.attach(e::publishNonceFloor);
+        // M4.5, 14 §11: from here on the cipher holds every subkey; a failed
+        // open zeroes them rather than leaving them to the collector.
+        try {
+            // §2.1 step 5, on the chosen slot and after step 4's MAC (F-129).
+            sb.checkFeatures();
+            if (!options.readOnly) {
+                sb.durabilityAchieved = file.achieved();
+                // `writer_id` names the SDK that created the file and is left
+                // alone here. Who has since modified it is `05-catalog.md` §7's
+                // `writers` list, which accumulates rather than replaces - and
+                // which is the field worth looking at first when a file handed
+                // between SDKs misbehaves. Overwriting the superblock field on
+                // every open would destroy the only record of where the file came
+                // from and give the accumulating list nothing to accumulate.
             }
-            try {
-                e.commitNow();
-            } catch (java.io.UncheckedIOException full) {
-                // F-094: housekeeping (sealed orphans), not data. On a full
-                // device the committer publishes it once there is room.
+            Pager pager = new Pager(file, sb.pageSize(), sb.pageCount, sb.commitId, sb.minRetainedCommit);
+            // `12-profiles.md` §1's page cache budget. Until this line the row was
+            // a decoration in every implementation: declared and unread in Rust,
+            // absent here, and this pager read through to the file on every page.
+            pager.pageCacheBytes(options.profile.pageCacheBytes());
+            Engine e = new Engine(file, pager, sb, options);
+            if (cipher != null) {
+                e.installCipher(cipher);
             }
+            e.loadTrees();
+            if (!options.readOnly) {
+                // 10 §4: a value-log segment a previous session left open is sealed
+                // at its last durable watermark and new writes go to a fresh
+                // segment. Encrypted, re-appending would reuse a nonce; the rule is
+                // unconditional because a rule that applies sometimes gets
+                // implemented wrong.
+                e.vlog.sealOrphans();
+                e.startCommitter();
+                if (e.cipher != null) {
+                    e.cipher.attach(e::publishNonceFloor);
+                }
+                try {
+                    e.commitNow();
+                } catch (java.io.UncheckedIOException full) {
+                    // F-094: housekeeping (sealed orphans), not data. On a full
+                    // device the committer publishes it once there is room.
+                }
+            }
+            return e;
+        } catch (RuntimeException x) {
+            if (cipher != null) {
+                cipher.close();
+            }
+            throw x;
         }
-        return e;
     }
 
     /**
@@ -4192,6 +4228,14 @@ public final class Engine implements AutoCloseable {
 
     /** §5: add a keyslot. One superblock write; the master key is unchanged. */
     public void addKey(byte[] password, byte[] rawKey, String label) {
+        try {
+            addKey0(password, rawKey, label);
+        } finally {
+            wipe(password);
+        }
+    }
+
+    private void addKey0(byte[] password, byte[] rawKey, String label) {
         requireEncrypted();
         structure.lock();
         try {
@@ -4308,6 +4352,14 @@ public final class Engine implements AutoCloseable {
      * what is still plaintext. Exactly one of {@code password}, {@code rawKey}.
      */
     public void encrypt(byte[] password, byte[] rawKey) {
+        try {
+            encrypt0(password, rawKey);
+        } finally {
+            wipe(password);
+        }
+    }
+
+    private void encrypt0(byte[] password, byte[] rawKey) {
         if ((password == null) == (rawKey == null)) {
             throw new InvalidArgumentException("encrypt() takes a password or a raw key, not both or neither");
         }
@@ -4699,6 +4751,14 @@ public final class Engine implements AutoCloseable {
     // checkpoints exist, as in Rust's rotate.rs; step it when large files need
     // rotating online.
     public static Engine rotateMasterKey(Engine e, byte[] password, byte[] rawKey) {
+        try {
+            return rotateMasterKey0(e, password, rawKey);
+        } finally {
+            wipe(password);
+        }
+    }
+
+    private static Engine rotateMasterKey0(Engine e, byte[] password, byte[] rawKey) {
         if ((password == null) == (rawKey == null)) {
             throw new InvalidArgumentException("rotateMasterKey() takes a password or a raw key, not both or neither");
         }
@@ -4966,9 +5026,9 @@ public final class Engine implements AutoCloseable {
         }
     }
 
+    /** M4.5: from the live cipher; the session never keeps the caller's password. */
     private byte[] currentMasterKey() {
-        return FileCipher.unwrap(Keyslot.decodeAll(sb.keyslots), sb.databaseUuid,
-                options.password, options.rawKey);
+        return cipher.masterKey();
     }
 
     // ==================================================================

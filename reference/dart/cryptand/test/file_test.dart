@@ -18,12 +18,62 @@ String tmp(String tag) {
   return '${d.path}/db.cryptand';
 }
 
-Database fresh({int memtableEntries = 200}) => Database(
-    engine: Engine(memtableEntries: memtableEntries, vlogMin: 256));
+Database fresh({int memtableEntries = 200}) =>
+    Database(engine: Engine(memtableEntries: memtableEntries, vlogMin: 256));
 
 void main() {
   encryptionTests();
   lockTests();
+  test('M4.5 / 14 section 11: the credential is zeroed and never in error text',
+      () {
+    const marker = 'M45-marker-pw-7c1f';
+    Uint8List pw() => Uint8List.fromList(marker.codeUnits);
+    bool wiped(List<int> b) => b.every((x) => x == 0);
+    final texts = <String>[];
+    final path = tmp('m45');
+    final c = pw();
+    final db = DatabaseFile.create(path,
+        credential: c, tCost: 2, mCostKib: 16384, profile: Profile.desktop);
+    expect(wiped(c), isTrue, reason: 'create left the credential');
+    DatabaseFile.save(db, path);
+    texts.add(db.toString());
+
+    final wrong = Uint8List.fromList('${marker}x'.codeUnits);
+    try {
+      DatabaseFile.open(path, key: wrong);
+      fail('a wrong password opened the file');
+    } on CannotUnlockException catch (e, st) {
+      texts
+        ..add(e.toString())
+        ..add(st.toString());
+    }
+    expect(wiped(wrong), isTrue, reason: 'a failed open left the credential');
+
+    final ok = pw();
+    final back = DatabaseFile.open(path, key: ok);
+    expect(wiped(ok), isTrue, reason: 'open left the credential');
+    texts.add(back.toString());
+    final ro = pw();
+    DatabaseFile.openReadOnly(path, key: ro);
+    expect(wiped(ro), isTrue, reason: 'openReadOnly left the credential');
+
+    final plain = tmp('m45-plain');
+    DatabaseFile.save(fresh(), plain);
+    try {
+      DatabaseFile.open(plain, key: pw());
+    } catch (e, st) {
+      texts
+        ..add(e.toString())
+        ..add(st.toString());
+    }
+
+    final hex = pw().map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    for (final t in texts) {
+      expect(t.contains(marker) || t.toLowerCase().contains(hex), isFalse,
+          reason: 'secret in: $t');
+    }
+  });
+
   test('a database round-trips through a file', () {
     final path = tmp('roundtrip');
     final db = fresh();
@@ -75,7 +125,8 @@ void main() {
     final next = bd.getUint64(nextVlogSegmentId, Endian.little) + 5;
     for (final slot in [0, 4096]) {
       bd.setUint64(slot + nextVlogSegmentId, next, Endian.little);
-      bd.setUint32(slot + checksum, crc32c(b, slot, slot + checksum), Endian.little);
+      bd.setUint32(
+          slot + checksum, crc32c(b, slot, slot + checksum), Endian.little);
     }
     File(path).writeAsBytesSync(b, flush: true);
     final back = DatabaseFile.open(path);
@@ -111,8 +162,7 @@ void main() {
   test('the value-log head page is a page: header, type and checksum', () {
     final path = tmp('vloghead');
     final db = fresh();
-    db.engine
-        .put(t, CNitriteId(1), Uint8List(4000)..fillRange(0, 4000, 3));
+    db.engine.put(t, CNitriteId(1), Uint8List(4000)..fillRange(0, 4000, 3));
     db.engine.flush();
     DatabaseFile.save(db, path);
 
@@ -121,8 +171,8 @@ void main() {
         Uint8List.sublistView(bytes, 4096, 4096 + Sb.size));
     var found = 0;
     for (var p = 2; p < sb.pageCount; p++) {
-      final page = Uint8List.sublistView(
-          bytes, p * sb.pageSize, (p + 1) * sb.pageSize);
+      final page =
+          Uint8List.sublistView(bytes, p * sb.pageSize, (p + 1) * sb.pageSize);
       if (page[4] != PageType.vlogSegment) continue;
       // Reading it verifies the checksum, which is the point: without a page
       // header a repair pass scanning for VLOG_SEGMENT pages
@@ -257,10 +307,8 @@ void main() {
     expect(back.engine.vlog.segments.length, lessThan(placed),
         reason: 'a placed segment was collected');
     DatabaseFile.save(back, path);
-    final leaks = DatabaseFile.open(path)
-        .engine
-        .verifyStructure()
-        .of(FindingClass.leak);
+    final leaks =
+        DatabaseFile.open(path).engine.verifyStructure().of(FindingClass.leak);
     expect(leaks, isEmpty, reason: leaks.join('\n'));
   });
 
@@ -282,7 +330,8 @@ void main() {
     }
     DatabaseFile.save(db, path);
     expect(db.engine.store.freedPages, greaterThan(0),
-        reason: 'copy-on-write orphaned pages, so there is a free tree to write');
+        reason:
+            'copy-on-write orphaned pages, so there is a free tree to write');
 
     final back = DatabaseFile.open(path);
     expect(back.engine.store.freeExtents, isNotEmpty,
@@ -362,7 +411,8 @@ void encryptionTests() {
     // identically for a missing keyslot and a wrong key.
     expect(() => DatabaseFile.open(path, key: List.filled(32, 8)),
         throwsA(isA<CannotUnlockException>()));
-    expect(() => DatabaseFile.open(path), throwsA(isA<CannotUnlockException>()));
+    expect(
+        () => DatabaseFile.open(path), throwsA(isA<CannotUnlockException>()));
   });
 
   test('no inline value or key survives in the clear', () {
@@ -395,7 +445,8 @@ void encryptionTests() {
       expect(hits, 0, reason: '"$needle" is on disk in the clear');
     }
     final back = DatabaseFile.open(path, key: key);
-    expect(String.fromCharCodes(back.engine.get(t, const CStr('KEYNEEDLE-0007'))!),
+    expect(
+        String.fromCharCodes(back.engine.get(t, const CStr('KEYNEEDLE-0007'))!),
         'VALUENEEDLE');
   });
 
@@ -498,7 +549,8 @@ void encryptionTests() {
     // the MAC.
     final path = tmp('tamper');
     final db = DatabaseFile.create(path, credential: key, kdf: Keyslot.kdfRaw);
-    db.engine.put(t, const CNitriteId(1), Uint8List.fromList('secret'.codeUnits));
+    db.engine
+        .put(t, const CNitriteId(1), Uint8List.fromList('secret'.codeUnits));
     db.engine.flush();
     DatabaseFile.save(db, path);
 

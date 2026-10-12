@@ -258,6 +258,11 @@ public final class FileCipher implements PageCrypto, AutoCloseable {
     // §6 the superblock MAC
     // ==================================================================
 
+    /** A copy of the master key; the caller zeroes it. */
+    public byte[] masterKey() {
+        return masterKey.clone();
+    }
+
     public byte[] macKey() {
         return macKey.clone();
     }

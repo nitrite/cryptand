@@ -466,6 +466,14 @@ public final class Database implements AutoCloseable {
      * confidentiality boundary: whoever opened the file has the master key.
      */
     public void addUser(String username, byte[] password, Profile costProfile) {
+        try {
+            addUser0(username, password, costProfile);
+        } finally {
+            Engine.wipe(password);
+        }
+    }
+
+    private void addUser0(String username, byte[] password, Profile costProfile) {
         if (engine.superblock().cipher == Superblock.Cipher.NONE) {
             System.getLogger(Database.class.getName()).log(System.Logger.Level.WARNING,
                     "a user was created on an unencrypted database; this is role separation, "
@@ -499,6 +507,14 @@ public final class Database implements AutoCloseable {
 
     /** Constant-time comparison — §8 requires it, and a byte-by-byte compare is an oracle. */
     public boolean authenticate(String username, byte[] password) {
+        try {
+            return authenticate0(username, password);
+        } finally {
+            Engine.wipe(password);
+        }
+    }
+
+    private boolean authenticate0(String username, byte[] password) {
         byte[] raw;
         engine.lockStructure();
         try {

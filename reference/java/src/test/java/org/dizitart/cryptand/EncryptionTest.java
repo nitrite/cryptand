@@ -445,4 +445,72 @@ class EncryptionTest {
         }
         assertEquals((long) threads * each, c.allocatedCount());
     }
+
+    private static final String MARKER = "M45-marker-pw-7c1f";
+
+    private static byte[] marker() {
+        return MARKER.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static boolean wiped(byte[] b) {
+        for (byte x : b) if (x != 0) return false;
+        return true;
+    }
+
+    private static void collect(List<String> texts, Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            texts.add(c.toString());
+            for (StackTraceElement el : c.getStackTrace()) texts.add(el.toString());
+        }
+    }
+
+    @Test
+    @DisplayName("M4.5 / 14 §11: every entry point zeroes the password, and no error text carries it")
+    void passwordIsWipedAndNeverInErrorText(@TempDir Path dir) throws Exception {
+        Path f = dir.resolve("m45.cryptand");
+        Path plain = dir.resolve("plain.cryptand");
+        List<String> texts = new ArrayList<>();
+        byte[] pw = marker();
+        Engine.Options o = new Engine.Options();
+        o.profile = Profile.DESKTOP;
+        o.encrypt = true;
+        o.password = pw;
+        try (Engine e = Engine.create(f, o)) {
+            texts.add(e.toString());
+            texts.add(o.toString());
+        }
+        assertTrue(wiped(pw), "create left the password");
+
+        byte[] wrong = (MARKER + "x").getBytes(StandardCharsets.UTF_8);
+        Engine.Options w = new Engine.Options();
+        w.password = wrong;
+        collect(texts, assertThrows(CannotUnlockException.class, () -> Engine.open(f, w)));
+        assertTrue(wiped(wrong), "a failed open left the password");
+
+        Engine.Options ok = new Engine.Options();
+        ok.password = marker();
+        try (Engine e = Engine.open(f, ok)) {
+            assertTrue(wiped(ok.password), "open left the password");
+            byte[] extra = marker();
+            e.addKey(extra, null, "second");
+            assertTrue(wiped(extra), "addKey left the password");
+            byte[] again = marker();
+            collect(texts, assertThrows(RuntimeException.class, () -> e.encrypt(again, null)));
+            assertTrue(wiped(again), "a refused encrypt left the password");
+            texts.add(e.toString());
+        }
+
+        Engine.create(plain, new Engine.Options()).close();
+        Engine.Options p = new Engine.Options();
+        p.password = marker();
+        collect(texts, assertThrows(RuntimeException.class, () -> Engine.open(plain, p)));
+        assertTrue(wiped(p.password), "open of a plaintext file left the password");
+
+        StringBuilder hb = new StringBuilder();
+        for (byte b : marker()) hb.append(String.format("%02x", b));
+        String hex = hb.toString();
+        for (String t : texts) {
+            assertFalse(t.contains(MARKER) || t.toLowerCase().contains(hex), "secret in: " + t);
+        }
+    }
 }

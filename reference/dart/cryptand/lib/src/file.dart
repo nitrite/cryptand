@@ -92,8 +92,7 @@ abstract final class DatabaseFile {
       }
       final start = store.allocExtent(seg.pageCount);
       store.writeExtent(start, seg.extent);
-      placed.add(
-          _withPlacement(ref, start, seg.pageCount, store.writtenNonce));
+      placed.add(_withPlacement(ref, start, seg.pageCount, store.writtenNonce));
       moved = true;
     }
 
@@ -276,34 +275,39 @@ abstract final class DatabaseFile {
     uuid[8] = (uuid[8] & 0x3F) | 0x80;
     final master = randomBytes(32);
     final salt = randomBytes(32);
-    final slot = wrapMasterKey(
-      masterKey: master,
-      kek: kdf == Keyslot.kdfRaw
-          ? Uint8List.fromList(credential)
-          : deriveKek(
-              slot: Keyslot(
-                state: Keyslot.occupied,
-                kdf: kdf,
-                tCost: tCost,
-                mCostKib: mCostKib,
-                parallelism: parallelism,
-                salt: salt,
-                wrapNonce: Uint8List(24),
-                wrappedKey: Uint8List(32),
-                wrapTag: Uint8List(16),
-                label: label,
-              ),
-              password: credential),
-      databaseUuid: uuid,
-      slotIndex: 0,
-      wrapNonce: randomBytes(24),
-      salt: salt,
-      kdf: kdf,
-      tCost: tCost,
-      mCostKib: mCostKib,
-      parallelism: parallelism,
-      label: label,
-    );
+    final Keyslot slot;
+    try {
+      slot = wrapMasterKey(
+        masterKey: master,
+        kek: kdf == Keyslot.kdfRaw
+            ? Uint8List.fromList(credential)
+            : deriveKek(
+                slot: Keyslot(
+                  state: Keyslot.occupied,
+                  kdf: kdf,
+                  tCost: tCost,
+                  mCostKib: mCostKib,
+                  parallelism: parallelism,
+                  salt: salt,
+                  wrapNonce: Uint8List(24),
+                  wrappedKey: Uint8List(32),
+                  wrapTag: Uint8List(16),
+                  label: label,
+                ),
+                password: credential),
+        databaseUuid: uuid,
+        slotIndex: 0,
+        wrapNonce: randomBytes(24),
+        salt: salt,
+        kdf: kdf,
+        tCost: tCost,
+        mCostKib: mCostKib,
+        parallelism: parallelism,
+        label: label,
+      );
+    } finally {
+      if (kdf != Keyslot.kdfRaw) _wipe(credential);
+    }
     final keyslots = Uint8List(Sb.keyslotSize * Sb.keyslotCount)
       ..setRange(0, Keyslot.size, slot.encode());
 
@@ -432,6 +436,19 @@ abstract final class DatabaseFile {
   static Database openReadOnly(String path, {List<int>? key}) =>
       _open(path, key, readOnly: true);
 
+  /// `14-security.md` §11: a password is zeroed after use, on every exit
+  /// path. A raw key belongs to the host (a keystore item) and is left alone,
+  /// as in Java.
+  static void _wipe(List<int>? credential) {
+    if (credential == null) return;
+    try {
+      credential.fillRange(0, credential.length, 0);
+    } on UnsupportedError {
+      // ponytail: a const or unmodifiable list cannot be zeroed; §11 asks the
+      // caller for a mutable one, and the README says so.
+    }
+  }
+
   /// `spec/01-container.md` §10 — "one writing **process** per database,
   /// enforced by an exclusive lock on the single byte at offset 2^62 of the
   /// database file (`fcntl` / `LockFileEx`) held for its writing lifetime", and "a second
@@ -466,7 +483,8 @@ abstract final class DatabaseFile {
       throw const CorruptionException('file is shorter than two superblocks');
     }
     // §2.1 steps 1–3, and the page size is not known until slot A is read.
-    final probe = Superblock.tryDecode(Uint8List.sublistView(bytes, 0, Sb.size));
+    final probe =
+        Superblock.tryDecode(Uint8List.sublistView(bytes, 0, Sb.size));
     // F-069: with slot A invalid the page size is unknown, and slot B sits at
     // offset page_size. Try every legal size (page_size_log2 12..16) and take
     // a slot only where its own page size names the offset it was found at.
@@ -480,7 +498,8 @@ abstract final class DatabaseFile {
         if (bytes.length < size + Sb.size) continue;
         final b = Superblock.tryDecode(
             Uint8List.sublistView(bytes, size, size + Sb.size));
-        if (b != null && b.pageSize == size &&
+        if (b != null &&
+            b.pageSize == size &&
             (best == null || b.commitId > best.commitId)) {
           best = b;
           pageSize = size;
@@ -497,7 +516,8 @@ abstract final class DatabaseFile {
     // §3 of `spec/11-conformance.md`: an unknown bit in `features_required`
     // is a refusal, named.
     for (var b = 0; b < 64; b++) {
-      if (sb.featuresRequired & (1 << b) != 0 && !Feature.names.containsKey(b)) {
+      if (sb.featuresRequired & (1 << b) != 0 &&
+          !Feature.names.containsKey(b)) {
         throw UnsupportedFeatureException(
             'this file requires unknown feature bit $b');
       }
@@ -524,172 +544,186 @@ abstract final class DatabaseFile {
       ring = KeyRing(master, Uint8List.fromList(sb.databaseUuid));
       // §6.2 — verify `sb_mac` before acting on any other field, so an
       // attacker cannot set `cipher = 0` or weaken an Argon2id cost.
-      verifySuperblockMac(ring.macKey, sb.encode());
-    }
-    // §2.1 step 7: ignore everything at or beyond `page_count` — debris from
-    // an interrupted commit.
-    final used = sb.pageCount * sb.pageSize;
-    final store = PageStore.fromBytes(
-        Uint8List.sublistView(bytes, 0, used > bytes.length ? bytes.length : used),
-        pageSize: sb.pageSize)
-      // `01-container.md` §7 — the codec is a *default* for newly written
-      // pages and comes from the file, not from this build's profile, so a
-      // desktop that opens a phone's database keeps writing the codec the
-      // phone chose. It has to be set before the first page is read, because
-      // an already-compressed page is decompressed on the way out.
-      ..pageCodec = sb.pageCodec;
-
-    final e = Engine(
-      pageSize: sb.pageSize,
-      vlogMin: sb.vlogMin,
-      levels: LevelPolicy(
-        l0Trigger: sb.l0Trigger,
-        tierWidth: sb.tierWidth,
-        overlapBound: sb.overlapBound,
-        levelCount: sb.levelCount,
-      ),
-      vlogSpaceTargetPct: sb.vlogSpaceTargetPct,
-      localityDebtPct: sb.localityDebtPct,
-      vlogSegmentBytes: sb.vlogSegmentBytes,
-      store: store,
-      manifestRoot: sb.manifestRoot,
-      freelistRoot: sb.freelistRoot,
-      checkpointRoot: sb.checkpointRoot,
-      changefeedRoot: sb.changefeedRoot,
-      rootNonces: sb.rootNonces,
-    );
-    e
-      ..databaseUuid = Uint8List.fromList(sb.databaseUuid)
-      ..restoreCounters(
-        nextSeq: sb.nextSeq,
-        nextSegmentId: sb.nextSegmentId,
-        visibleSeq: sb.visibleSeq,
-        commitId: sb.commitId,
-      );
-    if (!e.writers.contains(sb.writerId)) e.writers.add(sb.writerId);
-    // §6: `page_size` is fixed at creation, so a name whose page size does not
-    // match this file is advisory metadata that cannot be adopted; the values
-    // in the superblock are what the engine already runs on.
-    if (sb.profile.pageSize == sb.pageSize) e.setProfile(sb.profile);
-    e.durabilityAchieved = Durability.fromCode(sb.durabilityAchieved);
-    e.superblock = sb;
-    _keyslots[e] = Uint8List.fromList(sb.keyslots);
-
-    if (ring != null) {
-      // §4.1 rule 1: "on open, before allocating anything, a writer MUST
-      // durably publish a superblock whose `next_nonce` is
-      // `persisted_next_nonce + 2^20`." Rule 1 is what makes the watermark
-      // move even for a session that writes nothing else; without it two
-      // successive crashed sessions both start at W and hand out the same
-      // values. It is published *here*, before the segments below are read
-      // and long before anything is written.
-      // A read-only handle publishes no floor because it allocates no nonce;
-      // see `openReadOnly`. `NonceAllocator.readOnly` hands out nothing, so
-      // the absence of a floor cannot turn into a reused nonce.
-      e.installKeys(
-          ring,
-          readOnly
-              ? NonceAllocator.readOnly(sb.nextNonce)
-              : NonceAllocator.open(sb.nextNonce,
-                  (floor) => _publishNonceFloor(path, sb, ring, floor)));
-    }
-
-    // §6: the free tree, read back so this session reuses space rather than
-    // extending the file for ever. Read before the segment extents so that
-    // nothing has allocated yet.
-    if (sb.freelistRoot != 0) {
-      final extents = <FreeExtent>[];
-      for (final (k, v) in e.freelist.scan()) {
-        // F-118: narrowed, so a hostile entry is corruption, not a TypeError.
-        final a = expectValue<CArray>(decodeKey(k), 'free-list key');
-        if (a.items.length < 2) {
-          throw const CorruptionException(
-              'free-list key has fewer than two parts');
-        }
-        final d = expectValue<CDoc>(decodeValue(v), 'free-list entry');
-        extents.add(FreeExtent(
-          expectValue<CInt>(a.items[0], 'free-list key').magnitude.lo,
-          expectValue<CInt>(a.items[1], 'free-list key').magnitude.lo,
-          expectField<CInt>(d, 'pages', 'free-list entry').magnitude.lo,
-        ));
-      }
-      store.loadFree(extents);
-    }
-
-    // Segment extents, addressed by the manifest's `start_page`/`pages`.
-    for (final ref in e.manifest.all) {
-      if (ref.pages == 0) {
-        throw CorruptionException(
-            'manifest entry for segment ${ref.segmentId} has no extent');
-      }
-      e.extents[ref.segmentId] = Segment(
-          store.readSegment(ref.startPage, ref.pages, ref.nonce), sb.pageSize);
-    }
-
-    // Value-log segments, from tree 7.
-    final stats = CowTree(store,
-        treeId: TreeId.vlogStats,
-        root: sb.vlogStatsRoot,
-        rootNonce: sb.rootNonces[4]);
-    e.outerTrees['tree 7'] = stats;
-    for (final (k, v) in stats.scan()) {
-      final int id;
-      final VlogSegment seg;
-      // 14 §9.1 (F-117, as F-110): a stats entry of the wrong shape is
-      // corruption, not a `TypeError`.
       try {
-        id = ((decodeKey(k) as CInt).magnitude).lo;
-        final d = decodeValue(v) as CDoc;
-        int u(String f) => ((d[f]! as CInt).magnitude).lo;
-        bool b(String f) => (d[f] as CBool?)?.value ?? false;
-        Uint8List? by(String f) => (d[f] as CBytes?)?.value;
-        final extent = store.readExtentClear(u('start_page'), u('pages'));
-        seg = VlogSegment.fromExtent(
-          extent,
-          sb.pageSize,
-          bytes: u('bytes'),
-          records: u('records'),
-          sealed: b('sealed'),
-          clustered: b('clustered'),
-          minKey: by('min_key'),
-          maxKey: by('max_key'),
-          liveBytes: u('live_bytes'),
-          liveRecords: u('live_records'),
-        )..startPage = u('start_page');
-      } on TypeError catch (e) {
-        throw CorruptionException('value-log stats entry has the wrong shape: $e');
+        verifySuperblockMac(ring.macKey, sb.encode());
+      } catch (_) {
+        ring.destroy();
+        rethrow;
       }
-      // §4.3 of `spec/14-security.md` and §4 of `spec/10-transactions.md`: on
-      // open, every unsealed value-log segment is sealed at its durable
-      // watermark and a fresh segment is opened for new writes. Unencrypted
-      // that is housekeeping; encrypted, re-appending would reuse a nonce.
-      if (!seg.sealed) seg.seal(claimClustered: seg.clustered);
-      if (seg.id != id) {
-        // §11 invariant 8b: a head page and a tree-7 entry that disagree on
-        // `segment_id` is corruption.
-        throw CorruptionException(
-            'value-log head page says segment ${seg.id}, tree 7 says $id');
-      }
-      e.vlog.adopt(seg);
     }
-    // F-045: ids are "globally unique, never reused" (04 §2.1). A collected
-    // segment has no tree-7 entry, so the highest adopted id can be below the
-    // superblock's counter, and reusing one gives a dead pointer a new record.
-    e.vlog.reserveIdsBelow(sb.nextVlogSegmentId);
+    // M4.5, 14 section 11: a failed open zeroes the ring it built.
+    try {
+      // §2.1 step 7: ignore everything at or beyond `page_count` — debris from
+      // an interrupted commit.
+      final used = sb.pageCount * sb.pageSize;
+      final store = PageStore.fromBytes(
+          Uint8List.sublistView(
+              bytes, 0, used > bytes.length ? bytes.length : used),
+          pageSize: sb.pageSize)
+        // `01-container.md` §7 — the codec is a *default* for newly written
+        // pages and comes from the file, not from this build's profile, so a
+        // desktop that opens a phone's database keeps writing the codec the
+        // phone chose. It has to be set before the first page is read, because
+        // an already-compressed page is decompressed on the way out.
+        ..pageCodec = sb.pageCodec;
 
-    // Trees 0, 2 and 3, rooted from the superblock like everything else.
-    return Database(
-      engine: e,
-      catalogRoot: sb.catalogRoot,
-      catalogNonce: sb.rootNonces[0],
-      attributesRoot: sb.attributesRoot,
-      attributesNonce: sb.rootNonces[2],
-      nextTreeId: sb.nextTreeId,
-      // §4 rule 2 of `spec/11-conformance.md`: a reopen preserves what the
-      // file holds, so it does not overwrite the store metadata another SDK
-      // wrote.
-      initStoreMetadata: false,
-    )..catalog.loadTreeIndex();
+      final e = Engine(
+        pageSize: sb.pageSize,
+        vlogMin: sb.vlogMin,
+        levels: LevelPolicy(
+          l0Trigger: sb.l0Trigger,
+          tierWidth: sb.tierWidth,
+          overlapBound: sb.overlapBound,
+          levelCount: sb.levelCount,
+        ),
+        vlogSpaceTargetPct: sb.vlogSpaceTargetPct,
+        localityDebtPct: sb.localityDebtPct,
+        vlogSegmentBytes: sb.vlogSegmentBytes,
+        store: store,
+        manifestRoot: sb.manifestRoot,
+        freelistRoot: sb.freelistRoot,
+        checkpointRoot: sb.checkpointRoot,
+        changefeedRoot: sb.changefeedRoot,
+        rootNonces: sb.rootNonces,
+      );
+      e
+        ..databaseUuid = Uint8List.fromList(sb.databaseUuid)
+        ..restoreCounters(
+          nextSeq: sb.nextSeq,
+          nextSegmentId: sb.nextSegmentId,
+          visibleSeq: sb.visibleSeq,
+          commitId: sb.commitId,
+        );
+      if (!e.writers.contains(sb.writerId)) e.writers.add(sb.writerId);
+      // §6: `page_size` is fixed at creation, so a name whose page size does not
+      // match this file is advisory metadata that cannot be adopted; the values
+      // in the superblock are what the engine already runs on.
+      if (sb.profile.pageSize == sb.pageSize) e.setProfile(sb.profile);
+      e.durabilityAchieved = Durability.fromCode(sb.durabilityAchieved);
+      e.superblock = sb;
+      _keyslots[e] = Uint8List.fromList(sb.keyslots);
+
+      if (ring != null) {
+        // §4.1 rule 1: "on open, before allocating anything, a writer MUST
+        // durably publish a superblock whose `next_nonce` is
+        // `persisted_next_nonce + 2^20`." Rule 1 is what makes the watermark
+        // move even for a session that writes nothing else; without it two
+        // successive crashed sessions both start at W and hand out the same
+        // values. It is published *here*, before the segments below are read
+        // and long before anything is written.
+        // A read-only handle publishes no floor because it allocates no nonce;
+        // see `openReadOnly`. `NonceAllocator.readOnly` hands out nothing, so
+        // the absence of a floor cannot turn into a reused nonce.
+        e.installKeys(
+            ring,
+            readOnly
+                ? NonceAllocator.readOnly(sb.nextNonce)
+                : NonceAllocator.open(sb.nextNonce,
+                    (floor) => _publishNonceFloor(path, sb, ring, floor)));
+      }
+
+      // §6: the free tree, read back so this session reuses space rather than
+      // extending the file for ever. Read before the segment extents so that
+      // nothing has allocated yet.
+      if (sb.freelistRoot != 0) {
+        final extents = <FreeExtent>[];
+        for (final (k, v) in e.freelist.scan()) {
+          // F-118: narrowed, so a hostile entry is corruption, not a TypeError.
+          final a = expectValue<CArray>(decodeKey(k), 'free-list key');
+          if (a.items.length < 2) {
+            throw const CorruptionException(
+                'free-list key has fewer than two parts');
+          }
+          final d = expectValue<CDoc>(decodeValue(v), 'free-list entry');
+          extents.add(FreeExtent(
+            expectValue<CInt>(a.items[0], 'free-list key').magnitude.lo,
+            expectValue<CInt>(a.items[1], 'free-list key').magnitude.lo,
+            expectField<CInt>(d, 'pages', 'free-list entry').magnitude.lo,
+          ));
+        }
+        store.loadFree(extents);
+      }
+
+      // Segment extents, addressed by the manifest's `start_page`/`pages`.
+      for (final ref in e.manifest.all) {
+        if (ref.pages == 0) {
+          throw CorruptionException(
+              'manifest entry for segment ${ref.segmentId} has no extent');
+        }
+        e.extents[ref.segmentId] = Segment(
+            store.readSegment(ref.startPage, ref.pages, ref.nonce),
+            sb.pageSize);
+      }
+
+      // Value-log segments, from tree 7.
+      final stats = CowTree(store,
+          treeId: TreeId.vlogStats,
+          root: sb.vlogStatsRoot,
+          rootNonce: sb.rootNonces[4]);
+      e.outerTrees['tree 7'] = stats;
+      for (final (k, v) in stats.scan()) {
+        final int id;
+        final VlogSegment seg;
+        // 14 §9.1 (F-117, as F-110): a stats entry of the wrong shape is
+        // corruption, not a `TypeError`.
+        try {
+          id = ((decodeKey(k) as CInt).magnitude).lo;
+          final d = decodeValue(v) as CDoc;
+          int u(String f) => ((d[f]! as CInt).magnitude).lo;
+          bool b(String f) => (d[f] as CBool?)?.value ?? false;
+          Uint8List? by(String f) => (d[f] as CBytes?)?.value;
+          final extent = store.readExtentClear(u('start_page'), u('pages'));
+          seg = VlogSegment.fromExtent(
+            extent,
+            sb.pageSize,
+            bytes: u('bytes'),
+            records: u('records'),
+            sealed: b('sealed'),
+            clustered: b('clustered'),
+            minKey: by('min_key'),
+            maxKey: by('max_key'),
+            liveBytes: u('live_bytes'),
+            liveRecords: u('live_records'),
+          )..startPage = u('start_page');
+        } on TypeError catch (e) {
+          throw CorruptionException(
+              'value-log stats entry has the wrong shape: $e');
+        }
+        // §4.3 of `spec/14-security.md` and §4 of `spec/10-transactions.md`: on
+        // open, every unsealed value-log segment is sealed at its durable
+        // watermark and a fresh segment is opened for new writes. Unencrypted
+        // that is housekeeping; encrypted, re-appending would reuse a nonce.
+        if (!seg.sealed) seg.seal(claimClustered: seg.clustered);
+        if (seg.id != id) {
+          // §11 invariant 8b: a head page and a tree-7 entry that disagree on
+          // `segment_id` is corruption.
+          throw CorruptionException(
+              'value-log head page says segment ${seg.id}, tree 7 says $id');
+        }
+        e.vlog.adopt(seg);
+      }
+      // F-045: ids are "globally unique, never reused" (04 §2.1). A collected
+      // segment has no tree-7 entry, so the highest adopted id can be below the
+      // superblock's counter, and reusing one gives a dead pointer a new record.
+      e.vlog.reserveIdsBelow(sb.nextVlogSegmentId);
+
+      // Trees 0, 2 and 3, rooted from the superblock like everything else.
+      return Database(
+        engine: e,
+        catalogRoot: sb.catalogRoot,
+        catalogNonce: sb.rootNonces[0],
+        attributesRoot: sb.attributesRoot,
+        attributesNonce: sb.rootNonces[2],
+        nextTreeId: sb.nextTreeId,
+        // §4 rule 2 of `spec/11-conformance.md`: a reopen preserves what the
+        // file holds, so it does not overwrite the store metadata another SDK
+        // wrote.
+        initStoreMetadata: false,
+      )..catalog.loadTreeIndex();
+    } catch (_) {
+      ring?.destroy();
+      rethrow;
+    }
   }
 
   /// §3.3 — tries the raw-key slots with [key] as 32 key bytes, then the
@@ -704,8 +738,12 @@ abstract final class DatabaseFile {
           databaseUuid: uuid);
       if (k != null) return k;
     }
-    return unlockWithPassword(
+    final m = unlockWithPassword(
         keyslotArea: sb.keyslots, password: key, databaseUuid: uuid);
+    // §11: zero it once it is known to be a password. A 32-byte credential
+    // that unlocked nothing may be the host's raw key, so it is left alone.
+    if (m != null || key.length != 32) _wipe(key);
+    return m;
   }
 
   /// §4.1's publish: the superblock, with the new floor, made durable before

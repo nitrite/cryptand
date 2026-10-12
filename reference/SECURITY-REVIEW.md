@@ -37,7 +37,7 @@ Status 2026-10-11: M4.1 complete; no `?` rows. Row 29's caller-array wipe and ro
 | 26 | 10 | credentials: Argon2id, per-record salt, hash only, constant-time verify | n/a (no user records) | `CollectionsTest.users` (salt, hash-only: F-124), `HostileUserRecordTest`; verify via `Security.constantTimeEquals` | n/a (no user records) |
 | 27 | 10 | user password not reused as keyslot password | n/a | independent random salts (rows 5, 26) | n/a |
 | 28 | 11 | master key and subkeys zeroed on close / drop | `a_key_ring_zeroes_itself_on_drop_and_not_only_on_close`, `secure_zero_clears_under_release_optimization` | `SecurityConformanceTest.closeZeroesEveryKey` (F-124) | "destroy zeroes every key" |
-| 29 | 11 | no password parameter of an immutable string type | n/a (`&[u8]`) | API takes `byte[]` (`Database.addUser`) | M4.5 |
+| 29 | 11 | no password parameter of an immutable string type; zeroed after use | n/a (`&[u8]`, borrowed) | `byte[]`; every entry point zeroes it on every exit: `EncryptionTest.passwordIsWipedAndNeverInErrorText` (fails reverted). The session no longer keeps the password: `addKey`/rotation take the master key from the cipher | `List<int>`; zeroed once used as a password (`create` with Argon2id, open via an Argon2id slot), raw keys left alone: `file_test` "M4.5" (fails reverted) |
 | 30 | 11 | document best-effort zeroing under a moving GC | n/a | doc: `java/README.md` (F-125) | doc: `dart/cryptand/README.md` (F-125) |
 | 31 | 11 | metadata carries no user name / device id | fixed product string | fixed default; `Options.writerId` documents the rule (F-125) | fixed default; `save(writerId:)` documents the rule (F-125) |
 | 32 | 11 | mlock is optional; never fail open without it | n/a (no mlock used) | n/a | n/a |
@@ -48,4 +48,4 @@ Status 2026-10-11: M4.1 complete; no `?` rows. Row 29's caller-array wipe and ro
 | 37 | 13 | key rotation | `key_rotation_leaves_only_the_new_credential_working` | `EncryptionTest.keyRotation` | M5 |
 | 38 | 13 | conversion round trip | `convert_test::encrypt_in_place…`, `decrypt_needs…` | `ConvertTest` | M5 |
 | 39 | 13 | cross-SDK encrypted round trip | `conformance/interop/run.sh` (encrypted, 12/12) | same | same |
-| 40 | 11 | never log a key, keyslot or password (errors, panics, trace) | M4.5 marker test | M4.5 | M4.5 |
+| 40 | 11 | never log a key, keyslot or password (errors, panics, trace) | `no_error_text_carries_the_credential` (Display + Debug; caught a seeded leak); `KeyRing` has no `Debug` | `EncryptionTest.passwordIsWipedAndNeverInErrorText` (messages, causes, stack frames, `toString`; caught a seeded leak) | `file_test` "M4.5" (messages, stack traces, `toString`) |

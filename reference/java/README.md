@@ -76,7 +76,10 @@ Apache License 2.0, see [LICENSE](LICENSE).
 ## Key material in memory
 
 Keys and subkeys live in `byte[]` and are zeroed on `close()`; passwords are
-taken as `byte[]`, never `String`. The JVM's garbage collector may copy an
+taken as `byte[]`, never `String`, and every call that takes one (`open`,
+`create`, `addKey`, `encrypt`, `rotateMasterKey`, `addUser`, `authenticate`)
+zeroes it before returning, on success or failure: pass a fresh copy each
+time. A raw key (`Options.rawKey`) belongs to the host and is not zeroed. The JVM's garbage collector may copy an
 array before it is zeroed, and a copy the program never sees cannot be wiped,
 so zeroing is **best-effort** (`spec/14-security.md` §11).
 

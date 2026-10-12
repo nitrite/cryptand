@@ -811,3 +811,48 @@ fn nonce_exhaustion_is_an_error_never_a_wrap() {
     }
     assert!(matches!(r, Err(Error::Invalid(_))), "64 writes fit in a window of 8 nonces: {r:?}");
 }
+
+/// M4.5, 14 §11: "never log a key … or a password — in an error message, or in
+/// a panic payload". A marker credential goes through every refusal; no
+/// `Display` or `Debug` text may carry it, raw or hex.
+#[test]
+fn no_error_text_carries_the_credential() {
+    const MARKER: &[u8; 32] = b"M45-marker-key-7c1f-0123456789ab";
+    let t = TempDb::new("m45");
+    let plain = TempDb::new("m45-plain");
+    {
+        let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+        let master = security::random_bytes::<32>();
+        let slot = make_keyslot(&master, &e.sb.database_uuid, 0, MARKER, 0, 0, 0, 0, "k").unwrap();
+        e.sb.keyslots[..keyslot::SIZE].copy_from_slice(&slot.encode());
+        e.sb.cipher = 1;
+        e.sb.set_feature(feature::CIPHER, true);
+        e.keys = Some(KeyRing::from_master(master, e.sb.database_uuid, 0));
+        e.commit(Durability::Sync).unwrap();
+    }
+    Engine::create(&plain.path, Profile::Desktop).unwrap();
+    let mut wrong = *MARKER;
+    wrong[31] ^= 1;
+    let mut texts = Vec::new();
+    for r in [
+        Engine::open(&t.path, Some(&wrong)).map(|_| ()),
+        Engine::open(&t.path, None).map(|_| ()),
+        Engine::open_read_only(&t.path, Some(&wrong)).map(|_| ()),
+    ] {
+        let e = r.expect_err("every one of these must be refused");
+        texts.push(format!("{e}"));
+        texts.push(format!("{e:?}"));
+    }
+    // F-137: Rust opens a plaintext file a key was supplied for (Java refuses).
+    if let Err(e) = Engine::open(&plain.path, Some(MARKER)) {
+        texts.push(format!("{e} {e:?}"));
+    }
+    // `KeyRing` has no `Debug` at all (14 §11's SHOULD), so it cannot leak here.
+    // A prefix: the wrong key differs from MARKER in its last byte.
+    let text = String::from_utf8_lossy(&MARKER[..20]).into_owned();
+    let hex: String = MARKER[..20].iter().map(|b| format!("{b:02x}")).collect();
+    let bytes = format!("{:?}", &MARKER[..4]);
+    for s in &texts {
+        assert!(!s.contains(&text) && !s.to_lowercase().contains(&hex) && !s.contains(&bytes[1..bytes.len() - 1]), "secret in: {s}");
+    }
+}

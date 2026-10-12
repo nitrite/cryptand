@@ -96,7 +96,11 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 ## Key material in memory
 
 Keys and subkeys live in `Uint8List` and are zeroed when the database is
-closed. The Dart VM's garbage collector moves objects and may leave copies the
+closed. A password passed to `create`, `open` or `openReadOnly` is zeroed
+once it has been used as one, on success or failure: pass a fresh mutable
+`Uint8List` each time (a `const` list cannot be zeroed). A raw key (32 bytes
+unlocking a raw-key slot) belongs to the host and is left alone; a 32-byte
+credential that unlocks nothing is left alone too, since it may be one. The Dart VM's garbage collector moves objects and may leave copies the
 program never sees, so zeroing is **best-effort** (`spec/14-security.md` §11).
 
 ## What encryption does not protect against
