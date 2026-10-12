@@ -48,6 +48,8 @@
   CycloneDX SBOMs to the tag's GitHub release (`gh release create` if absent);
   Dart has no SBOM step (no tool in PLAN). `SECURITY.md` uses GitHub private
   reporting: **[H] enable it in repo settings.**
+- M4.9 done: `pager.rs` also has 3 FFI `unsafe` blocks (the plan missed them),
+  `security.rs` has none; README/CHANGELOG no longer say "no `unsafe`".
 - Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
   `reference/conformance/files/fuzz-regress/fNNN-*.cryptand`
   (`CRYPTAND_FUZZ_DUMP` keeps only the last input replayed). Replaying
@@ -80,8 +82,9 @@
 
 ## Next action
 
-M4.9: Rust `unsafe` — `// SAFETY:` at each site in `compare.rs`, `hash.rs`,
-`security.rs`, `#![deny(unsafe_op_in_unsafe_fn)]`; then M4 Verify.
+M4 is done for R+J (M4.9: `unsafe` documented + lint, gate green). Track A is
+done until M5. Next: M6 scale runs (track C, remote) or start M5 on
+`dart-storage`; the human picks the order if it matters.
 
 ## Log
 
@@ -101,3 +104,4 @@ M4.9: Rust `unsafe` — `// SAFETY:` at each site in `compare.rs`, `hash.rs`,
 - 2026-10-12 — M4.6 done: F-138 length checks (R+J+D), tests fail reverted; gate quick green.
 - 2026-10-12 — M4.7 done: F-139 file modes 0600 + sidecar no-follow (R+J+D), tests fail reverted; F-140 (Dart) for M5; gate quick green.
 - 2026-10-12 — M4.8 done: deny/audit clean, release workflows pinned, SBOMs, SECURITY.md.
+- 2026-10-12 — M4.9 done (SAFETY comments + lints, bench unsafe removed); M4 done R+J; gate quick green.

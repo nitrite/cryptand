@@ -29,7 +29,7 @@ write-ahead log:
   Headers stay in the clear so verify/repair/backup run with no key.
 
 This crate is **Level 4** (core + collections + full-text + spatial + vector),
-full write profile, no `unsafe`.
+full write profile. `unsafe` only at six commented FFI/intrinsic sites.
 
 ## Usage
 

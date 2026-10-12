@@ -63,13 +63,15 @@ pub fn crc32c(data: &[u8]) -> u32 {
     }
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("sse4.2") {
-        // SAFETY: as above.
+        // SAFETY: the feature the function is compiled for was just detected.
         return unsafe { crc32c_x86(data) };
     }
     crc32c_table(data)
 }
 
 #[cfg(target_arch = "aarch64")]
+/// # Safety
+/// The CPU must support `crc` (checked by [`crc32c`]).
 #[target_feature(enable = "crc")]
 unsafe fn crc32c_arm(data: &[u8]) -> u32 {
     use std::arch::aarch64::{__crc32cb, __crc32cd};
@@ -85,6 +87,8 @@ unsafe fn crc32c_arm(data: &[u8]) -> u32 {
 }
 
 #[cfg(target_arch = "x86_64")]
+/// # Safety
+/// The CPU must support `sse4.2` (checked by [`crc32c`]).
 #[target_feature(enable = "sse4.2")]
 unsafe fn crc32c_x86(data: &[u8]) -> u32 {
     use std::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};

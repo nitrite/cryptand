@@ -8,7 +8,7 @@ this code and the spec disagree, the spec wins.
 ## 1.0.0
 
 First stable release. Complete implementation of CFF v1.0 — every specification
-chapter (`00`–`14`), **Level 4** conformance, full write profile, no `unsafe`.
+chapter (`00`–`14`), **Level 4** conformance, full write profile. `unsafe` only at six commented FFI/intrinsic sites.
 
 ### Storage engine
 

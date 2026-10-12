@@ -46,7 +46,7 @@ pub struct MemSlice([u8]);
 impl MemSlice {
     #[inline]
     pub fn new(b: &[u8]) -> &MemSlice {
-        // `repr(transparent)` over `[u8]`: the same layout, the same lifetime,
+        // SAFETY: `repr(transparent)` over `[u8]`: the same layout, the same lifetime,
         // a different `Ord`.
         unsafe { &*(b as *const [u8] as *const MemSlice) }
     }

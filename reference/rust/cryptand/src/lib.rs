@@ -24,6 +24,7 @@
 //! | `12` profiles | [`profile`] |
 //! | `13` operations | [`checkpoint`], [`backup`], [`changefeed`], [`repair`], [`verify`], [`metrics`], [`stats`], [`spaceapi`], [`multiproc`] |
 //! | `14` security | [`security`] |
+#![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 pub mod analyzer;
 pub mod backup;

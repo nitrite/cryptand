@@ -74,10 +74,10 @@ fn below(seed: u64, n: u64) -> usize {
     ((seed >> 32) % n) as usize
 }
 
-static mut MEASURING: bool = true;
+static MEASURING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 fn measuring() -> bool {
-    unsafe { MEASURING }
+    MEASURING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn row(name: &str, value: String, unit: &str) {
@@ -186,7 +186,7 @@ fn main() {
     let v1: Vec<Vec<u8>> = (0..n).map(|i| cryptand::cve::encode(&doc(i, 1))).collect();
 
     for p in 0..2 {
-        unsafe { MEASURING = p == 1 };
+        MEASURING.store(p == 1, std::sync::atomic::Ordering::Relaxed);
         pass(n, mixed_ops, &v0, &v1);
     }
     println!("# done");
