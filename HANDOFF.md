@@ -83,13 +83,14 @@
 ## Next action
 
 M5 on branch `dart-storage`; design = top of `reference/dart/cryptand/REPORT.md`.
-Step (2) done: segments are placed in the store when published
-(`Engine.place`) and `Engine.extents` is an LRU under `pageCacheBytes`
-(profile, overridable for tests); open reads only the manifest. Known gap:
-`repair.rebuildManifest` still scans resident segments only; it must scan the
-store's pages for segment heads (fix with step 1). In-memory databases never
-reclaim retired extents (no commit moves `minRetainedCommit`). Next: step (1),
-open on `PageStore.onFile` instead of `fromBytes`.
+Steps (2) and (1) done: segments placed on publish + LRU; `DatabaseFile.open`
+runs on `PageStore.onFile` (reads only the superblock region; `Engine.close`
+closes the handle); `rebuildManifest` scans store pages like Rust. Value-log
+extents are still read whole at open (`VlogSegment.fromExtent`) and `save()`
+still rewrites the whole image. Known gaps: in-memory databases never reclaim
+retired extents; the writer lock is released right after open (01 §10 says
+held for the writing lifetime: fix with step 5 by locking the store's handle).
+Next: step (3), value-log records written/read at their file offset.
 
 ## Log
 
@@ -112,3 +113,4 @@ open on `PageStore.onFile` instead of `fromBytes`.
 - 2026-10-12 — M4.9 done (SAFETY comments + lints, bench unsafe removed); M4 done R+J; gate quick green.
 - 2026-10-12 — M5 started: branch `dart-storage`, 5.1 design (mirror Rust: segment LRU, vlog positioned writes, commit = Rust commit).
 - 2026-10-12 — M5 step 2: segment LRU + place-on-publish; 694 Dart tests, interop gate green.
+- 2026-10-12 — M5 step 1: open on `onFile`; rebuildManifest scans pages; 694 Dart tests, interop gate green.
