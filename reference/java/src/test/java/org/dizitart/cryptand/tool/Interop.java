@@ -57,7 +57,7 @@ public final class Interop {
 
     /**
      * A document is {@code {_id, seq, country, note}}. Every tenth {@code note}
-     * is 900 bytes, above {@code desktop}'s {@code vlog_min} of 256, so the
+     * is 900 bytes, above the {@code vlog_min} of 256 {@code write} sets, so the
      * fixture exercises both the inline and the separated value path.
      */
     static Value.Doc document(long i, byte[] note) {
@@ -294,6 +294,7 @@ public final class Interop {
         Files.deleteIfExists(Path.of(path));
         Engine.Options o = options(key);
         o.encrypt = key != null || password != null;
+        o.vlogMin = 256; // below every profile's default, so the 900-byte notes reach the value log
         Database database = Database.create(Path.of(path), o);
         long now = database.engine().options().clock.getAsLong();
 

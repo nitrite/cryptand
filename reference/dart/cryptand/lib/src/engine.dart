@@ -538,7 +538,7 @@ final class Engine {
     // F-127: the read rule follows the MAC'd superblock, never the pages.
     store.strict =
         (superblock?.featuresOptional ?? 0) & (1 << Feature.converting) == 0;
-    vlog.crypto = VlogCrypto(ring, nonces.allocate);
+    vlog.crypto = VlogCrypto(ring, nonces.allocate, strict: store.strict);
   }
 
   NonceAllocator? get nonces => _nonces;

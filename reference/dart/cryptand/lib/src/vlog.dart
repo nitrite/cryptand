@@ -29,9 +29,13 @@ import 'security.dart';
 /// sense that it draws from the same allocator: one counter, because two would
 /// be two chances to hand the same value out twice.
 final class VlogCrypto {
-  VlogCrypto(this.ring, this._allocate);
+  VlogCrypto(this.ring, this._allocate, {this.strict = false});
 
   final KeyRing ring;
+
+  /// F-127, `14-security.md` §8.3: `cipher = 1` and `CONVERTING` clear, so
+  /// every record is decrypted whatever it looks like.
+  final bool strict;
   final int Function() _allocate;
 
   int allocate() => _allocate();
@@ -336,11 +340,18 @@ final class VlogSegment {
     final bodyStart = r.position;
     final crcAt = bodyStart + recordLen - 4;
     final stored = ByteData.view(_buf.buffer).getUint32(crcAt, Endian.little);
-    final crcFrom = crypto == null ? bodyStart : bodyStart + 8;
+    // F-132: a converting file mixes plaintext and encrypted segments, and
+    // byte 39 cannot tell them apart (F-076: Dart writes 0). A record whose
+    // clear CRC holds without the counter is plaintext; the tag stays the
+    // authority on the rest. ponytail: per-record probe, per-segment once M5
+    // writes byte 39.
+    final plain = crypto == null ||
+        (!crypto.strict && crc32c(_buf, bodyStart, crcAt) == stored);
+    final crcFrom = plain ? bodyStart : bodyStart + 8;
     if (crc32c(_buf, crcFrom, crcAt) != stored) {
       throw CorruptionException('value-log record CRC mismatch at $ptr');
     }
-    if (crypto == null) {
+    if (plain) {
       final treeId = r.u32();
       final key = r.bytesCopy(r.uvar());
       final value = r.bytesCopy(r.uvar());

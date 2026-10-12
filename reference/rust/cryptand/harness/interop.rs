@@ -30,7 +30,7 @@ pub const N: i64 = 400;
 pub const COUNTRIES: [&str; 5] = ["de", "fr", "uk", "in", "us"];
 
 /// A document is `{_id, seq, country, note}`. Every tenth `note` is 900 bytes,
-/// which is above `desktop`'s `vlog_min` of 256, so the fixture exercises both
+/// which is above the `vlog_min` of 256 `write` sets, so the fixture exercises both
 /// the inline and the separated value path.
 pub fn document(i: i64, note: Option<Vec<u8>>) -> Value {
     let note = note.unwrap_or_else(|| {
@@ -204,6 +204,9 @@ fn cmd_write(path: &str) -> cryptand::Result<()> {
         Some(k) => Engine::create_encrypted(&PathBuf::from(path), Profile::Desktop, &k, 0, 0, 0, 0)?,
         None => Engine::create(&PathBuf::from(path), Profile::Desktop)?,
     };
+    // Below every profile's default, so the 900-byte notes reach the value log
+    // (the Dart writer sets the same).
+    e.sb.vlog_min = 256;
     let now = cryptand::engine::now_millis();
     let mut cat = std::mem::replace(&mut e.catalog, Catalog::new((0, 0), 16));
     let dict = cat

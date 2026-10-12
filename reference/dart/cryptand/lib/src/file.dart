@@ -268,7 +268,9 @@ abstract final class DatabaseFile {
     int parallelism = 1,
     String label = 'keyslot 0',
     int? vlogSegmentBytes,
+    int? vlogMin,
   }) {
+    vlogMin ??= profile.vlogMin;
     final uuid = randomBytes(16);
     uuid[6] = (uuid[6] & 0x0F) | 0x40;
     uuid[8] = (uuid[8] & 0x3F) | 0x80;
@@ -309,7 +311,7 @@ abstract final class DatabaseFile {
     final e = Engine(
         pageSize: profile.pageSize,
         memtableEntries: memtableEntries,
-        vlogMin: profile.vlogMin,
+        vlogMin: vlogMin,
         // The profile's value unless the caller names one. A value-log segment
         // extent is *preallocated*, so `mobile`'s 4 MiB is 4 MiB of file for
         // one separated value — which is right for a device and wrong for a
@@ -327,7 +329,7 @@ abstract final class DatabaseFile {
       pageCount: 2,
       profile: profile,
       pageCodec: profile.pageCodec,
-      vlogMin: profile.vlogMin,
+      vlogMin: vlogMin,
       cipher: 1,
       featuresRequired: (1 << Feature.core) | (1 << Feature.cipher),
       databaseUuid: uuid,

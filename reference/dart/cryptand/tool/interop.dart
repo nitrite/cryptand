@@ -23,7 +23,7 @@ const int n = 400;
 const List<String> countries = ['de', 'fr', 'uk', 'in', 'us'];
 
 /// A document is `{_id, seq, country, note}`. Every tenth `note` is 900 bytes,
-/// which is above `desktop`'s `vlog_min` of 256, so the fixture exercises both
+/// which is above the `vlogMin` of 256 `write` sets, so the fixture exercises both
 /// the inline and the separated value path.
 CDoc document(int i, {Uint8List? note}) {
   note ??= Uint8List(i % 10 == 0 ? 900 : 40)..fillRange(0, i % 10 == 0 ? 900 : 40, i % 251);
@@ -160,7 +160,8 @@ void cmdWrite(String path) {
           tCost: 2,
           mCostKib: 16384,
           parallelism: 2,
-          memtableEntries: 120);
+          memtableEntries: 120,
+          vlogMin: 256);
   final dictDesc = db.catalog.create(nameDictName,
       kind: TreeKind.nameDict, owner: collectionName, keyKind: 'u32');
   final dataDesc = db.catalog.create(collectionName,
