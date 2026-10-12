@@ -1093,6 +1093,8 @@ final class Engine {
     _emit(const StoreEvent(StoreEventKind.closing));
     if (flushMemtable && _memtable.isNotEmpty) commit();
     vlog.sealOpen();
+    store.file?.closeSync();
+    store.file = null;
     _closed = true;
     _emit(const StoreEvent(StoreEventKind.closed));
   }

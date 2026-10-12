@@ -452,7 +452,23 @@ abstract final class DatabaseFile {
   }
 
   static Database _open(String path, List<int>? key, {bool readOnly = false}) {
-    final bytes = File(path).readAsBytesSync();
+    // M5: the store reads pages from the file on demand; only the superblock
+    // region (slot B is at most 64 KiB in) is read up front.
+    final raf = File(path).openSync(mode: readOnly ? FileMode.read : FileMode.append);
+    try {
+      return _openOn(raf, path, key, readOnly: readOnly);
+    } catch (_) {
+      raf.closeSync();
+      rethrow;
+    }
+  }
+
+  static Database _openOn(RandomAccessFile raf, String path, List<int>? key,
+      {required bool readOnly}) {
+    final fileLen = raf.lengthSync();
+    final head = (1 << 16) + Sb.size;
+    raf.setPositionSync(0);
+    final bytes = raf.readSync(fileLen < head ? fileLen : head);
     if (bytes.length < 2 * Sb.size) {
       throw const CorruptionException('file is shorter than two superblocks');
     }
@@ -480,7 +496,7 @@ abstract final class DatabaseFile {
         }
       }
     }
-    if (bytes.length < 2 * pageSize) {
+    if (fileLen < 2 * pageSize) {
       throw const CorruptionException('file is shorter than its two slots');
     }
     final sb = Superblock.open(
@@ -535,10 +551,9 @@ abstract final class DatabaseFile {
       // §2.1 step 7: ignore everything at or beyond `page_count` — debris from
       // an interrupted commit.
       final used = sb.pageCount * sb.pageSize;
-      final store = PageStore.fromBytes(
-          Uint8List.sublistView(
-              bytes, 0, used > bytes.length ? bytes.length : used),
-          pageSize: sb.pageSize)
+      final store = PageStore.onFile(raf,
+          pageSize: sb.pageSize,
+          pageCount: used > fileLen ? fileLen ~/ sb.pageSize : sb.pageCount)
         // `01-container.md` §7 — the codec is a *default* for newly written
         // pages and comes from the file, not from this build's profile, so a
         // desktop that opens a phone's database keeps writing the codec the
