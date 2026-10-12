@@ -400,13 +400,13 @@ final class DocView {
           'expected DOC tag 0x22, found 0x${tag.toRadixString(16)}');
     }
     final byteLen = r.uvar();
-    if (byteLen > r.remaining) {
+    if (byteLen < 0 || byteLen > r.remaining) {
       throw CorruptionException(
           'DOC byte_len $byteLen exceeds ${r.remaining} available');
     }
     final end = r.position + byteLen;
     final count = r.uvar();
-    if (count > kMaxFieldCount) {
+    if (count < 0 || count > kMaxFieldCount) {
       throw LimitException('document field count $count exceeds $kMaxFieldCount');
     }
     final flags = r.u8();

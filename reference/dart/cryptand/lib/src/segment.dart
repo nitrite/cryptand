@@ -774,7 +774,7 @@ final class Node {
   Uint8List keyAt(int i) {
     final r = ByteReader(page, _cellOffset(i), page.length);
     final suffixLen = r.uvar();
-    if (suffixLen > page.length) {
+    if (suffixLen < 0 || suffixLen > page.length) { // F-138: uvar >= 2^63 is negative
       throw CorruptionException('page $pageIndex: cell $i suffix too long');
     }
     final out = Uint8List(prefixLen + suffixLen);
@@ -834,7 +834,7 @@ final class Node {
       suffixLen = r.uvar();
       at = r.position;
     }
-    if (at + suffixLen > page.length) {
+    if (suffixLen < 0 || at + suffixLen > page.length) {
       throw CorruptionException(
           'page $pageIndex: cell $i suffix runs past the page');
     }
@@ -907,6 +907,9 @@ final class Node {
       final r = ByteReader(page, off, page.length);
       suffixLen = r.uvar();
       sat = r.position;
+    }
+    if (suffixLen < 0 || sat + suffixLen > page.length) { // F-138
+      throw CorruptionException('page $pageIndex: cell $i suffix runs past the page');
     }
     final total = prefixLen + suffixLen;
     if (total < 9) {
@@ -1041,13 +1044,13 @@ final class Node {
   SegRecord recordAt(int i) {
     final r = ByteReader(page, _cellOffset(i), page.length);
     final suffixLen = r.uvar();
-    if (suffixLen > page.length) {
+    if (suffixLen < 0 || suffixLen > page.length) { // F-138: uvar >= 2^63 is negative
       throw CorruptionException('page $pageIndex: cell $i suffix too long');
     }
     // The key is built from the page directly: [keyAt] decoded the same
     // pointer and length again, through a second reader and a view.
     final at = r.position;
-    if (at + suffixLen > page.length) {
+    if (suffixLen < 0 || at + suffixLen > page.length) {
       throw CorruptionException('page $pageIndex: cell $i suffix runs past the page');
     }
     final key = Uint8List(prefixLen + suffixLen);

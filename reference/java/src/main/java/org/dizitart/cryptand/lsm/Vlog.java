@@ -1288,10 +1288,11 @@ public final class Vlog {
                 int at = (int) (offset - windowAt);
                 ByteReader r = new ByteReader(java.util.Arrays.copyOfRange(
                         window, at, Math.min(at + 16, windowLen)));
-                total = (int) (r.uvar() + r.consumed());
-                if (total <= 0 || offset + total > end) {
+                long len = r.uvar();
+                if (len < 0 || len > end - offset - r.consumed()) { // F-138
                     return false;
                 }
+                total = (int) (len + r.consumed());
                 byte[] buf;
                 if (at + total <= windowLen) {
                     buf = java.util.Arrays.copyOfRange(window, at, at + total);

@@ -211,6 +211,31 @@ class ConvertTest {
         }
     }
 
+    /** F-138: a value-log record length is file data; rotation must not size a buffer from it unchecked. */
+    @Test
+    void rotateRefusesAHostileValueLogRecordLength(@TempDir Path dir) throws Exception {
+        Path f = dir.resolve("rotate-vlog.cryptand");
+        long at;
+        try (Engine e = Engine.create(f, opts(k(1)))) {
+            fill(e);
+            e.vlog().sealAll();
+            org.dizitart.cryptand.lsm.VlogStats st = e.vlog().allStats().stream()
+                    .filter(x -> x.bytes > 0).findFirst().orElseThrow();
+            at = st.startPage * e.pager().pageSize() + org.dizitart.cryptand.lsm.VlogSegment.DATA_OFFSET;
+        }
+        try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(f,
+                java.nio.file.StandardOpenOption.WRITE)) {
+            // uvar 2^31: `(int) len` is Integer.MIN_VALUE.
+            ch.write(java.nio.ByteBuffer.wrap(new byte[] {(byte) 0x80, (byte) 0x80, (byte) 0x80, (byte) 0x80, 0x08}), at);
+        }
+        Engine e = Engine.open(f, reopen(k(1)));
+        try {
+            assertThrows(CorruptionException.class, () -> Engine.rotateMasterKey(e, null, k(2)));
+        } finally {
+            e.close();
+        }
+    }
+
     /** F-104: a free page's bytes may be anything; a garbage stored length must not size an allocation. */
     @Test
     void rotateSkipsAFreePageWithAHugeStoredLength(@TempDir Path dir) throws Exception {

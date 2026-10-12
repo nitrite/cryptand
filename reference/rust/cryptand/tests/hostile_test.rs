@@ -478,3 +478,14 @@ fn make_f113_catalog_cycle() {
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/files/fuzz-regress/f113-catalog-cycle.cryptand");
     std::fs::write(out, &b).unwrap();
 }
+
+/// F-138: a record length near 2^64 must not wrap `n + len` past the bounds check.
+#[test]
+fn value_log_record_length_near_two_to_the_64_is_corrupt() {
+    let mut b = vec![0xFFu8; 9];
+    b.push(0x01);
+    b.extend_from_slice(&[0u8; 16]);
+    for encrypted in [false, true] {
+        assert!(matches!(cryptand::vlog::decode_record(&b, encrypted), Err(cryptand::Error::Corrupt(_))));
+    }
+}

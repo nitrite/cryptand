@@ -157,6 +157,29 @@ fn rotate_master_key_rekeys_everything_and_drops_the_old_keys() {
     check(&mut e, n + 1, "reopened after rotation");
 }
 
+/// F-138: a value-log record length is file data; rotation must not size a buffer from it unchecked.
+#[test]
+fn rotate_refuses_a_hostile_value_log_record_length() {
+    use cryptand::rotate::rotate_master_key;
+    use std::os::unix::fs::FileExt;
+    let t = TempDb::new("rotate-vlog");
+    let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &[1u8; 32], 0, 0, 0, 0).unwrap();
+    for i in 0..300 {
+        e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
+    }
+    e.close(true).unwrap();
+    drop(e);
+    let e = Engine::open(&t.path, Some(&[1u8; 32])).unwrap();
+    let s = e.vlog_stats.values().find(|s| s.bytes > 0).unwrap();
+    let at = s.start_page * e.sb.page_size() as u64 + cryptand::vlog::DATA_OFFSET as u64;
+    drop(e);
+    // uvar 2^62: far past the segment, and an allocation that aborts.
+    let f = std::fs::OpenOptions::new().write(true).open(&t.path).unwrap();
+    f.write_all_at(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40], at).unwrap();
+    let e = Engine::open(&t.path, Some(&[1u8; 32])).unwrap();
+    assert!(matches!(rotate_master_key(e, &[2u8; 32], 0, 0, 0, 0), Err(cryptand::Error::Corrupt(_))));
+}
+
 #[test]
 fn rotate_a_half_encrypted_file() {
     use cryptand::rotate::rotate_master_key;

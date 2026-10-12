@@ -19,7 +19,7 @@ interop gate 12/12 directions plaintext+encrypted.
 | M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 checkers in all three; 1.3 hop built; 1.4 regress + hop in the gate; 1.5 index differential in all three, 2000 seeds clean) |
 | M2 | Crash consistency + concurrency | A | 10-16 | in progress (2.1 Rust+Java: 3000 fault seeds each clean, Dart after M5; 2.2: Rust and Java 5000 kills 0 failures each (Java after F-098–F-104), Dart after M5; 2.3 `tools/enospc.sh`: Rust + Java green plain+encrypted; F-082–F-104) |
 | M3 | Coverage-guided fuzzing | A | 10-16 | in progress (3.1: 8 Rust cargo-fuzz targets, 4 h campaign done 10-10, 0 crashes; Jazzer 10-10 runs were under JDK 24 (void); 10-11 all 7 targets x 2 h under JDK 21 clean after F-119, F-120; 3.3: 7 Jazzer targets, replayed in `mvn verify`; `fuzz-regress/` replayed by the three hostile tests; F-105–F-121) |
-| M4 | Security review + pentest | A | 10-21 | in progress (4.1 done: SECURITY-REVIEW.md 40 rows, F-122–F-125; 4.2 done: `conformance/vectors/kat`, 6 KAT tests per language (Java no keyed BLAKE2b), F-126 Argon2id J+D; interop password leg; 4.3: `tools/security_attack.py` 3x3; F-127 (CONVERTING bit) and F-128 (parent-recorded nonces) format changes approved and fixed in all three, corpus regenerated; F-129, F-130 fixed; 4.3 done 10-12: 1479 runs incl. value-log records, 0 failures, F-132 (Dart)); blobs have no writer (F-103); 4.4 done 10-12: F-133 exhaustion wrap (R+J+D), F-134 (J), Java 32-thread uniqueness; 4.5 done 10-12: F-135 (J+D password zeroing), F-136 (J+D failed-open zeroing), marker test R+J+D; F-137 fixed (R+D, spec MUST) |
+| M4 | Security review + pentest | A | 10-21 | in progress (4.1 done: SECURITY-REVIEW.md 40 rows, F-122–F-125; 4.2 done: `conformance/vectors/kat`, 6 KAT tests per language (Java no keyed BLAKE2b), F-126 Argon2id J+D; interop password leg; 4.3: `tools/security_attack.py` 3x3; F-127 (CONVERTING bit) and F-128 (parent-recorded nonces) format changes approved and fixed in all three, corpus regenerated; F-129, F-130 fixed; 4.3 done 10-12: 1479 runs incl. value-log records, 0 failures, F-132 (Dart)); blobs have no writer (F-103); 4.4 done 10-12: F-133 exhaustion wrap (R+J+D), F-134 (J), Java 32-thread uniqueness; 4.5 done 10-12: F-135 (J+D password zeroing), F-136 (J+D failed-open zeroing), marker test R+J+D; F-137 fixed (R+D, spec MUST); 4.6 done 10-12: F-138 (R+J+D unchecked record/suffix lengths) |
 | M5 | Dart storage rewrite | B | 10-23 gate | todo |
 | M6 | Scale 10⁶→10⁹, soak, P2 | C | 10-24 | todo |
 | M7 | Platforms, Flutter on device, API freeze, dry runs | all | 10-26 | todo |
@@ -248,7 +248,7 @@ the test that proves it → result.
   panic unwind); no secret in `toString`, `Debug`, logs, or exception text (a
   test sets a marker password and greps every error message for it); Java
   takes `char[]`/`byte[]` and wipes it; Dart's best-effort limit is documented.
-- [ ] **4.6** Length arithmetic sweep (the defect 101 class): list every
+- [x] **4.6** Length arithmetic sweep (the defect 101 class): list every
   `count × size`, `offset + len`, and `(int)` / `as usize` / `toInt()` on a file
   value in all three, and prove each is checked. Java has 5 `(int)` casts on
   file values plus `int n = (int) r.uvar()` in `BtreePage`. Also cover the

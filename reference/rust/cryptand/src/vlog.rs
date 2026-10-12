@@ -233,7 +233,7 @@ pub fn encode_record_encrypted(tree_id: u32, nonce_counter: u64, ciphertext_with
 pub fn decode_record(b: &[u8], encrypted: bool) -> Result<VlogRecord> {
     let (len, n) = get_uvar(b)?;
     let len = len as usize;
-    if n + len > b.len() {
+    if len > b.len() - n {
         return corrupt("value-log record runs past the buffer");
     }
     let body = &b[n..n + len];

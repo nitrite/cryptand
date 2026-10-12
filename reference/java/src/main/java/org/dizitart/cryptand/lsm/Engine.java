@@ -4876,6 +4876,10 @@ public final class Engine implements AutoCloseable {
                     readAt(f, head, base + off);
                     ByteReader r = new ByteReader(head);
                     long len = r.uvar();
+                    if (len < 0 || len > end - off - r.position()) { // F-138
+                        throw new CorruptionException("value-log record at " + st.segmentId + "+" + off
+                                + " declares " + Long.toUnsignedString(len) + " bytes, past the watermark");
+                    }
                     byte[] raw = new byte[r.position() + (int) len];
                     readAt(f, raw, base + off);
                     VlogSegment.Record rec;

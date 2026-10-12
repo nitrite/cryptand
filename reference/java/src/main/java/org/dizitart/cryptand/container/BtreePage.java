@@ -319,7 +319,7 @@ public final class BtreePage {
     /** The full key of cell {@code i}, prefix restored. */
     public byte[] key(int i) {
         ByteReader r = readerAt(i);
-        int suffixLen = (int) r.uvar();
+        int suffixLen = r.uvarLength("btree cell suffix");
         byte[] suffix = r.bytes(suffixLen);
         byte[] k = new byte[prefix.length + suffixLen];
         System.arraycopy(prefix, 0, k, 0, prefix.length);
@@ -342,7 +342,7 @@ public final class BtreePage {
             throw new CorruptionException("leaf cell requested from an internal page");
         }
         ByteReader r = readerAt(i);
-        int suffixLen = (int) r.uvar();
+        int suffixLen = r.uvarLength("btree cell suffix");
         byte[] suffix = r.bytes(suffixLen);
         byte[] key = concat(prefix, suffix);
         int kindFlags = r.u8();
@@ -361,12 +361,12 @@ public final class BtreePage {
         long overflow = 0;
         switch (kind) {
             case Kind.INLINE: {
-                int n = (int) r.uvar();
+                int n = r.uvarLength("btree cell value");
                 value = r.bytes(n);
             }
                 break;
             case Kind.OVERFLOW: {
-                int n = (int) r.uvar();
+                int n = r.uvarLength("btree cell value");
                 value = r.bytes(n);
                 overflow = r.u64();
             }
@@ -391,7 +391,7 @@ public final class BtreePage {
             throw new CorruptionException("internal cell requested from a leaf page");
         }
         ByteReader r = readerAt(i);
-        int suffixLen = (int) r.uvar();
+        int suffixLen = r.uvarLength("btree cell suffix");
         byte[] suffix = r.bytes(suffixLen);
         long child = r.u64();
         long entries = r.u64();

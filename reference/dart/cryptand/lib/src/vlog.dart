@@ -337,6 +337,11 @@ final class VlogSegment {
     }
     final r = ByteReader(_buf, ptr.offset, ptr.offset + ptr.len);
     final recordLen = r.uvar();
+    if (recordLen < 5 || recordLen > r.remaining) {
+      // F-138: a file value, checked before it places the CRC.
+      throw CorruptionException(
+          'value-log record at $ptr declares $recordLen bytes');
+    }
     final bodyStart = r.position;
     final crcAt = bodyStart + recordLen - 4;
     final stored = ByteData.view(_buf.buffer).getUint32(crcAt, Endian.little);

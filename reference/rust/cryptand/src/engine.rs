@@ -1495,8 +1495,8 @@ impl Engine {
                 let base = start * self.pager.page_size as u64 + DATA_OFFSET as u64;
                 let head = self.pager.read_at(base, (bytes as usize).min(10))?;
                 if let Ok((len, n)) = crate::varint::get_uvar(&head) {
-                    let total = n + len as usize;
-                    if total as u64 <= bytes {
+                    if len <= bytes - n as u64 {
+                        let total = n + len as usize;
                         let raw = self.pager.read_at(base, total)?;
                         e = vlog::decode_record(&raw, false).is_err();
                     }

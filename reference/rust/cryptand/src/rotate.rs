@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::container::{Durability, PageHeader, PAGE_HEADER_BYTES};
 use crate::engine::Engine;
-use crate::error::{invalid, Result};
+use crate::error::{corrupt, invalid, Result};
 use crate::posio::PosIo;
 use crate::security::{keyslot, make_keyslot, random_bytes, KeyRing};
 use crate::segment::value_kind;
@@ -159,6 +159,12 @@ pub fn rotate_master_key(
                 let mut head = vec![0u8; ((bytes - off) as usize).min(10)];
                 f.read_exact_at(&mut head, base + off)?;
                 let (len, n) = crate::varint::get_uvar(&head)?;
+                if len > bytes - off - n as u64 {
+                    // F-138: a file value, checked before it sizes the buffer.
+                    return corrupt(format!(
+                        "value-log record at {id}+{off} declares {len} bytes, past the watermark"
+                    ));
+                }
                 let mut raw = vec![0u8; n + len as usize];
                 f.read_exact_at(&mut raw, base + off)?;
                 let rec = vlog::decode_record(&raw, true)?;

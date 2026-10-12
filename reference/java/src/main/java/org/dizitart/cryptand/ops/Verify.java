@@ -536,12 +536,13 @@ public final class Verify {
                     byte[] lead = new byte[(int) Math.min(16, end - offset)];
                     pager.file().readFully(pager.offsetOf(head.startPage) + offset, lead, 0, lead.length);
                     ByteReader r = new ByteReader(lead);
-                    total = (int) (r.uvar() + r.consumed());
-                    if (offset + total > end) {
+                    long len = r.uvar();
+                    if (len < 0 || len > end - offset - r.consumed()) { // F-138: before the cast
                         findings.add(new Finding(Kind.CORRUPTION, "value-log segment " + s.segmentId
                                 + " has a record running past its durable watermark"));
                         break;
                     }
+                    total = (int) (len + r.consumed());
                     byte[] buf = new byte[total];
                     pager.file().readFully(pager.offsetOf(head.startPage) + offset, buf, 0, total);
                     rec = engine.vlog().decodeAt(head, buf, offset);
