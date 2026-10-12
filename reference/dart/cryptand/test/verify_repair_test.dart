@@ -161,8 +161,10 @@ void main() {
         for (var l = 0; l <= e.lastLevel; l++) e.refsAt(l).length
       ];
 
-      // Destroy the manifest utterly.
+      // Destroy the manifest utterly, and empty the segment cache so the
+      // rebuild has to find the heads in the store's pages.
       e.manifest.tree.root = 0;
+      e.extents.clear();
       e.clearLevelCache();
       expect(e.refsAt(e.lastLevel), isEmpty);
       expect(e.scanTree(tree).length, 0, reason: 'nothing is reachable');
@@ -215,11 +217,12 @@ void main() {
     test('a corrupt segment is left out and reported', () {
       final e = seeded(n: 800);
       final victim = e.refsAt(e.lastLevel).first;
-      e.extents[victim.segmentId]!.extent[4096 + 100] ^= 0xFF;
+      e.store.readClear(victim.startPage + 1)[100] ^= 0xFF;
+      e.extents.clear();
       e.manifest.tree.root = 0;
       e.clearLevelCache();
       final rep = e.rebuildManifest();
-      expect(rep.notes.join(' '), contains('${victim.segmentId}'));
+      expect(rep.notes.join(' '), contains('page ${victim.startPage}'));
       expect(rep.notes.join(' '), contains('fails its checksums'));
       // The rest of the database came back.
       expect(e.scanTree(tree).length, greaterThan(0));

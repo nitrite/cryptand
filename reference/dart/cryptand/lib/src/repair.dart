@@ -18,8 +18,11 @@
 /// would recover it.
 library;
 
+import 'container.dart';
 import 'engine.dart';
+import 'errors.dart';
 import 'manifest.dart';
+import 'segment.dart';
 import 'verify.dart';
 
 /// What a repair did.
@@ -58,21 +61,41 @@ extension EngineRepair on Engine {
     final recovered = <SegmentRef>[];
     var entries = 0;
 
-    // The scan. A real implementation walks the file's pages looking for
-    // PageType.segmentHeader with the CRY_SEG magic; here the extents are the
-    // page space, so the scan is over them — the information read is the same
-    // and comes from the same bytes.
-    for (final seg in extents.values) {
+    // The scan, as Rust `rebuild_manifest`: every page of the store, not the
+    // resident cache, which after M5 holds only what was recently read. A
+    // retired segment's head survives in its freed extent until reused; the
+    // free tree is a separate root, so it says which heads are debris.
+    final freed = {for (final x in store.freeExtents) x.startPage};
+    var page = 2;
+    while (page < store.pageCount) {
+      final PageHeader h;
       try {
-        seg.verifyChecksums();
-      } on Exception {
-        notes.add('segment ${seg.header.segmentId} fails its checksums and '
-            'was left out of the rebuilt manifest');
+        h = PageHeader.read(store.readClear(page), pageId: page);
+      } on CryptandException {
+        page++;
         continue;
       }
-      final h = seg.header;
-      recovered.add(SegmentRef.of(seg, level: h.level, group: h.group));
-      entries += h.entryCount;
+      final pages = h.extentPages < 1 ? 1 : h.extentPages;
+      if (h.pageType != PageType.segmentHeader || freed.contains(page)) {
+        page += pages;
+        continue;
+      }
+      final Segment seg;
+      try {
+        seg = Segment(store.readExtent(page, pages), pageSize)
+          ..verifyChecksums();
+      } on Exception catch (x) {
+        notes.add('segment at page $page fails its checksums and was left '
+            'out of the rebuilt manifest: $x');
+        page += pages;
+        continue;
+      }
+      final sh = seg.header;
+      // Repair trusts what it finds: the head's own nonce.
+      recovered.add(SegmentRef.of(seg, level: sh.level, group: sh.group)
+          .placedAt(page, h.nonce));
+      entries += sh.entryCount;
+      page += pages;
     }
 
     recovered.sort((a, b) {
