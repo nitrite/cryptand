@@ -32,11 +32,9 @@ import 'cve.dart';
 import 'database.dart';
 import 'engine.dart';
 import 'errors.dart';
-import 'manifest.dart';
 import 'profile.dart';
 import 'security.dart';
 import 'txn.dart';
-import 'segment.dart';
 import 'value.dart';
 import 'vlog.dart';
 
@@ -75,37 +73,11 @@ abstract final class DatabaseFile {
     // published by [create]; on one it opened, by [open]. Nothing here
     // allocates a nonce that a published floor does not already cover.
 
-    // 1. Every segment the manifest names becomes an extent at a real page id.
-    final refs = e.manifest.all.toList();
-    final placed = <SegmentRef>[];
-    var moved = false;
-    for (final ref in refs) {
-      final seg = e.extents[ref.segmentId];
-      if (seg == null) {
-        throw StateError('manifest names segment ${ref.segmentId}, '
-            'which this engine does not hold');
-      }
-      // A segment that already has an extent keeps it. Segments are immutable
-      // (§2), so re-placing one would append a second copy of bytes that
-      // cannot have changed.
-      if (ref.startPage != 0 && ref.pages == seg.pageCount) {
-        placed.add(ref);
-        continue;
-      }
-      final start = store.allocExtent(seg.pageCount);
-      store.writeExtent(start, seg.extent);
-      placed.add(_withPlacement(ref, start, seg.pageCount, store.writtenNonce));
-      moved = true;
-    }
-
-    // 2. Republish the manifest with the real placements, if any changed.
-    //    Removing before adding, because a re-placed entry keeps its key.
-    if (moved) {
-      for (final ref in refs) {
-        e.manifest.remove(ref);
-      }
-      for (final ref in placed) {
-        e.manifest.add(ref);
+    // 1–2. M5: every segment is placed in the store when published
+    //      (`Engine.place`), so the manifest already holds real placements.
+    for (final ref in e.manifest.all) {
+      if (ref.startPage == 0) {
+        throw StateError('segment ${ref.segmentId} was never placed');
       }
     }
 
@@ -651,15 +623,13 @@ abstract final class DatabaseFile {
         store.loadFree(extents);
       }
 
-      // Segment extents, addressed by the manifest's `start_page`/`pages`.
+      // Segment extents are read on demand through `Engine.segment` (M5);
+      // §9.2's "names a segment with no extent" is checked here, cheaply.
       for (final ref in e.manifest.all) {
         if (ref.pages == 0) {
           throw CorruptionException(
               'manifest entry for segment ${ref.segmentId} has no extent');
         }
-        e.extents[ref.segmentId] = Segment(
-            store.readSegment(ref.startPage, ref.pages, ref.nonce),
-            sb.pageSize);
       }
 
       // Value-log segments, from tree 7.
@@ -802,29 +772,6 @@ Uint8List encodeVlogStats(VlogSegment v, {required int startPage}) {
   }
   return encodeValue(CDoc(f));
 }
-
-SegmentRef _withPlacement(SegmentRef r, int startPage, int pages, int nonce) =>
-    SegmentRef(
-      segmentId: r.segmentId,
-      level: r.level,
-      group: r.group,
-      minKey: r.minKey,
-      maxKey: r.maxKey,
-      minSeq: r.minSeq,
-      maxSeq: r.maxSeq,
-      entries: r.entries,
-      tombstones: r.tombstones,
-      hasRangeDeletes: r.hasRangeDeletes,
-      startPage: startPage,
-      pages: pages,
-      root: r.root,
-      filter: r.filter,
-      minExpiry: r.minExpiry,
-      valueBytes: r.valueBytes,
-      vlogBytes: r.vlogBytes,
-      trees: r.trees,
-      nonce: nonce,
-    );
 
 /// PLAN 4.7: every file the engine creates is owner-only (`0600`); the umask
 /// can only narrow it. `dart:io` has no mode setter, so libc `chmod` through

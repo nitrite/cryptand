@@ -129,10 +129,12 @@ extension EngineVerify on Engine {
 
     for (final entry in byLevel.entries) {
       for (final ref in entry.value) {
-        final seg = extents[ref.segmentId];
-        if (seg == null) {
+        final Segment seg;
+        try {
+          seg = segment(ref);
+        } on Exception catch (e) {
           f.add(Finding('01§9.2',
-              'manifest names segment ${ref.segmentId} with no extent',
+              'manifest names segment ${ref.segmentId}, unreadable: $e',
               segmentId: ref.segmentId));
           continue;
         }

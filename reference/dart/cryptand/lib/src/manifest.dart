@@ -50,6 +50,29 @@ final class SegmentRef {
     this.nonce = 0,
   });
 
+  /// This entry at its extent: `start_page` and the head's nonce (F-128).
+  SegmentRef placedAt(int startPage, int nonce) => SegmentRef(
+        segmentId: segmentId,
+        level: level,
+        group: group,
+        minKey: minKey,
+        maxKey: maxKey,
+        minSeq: minSeq,
+        maxSeq: maxSeq,
+        entries: entries,
+        tombstones: tombstones,
+        hasRangeDeletes: hasRangeDeletes,
+        startPage: startPage,
+        pages: pages,
+        root: root,
+        filter: filter,
+        minExpiry: minExpiry,
+        valueBytes: valueBytes,
+        vlogBytes: vlogBytes,
+        trees: trees,
+        nonce: nonce,
+      );
+
   factory SegmentRef.of(Segment s, {required int level, required int group}) {
     final h = s.header;
     return SegmentRef(

@@ -82,11 +82,14 @@
 
 ## Next action
 
-M5 started on branch `dart-storage` (off `packaging/v1.0.0`); 5.1 design is
-the top section of `reference/dart/cryptand/REPORT.md`. Next: its step (2),
-replace `Engine.extents` with a budgeted whole-segment LRU `segment(ref)`
-(Rust `Engine::admit`), all Dart tests green, then step (1) open on
-`PageStore.onFile`. M6 (track C, remote) can run in parallel.
+M5 on branch `dart-storage`; design = top of `reference/dart/cryptand/REPORT.md`.
+Step (2) done: segments are placed in the store when published
+(`Engine.place`) and `Engine.extents` is an LRU under `pageCacheBytes`
+(profile, overridable for tests); open reads only the manifest. Known gap:
+`repair.rebuildManifest` still scans resident segments only; it must scan the
+store's pages for segment heads (fix with step 1). In-memory databases never
+reclaim retired extents (no commit moves `minRetainedCommit`). Next: step (1),
+open on `PageStore.onFile` instead of `fromBytes`.
 
 ## Log
 
@@ -108,3 +111,4 @@ replace `Engine.extents` with a budgeted whole-segment LRU `segment(ref)`
 - 2026-10-12 — M4.8 done: deny/audit clean, release workflows pinned, SBOMs, SECURITY.md.
 - 2026-10-12 — M4.9 done (SAFETY comments + lints, bench unsafe removed); M4 done R+J; gate quick green.
 - 2026-10-12 — M5 started: branch `dart-storage`, 5.1 design (mirror Rust: segment LRU, vlog positioned writes, commit = Rust commit).
+- 2026-10-12 — M5 step 2: segment LRU + place-on-publish; 694 Dart tests, interop gate green.

@@ -24,6 +24,7 @@ import 'crc32c.dart';
 import 'errors.dart';
 import 'filter.dart' show cfh64;
 import 'manifest.dart';
+import 'profile.dart';
 import 'security.dart';
 import 'segment.dart';
 import 'txn.dart';
@@ -395,8 +396,63 @@ final class Engine {
 
   bool _closed = false;
 
-  /// Segment extents by `segment_id`, standing in for `start_page`/`pages`.
+  /// M5: resident segments by `segment_id`, a cache over the store. Every
+  /// segment is placed in the store when published ([place]), so an evicted
+  /// one is read back through its manifest entry ([segment]). Insertion order
+  /// is recency: [segment] re-inserts on a hit.
   final Map<int, Segment> extents = {};
+
+  int cacheHits = 0, cacheMisses = 0, cacheEvictions = 0;
+
+  /// Overrides the profile's page cache budget; for tests.
+  int? pageCacheBytes;
+
+  /// Key-page reads of segments evicted since the last [resetCounters], so
+  /// [_collectKeyReads] does not lose them with the segment.
+  int _evictedPageReads = 0;
+
+  /// The segment [r] names: resident, or read from its extent and admitted.
+  Segment segment(SegmentRef r) {
+    final hit = extents.remove(r.segmentId);
+    if (hit != null) {
+      cacheHits++;
+      return extents[r.segmentId] = hit;
+    }
+    cacheMisses++;
+    final seg = Segment(store.readSegment(r.startPage, r.pages, r.nonce), pageSize);
+    _admit(seg);
+    return seg;
+  }
+
+  /// `spec/12-profiles.md` §1's page cache budget, as Rust `Engine::admit`:
+  /// evict least recently used until under budget, never [seg] itself.
+  /// ponytail: whole segments, not pages (REPORT M5.1 item 2).
+  void _admit(Segment seg) {
+    final id = seg.header.segmentId;
+    extents.remove(id);
+    extents[id] = seg;
+    var resident = 0;
+    for (final s in extents.values) {
+      resident += s.extent.length;
+    }
+    final budget = pageCacheBytes ?? profile.pageCacheBytes;
+    while (resident > budget && extents.length > 1) {
+      final victim = extents.keys.first;
+      final v = extents.remove(victim)!;
+      resident -= v.extent.length;
+      _evictedPageReads += v.pageReads;
+      cacheEvictions++;
+    }
+  }
+
+  /// Writes [seg]'s extent into the store and returns its placed entry.
+  SegmentRef place(Segment seg, {required int level, required int group}) {
+    final start = store.allocExtent(seg.pageCount);
+    store.writeExtent(start, seg.extent);
+    _admit(seg);
+    return SegmentRef.of(seg, level: level, group: group)
+        .placedAt(start, store.writtenNonce);
+  }
 
   /// Segments a checksum failure has taken out of service, and the key range
   /// each one covered — `spec/13-operations.md` §4.
@@ -441,7 +497,7 @@ final class Engine {
       for (final r in refsAt(l)) {
         if (quarantined.containsKey(r.segmentId)) continue;
         try {
-          extents[r.segmentId]!.verifyChecksums();
+          segment(r).verifyChecksums();
         } on CorruptionException {
           bad.add(quarantine(r.segmentId));
         }
@@ -806,11 +862,13 @@ final class Engine {
     for (final s in extents.values) {
       s.resetCounters();
     }
+    _evictedPageReads = 0;
+    cacheHits = cacheMisses = cacheEvictions = 0;
     store.resetCounters();
   }
 
   int _collectKeyReads() {
-    var n = keyPageReads;
+    var n = keyPageReads + _evictedPageReads;
     for (final s in extents.values) {
       n += s.pageReads;
     }
@@ -1140,8 +1198,7 @@ final class Engine {
 
   Segment _publish(SegmentBuilder b, {required int level, required int group}) {
     final seg = Segment(b.build(), pageSize);
-    extents[seg.header.segmentId] = seg;
-    manifest.add(SegmentRef.of(seg, level: level, group: group));
+    manifest.add(place(seg, level: level, group: group));
     _levelCache.remove(level);
     _invalidateCandidateOrder();
     return seg;
@@ -1178,8 +1235,7 @@ final class Engine {
     for (var l = 0; l <= lastLevel; l++) {
       for (final r in refsAt(l)) {
         if (quarantined.containsKey(r.segmentId)) continue;
-        final seg = extents[r.segmentId];
-        if (seg != null) yield seg;
+        yield segment(r);
       }
     }
   }
@@ -1446,7 +1502,7 @@ final class Engine {
       levelled: levelled,
       group: group,
       sources: [
-        for (final r in all) extents[r.segmentId]!.cursor()..seekFirst(),
+        for (final r in all) segment(r).cursor()..seekFirst(),
       ],
       out: _builder(level: target, group: group),
       // §5's conditions 2 and 3: a version may be dropped only at the last
@@ -1560,8 +1616,7 @@ final class Engine {
       _retire(r);
     }
     for (final s in job.outputs) {
-      extents[s.header.segmentId] = s;
-      manifest.add(SegmentRef.of(s, level: job.target, group: job.group));
+      manifest.add(place(s, level: job.target, group: job.group));
     }
     _levelCache.remove(job.target);
     _invalidateCandidateOrder();
@@ -1739,7 +1794,7 @@ final class Engine {
     for (var l = 0; l <= lastLevel; l++) {
       for (final ref in refsAt(l)) {
         if (!ref.hasRangeDeletes) continue;
-        for (final rd in extents[ref.segmentId]!.rangeDeletes) {
+        for (final rd in segment(ref).rangeDeletes) {
           if (rd.covers(prefix)) out.add(rd);
         }
       }
@@ -1807,7 +1862,7 @@ final class Engine {
     for (var l = 0; l <= lastLevel; l++) {
       for (final ref in refsAt(l)) {
         if (!ref.hasRangeDeletes) continue;
-        for (final rd in extents[ref.segmentId]!.rangeDeletes) {
+        for (final rd in segment(ref).rangeDeletes) {
           if (rd.treeId == treeId) out.add(rd);
         }
       }
@@ -1835,7 +1890,7 @@ final class Engine {
     final out = <Segment>[];
     for (final ref in _candidateRefs()) {
       if (!ref.covers(userKeyPrefix)) continue;
-      final seg = extents[ref.segmentId]!;
+      final seg = segment(ref);
       final f = seg.filter;
       // §4: a segment that may hold a covering range delete MUST NOT be
       // pruned by its filter, which contains point keys only.
@@ -1923,7 +1978,7 @@ final class Engine {
         stop = true;
       }
       if (!ref.covers(prefix)) continue;
-      final s = extents[ref.segmentId]!;
+      final s = segment(ref);
       final f = s.filter;
       // §4: a segment that may hold a covering range delete MUST NOT be
       // pruned by its filter, which contains point keys only.

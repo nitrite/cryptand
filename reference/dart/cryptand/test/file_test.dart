@@ -231,6 +231,29 @@ void main() {
     }
   });
 
+  test('M5: segments past the cache budget are evicted and read back', () {
+    final path = tmp('evict');
+    final db = fresh();
+    db.engine.pageCacheBytes = 1; // one resident segment
+    for (var i = 0; i < 100; i++) {
+      db.engine.put(t, CNitriteId(i), Uint8List.fromList([i]));
+      if (i % 10 == 9) db.engine.flush();
+    }
+    for (var i = 0; i < 100; i++) {
+      expect(db.engine.get(t, CNitriteId(i)), [i]);
+    }
+    expect(db.engine.manifest.all.length, greaterThan(1));
+    expect(db.engine.extents.length, 1);
+    expect(db.engine.cacheEvictions, greaterThan(0));
+    DatabaseFile.save(db, path);
+    final back = DatabaseFile.open(path);
+    back.engine.pageCacheBytes = 1;
+    for (var i = 0; i < 100; i++) {
+      expect(back.engine.get(t, CNitriteId(i)), [i]);
+    }
+    expect(back.engine.cacheEvictions, greaterThan(0));
+  });
+
   test('a reopen preserves every extent, byte for byte', () {
     final path = tmp('stable');
     final db = fresh();
@@ -256,9 +279,8 @@ void main() {
     // that cannot have changed.
     final back = DatabaseFile.open(second);
     for (final r in back.engine.manifest.all) {
-      final was = reopened.engine.extents[r.segmentId];
-      expect(was, isNotNull, reason: 'segment ${r.segmentId} survived');
-      expect(back.engine.extents[r.segmentId]!.extent, was!.extent,
+      final was = reopened.engine.segment(r);
+      expect(back.engine.segment(r).extent, was.extent,
           reason: 'segment ${r.segmentId} is immutable');
     }
     for (var i = 0; i < 100; i++) {

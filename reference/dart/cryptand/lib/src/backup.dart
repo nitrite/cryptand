@@ -24,7 +24,6 @@ import 'dart:typed_data';
 
 import 'engine.dart';
 import 'errors.dart';
-import 'manifest.dart';
 import 'verify.dart';
 
 /// §2.1's two modes for an encrypted source, plus the plain case.
@@ -198,9 +197,8 @@ final class Backup {
           skipped++;
           continue;
         }
-        final seg = source.extents[ref.segmentId]!;
-        destination.extents[ref.segmentId] = seg;
-        destination.manifest.add(SegmentRef.of(seg, level: l, group: ref.group));
+        final seg = source.segment(ref);
+        destination.manifest.add(destination.place(seg, level: l, group: ref.group));
         copied++;
         bytes += seg.extent.length;
       }
@@ -214,6 +212,9 @@ final class Backup {
           if (!wanted.contains(r.segmentId)) {
             destination.manifest.remove(r);
             destination.extents.remove(r.segmentId);
+            if (r.startPage != 0) {
+              destination.store.freeExtent(r.startPage, r.pages);
+            }
           }
         }
       }

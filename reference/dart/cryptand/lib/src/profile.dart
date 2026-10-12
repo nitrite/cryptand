@@ -19,6 +19,14 @@ import 'engine.dart';
 /// The behavioural constants of `spec/12-profiles.md` §1 that are not already
 /// superblock fields on [Profile].
 extension ProfileBehaviour on Profile {
+  /// §1's page cache budget, which bounds the resident segments (M5).
+  int get pageCacheBytes => switch (this) {
+        Profile.mobile || Profile.custom => 4 << 20,
+        Profile.tablet => 16 << 20,
+        Profile.desktop => 64 << 20,
+        Profile.server => 512 << 20,
+      };
+
   /// §4, **normative for every profile**: "An implementation MUST NOT block a
   /// caller's thread for longer than this in any single operation that the
   /// application did not explicitly request as a bulk operation."

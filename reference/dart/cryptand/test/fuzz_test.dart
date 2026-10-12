@@ -164,7 +164,12 @@ bool _pageDiffers(Uint8List a, Uint8List b, int page, int pageSize) {
 bool _opens(Uint8List image, String path) {
   File(path).writeAsBytesSync(image, flush: true);
   try {
-    DatabaseFile.open(path);
+    // M5: segments are read on demand, so read them all, as the eager open
+    // did: the container gate is crossed when a segment is fetched.
+    final e = DatabaseFile.open(path).engine;
+    for (final r in e.manifest.all) {
+      e.segment(r);
+    }
     return true;
   } on CryptandException {
     return false;
