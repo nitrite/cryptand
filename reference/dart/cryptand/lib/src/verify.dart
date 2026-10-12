@@ -495,9 +495,12 @@ extension EngineVerify on Engine {
   void _checkLocalityDebt(List<Finding> f) {
     final debt = vlog.localityDebt * 100;
     if (debt > localityDebtPct) {
+      // F-141: a bound the format permits exceeding (§6.9 holds it only
+      // when not under write pressure), so a warning, as Rust and Java.
       f.add(Finding('11.11',
           'locality_debt ${debt.toStringAsFixed(1)}% exceeds '
-          'locality_debt_pct $localityDebtPct%'));
+          'locality_debt_pct $localityDebtPct%',
+          kind: FindingClass.warning));
     }
   }
 }

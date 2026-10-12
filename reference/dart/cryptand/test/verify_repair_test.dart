@@ -146,7 +146,8 @@ void main() {
       final r = e.verifyStructure(deep: false);
       // With the bound at 0 any debt at all is a finding.
       if (e.vlog.localityDebt > 0) {
-        expect(r.findings.map((f) => f.invariant), contains('11.11'));
+        final f = r.findings.firstWhere((f) => f.invariant == '11.11');
+        expect(f.kind, FindingClass.warning, reason: 'F-141: not corruption');
       }
     });
   });
