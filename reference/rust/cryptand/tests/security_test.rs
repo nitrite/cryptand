@@ -843,8 +843,13 @@ fn no_error_text_carries_the_credential() {
         texts.push(format!("{e}"));
         texts.push(format!("{e:?}"));
     }
-    // F-137: Rust opens a plaintext file a key was supplied for (Java refuses).
-    if let Err(e) = Engine::open(&plain.path, Some(MARKER)) {
+    // F-137, 14 §6.1: a key on a plaintext file is refused, read-write and read-only.
+    for r in [
+        Engine::open(&plain.path, Some(MARKER)).map(|_| ()),
+        Engine::open_read_only(&plain.path, Some(MARKER)).map(|_| ()),
+    ] {
+        let e = r.expect_err("F-137: a key on a plaintext file must be refused");
+        assert!(matches!(e, Error::Invalid(_)), "{e:?}");
         texts.push(format!("{e} {e:?}"));
     }
     // `KeyRing` has no `Debug` at all (14 §11's SHOULD), so it cannot leak here.

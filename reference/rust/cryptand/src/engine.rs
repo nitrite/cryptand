@@ -635,6 +635,13 @@ impl Engine {
                     )));
                 }
             }
+            // F-137, 14 §6.1: a caller who supplies a key believes the file is
+            // encrypted; opening it as plaintext would hide the downgrade.
+            if key.is_some() {
+                return Err(Error::Invalid(
+                    "a key was supplied but the file is not encrypted".into(),
+                ));
+            }
         }
 
         // Step 4: unwrap and verify `sb_mac` before acting on any other field.

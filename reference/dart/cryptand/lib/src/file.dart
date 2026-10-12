@@ -537,6 +537,11 @@ abstract final class DatabaseFile {
           'MAC: someone has tried to turn encryption off '
           '(spec/14-security.md section 6.1)');
     }
+    // F-137, 14 §6.1: a key on a plaintext file hides the downgrade.
+    if (claimsPlain && key != null) {
+      throw const InvalidArgumentException(
+          'a key was supplied but the file is not encrypted');
+    }
     if (sb.cipher != 0) {
       if (key == null) throw const CannotUnlockException();
       final master = _unlockMaster(sb, key);

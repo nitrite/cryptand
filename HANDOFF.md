@@ -31,6 +31,9 @@
 - M4.5 done: passwords zeroed by every Java/Dart entry point (F-135; raw
   keys left to the host: zeroing them broke every reusing caller); failed
   opens zero the cipher/ring (F-136); marker tests R+J+D. **M5 keeps both.**
+- F-137 fixed (human 10-12): 14 §6.1 MUST refuse a key on a plaintext file;
+  R+D now refuse like Java. F-135 API kept: passwords zeroed, raw keys are
+  the host's (14 §11 note). **M5 keeps the F-137 refusal.**
 - F-132 (Dart, fixed): converting files mix plaintext/encrypted vlog records;
   Dart probes per record (ponytail) until M5 writes byte 39 (F-076).
 - Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
@@ -61,10 +64,7 @@
 
 ## Open questions for the human
 
-- F-137: opening a plaintext file with a key. Java refuses, Rust and Dart
-  open silently. Make the refusal a MUST in 14 (and fix R+D)? No format change.
-- F-135 API choice: passwords are zeroed, raw keys are not (both Java and
-  Dart). OK for the API freeze?
+- None.
 
 ## Next action
 
@@ -85,3 +85,4 @@ and narrowing cast on a file-derived value in all three, and test each.
 - 2026-10-12 — M4.3 done: vlog record/head attacks (1479 runs clean); interop fixture now separates values in all three, exposing F-132 (Dart converting-file vlog read), fixed; gate quick green.
 - 2026-10-12 — M4.4 done: F-133 nonce exhaustion wrap (R+J+D), F-134 (J nonce_base); gate quick green.
 - 2026-10-12 — M4.5 done: F-135/F-136 (J+D), marker tests R+J+D; F-137 to the human; gate quick green.
+- 2026-10-12 — F-137 fixed R+D + spec MUST after the human's decision; F-135 raw-key ownership noted in 14 §11; gate quick green.

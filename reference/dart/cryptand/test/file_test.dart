@@ -59,12 +59,16 @@ void main() {
 
     final plain = tmp('m45-plain');
     DatabaseFile.save(fresh(), plain);
-    try {
-      DatabaseFile.open(plain, key: pw());
-    } catch (e, st) {
-      texts
-        ..add(e.toString())
-        ..add(st.toString());
+    // F-137, 14 section 6.1: a key on a plaintext file is refused.
+    for (final o in [DatabaseFile.open, DatabaseFile.openReadOnly]) {
+      try {
+        o(plain, key: pw());
+        fail('F-137: a key on a plaintext file opened it');
+      } on InvalidArgumentException catch (e, st) {
+        texts
+          ..add(e.toString())
+          ..add(st.toString());
+      }
     }
 
     final hex = pw().map((b) => b.toRadixString(16).padLeft(2, '0')).join();

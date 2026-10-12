@@ -537,6 +537,12 @@ attacker can recompute. Without a MAC, an attacker with write access can:
 
 None of that touches a single encrypted byte, and all of it is invisible.
 
+A reader therefore MUST NOT open a file whose superblock says `cipher = 0`
+when the caller supplied a key or password: it MUST refuse with an
+invalid-argument error. A caller who supplies a key believes the file is
+encrypted. Opening it silently as plaintext would hide exactly the
+downgrade above (F-137).
+
 ### 6.2 The MAC
 
 `sb_mac`, 32 bytes at superblock offset 296:
@@ -800,6 +806,12 @@ is immutable and interned, so take `char[]` or `byte[]`. Dart: `String` is
 likewise immutable with no zeroing, so take a `Uint8List`, and document the
 best-effort caveat the VM imposes. Rust: `zeroize` on drop, and keep the type out
 of `Debug` and `Clone`.
+
+*Non-normative — who owns a raw key (F-135, decided for the 1.0 API).* The
+engine zeroes a password the caller passes as soon as Argon2id has consumed it.
+It does not zero a caller's raw 32-byte key: that array belongs to the host,
+which commonly reuses it across opens. The engine's own copies, and every key
+derived from it, are zeroed as the table above requires.
 
 Two more, both MUST:
 

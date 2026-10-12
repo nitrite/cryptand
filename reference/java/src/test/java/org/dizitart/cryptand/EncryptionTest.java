@@ -503,7 +503,7 @@ class EncryptionTest {
         Engine.create(plain, new Engine.Options()).close();
         Engine.Options p = new Engine.Options();
         p.password = marker();
-        collect(texts, assertThrows(RuntimeException.class, () -> Engine.open(plain, p)));
+        collect(texts, assertThrows(org.dizitart.cryptand.InvalidArgumentException.class, () -> Engine.open(plain, p)));
         assertTrue(wiped(p.password), "open of a plaintext file left the password");
 
         StringBuilder hb = new StringBuilder();
