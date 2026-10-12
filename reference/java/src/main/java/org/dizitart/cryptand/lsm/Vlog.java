@@ -496,7 +496,7 @@ public final class Vlog {
         s.tier = tier;
         s.heatClass = heatClass;
         s.encrypted = seals() ? 1 : 0;
-        s.nonceBase = seals() ? cipher.nextNonceWatermark() : 0;
+        s.nonceBase = seals() ? cipher.allocateNonce() : 0;
         s.startPage = start;
         s.pages = pages;
 
