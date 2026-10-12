@@ -19,7 +19,7 @@ interop gate 12/12 directions plaintext+encrypted.
 | M1 | Differential + model testing | A | 10-14 | in progress (1.1 done; 1.2 checkers in all three; 1.3 hop built; 1.4 regress + hop in the gate; 1.5 index differential in all three, 2000 seeds clean) |
 | M2 | Crash consistency + concurrency | A | 10-16 | in progress (2.1 Rust+Java: 3000 fault seeds each clean, Dart after M5; 2.2: Rust and Java 5000 kills 0 failures each (Java after F-098–F-104), Dart after M5; 2.3 `tools/enospc.sh`: Rust + Java green plain+encrypted; F-082–F-104) |
 | M3 | Coverage-guided fuzzing | A | 10-16 | in progress (3.1: 8 Rust cargo-fuzz targets, 4 h campaign done 10-10, 0 crashes; Jazzer 10-10 runs were under JDK 24 (void); 10-11 all 7 targets x 2 h under JDK 21 clean after F-119, F-120; 3.3: 7 Jazzer targets, replayed in `mvn verify`; `fuzz-regress/` replayed by the three hostile tests; F-105–F-121) |
-| M4 | Security review + pentest | A | 10-21 | in progress (4.1 done: SECURITY-REVIEW.md 40 rows, F-122–F-125; 4.2 done: `conformance/vectors/kat`, 6 KAT tests per language (Java no keyed BLAKE2b), F-126 Argon2id J+D; interop password leg; 4.3: `tools/security_attack.py` 3x3; F-127 (CONVERTING bit) and F-128 (parent-recorded nonces) format changes approved and fixed in all three, corpus regenerated; F-129, F-130 fixed; vlog/blob attacks pending) |
+| M4 | Security review + pentest | A | 10-21 | in progress (4.1 done: SECURITY-REVIEW.md 40 rows, F-122–F-125; 4.2 done: `conformance/vectors/kat`, 6 KAT tests per language (Java no keyed BLAKE2b), F-126 Argon2id J+D; interop password leg; 4.3: `tools/security_attack.py` 3x3; F-127 (CONVERTING bit) and F-128 (parent-recorded nonces) format changes approved and fixed in all three, corpus regenerated; F-129, F-130 fixed; 4.3 done 10-12: 1479 runs incl. value-log records, 0 failures, F-132 (Dart)); blobs have no writer (F-103) |
 | M5 | Dart storage rewrite | B | 10-23 gate | todo |
 | M6 | Scale 10⁶→10⁹, soak, P2 | C | 10-24 | todo |
 | M7 | Platforms, Flutter on device, API freeze, dry runs | all | 10-26 | todo |
@@ -233,7 +233,7 @@ the test that proves it → result.
   including parallelism > 1; RFC 7693 and reference BLAKE2b KATs; empty and
   maximum lengths. Java and Dart hand-roll Argon2id, BLAKE2b and HChaCha20, so
   this is where a silent mismatch would hide.
-- [~] **4.3** File-attacker harness (`security_attack`): attack × location ×
+- [x] **4.3** File-attacker harness (`security_attack`): attack × location ×
   implementation. Attacks: flip, zero, or truncate each byte class (cleartext
   page header, ciphertext, tag, nonce, superblock, keyslot); splice pages
   across files and across positions; replay an older authentic page within
