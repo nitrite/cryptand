@@ -396,4 +396,53 @@ class EncryptionTest {
         }
         return false;
     }
+
+    @Test
+    @DisplayName("M4.4: nonce exhaustion near 2^64 is an error, never a wrap to 0")
+    void nonceExhaustion() {
+        FileCipher c = FileCipher.of(new byte[32], new byte[16], -9L); // u64 max - 8
+        List<Long> floors = new ArrayList<>();
+        c.attach(floors::add);
+        assertEquals(-1L, floors.get(0), "the floor saturates at 2^64 - 1");
+        Set<Long> seen = new HashSet<>();
+        for (int i = 0; i < 8; i++) {
+            long n = c.allocateNonce();
+            assertTrue(Long.compareUnsigned(n, -9L) >= 0, "wrapped to " + n);
+            assertTrue(seen.add(n));
+        }
+        for (int i = 0; i < 3; i++) {
+            assertThrows(org.dizitart.cryptand.InvalidArgumentException.class, c::allocateNonce);
+        }
+    }
+
+    @Test
+    @DisplayName("M4.4: 32 threads never share a nonce, and every one sits below a published floor")
+    void concurrentNonceUniqueness() throws Exception {
+        FileCipher c = FileCipher.of(new byte[32], new byte[16], 0);
+        java.util.concurrent.atomic.AtomicLong floor = new java.util.concurrent.atomic.AtomicLong();
+        c.attach(floor::set);
+        int threads = 32, each = 100_000; // 3.2M: crosses the 2^20 floor three times
+        long[][] got = new long[threads][each];
+        Thread[] ts = new Thread[threads];
+        java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+        for (int t = 0; t < threads; t++) {
+            int id = t;
+            ts[t] = new Thread(() -> {
+                try { go.await(); } catch (InterruptedException e) { throw new RuntimeException(e); }
+                for (int i = 0; i < each; i++) {
+                    long n = c.allocateNonce();
+                    assertTrue(n < floor.get(), "nonce " + n + " at or above the published floor");
+                    got[id][i] = n;
+                }
+            });
+            ts[t].start();
+        }
+        go.countDown();
+        for (Thread t : ts) t.join();
+        long[] all = java.util.Arrays.stream(got).flatMapToLong(java.util.Arrays::stream).sorted().toArray();
+        for (int i = 1; i < all.length; i++) {
+            assertTrue(all[i] != all[i - 1], "nonce " + all[i] + " issued twice");
+        }
+        assertEquals((long) threads * each, c.allocatedCount());
+    }
 }

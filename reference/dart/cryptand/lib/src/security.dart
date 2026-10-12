@@ -246,6 +246,17 @@ Uint8List buildNonce(int domain, int counter, int objectId, int offset) {
 /// twice — which for a stream cipher discloses both plaintexts and the
 /// authentication key, with every affected page still verifying perfectly.
 /// `test/security_test.dart` is where that was caught.
+// M4.4: counters are u64 held in a signed int. Compare unsigned and saturate
+// at 2^64 - 1 (-1), so exhaustion fails in [NonceAllocator.published] rather
+// than wrapping to 0.
+int _cmpU64(int a, int b) =>
+    (a ^ 0x8000000000000000).compareTo(b ^ 0x8000000000000000);
+
+int _addSaturating(int a, int b) {
+  final r = a + b;
+  return _cmpU64(r, a) < 0 ? -1 : r;
+}
+
 final class NonceAllocator {
   NonceAllocator._(this._next, this._published);
 
@@ -254,7 +265,7 @@ final class NonceAllocator {
   /// durable must not proceed.
   factory NonceAllocator.open(
       int persistedNextNonce, void Function(int nextNonce) publish) {
-    final floor = persistedNextNonce + kNonceGap;
+    final floor = _addSaturating(persistedNextNonce, kNonceGap);
     publish(floor); // rule 1: durable before anything is allocated
     return NonceAllocator._(persistedNextNonce, floor);
   }
@@ -278,10 +289,10 @@ final class NonceAllocator {
   int get publishedWatermark => _published;
 
   /// Whether a new watermark must be published before allocating again.
-  bool get mustPublish => _next >= _published;
+  bool get mustPublish => _cmpU64(_next, _published) >= 0;
 
   /// The value to publish next.
-  int get toPublish => _published + kNonceGap;
+  int get toPublish => _addSaturating(_published, kNonceGap);
 
   int allocate() {
     if (mustPublish) {
@@ -294,7 +305,7 @@ final class NonceAllocator {
 
   /// Records that a superblock carrying [watermark] is durable.
   void published(int watermark) {
-    if (watermark <= _published) {
+    if (_cmpU64(watermark, _published) <= 0) {
       throw const InvalidArgumentException(
           'the nonce watermark must strictly advance, or a crash reissues '
           'values the previous session allocated');

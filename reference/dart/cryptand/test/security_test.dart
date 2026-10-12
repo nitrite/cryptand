@@ -196,6 +196,22 @@ void main() {
       expect(a.allocate(), kNonceGap);
     });
 
+    test('M4.4: exhaustion near 2^64 is an error, never a wrap to 0', () {
+      var persisted = -9; // u64 max - 8
+      final a = NonceAllocator.open(persisted, (w) => persisted = w);
+      expect(persisted, -1, reason: 'the floor saturates at 2^64 - 1');
+      final seen = <int>{};
+      while (!a.mustPublish) {
+        final n = a.allocate();
+        expect(n < 0, isTrue, reason: 'wrapped to $n');
+        expect(seen.add(n), isTrue);
+      }
+      expect(seen.length, 8);
+      expect(() => a.published(a.toPublish),
+          throwsA(isA<InvalidArgumentException>()));
+      expect(a.allocate, throwsA(isA<StateError>()));
+    });
+
     test('the watermark must strictly advance', () {
       var persisted = 0;
       final a = NonceAllocator.open(persisted, (w) => persisted = w);

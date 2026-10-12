@@ -86,7 +86,7 @@ public final class FileCipher implements PageCrypto, AutoCloseable {
      */
     public void attach(NoncePublisher publisher) {
         this.publisher = publisher;
-        long floor = nextNonce.get() + Security.NONCE_GAP;
+        long floor = addSaturating(nextNonce.get(), Security.NONCE_GAP);
         publisher.publishNonceFloor(floor);
         publishedFloor = floor;
     }
@@ -94,14 +94,20 @@ public final class FileCipher implements PageCrypto, AutoCloseable {
     /** §4.1's rules 2 and 3: allocate below the published floor, and publish before crossing it. */
     public long allocateNonce() {
         while (true) {
-            long v = nextNonce.getAndIncrement();
-            if (v < publishedFloor) {
+            // M4.4: counters are u64. The cursor sticks at 2^64 - 1 rather
+            // than wrapping to 0, and every comparison is unsigned.
+            long v = nextNonce.getAndUpdate(x -> x == -1L ? -1L : x + 1);
+            if (Long.compareUnsigned(v, publishedFloor) < 0) {
                 allocated.incrementAndGet();
                 return v;
             }
             synchronized (this) {
-                if (v >= publishedFloor && publisher != null) {
-                    long floor = Math.max(v, publishedFloor) + Security.NONCE_GAP;
+                if (Long.compareUnsigned(v, publishedFloor) >= 0 && publisher != null) {
+                    long floor = addSaturating(maxUnsigned(v, publishedFloor), Security.NONCE_GAP);
+                    if (floor == publishedFloor) {
+                        throw new InvalidArgumentException(
+                                "the 64-bit nonce space of this database is exhausted");
+                    }
                     publisher.publishNonceFloor(floor);
                     publishedFloor = floor;
                 }
@@ -110,7 +116,7 @@ public final class FileCipher implements PageCrypto, AutoCloseable {
                 // No publisher yet - creating the file, before the first
                 // superblock exists. The floor advances with the counter and is
                 // published by the create path's own first commit.
-                publishedFloor = v + Security.NONCE_GAP;
+                publishedFloor = addSaturating(v, Security.NONCE_GAP);
                 allocated.incrementAndGet();
                 return v;
             }
@@ -123,7 +129,16 @@ public final class FileCipher implements PageCrypto, AutoCloseable {
     }
 
     public long nextNonceWatermark() {
-        return Math.max(nextNonce.get(), publishedFloor);
+        return maxUnsigned(nextNonce.get(), publishedFloor);
+    }
+
+    private static long addSaturating(long a, long b) {
+        long r = a + b;
+        return Long.compareUnsigned(r, a) < 0 ? -1L : r;
+    }
+
+    private static long maxUnsigned(long a, long b) {
+        return Long.compareUnsigned(a, b) >= 0 ? a : b;
     }
 
     public byte[] databaseUuid() {

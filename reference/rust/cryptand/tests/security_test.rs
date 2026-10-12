@@ -781,3 +781,33 @@ fn a_truncated_file_is_corruption_not_an_io_error() {
     });
     assert!(matches!(r, Err(Error::Corrupt(_))), "{r:?}");
 }
+
+/// M4.4: a watermark near 2^64 runs out with an error. It never wraps to 0
+/// and never hands out the published value itself (§4.1 rule 2).
+#[test]
+fn nonce_exhaustion_is_an_error_never_a_wrap() {
+    let t = TempDb::new("nonce-exhaust");
+    let raw_key = [5u8; 32];
+    {
+        let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+        let master = security::random_bytes::<32>();
+        let slot = make_keyslot(&master, &e.sb.database_uuid, 0, &raw_key, 0, 0, 0, 0, "k").unwrap();
+        e.sb.keyslots[..keyslot::SIZE].copy_from_slice(&slot.encode());
+        e.sb.cipher = 1;
+        e.sb.set_feature(feature::CIPHER, true);
+        e.keys = Some(KeyRing::from_master(master, e.sb.database_uuid, 0));
+        e.commit(Durability::Sync).unwrap();
+        e.sb.next_nonce = u64::MAX - 8;
+        e.commit(Durability::Sync).unwrap();
+    }
+    let mut e = Engine::open(&t.path, Some(&raw_key)).unwrap();
+    let big = vec![9u8; e.sb.vlog_min as usize + 512];
+    let mut r = Ok(());
+    for i in 0..64i64 {
+        r = e.put(T, &Value::NitriteId(i), &big).and_then(|_| e.flush()).map(|_| ());
+        if r.is_err() {
+            break;
+        }
+    }
+    assert!(matches!(r, Err(Error::Invalid(_))), "64 writes fit in a window of 8 nonces: {r:?}");
+}

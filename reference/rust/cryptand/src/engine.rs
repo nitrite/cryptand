@@ -947,8 +947,14 @@ impl Engine {
             self.nonce_next = 0;
             self.nonce_limit = 0;
         }
-        if self.nonce_next + n > self.nonce_limit {
+        let fits = |e: &Engine| e.nonce_next.checked_add(n).is_some_and(|end| end <= e.nonce_limit);
+        if !fits(self) {
             self.publish_nonce_floor()?;
+            // M4.4: the watermark saturates at 2^64 - 1, so a publish there
+            // widens nothing. Running out is an error, never a wrap.
+            if !fits(self) {
+                return crate::error::invalid("the 64-bit nonce space of this database is exhausted");
+            }
         }
         Ok(())
     }
@@ -1503,6 +1509,9 @@ impl Engine {
         let n = match &mut self.pager.crypto {
             Some(c) => {
                 let n = c.next;
+                if n >= c.limit {
+                    return crate::error::invalid("the published nonce window is exhausted");
+                }
                 c.next += 1;
                 n
             }
