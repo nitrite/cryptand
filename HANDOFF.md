@@ -93,10 +93,15 @@ seed grew to 182 GB and filled the remote disk). **M2.2 Dart rerun: 1000 kills
 300x at 0-30 ms, 0 bad. Kill runs now use `ulimit -f 4000000`.
 Dart space vs Rust: seed 203502 ends 11 MB (Rust 1.5 MB); cold sizing is a
 ponytail (2x live + 64 KiB).
-Remote disk ~13 GB free; old `s205*` leftovers in `cryptand-kill-plain` (ask
-before deleting).
-Next: Dart writer RSS growth (604 MB building 10^7), then M2.1 Dart fault
-seeds, Dart corpus replay (M3.4), the `?`/`M5` rows of FINDINGS, SECURITY-REVIEW
+F-147 (10-13, third session): the "writer RSS growth" was compaction holding
+every input and output (10^7 build peaked 2.36 GB). Dart fixed: 201 MB max
+RSS at 10^7, 1000 kills (205000..206000) clean. **Rust collects all inputs
+into `job.entries` and keeps output extents; Java unchecked.**
+Remote cleaned 10-13 (torture scratch, fuzz targets in kill clones): 37 GB free.
+`cryptand-rss` has an instrumented `cow.dart`/`rss_scale.dart`; rsync `--delete` over it.
+Next: F-147 in Rust and Java (measure 10^7 RSS first, same shape: stream
+disjoint runs, drop output bytes once placed), then M2.1 Dart fault seeds,
+Dart corpus replay (M3.4), the `?`/`M5` rows of FINDINGS, SECURITY-REVIEW
 Dart rows, M6 Dart rungs.
 
 ## Log
@@ -127,3 +132,4 @@ Dart rows, M6 Dart rungs.
 - 2026-10-13 — lock/created parity with R/J; F-141; M2.2 Dart 1 000 kills 0 failures (fault control caught); 699 Dart tests, interop green.
 - 2026-10-13 — F-140, F-142 fixed; F-072 Dart done (keyslots, rotate, encrypt/decrypt), gate steps 7–9 with Dart; 10⁷ open RSS 58 MB PASS; 704 Dart tests, interop green.
 - 2026-10-13 — Dart kill mix with maint ops: F-143..F-146 (F-146 S0) and F-094/F-096 Dart fixed; M2.2 Dart 1000 kills 0 failures; 709 Dart tests, gate green.
+- 2026-10-13 — remote cleaned (21 -> 37 GB free); F-147 Dart compaction streams inputs/outputs: 10^7 build 2.36 GB -> 201 MB RSS, 1000 kills clean; R+J open.
