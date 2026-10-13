@@ -834,6 +834,24 @@ void lockTests() {
       ..close();
   });
 
+  test('F-145: decrypt finishes when a value-log entry has expired', () {
+    Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);
+    final path = tmp('f145');
+    final db = DatabaseFile.create(path,
+        credential: k(1), kdf: Keyslot.kdfRaw, profile: Profile.desktop);
+    final e = db.engine..nowMs = 1000;
+    e.put(1, CBytes(Uint8List.fromList([0x31])), Uint8List(7887),
+        expiryMs: 2000); // value log
+    e.nowMs = 3000;
+    db.decrypt(confirmRemoveEncryption: true);
+    var steps = 0;
+    while (db.convertStep()) {
+      expect(++steps, lessThan(10),
+          reason: '${db.conversion().remaining} objects never convert');
+    }
+    e.close();
+  });
+
   test('F-094/F-096: conversions of a small database stay small', () {
     Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);
     final path = tmp('f096');

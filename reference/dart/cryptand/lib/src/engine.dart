@@ -1616,6 +1616,11 @@ final class Engine {
           // the tombstone still sees the versions it hides, so dropping the
           // tombstone alone would resurrect them for every later reader.
           if (rec.valueKind == ValueKind.blob) job.deadBlobs.add(rec.value);
+          // F-145: a dropped expired value's record is dead too, or its
+          // segment is never reclaimed (and a conversion never finishes).
+          if (rec.valueKind == ValueKind.vlog) {
+            job.dead.add(VlogPointer.decode(rec.value));
+          }
         } else {
           job.out.add(_promote(rec, parsed.treeId, job.dead, job.recluster,
               levelled: job.levelled));
