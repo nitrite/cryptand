@@ -93,7 +93,7 @@ public final class XlangCrudBench {
         return 1_767_225_600_000L * 4_194_304L + i * 4096L + 1L;
     }
 
-    private static Value.Doc doc(long i, long rev) {
+    static Value.Doc doc(long i, long rev) {
         String pad = String.format("%06d", i);
         Map<String, Value> f = new LinkedHashMap<>();
         f.put("_id", new Value.NitriteId(snowflake(i)));
@@ -113,7 +113,7 @@ public final class XlangCrudBench {
         return new Value.Doc(f);
     }
 
-    private static byte[] keyOf(long i) {
+    static byte[] keyOf(long i) {
         return Cke.encode(new Value.NitriteId(snowflake(i)));
     }
 

@@ -188,15 +188,58 @@ pub struct CompactionJob {
     pub inputs: Vec<SegmentRef>,
     pub target_level: u8,
     pub target_group: u8,
-    entries: Vec<SegEntry>,
-    cursor: usize,
+    runs: Vec<RunCursor>,
+    reaches_last: bool,
+    min_retained: u64,
+    range_tombstones: Vec<RangeDelete>,
+    last_user: Option<Vec<u8>>,
+    newer_visible_seq: Option<u64>,
+    /// Whether this key already passed its newest version with
+    /// `seq <= min_retained` -- the one every snapshot resolves to.
+    floor_seen: bool,
     builder: Option<SegmentBuilder>,
-    /// `(extent, start_page, head nonce)`.
-    outputs: Vec<(Vec<u8>, u64, u64)>,
+    /// F-147: placed as each one fills; only the ref is kept, not the bytes.
+    outputs: Vec<SegmentRef>,
     per_output: u64,
     pub bytes_written: u64,
     /// F-050: BLOB pointers of dropped entries, freed when the job publishes.
     dead_blobs: Vec<Vec<u8>>,
+}
+
+/// F-147: disjoint input segments merged as one source, read one segment at
+/// a time, so a compaction holds a segment per run rather than every input
+/// (a 10^7 build peaked near 2 GB RSS merging the last level).
+struct RunCursor {
+    refs: Vec<SegmentRef>,
+    next: usize,
+    buf: std::collections::VecDeque<SegRecord>,
+}
+
+impl RunCursor {
+    /// Interval partitioning: segments sorted by `min_key`, each appended to
+    /// the first run it follows strictly. Overlapping segments get their own.
+    fn of(refs: &[SegmentRef]) -> Vec<RunCursor> {
+        let mut sorted = refs.to_vec();
+        sorted.sort_by(|a, b| a.min_key.cmp(&b.min_key));
+        let mut runs: Vec<Vec<SegmentRef>> = Vec::new();
+        for r in sorted {
+            match runs.iter_mut().find(|run| run.last().unwrap().max_key < r.min_key) {
+                Some(run) => run.push(r),
+                None => runs.push(vec![r]),
+            }
+        }
+        runs.into_iter().map(|refs| RunCursor { refs, next: 0, buf: Default::default() }).collect()
+    }
+
+    /// Whether the run has a record left, loading its next segment if needed.
+    fn fill(&mut self, engine: &mut Engine) -> Result<bool> {
+        while self.buf.is_empty() && self.next < self.refs.len() {
+            let seg = engine.segment(&self.refs[self.next])?;
+            self.next += 1;
+            self.buf = seg.iter().collect::<Result<_>>()?;
+        }
+        Ok(!self.buf.is_empty())
+    }
 }
 
 impl CompactionJob {
@@ -2563,109 +2606,14 @@ impl Engine {
         let reaches_last = target == last;
         let min_retained = self.min_retained_seq();
 
-        // Merge every input, newest version of a key first (§1's inverted seq
-        // makes that the natural order).
-        let mut merged: Vec<SegRecord> = Vec::new();
-        for r in &inputs {
-            let seg = self.segment(r)?;
-            for rec in seg.iter() {
-                merged.push(rec?);
-            }
-        }
-        merged.sort_by(|a, b| a.internal_key.cmp(&b.internal_key));
         // F-018: range tombstones every snapshot already sees. A record they
-        // cover (with an older seq) is dropped here, in the same pass that may
-        // drop the tombstone itself; otherwise it outlives what hid it.
+        // cover (with an older seq) is dropped in the same pass that may drop
+        // the tombstone itself; otherwise it outlives what hid it.
         let mut range_tombstones: Vec<RangeDelete> = Vec::new();
         if reaches_last {
-            for rec in merged.iter().filter(|r| r.op() == op::RANGE_DELETE && r.seq() <= min_retained) {
-                range_tombstones.push(RangeDelete {
-                    tree_id: 0, // unused: `start`/`end` already carry the tree prefix
-                    start: user_part(&rec.internal_key).to_vec(),
-                    end: crate::segment::decode_range_delete_payload(parse_internal_key(&rec.internal_key)?.tree_id, &rec.value)?,
-                    seq: rec.seq(),
-                });
+            for r in &inputs {
+                range_tombstones.extend(self.segment(r)?.range_deletes()?.into_iter().filter(|rd| rd.seq <= min_retained));
             }
-        }
-
-        let mut kept: Vec<SegEntry> = Vec::new();
-        let mut dead_blobs: Vec<Vec<u8>> = Vec::new();
-        let mut last_user: Option<Vec<u8>> = None;
-        let mut newer_visible_seq: Option<u64> = None;
-        // Whether this key already passed its newest version with
-        // `seq <= min_retained` -- the one every snapshot resolves to.
-        let mut floor_seen = false;
-        for rec in merged {
-            let uk = user_part(&rec.internal_key).to_vec();
-            let same_key = last_user.as_deref() == Some(uk.as_slice());
-            if !same_key {
-                last_user = Some(uk.clone());
-                newer_visible_seq = None;
-                floor_seen = false;
-            }
-            let seq = rec.seq();
-            // Conditions 1 and 2: a newer version exists in this compaction
-            // and its seq is <= the oldest live snapshot's. F-021: *any* newer
-            // version, not only the newest -- with the newest above the floor,
-            // the version under a dropped tombstone used to survive and the
-            // oldest snapshot read it.
-            let drop_it = same_key && floor_seen && reaches_last;
-            if seq <= min_retained {
-                floor_seen = true;
-            }
-            if newer_visible_seq.is_none() {
-                newer_visible_seq = Some(seq);
-            }
-            let drop_it = drop_it
-                || (rec.op() != op::RANGE_DELETE
-                    && range_tombstones.iter().any(|rd| rd.seq > seq && rd.covers(&uk)));
-            if drop_it {
-                // §6.7 — `live_bytes` is decremented when a compaction observes
-                // a record superseded or deleted. Without this the hot tier's
-                // liveness never falls, so `locality_debt` reads ~100 % on a
-                // database whose values have all been promoted or superseded,
-                // and collection never fires.
-                self.release_if_vlog(&rec);
-                if rec.value_kind == value_kind::BLOB {
-                    dead_blobs.push(rec.value.clone());
-                }
-                continue;
-            }
-            if !same_key && matches!(newer_visible_seq, Some(ns) if ns > min_retained) {
-                // Kept solely because condition 2 was not met — that is what
-                // `pinned_by_snapshots` accumulates (`13-operations.md` §6).
-                self.counters.pinned_by_snapshots +=
-                    (rec.internal_key.len() + rec.value.len()) as u64;
-            }
-            // An expired entry may be dropped when condition 3 holds and its
-            // deadline is older than the oldest live snapshot's wall clock.
-            if reaches_last {
-                if let Some(x) = rec.expiry_ms {
-                    if x <= self.now_ms && seq <= min_retained {
-                        self.release_if_vlog(&rec);
-                        if rec.value_kind == value_kind::BLOB {
-                            dead_blobs.push(rec.value.clone());
-                        }
-                        continue;
-                    }
-                }
-                // A tombstone may be dropped only when its own seq is <= the
-                // oldest live snapshot's; dropping it earlier resurrects the
-                // versions it hides.
-                if (rec.op() == op::DELETE || rec.op() == op::RANGE_DELETE) && seq <= min_retained {
-                    self.release_if_vlog(&rec);
-                    if rec.value_kind == value_kind::BLOB {
-                        dead_blobs.push(rec.value.clone());
-                    }
-                    continue;
-                }
-            }
-            kept.push(SegEntry {
-                internal_key: rec.internal_key,
-                value_kind: rec.value_kind,
-                value: rec.value,
-                expiry_ms: rec.expiry_ms,
-            });
         }
 
         // §6.3 — promotion clusters a *generation* of surviving values. Each
@@ -2683,17 +2631,114 @@ impl Engine {
                 self.vlog_stats.values().filter(|s| s.tier == Tier::Hot as u8).map(|s| s.live_bytes).sum();
         }
         let per_output = self.segment_entries_at(target);
+        let runs = RunCursor::of(&inputs);
         Ok(Some(CompactionJob {
             inputs,
             target_level: target,
             target_group: group,
-            entries: kept,
-            cursor: 0,
+            runs,
+            reaches_last,
+            min_retained,
+            range_tombstones,
+            last_user: None,
+            newer_visible_seq: None,
+            floor_seen: false,
             builder: None,
             outputs: Vec::new(),
             per_output,
             bytes_written: 0,
-            dead_blobs,
+            dead_blobs: Vec::new(),
+        }))
+    }
+
+    /// F-147: the next record of the merge, newest version of a key first
+    /// (§1's inverted seq makes that the natural order). Each run holds one
+    /// segment resident, not the whole input.
+    fn next_merged(&mut self, job: &mut CompactionJob) -> Result<Option<SegRecord>> {
+        let mut pick: Option<usize> = None;
+        for i in 0..job.runs.len() {
+            if !job.runs[i].fill(self)? {
+                continue;
+            }
+            let key = |j: usize| job.runs[j].buf.front().unwrap().internal_key.as_slice();
+            if pick.map_or(true, |p| key(i) < key(p)) {
+                pick = Some(i);
+            }
+        }
+        Ok(pick.and_then(|i| job.runs[i].buf.pop_front()))
+    }
+
+    /// §5's drop conditions for one merged record; `None` if it is dropped.
+    fn compaction_keep(&mut self, job: &mut CompactionJob, rec: SegRecord) -> Result<Option<SegEntry>> {
+        let (reaches_last, min_retained) = (job.reaches_last, job.min_retained);
+        let uk = user_part(&rec.internal_key).to_vec();
+        let same_key = job.last_user.as_deref() == Some(uk.as_slice());
+        if !same_key {
+            job.last_user = Some(uk.clone());
+            job.newer_visible_seq = None;
+            job.floor_seen = false;
+        }
+        let seq = rec.seq();
+        // Conditions 1 and 2: a newer version exists in this compaction
+        // and its seq is <= the oldest live snapshot's. F-021: *any* newer
+        // version, not only the newest -- with the newest above the floor,
+        // the version under a dropped tombstone used to survive and the
+        // oldest snapshot read it.
+        let drop_it = same_key && job.floor_seen && reaches_last;
+        if seq <= min_retained {
+            job.floor_seen = true;
+        }
+        if job.newer_visible_seq.is_none() {
+            job.newer_visible_seq = Some(seq);
+        }
+        let drop_it = drop_it
+            || (rec.op() != op::RANGE_DELETE
+                && job.range_tombstones.iter().any(|rd| rd.seq > seq && rd.covers(&uk)));
+        if drop_it {
+            // §6.7 — `live_bytes` is decremented when a compaction observes
+            // a record superseded or deleted. Without this the hot tier's
+            // liveness never falls, so `locality_debt` reads ~100 % on a
+            // database whose values have all been promoted or superseded,
+            // and collection never fires.
+            self.release_if_vlog(&rec);
+            if rec.value_kind == value_kind::BLOB {
+                job.dead_blobs.push(rec.value.clone());
+            }
+            return Ok(None);
+        }
+        if !same_key && matches!(job.newer_visible_seq, Some(ns) if ns > min_retained) {
+            // Kept solely because condition 2 was not met — that is what
+            // `pinned_by_snapshots` accumulates (`13-operations.md` §6).
+            self.counters.pinned_by_snapshots += (rec.internal_key.len() + rec.value.len()) as u64;
+        }
+        // An expired entry may be dropped when condition 3 holds and its
+        // deadline is older than the oldest live snapshot's wall clock.
+        if reaches_last {
+            if let Some(x) = rec.expiry_ms {
+                if x <= self.now_ms && seq <= min_retained {
+                    self.release_if_vlog(&rec);
+                    if rec.value_kind == value_kind::BLOB {
+                        job.dead_blobs.push(rec.value.clone());
+                    }
+                    return Ok(None);
+                }
+            }
+            // A tombstone may be dropped only when its own seq is <= the
+            // oldest live snapshot's; dropping it earlier resurrects the
+            // versions it hides.
+            if (rec.op() == op::DELETE || rec.op() == op::RANGE_DELETE) && seq <= min_retained {
+                self.release_if_vlog(&rec);
+                if rec.value_kind == value_kind::BLOB {
+                    job.dead_blobs.push(rec.value.clone());
+                }
+                return Ok(None);
+            }
+        }
+        Ok(Some(SegEntry {
+            internal_key: rec.internal_key,
+            value_kind: rec.value_kind,
+            value: rec.value,
+            expiry_ms: rec.expiry_ms,
         }))
     }
 
@@ -2715,7 +2760,8 @@ impl Engine {
         self.arm()?;
         let budget = budget_bytes.unwrap_or(self.profile.compaction_step_bytes as u64);
         let mut spent = 0u64;
-        while job.cursor < job.entries.len() {
+        while let Some(rec) = self.next_merged(job)? {
+            let Some(mut e) = self.compaction_keep(job, rec)? else { continue };
             if job.builder.is_none() {
                 let b = SegmentBuilder::with_reserve(
                     self.pager.page_size,
@@ -2728,11 +2774,6 @@ impl Engine {
                 self.sb.next_segment_id += 1;
                 job.builder = Some(b);
             }
-            // Moved out, not cloned: the job held every surviving entry for its
-            // whole life *and* the builder was handed a copy of each, so a full
-            // compaction of a 13.7 MB segment peaked at 57 MB of heap. A
-            // consumed slot is never read again; `cursor` only moves forward.
-            let mut e = std::mem::take(&mut job.entries[job.cursor]);
             // §6.3 — during a compaction that outputs the last level, every
             // surviving HOT-tier value is promoted into a COLD segment. The
             // entries arrive in internal-key order, so the cold log is
@@ -2752,7 +2793,6 @@ impl Engine {
             }
             let bytes = e.internal_key.len() + e.value.len() + 16;
             job.builder.as_mut().unwrap().add(e)?;
-            job.cursor += 1;
             spent += bytes as u64;
             job.bytes_written += bytes as u64;
             let full = job.builder.as_ref().unwrap().entry_count() >= job.per_output;
@@ -2760,7 +2800,7 @@ impl Engine {
                 self.rotate_output(job)?;
             }
             if spent >= budget {
-                return Ok(job.cursor < job.entries.len());
+                return Ok(true);
             }
         }
         self.rotate_output(job)?;
@@ -2780,15 +2820,27 @@ impl Engine {
             return Err(e);
         }
         self.counters.write_amp_key_index += extent.len() as u64;
-        job.outputs.push((extent, start, self.pager.written_nonce));
+        match Segment::open(extent, self.pager.page_size) {
+            Ok(seg) => job.outputs.push(SegmentRef::of(
+                &seg,
+                job.target_level,
+                job.target_group,
+                start,
+                self.pager.written_nonce,
+            )),
+            Err(e) => {
+                self.pager.free_extent(start, pages, 0);
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
     /// Gives back a failed job's outputs: never published, so no reader holds
     /// them, and dropped with the job they leaked (M2.3).
     fn abandon_compaction(&mut self, job: CompactionJob) {
-        for (extent, start, _) in &job.outputs {
-            self.pager.free_extent(*start, (extent.len() / self.pager.page_size) as u32, 0);
+        for r in &job.outputs {
+            self.pager.free_extent(r.start_page, r.pages, 0);
         }
     }
 
@@ -2821,20 +2873,10 @@ impl Engine {
         }
         let outputs = std::mem::take(&mut job.outputs);
         if err.is_none() {
-            for (extent, start, nonce) in &outputs {
-                match Segment::open(extent.clone(), self.pager.page_size) {
-                    Ok(seg) => {
-                        let r = SegmentRef::of(&seg, job.target_level, job.target_group, *start, *nonce);
-                        self.admit(r.segment_id, Arc::new(seg));
-                        if let Err(e) = m.add(&mut self.pager, &r) {
-                            err = Some(e);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        err = Some(e);
-                        break;
-                    }
+            for r in &outputs {
+                if let Err(e) = m.add(&mut self.pager, r) {
+                    err = Some(e);
+                    break;
                 }
             }
         }
@@ -2850,8 +2892,8 @@ impl Engine {
             back.tree.freed = std::mem::take(&mut m.tree.freed);
             self.manifest = back;
             // Never published, so no reader holds them.
-            for (extent, start, _) in &outputs {
-                self.pager.free_extent(*start, (extent.len() / self.pager.page_size) as u32, 0);
+            for r in &outputs {
+                self.pager.free_extent(r.start_page, r.pages, 0);
             }
             return Err(e);
         }
