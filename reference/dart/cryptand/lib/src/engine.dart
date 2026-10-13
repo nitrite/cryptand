@@ -1136,7 +1136,16 @@ final class Engine {
     commitId++;
     visibleSeq = sequenced;
     _refreshRetention(publishing: true);
-    publisher?.call(durability);
+    try {
+      publisher?.call(durability);
+    } catch (_) {
+      // F-095: not a commit. Left numbered, the retry skipped an id and, slots
+      // alternating by id, overwrote the last durable superblock; the raised
+      // floor let this commit's frees be reused early.
+      commitId--;
+      _refreshRetention();
+      rethrow;
+    }
     _refreshRetention();
     _pruneWrittenAt();
     _emit(StoreEvent(StoreEventKind.commit,

@@ -316,6 +316,8 @@ void _check(String name, Plan Function((int, int), List<int>) planOf) {
 int _below(List<int> rng, int n) => _mod(_mix(rng), n < 1 ? 1 : n);
 
 void main() {
+  _f095();
+
   test('power cut at a random write', () {
     _check('crash', (c, rng) => Plan()..crashAtWrite = _below(rng, c.$1));
   }, timeout: const Timeout(Duration(minutes: 10)));
@@ -339,4 +341,35 @@ void main() {
     });
     expect(failures, isNotEmpty, reason: 'a lying fsync went unnoticed in 20 seeds');
   }, timeout: const Timeout(Duration(minutes: 10)));
+}
+
+/// F-095: a publish that fails after numbering its commit must not skip a
+/// number. Slots alternate by commit id, so the skipped retry overwrote the
+/// last durable superblock.
+void _f095() {
+  test('a failed publish does not skip a commit id', () {
+    final dir = Directory.systemTemp.createTempSync('f095-');
+    final path = '${dir.path}/db.cryptand';
+    final db = _create(path, false);
+    final e = db.engine;
+    try {
+      e.put(_tree, _k(1), Uint8List(8));
+      e.commit();
+      // #0, #1: the barriers before the flush and after it; #2: the one
+      // before the superblock write, after the commit is numbered.
+      Faults.arm(path, Plan()..eioAtSync = 2);
+      e.put(_tree, _k(1), Uint8List(9));
+      expect(() => e.commit(), throwsA(anything));
+      Faults.disarm(path);
+      e.commit();
+      final all = File(path).readAsBytesSync();
+      final ps = e.store.pageSize;
+      final a = Superblock.tryDecode(Uint8List.sublistView(all, 0, ps))!.commitId;
+      final b = Superblock.tryDecode(Uint8List.sublistView(all, ps, 2 * ps))!.commitId;
+      expect((a - b).abs(), 1, reason: 'slots hold commits $a and $b');
+    } finally {
+      e.close();
+      dir.deleteSync(recursive: true);
+    }
+  });
 }
