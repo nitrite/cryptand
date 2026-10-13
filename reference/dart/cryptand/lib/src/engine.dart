@@ -64,6 +64,7 @@ final class CompactionJob {
   final int group;
   final List<SegmentCursor> sources;
   final List<VlogPointer> dead = [];
+
   /// BLOB pointers of dropped entries; their extents are freed at finish.
   final List<Uint8List> deadBlobs = [];
   final List<Segment> outputs = [];
@@ -183,8 +184,7 @@ final class LevelPolicy {
 
   /// The candidate bound of §4.1:
   /// `l0_trigger + overlap_bound × (level_count − 2) + 1`.
-  int get candidateBound =>
-      l0Trigger + overlapBound * (levelCount - 2) + 1;
+  int get candidateBound => l0Trigger + overlapBound * (levelCount - 2) + 1;
 }
 
 /// A store over the trees of one file.
@@ -432,7 +432,8 @@ final class Engine {
       return extents[r.segmentId] = hit;
     }
     cacheMisses++;
-    final seg = Segment(store.readSegment(r.startPage, r.pages, r.nonce), pageSize);
+    final seg =
+        Segment(store.readSegment(r.startPage, r.pages, r.nonce), pageSize);
     _admit(seg);
     return seg;
   }
@@ -605,8 +606,7 @@ final class Engine {
     _nonces = nonces;
     store.crypto = PageCrypto(ring, nonces);
     // F-127: the read rule follows the MAC'd superblock, never the pages.
-    store.strict =
-        featuresOptional & (1 << Feature.converting) == 0;
+    store.strict = featuresOptional & (1 << Feature.converting) == 0;
     vlog.crypto = VlogCrypto(ring, nonces.allocate, strict: store.strict);
   }
 
@@ -892,7 +892,6 @@ final class Engine {
     return n;
   }
 
-
   // -------------------------------------------------------------------------
   // Write path
   // -------------------------------------------------------------------------
@@ -1176,8 +1175,8 @@ final class Engine {
     // document create cost 52 ms of its 64 ms.
     final b = _builder(level: 0);
     for (final p in _memtable.values) {
-      b.add(SegEntry(p.internalKey, p.valueKind, p.value,
-          expiryMs: p.expiryMs));
+      b.add(
+          SegEntry(p.internalKey, p.valueKind, p.value, expiryMs: p.expiryMs));
     }
     _publish(b, level: 0, group: 0);
     _memtable.clear();
@@ -1519,6 +1518,12 @@ final class Engine {
         (forceRecluster ||
             vlog.allocatedBytes > vlog.liveBytes * vlogSpaceTargetPct / 100 ||
             vlog.localityDebt * 100 > localityDebtPct);
+    // F-094: a last-level compaction moves at most every live value into one
+    // fresh cold run.
+    // ponytail: 2x + 64 KiB covers the framing a re-encrypted record adds
+    // (keys and tags are not in liveBytes); a run that still overflows rolls
+    // over into a full extent, as Rust's.
+    if (levelled) vlog.nextColdBytes = 2 * vlog.liveBytes + (64 << 10);
 
     // **The group is decided before the outputs are built, not after.**
     // `group` is written into each segment's header (§2.1) *and* into its
@@ -1584,14 +1589,15 @@ final class Engine {
 
       final rec = pick.record();
       final parsed = parseInternalKey(rec.internalKey);
-      final userKey = Uint8List.sublistView(
-          rec.internalKey, 0, rec.internalKey.length - 9);
+      final userKey =
+          Uint8List.sublistView(rec.internalKey, 0, rec.internalKey.length - 9);
       final isNewest = job.lastUserKey == null ||
           compareKeys(job.lastUserKey!, userKey) != 0;
 
       if (isNewest) {
         // The only legal step boundary, checked before anything is consumed.
-        if (budgetBytes != null && job.bytesMerged - startBytes >= budgetBytes) {
+        if (budgetBytes != null &&
+            job.bytesMerged - startBytes >= budgetBytes) {
           return false;
         }
         job.lastUserKey = Uint8List.fromList(userKey);
@@ -1637,8 +1643,13 @@ final class Engine {
           // live: without it, §5 would have dropped this entry here.
           job.pinned += rec.value.length + rec.internalKey.length;
         }
-        job.out.add(SegEntry(rec.internalKey, rec.valueKind, rec.value,
-            expiryMs: rec.expiryMs));
+        // F-144: a recluster moves pinned versions' values too, or a
+        // conversion under a live snapshot never leaves their segment.
+        job.out.add(job.recluster
+            ? _promote(rec, parsed.treeId, job.dead, true,
+                levelled: job.levelled)
+            : SegEntry(rec.internalKey, rec.valueKind, rec.value,
+                expiryMs: rec.expiryMs));
       }
       job.bytesMerged += rec.internalKey.length + rec.value.length;
       pick.next();
@@ -1743,8 +1754,9 @@ final class Engine {
     return sb.toString();
   }
 
-  static Uint8List _userLow(Uint8List bound) =>
-      bound.length >= 13 ? Uint8List.sublistView(bound, 0, bound.length - 9) : bound;
+  static Uint8List _userLow(Uint8List bound) => bound.length >= 13
+      ? Uint8List.sublistView(bound, 0, bound.length - 9)
+      : bound;
 
   Uint8List _minOf(List<SegmentRef> refs) {
     var m = refs.first.minKey;
@@ -1780,8 +1792,8 @@ final class Engine {
   /// at all. It accumulated one unreachable cold generation per compaction and
   /// sat at 45 % locality debt against a 20 % bound, with collection running
   /// and returning immediately every time.
-  SegEntry _promote(SegRecord rec, int treeId, List<VlogPointer> dead,
-      bool recluster,
+  SegEntry _promote(
+      SegRecord rec, int treeId, List<VlogPointer> dead, bool recluster,
       {required bool levelled}) {
     if (!levelled) {
       return SegEntry(rec.internalKey, rec.valueKind, rec.value,
@@ -1965,7 +1977,9 @@ final class Engine {
   Uint8List? getView(int treeId, CValue key, {Snapshot? at}) {
     final rec = _winner(treeId, key, at);
     if (rec == null) return null;
-    return ValueKind.isPointer(rec.valueKind) ? _resolve(rec) : rec.value.asUnmodifiableView();
+    return ValueKind.isPointer(rec.valueKind)
+        ? _resolve(rec)
+        : rec.value.asUnmodifiableView();
   }
 
   /// The record [get] resolves, or null when the key is absent, deleted or
@@ -1973,7 +1987,9 @@ final class Engine {
   SegRecord? _winner(int treeId, CValue key, Snapshot? at) {
     // `userKeyPrefix(treeId, encodeKey(key))` in one buffer: that was two
     // arrays and two copies per read to build thirteen bytes.
-    final w = _keyWriter..clear()..u32be(treeId);
+    final w = _keyWriter
+      ..clear()
+      ..u32be(treeId);
     writeKey(w, key);
     final prefix = w.takeBytes();
     final ceiling = at?.seq;
@@ -1992,7 +2008,9 @@ final class Engine {
     // §4 step 4: a read landing inside an unavailable range fails naming the
     // range, "never with a wrong or empty answer". The test is on the manifest
     // entry, so it costs no I/O and works even though the extent is unreadable.
-    for (final r in memHit || quarantined.isEmpty ? const <SegmentRef>[] : quarantined.values) {
+    for (final r in memHit || quarantined.isEmpty
+        ? const <SegmentRef>[]
+        : quarantined.values) {
       if (r.covers(prefix)) {
         throw UnavailableRangeException(
             'key falls inside the range of quarantined segment '
@@ -2261,8 +2279,7 @@ final class Engine {
         pick.next();
       }
 
-      final userKey =
-          Uint8List.sublistView(bestKey, 0, bestKey.length - 9);
+      final userKey = Uint8List.sublistView(bestKey, 0, bestKey.length - 9);
       if (ceiling != null && parseInternalKey(bestKey).seq > ceiling) {
         continue; // invisible at this snapshot; a lower version may still show
       }
@@ -2396,8 +2413,7 @@ final class ScanResult {
 
   /// The metric `spec/13-operations.md` §6 calls "the number that predicts
   /// scan decay", and that P8 bounds at 0.3.
-  double get valueReadsPerScannedRow =>
-      rows == 0 ? 0 : valuePageReads / rows;
+  double get valueReadsPerScannedRow => rows == 0 ? 0 : valuePageReads / rows;
 
   @override
   String toString() => 'rows $rows, key pages $keyPageReads, '

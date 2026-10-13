@@ -813,6 +813,50 @@ void lockTests() {
     }
   });
 
+  test('F-144: decrypt finishes while a snapshot pins an old value-log version',
+      () {
+    Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);
+    final path = tmp('f144');
+    final db = DatabaseFile.create(path,
+        credential: k(1), kdf: Keyslot.kdfRaw, profile: Profile.desktop);
+    final e = db.engine;
+    final snap = e.snapshot();
+    e.put(2, CBytes(Uint8List.fromList([0x30])), Uint8List(4222)); // value log
+    e.put(2, CBytes(Uint8List.fromList([0x30])), Uint8List(41));
+    db.decrypt(confirmRemoveEncryption: true);
+    var steps = 0;
+    while (db.convertStep()) {
+      expect(++steps, lessThan(10),
+          reason: '${db.conversion().remaining} objects never convert');
+    }
+    e
+      ..release(snap)
+      ..close();
+  });
+
+  test('F-094/F-096: conversions of a small database stay small', () {
+    Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);
+    final path = tmp('f096');
+    final db = DatabaseFile.create(path,
+        credential: k(1), kdf: Keyslot.kdfRaw, profile: Profile.desktop);
+    final c = db.createCollection('c');
+    for (var round = 0; round < 3; round++) {
+      c.put(CStr('a$round'), CDoc({'v': CStr('x' * 5000)})); // value log
+      db.decrypt(confirmRemoveEncryption: true);
+      while (db.convertStep()) {}
+      c.put(CStr('b$round'), CDoc({'v': CStr('y' * 5000)}));
+      db.encrypt(k(1), kdf: Keyslot.kdfRaw);
+      while (db.convertStep()) {}
+    }
+    db.engine.compact();
+    for (var round = 0; round < 3; round++) {
+      expect(c.get(CStr('a$round')), CDoc({'v': CStr('x' * 5000)}));
+      expect(c.get(CStr('b$round')), CDoc({'v': CStr('y' * 5000)}));
+    }
+    db.engine.close();
+    expect(File(path).lengthSync(), lessThan(32 << 20)); // 202 MB before
+  });
+
   test('F-143: rotation after decrypt then encrypt skips dead pages of the old key',
       () {
     Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);

@@ -15,6 +15,7 @@
 /// vacuously true.
 library;
 
+import 'dart:math' show max, min;
 import 'dart:typed_data';
 
 import 'bytes.dart';
@@ -507,17 +508,36 @@ final class ValueLog {
 
   int _slot(int tier, int heat) => tier * 16 + heat;
 
+  static const _firstHotBytes = 256 << 10;
+  final Map<int, int> _nextHot = {};
+
+  /// F-094: bytes the next fresh cold segment is sized for; 0 is a full one.
+  int nextColdBytes = 0;
+
   VlogSegment _segmentFor(int tier, int heat, int need) {
     final k = _slot(tier, heat);
     var seg = _open[k];
     if (seg != null && seg.remaining >= need) return seg;
     if (seg != null) seg.seal(claimClustered: tier == VlogTier.cold);
+    // F-096: a full extent per fresh hot segment cost every encrypt, decrypt
+    // and compaction of a small database 64 MiB; grow from 256 KiB, doubling,
+    // starting over at open. F-094: a fresh cold segment is sized for what
+    // the promotion will move. As Rust; `capacity` is per segment (04 §6.2).
+    var want = segmentBytes;
+    if (tier == VlogTier.hot) {
+      final next = _nextHot[heat] ?? _firstHotBytes;
+      want = min(want, max(next, need));
+      _nextHot[heat] = min(segmentBytes, 2 * next);
+    } else if (nextColdBytes > 0) {
+      want = min(want, max(nextColdBytes, need));
+      nextColdBytes = 0;
+    }
     seg = VlogSegment(
       id: _nextId++,
       tier: tier,
       heatClass: heat,
       pageSize: pageSize,
-      capacity: need > segmentBytes ? need : segmentBytes,
+      capacity: max(want, need),
       store: store,
     );
     segments[seg.id] = seg;

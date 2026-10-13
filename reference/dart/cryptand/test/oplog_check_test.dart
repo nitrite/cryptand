@@ -99,6 +99,14 @@ class _Run {
     e.nowMs = clock;
   }
 
+  /// One step per kind of object, so a handful finish any file (F-144: a
+  /// conversion that never finished grew the file to 180 GB).
+  void convert() {
+    for (var i = 0; db.convertStep(); i++) {
+      if (i == 10) throw Diverged('convertStep never finishes: ${db.conversion().remaining} left');
+    }
+  }
+
   void record() => history[e.nextSeq - 1] = _copy(model);
 
   List<(Uint8List, Uint8List)> modelScan(Model m, int t, Uint8List? lo, Uint8List? hi) => [
@@ -239,11 +247,11 @@ class _Run {
       // F-072f: as Rust's harness. Conversion runs under a live snapshot.
       case 'encrypt' when !encrypted:
         db.encrypt(_key, kdf: Keyslot.kdfRaw);
-        while (db.convertStep()) {}
+        convert();
         encrypted = true;
       case 'decrypt' when encrypted:
         db.decrypt(confirmRemoveEncryption: true);
-        while (db.convertStep()) {}
+        convert();
         encrypted = false;
       case 'rotate' when encrypted && snaps.isEmpty:
         db = DatabaseFile.rotateMasterKey(db, _key, kdf: Keyslot.kdfRaw);
