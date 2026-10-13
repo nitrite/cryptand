@@ -123,9 +123,7 @@ abstract final class DatabaseFile {
     if (raf.lengthSync() < want) raf.truncateSync(want);
     final durable = e.durabilityAchieved == Durability.sync;
     if (durable) store.sync();
-    raf
-      ..setPositionSync(sb.commitId.isOdd ? 0 : store.pageSize)
-      ..writeFromSync(image);
+    fileWrite(raf, sb.commitId.isOdd ? 0 : store.pageSize, image);
     if (durable) store.sync();
     // The nonce floor rewrites both slots from this, so it must be the latest.
     e.superblock = sb;
@@ -1049,12 +1047,9 @@ abstract final class DatabaseFile {
     final bd = ByteData.view(image.buffer, image.offsetInBytes, image.length);
     bd.setUint64(Sb.nextNonce, floor, Endian.little);
     sealSuperblock(image, ring);
-    f
-      ..setPositionSync(0)
-      ..writeFromSync(image)
-      ..setPositionSync(sb.pageSize)
-      ..writeFromSync(image)
-      ..flushSync();
+    fileWrite(f, 0, image);
+    fileWrite(f, sb.pageSize, image);
+    fileSync(f);
   }
 }
 

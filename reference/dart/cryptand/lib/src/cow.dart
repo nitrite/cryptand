@@ -28,6 +28,28 @@ import 'lz4.dart';
 import 'errors.dart';
 import 'segment.dart';
 
+/// PLAN M2.1's fault-injection seam: null outside `test/fault_test.dart`, so
+/// it is not API. Every positioned write and fsync on a database file goes
+/// through [fileWrite] and [fileSync].
+abstract interface class FileHook {
+  void beforeWrite(RandomAccessFile f, int pos, List<int> bytes);
+  void beforeSync(RandomAccessFile f);
+}
+
+FileHook? fileHook;
+
+void fileWrite(RandomAccessFile f, int pos, List<int> bytes) {
+  fileHook?.beforeWrite(f, pos, bytes);
+  f
+    ..setPositionSync(pos)
+    ..writeFromSync(bytes);
+}
+
+void fileSync(RandomAccessFile f) {
+  fileHook?.beforeSync(f);
+  f.flushSync();
+}
+
 /// The file's page space: allocate, read, write.
 ///
 /// In memory, like the segment extents of phase 2 — `REPORT.md` §5 states the
@@ -254,9 +276,7 @@ final class PageStore {
     if (file == null) {
       _pages[pageId] = Uint8List(pageSize);
     } else {
-      file!
-        ..setPositionSync(pageId * pageSize)
-        ..writeFromSync(Uint8List(pageSize));
+      fileWrite(file!, pageId * pageSize, Uint8List(pageSize));
     }
   }
 
@@ -421,9 +441,7 @@ final class PageStore {
   /// One positioned write of raw bytes (Rust `append_into`).
   void writeAt(int pos, Uint8List bytes) {
     if (file != null) {
-      file!
-        ..setPositionSync(pos)
-        ..writeFromSync(bytes);
+      fileWrite(file!, pos, bytes);
       return;
     }
     for (var o = 0; o < bytes.length;) {
@@ -451,9 +469,7 @@ final class PageStore {
       _pages[pageId] = page;
       return;
     }
-    file!
-      ..setPositionSync(pageId * pageSize)
-      ..writeFromSync(page);
+    fileWrite(file!, pageId * pageSize, page);
   }
 
   Uint8List read(int pageId) {
@@ -724,7 +740,7 @@ final class PageStore {
   /// `spec/10-transactions.md` §7 — the strongest primitive the platform
   /// provides. Reported, never assumed.
   void sync() {
-    file?.flushSync();
+    if (file != null) fileSync(file!);
   }
 }
 
