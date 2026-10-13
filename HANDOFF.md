@@ -61,6 +61,10 @@
   04 §5 change: superseded non-RANGE_DELETE versions drop at any level, R+J+D): ~13 / ~26 MB.
   Dart FINDINGS cells done 10-13 (`test/findings_test.dart` ports the R/J repros); F-079 was a Dart
   verify false-leak bug, fixed (`Database.indexClaims`). Left `?`: F-007/008/010/012 (M6 scale).
+- F-151 fixed 10-13 (R+D): segments read the head eagerly, other pages on first use
+  (Rust `pager::SegmentPages` on its own read-only file description, since a dup
+  shares the OFD writer lock; Dart `PageStore.segmentPages`); cache budgets resident
+  pages. 10^6 remote: Rust get p50 5 us, Dart 29 us. Benches count via `Pager::reads()`.
 - Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
   (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
   `CRYPTAND_CORPUS_DIRS` (remote: `cryptand-gate/.../fuzz/{corpus,artifacts}` + `cryptand-kill-plain/reference/java/.cifuzz-corpus/...JazzerTest`).
@@ -88,13 +92,12 @@
 
 ## Next action
 
-Fix F-151 (S1, R+D): page-granular segment reads, the shape Java's `lsm/Segment.page`
-already has (header + filter + node pages fetched by index into the page-cache LRU,
-not whole extents). Show the cliff first with a counter test (bytes read per cold
-`get` <= a few pages; fails today). Then re-run the 10^6 rung on remote clone
-`cryptand-m6` (rsync the tree; Dart `tool/scale.dart build|read`, Rust
-`examples/rss_scale.rs PATH N [read]`) and continue 10^7, 10^8.
-Also check the Dart read-phase RSS (814 MB at 10^6 with deep verify) after the fix.
+Dart 10^6 `read` RSS is 153 MB against the 128 MB budget (includes deep
+`verify`; F-151 took it from 814). Find what holds it (verify's materialised
+`extent` per segment is the first suspect: `Segment.extent` reads every page
+and keeps them), fix, then run the 10^7 and 10^8 rungs on remote clone
+`cryptand-m6` (`~/m6-run/go.sh` runs both languages, log in
+`reference/bench/runs/m6-1e6-f151.log`; edit N).
 
 ## Log
 
@@ -132,3 +135,4 @@ Also check the Dart read-phase RSS (814 MB at 10^6 with deep verify) after the f
 - 2026-10-13 — Dart FINDINGS cells: 34 resolved (13 ported tests in `findings_test`), F-079 Dart verify fixed, interop step 12 verifies with Dart.
 - 2026-10-13 — committed F-150 residue + Dart FINDINGS (gate quick green); SECURITY-REVIEW Dart rows done (F-124, F-122 Dart tests).
 - 2026-10-13 — M6 started: `tool/scale.dart` (Dart rung, JSON line) and Rust `rss_scale read`; 10^6 rung: F-151 (whole-segment reads per cache miss, R+D) Dart get p50 36 ms, Rust 7.6 ms.
+- 2026-10-13 — F-151 fixed R+D (page-granular segment reads); 10^6 rung: Rust p50 7.6 ms -> 5 us, Dart 36 ms -> 29 us, Dart read RSS 153 MB (budget 128) open; gate quick green.
