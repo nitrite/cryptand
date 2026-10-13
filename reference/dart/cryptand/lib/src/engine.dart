@@ -191,7 +191,7 @@ final class LevelPolicy {
 final class Engine {
   Engine({
     this.pageSize = 4096,
-    this.vlogMin = 2048,
+    int? vlogMin,
     this.memtableEntries = 20000,
     this.policy = const LocalityPolicy(),
     this.levels = LevelPolicy.desktop,
@@ -208,7 +208,10 @@ final class Engine {
     int checkpointRoot = 0,
     int changefeedRoot = 0,
     List<int> rootNonces = const [0, 0, 0, 0, 0, 0, 0],
-  })  : segmentEntries = segmentEntries ?? memtableEntries,
+  })  : // F-140: 00 §8 caps vlog_min at page_size / 4, the value every
+        // profile uses (12 §2.5).
+        vlogMin = vlogMin ?? pageSize ~/ 4,
+        segmentEntries = segmentEntries ?? memtableEntries,
         store = store ?? PageStore(pageSize: pageSize) {
     vlog = ValueLog(
       pageSize: pageSize,

@@ -10,6 +10,7 @@ import 'package:cryptand/src/cve.dart';
 import 'package:cryptand/src/engine.dart';
 import 'package:cryptand/src/manifest.dart' show SegmentRef;
 import 'package:cryptand/src/errors.dart';
+import 'package:cryptand/src/limits.dart';
 import 'package:cryptand/src/value.dart';
 import 'package:cryptand/src/vlog.dart';
 import 'package:test/test.dart';
@@ -30,6 +31,14 @@ Uint8List docBytes(NameDict dict, int i) {
 }
 
 void main() {
+  test('F-140: the default vlog_min is within page_size / 4', () {
+    for (final ps in [4096, 16384]) {
+      final e = Engine(pageSize: ps);
+      expect(e.vlogMin, ps ~/ 4);
+      checkVlogMin(e.vlogMin, ps); // what DatabaseFile.save checks
+    }
+  });
+
   test('F-053: a lookup does not stop at an older version in a newer run', () {
     // L1 is tiered: its groups hold runs of any age, so the run with the
     // higher segment id can carry the *older* version of a key.
