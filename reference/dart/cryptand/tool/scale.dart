@@ -7,7 +7,7 @@
 /// ./scale read PATH N    # fresh process: cold open, gets, scan, verify
 /// ```
 ///
-/// `read` ends with PASS/FAIL against desktop page cache + 64 MB RSS. Run
+/// `read` ends with PASS/FAIL against PLAN 6.3's RSS bar (cache + 256 MB). Run
 /// AOT: under `dart run` the JIT alone peaks near 265 MB.
 library;
 
@@ -89,7 +89,9 @@ void main(List<String> args) {
     ..['missing'] = missing;
   db.engine.close();
   final rss = ProcessInfo.maxRss >> 20;
-  final budget = (Profile.desktop.pageCacheBytes >> 20) + 64;
+  // PLAN 6.3: profile budget + memtables + 256 MB; a read rung's memtable is
+  // empty. (+64 MB is M5.5's bar for a bare open, not for a rung.)
+  final budget = (Profile.desktop.pageCacheBytes >> 20) + 256;
   out
     ..['max_rss_mb'] = rss
     ..['budget_mb'] = budget

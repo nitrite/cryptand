@@ -712,3 +712,24 @@ fn an_encrypted_record_that_rolls_the_value_log_segment_reads_back() {
         assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap(), Some(value(i)), "reopened: key {i}");
     }
 }
+
+/// F-152, 10 §6: a bulk load whose flushes outgrow one compaction step must
+/// not run L0 past its hard bound (`l0_trigger` x 4); the step is raised while
+/// a bound is in overshoot.
+#[test]
+fn a_bulk_load_keeps_l0_under_its_hard_bound() {
+    let (_t, mut db) = db("f152", Profile::Mobile);
+    let hard = db.engine.policy.l0_trigger as usize * 4;
+    let mut worst = 0;
+    for c in 0..30i64 {
+        for i in 0..20_000i64 {
+            db.engine.put(T, &Value::NitriteId(c * 20_000 + i), &[7u8; 100]).unwrap();
+        }
+        db.commit(Durability::Sync).unwrap();
+        worst = worst.max(db.engine.refs_at(0).unwrap().len());
+        let bp = cryptand::txn::Backpressure::compute(&cryptand::txn::bounds_of(&mut db.engine).unwrap());
+        assert!(bp.delay_ms < cryptand::txn::MAX_DELAY_MS, "{:?} at its hard bound, commit {c}", bp.cause);
+    }
+    eprintln!("F-152 rust worst l0={worst} hard={hard}");
+    assert!(worst <= hard, "L0 reached {worst}, hard bound {hard}");
+}

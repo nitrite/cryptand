@@ -402,6 +402,10 @@ pub struct Engine {
     /// `11-conformance.md` §5 — trees whose `params.change_feed` is true.
     pub changefeed_trees: HashSet<u32>,
     job: Option<CompactionJob>,
+    /// F-152: bytes put since the last paced compaction step.
+    paced_bytes: u64,
+    /// F-152: compaction rate over the write rate, 4 raised to 64 by §6's x².
+    pace: f64,
     closed: bool,
     /// `14-security.md` §4.1 — the session's nonce allocation cursor and
     /// the published floor it must not reach. Equal means "publish first".
@@ -552,6 +556,8 @@ impl Engine {
             persisted_free: (0, Vec::new()),
             changefeed_trees: HashSet::new(),
             job: None,
+            paced_bytes: 0,
+            pace: 4.0,
             closed: false,
             nonce_next: 0,
             nonce_limit: 0,
@@ -770,6 +776,8 @@ impl Engine {
             persisted_free: (0, Vec::new()),
             changefeed_trees: HashSet::new(),
             job: None,
+            paced_bytes: 0,
+            pace: 4.0,
             closed: false,
             nonce_next: 0,
             nonce_limit: 0,
@@ -1209,6 +1217,20 @@ impl Engine {
         let feed_op = if op_code == op::DELETE { "delete" } else { "insert" };
         if let Some(k) = feed_key {
             self.feed(tree, seq, feed_op, &k)?;
+        }
+        // F-152, 10 §6.1: compaction paced at 4x the write rate, "raised while
+        // a bound is in overshoot" to 64x at the hard bound, one bounded step
+        // (12 §4) at a time. One step per commit let a bulk load run L0 past
+        // its hard bound. A compaction error is not this put's error, as in
+        // `Database::commit`.
+        self.paced_bytes += (cke_len + value.len()) as u64;
+        if self.paced_bytes as f64 * self.pace >= self.profile.compaction_step_bytes as f64 {
+            self.paced_bytes = 0;
+            let _ = self.maybe_compact(None);
+            let x2 = crate::txn::bounds_of(self)
+                .map(|b| crate::txn::Backpressure::compute(&b).delay_ms / crate::txn::MAX_DELAY_MS)
+                .unwrap_or(0.0);
+            self.pace = 4.0 + 60.0 * x2;
         }
         Ok(seq)
     }

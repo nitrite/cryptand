@@ -59,4 +59,27 @@ void main() {
     }
     e.close();
   });
+
+  test('F-152: a bulk load keeps L0 under its hard bound', () {
+    // 10 §6: flushes that outgrow one compaction step must not run L0 past
+    // l0_trigger x 4; the step is raised while a bound is in overshoot.
+    // Before the fix the 10^6 rung left 46 L0 segments.
+    final path =
+        '${Directory.systemTemp.createTempSync('cryptand-f152-').path}/db.cryptand';
+    DatabaseFile.save(Database(engine: Engine()), path);
+    final e = DatabaseFile.open(path).engine;
+    final hard = e.levels.l0Trigger * 4;
+    var worst = 0;
+    for (var c = 0; c < 30; c++) {
+      for (var i = 0; i < 20000; i++) {
+        e.put(16, CNitriteId(c * 20000 + i), Uint8List(100));
+      }
+      e.commit();
+      worst = worst > e.refsAt(0).length ? worst : e.refsAt(0).length;
+      expect(e.backpressure.delayMs, lessThan(100),
+          reason: '${e.backpressure.cause} at its hard bound, commit $c');
+    }
+    e.close();
+    expect(worst, lessThanOrEqualTo(hard));
+  });
 }

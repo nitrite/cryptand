@@ -1096,7 +1096,23 @@ final class Engine {
     }
     _feed(treeId, seq, op == Op.delete ? 'delete' : 'put', cke, key);
     if (_memtable.length >= memtableEntries) flush();
+    // F-152, 10 §6.1: compaction paced at 4x the write rate, "raised while a
+    // bound is in overshoot" to 64x at the hard bound, one bounded step
+    // (12 §4) at a time; one step per flush let a bulk load run L0 past its
+    // hard bound.
+    _pacedBytes += cke.length + encodedValue.length;
+    if (_pacedBytes * _pace >= compactionStepBytes) {
+      _pacedBytes = 0;
+      maybeCompact(budgetBytes: compactionStepBytes);
+      _pace = 4 + 60 * backpressure.delayMs / 100;
+    }
   }
+
+  /// F-152: bytes put since the last paced compaction step.
+  int _pacedBytes = 0;
+
+  /// F-152: compaction rate over the write rate.
+  double _pace = 4;
 
   // -------------------------------------------------------------------------
   // Commit — `spec/10-transactions.md` §2, §5, §9, §10

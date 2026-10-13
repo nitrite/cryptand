@@ -61,10 +61,15 @@
   04 §5 change: superseded non-RANGE_DELETE versions drop at any level, R+J+D): ~13 / ~26 MB.
   Dart FINDINGS cells done 10-13 (`test/findings_test.dart` ports the R/J repros); F-079 was a Dart
   verify false-leak bug, fixed (`Database.indexClaims`). Left `?`: F-007/008/010/012 (M6 scale).
-- F-151 fixed 10-13 (R+D): segments read the head eagerly, other pages on first use
-  (Rust `pager::SegmentPages` on its own read-only file description, since a dup
-  shares the OFD writer lock; Dart `PageStore.segmentPages`); cache budgets resident
-  pages. 10^6 remote: Rust get p50 5 us, Dart 29 us. Benches count via `Pager::reads()`.
+- F-151 fixed 10-13 (R+D): page-granular segment reads. 10^6 remote: Rust get p50 3 us, Dart 28 us.
+- F-152 fixed 10-14 (R+D): compaction paced per put (one bounded step per
+  `step / pace` bytes, pace 4..64 by §6 x²); L0 was 46 (Dart), Rust L1 tier at hard.
+  The M6 RSS bar is PLAN 6.3's (cache + memtables + 256 MB); `scale.dart` checked
+  M5.5's +64 MB open bar: Dart 10^6 read 206 MB now PASS (320).
+- Open: F-153 (Rust) write path never flushes at `memtable_entry_limit` (Dart does):
+  `rss_scale` holds 100k docs per commit, writer RSS 739 MB, keeps x=1 (pace 64).
+  F-154 (R+D) space: 10^6 files 922 MB / 1487 MB for 434 MB live (bar 1.6 once
+  settled); compaction inside a commit window cannot reuse what it frees (01 §6).
 - Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
   (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
   `CRYPTAND_CORPUS_DIRS` (remote: `cryptand-gate/.../fuzz/{corpus,artifacts}` + `cryptand-kill-plain/reference/java/.cifuzz-corpus/...JazzerTest`).
@@ -92,12 +97,10 @@
 
 ## Next action
 
-Dart 10^6 `read` RSS is 153 MB against the 128 MB budget (includes deep
-`verify`; F-151 took it from 814). Find what holds it (verify's materialised
-`extent` per segment is the first suspect: `Segment.extent` reads every page
-and keeps them), fix, then run the 10^7 and 10^8 rungs on remote clone
-`cryptand-m6` (`~/m6-run/go.sh` runs both languages, log in
-`reference/bench/runs/m6-1e6-f151.log`; edit N).
+F-153: Rust `Engine::write` flushes when `memtable_len() >= memtable_entry_limit`
+(as Dart `_write`); test fails with it reverted; then re-run the 10^6 rung on
+`cryptand-m6` (`~/m6-run/go.sh`, rsync src/lib first) and measure F-154's space
+amp after a final compact + reopen before deciding its fix. Then 10^7, 10^8.
 
 ## Log
 
@@ -136,3 +139,4 @@ and keeps them), fix, then run the 10^7 and 10^8 rungs on remote clone
 - 2026-10-13 — committed F-150 residue + Dart FINDINGS (gate quick green); SECURITY-REVIEW Dart rows done (F-124, F-122 Dart tests).
 - 2026-10-13 — M6 started: `tool/scale.dart` (Dart rung, JSON line) and Rust `rss_scale read`; 10^6 rung: F-151 (whole-segment reads per cache miss, R+D) Dart get p50 36 ms, Rust 7.6 ms.
 - 2026-10-13 — F-151 fixed R+D (page-granular segment reads); 10^6 rung: Rust p50 7.6 ms -> 5 us, Dart 36 ms -> 29 us, Dart read RSS 153 MB (budget 128) open; gate quick green.
+- 2026-10-14 — Dart read RSS was the wrong bar (M5.5 +64 vs 6.3 +256): 206 MB PASS; F-152 (R+D compaction pacing, L0 46 -> 2) fixed; F-153, F-154 opened; gate quick green.
