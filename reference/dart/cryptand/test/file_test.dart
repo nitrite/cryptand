@@ -813,6 +813,30 @@ void lockTests() {
     }
   });
 
+  test('F-143: rotation after decrypt then encrypt skips dead pages of the old key',
+      () {
+    Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);
+    final path = tmp('f143');
+    var db = DatabaseFile.create(path,
+        credential: k(1), kdf: Keyslot.kdfRaw, profile: Profile.desktop);
+    final c = db.createCollection('c');
+    for (var i = 0; i < 50; i++) {
+      c.put(CStr('k$i'), CDoc({'i': CStr('v$i')}));
+    }
+    db.engine.commit();
+    db.decrypt(confirmRemoveEncryption: true);
+    while (db.convertStep()) {}
+    db.encrypt(k(2), kdf: Keyslot.kdfRaw); // a new master key
+    while (db.convertStep()) {}
+    db = DatabaseFile.rotateMasterKey(db, k(3), kdf: Keyslot.kdfRaw);
+    db.engine.close();
+    db = DatabaseFile.open(path, key: k(3));
+    for (var i = 0; i < 50; i++) {
+      expect(db.collection('c')!.get(CStr('k$i')), CDoc({'i': CStr('v$i')}));
+    }
+    db.engine.close();
+  });
+
   test('F-072: rotateMasterKey re-seals pages and value-log records', () {
     Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);
     final path = tmp('rotate');

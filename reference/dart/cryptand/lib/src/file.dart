@@ -481,8 +481,27 @@ abstract final class DatabaseFile {
       throw const UnsupportedFeatureException(
           'rotateMasterKey() does not re-seal vector regions');
     }
-    // A quiet, durable state: memtable flushed, value-log segments sealed.
-    e.close();
+    // A quiet, durable state: memtable flushed, value-log segments sealed;
+    // close()'s own steps, so the live pages can be read before the handle goes.
+    e.commit();
+    e.vlog.sealOpen();
+    e.commit();
+    // F-143: as Rust, only live pages must open under the old key. A dead
+    // page may be sealed under a master key since replaced by
+    // decrypt-then-encrypt; it is re-sealed only if it opens.
+    final live = <int>{
+      for (final t in [
+        e.manifest.tree,
+        e.freelist,
+        e.checkpoints.tree,
+        e.changeFeed.tree,
+        ...e.outerTrees.values,
+      ])
+        ...t.reachablePages(),
+      for (final r in e.manifest.all)
+        for (var i = 0; i < r.pages; i++) r.startPage + i,
+    };
+    e.close(flushMemtable: false);
     final ps = e.pageSize;
     final vlogs = [
       for (final v in e.vlog.segments.values)
@@ -529,13 +548,20 @@ abstract final class DatabaseFile {
         }
         if (!h.isEncrypted) continue;
         final end = PageHeader.size + h.stored;
+        if (end > ps) continue; // not a page
         final header = Uint8List.sublistView(buf, 0, PageHeader.size);
-        final pt = decryptPagePayload(
-            keys: old,
-            pageId: p,
-            nonceCounter: h.nonce,
-            pageHeader40: header,
-            sealed: Uint8List.sublistView(buf, PageHeader.size, end));
+        final Uint8List pt;
+        try {
+          pt = decryptPagePayload(
+              keys: old,
+              pageId: p,
+              nonceCounter: h.nonce,
+              pageHeader40: header,
+              sealed: Uint8List.sublistView(buf, PageHeader.size, end));
+        } on TamperException {
+          if (live.contains(p)) rethrow;
+          continue;
+        }
         final ct = encryptPagePayload(
             keys: ring,
             pageId: p,

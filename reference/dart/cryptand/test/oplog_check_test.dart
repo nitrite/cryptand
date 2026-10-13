@@ -65,7 +65,8 @@ Model _copy(Model m) => {for (final e in m.entries) e.key: Tree.of(e.value, _mem
 class _Run {
   _Run(this.path, this.encrypted, this.profile, this.trees);
   final String path;
-  final bool encrypted;
+  bool encrypted;
+  bool erased = false;
   final Profile profile;
   final int trees;
   late Database db;
@@ -235,6 +236,25 @@ class _Run {
         e.collectWhileOverDebt(); // Rust's compact runs GC while over debt
       case 'shrink':
         e.shrink();
+      // F-072f: as Rust's harness. Conversion runs under a live snapshot.
+      case 'encrypt' when !encrypted:
+        db.encrypt(_key, kdf: Keyslot.kdfRaw);
+        while (db.convertStep()) {}
+        encrypted = true;
+      case 'decrypt' when encrypted:
+        db.decrypt(confirmRemoveEncryption: true);
+        while (db.convertStep()) {}
+        encrypted = false;
+      case 'rotate' when encrypted && snaps.isEmpty:
+        db = DatabaseFile.rotateMasterKey(db, _key, kdf: Keyslot.kdfRaw);
+        e.nowMs = clock;
+      case 'erase' when encrypted:
+        db.cryptoErase();
+        erased = true;
+      // ponytail: Dart has no file backup (Backup copies engine to engine);
+      // the source is only read, so it adds nothing to a kill test.
+      case 'encrypt' || 'decrypt' || 'rotate' || 'erase' || 'backup':
+        break;
       case 'ttl_advance':
         clock += j['ms'] as int;
         e.nowMs = clock;
@@ -360,7 +380,8 @@ void _tortureChild(List<String> lines, String db) {
         throw Diverged('line ${n + 1}: ${j['op']} — $x');
       }
     }
-    if (_durable(j)) print('ack ${n + 1}');
+    if (_durable(j) || r.erased) print('ack ${n + 1}');
+    if (r.erased) return; // nothing can open the file again
   }
   r.e.close();
 }
@@ -370,10 +391,24 @@ void _tortureChild(List<String> lines, String db) {
 /// at or past [ack]. Returns that line.
 int _tortureCheck(List<String> lines, String db, int ack) {
   final r = _header(lines, db);
+  // A conversion may be cut anywhere, so the file may be either; and from an
+  // acknowledged-or-later `erase` on, nothing may unlock it.
   try {
-    r.db = DatabaseFile.open(db, key: r.encrypted ? _key : null);
-  } catch (x) {
-    throw Diverged('open: $x');
+    r
+      ..db = DatabaseFile.open(db)
+      ..encrypted = false;
+  } catch (_) {
+    try {
+      r
+        ..db = DatabaseFile.open(db, key: _key)
+        ..encrypted = true;
+    } catch (x) {
+      // The child stops at the erase it runs, so it is the one at or past ack.
+      for (var n = ack; n <= lines.length; n++) {
+        if (lines[n - 1].contains('"op":"erase"')) return n;
+      }
+      throw Diverged('open: $x');
+    }
   }
   try {
     final bad = r.e
@@ -445,6 +480,7 @@ String _replayOn(_Run r, List<String> lines) {
       if (x is ArgumentError && x.message == 'invalid log') rethrow;
       throw Diverged('line ${n + 1}: ${j['op']} — $x');
     }
+    if (r.erased) break; // as the child: nothing can open the file again
   }
   try {
     return r.digestCheck();
