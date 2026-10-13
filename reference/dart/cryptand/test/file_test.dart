@@ -638,6 +638,42 @@ void encryptionTests() {
     expect(encrypted, greaterThan(4), reason: 'the probe found nothing');
   });
 
+  test('F-124: a value-log segment from a crashed session is sealed, not '
+      're-appended', () {
+    // 14 §4.3: appending to a segment not opened this session reuses nonces.
+    final path = tmp('reappend');
+    var db = DatabaseFile.create(path, credential: key, kdf: Keyslot.kdfRaw);
+    final big = Uint8List(db.engine.vlogMin + 512)..fillRange(0, 1, 1);
+    db.engine.put(t, CNitriteId(1), big);
+    db.engine.commit();
+    final open = [
+      for (final s in db.engine.vlog.segments.values)
+        if (!s.sealed) s.id
+    ];
+    expect(open, isNotEmpty, reason: 'the fixture left no segment open');
+    db.engine.close(flushMemtable: false); // the crash
+
+    db = DatabaseFile.open(path, key: key);
+    final segs = db.engine.vlog.segments;
+    final before = {for (final id in open) id: segs[id]!.bytes};
+    for (final id in open) {
+      expect(segs[id]!.sealed, isTrue, reason: 'segment $id not sealed');
+    }
+    db.engine.put(t, CNitriteId(2), big);
+    db.engine.commit();
+    before.forEach((id, bytes) => expect(segs[id]!.bytes, bytes,
+        reason: 'segment $id was appended to after a crash'));
+    db.engine.close();
+  });
+
+  test('F-122: crypto-erase is refused on an unencrypted file', () {
+    final path = tmp('erase-plain');
+    DatabaseFile.save(Database(engine: Engine()), path);
+    final db = DatabaseFile.open(path);
+    expect(db.cryptoErase, throwsA(isA<InvalidArgumentException>()));
+    db.engine.close();
+  });
+
   test('the nonce floor is published before anything is allocated', () {
     // §4.1 rule 1: "on open, before allocating anything, a writer MUST durably
     // publish a superblock whose next_nonce is persisted_next_nonce + 2^20."

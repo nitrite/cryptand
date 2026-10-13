@@ -88,8 +88,8 @@
 
 ## Next action
 
-SECURITY-REVIEW Dart rows, then M6 Dart rungs.
-Done 10-13 (sixth session): F-150 (see State).
+M6 Dart rungs (PLAN M6; scale 10^6..10^8 on the remote).
+Done 10-13 (seventh session): SECURITY-REVIEW Dart rows (2 new tests, row 13 n/a: Dart vector regions are in memory only).
 
 ## Log
 
@@ -125,3 +125,4 @@ Done 10-13 (sixth session): F-150 (see State).
 - 2026-10-13 — F-150 fixed: Rust level trigger + space-target GC + cold extent sizing, Dart close finishes job + free-list coalesce; Java measured unaffected; space_test R+J+D; gate quick green.
 - 2026-10-13 — F-150 residue: 04 §5 superseded versions drop at any level (approved), R+J+D; Rust 30->13 MB, Dart 80->26 MB.
 - 2026-10-13 — Dart FINDINGS cells: 34 resolved (13 ported tests in `findings_test`), F-079 Dart verify fixed, interop step 12 verifies with Dart.
+- 2026-10-13 — committed F-150 residue + Dart FINDINGS (gate quick green); SECURITY-REVIEW Dart rows done (F-124, F-122 Dart tests).
