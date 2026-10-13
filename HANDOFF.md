@@ -95,12 +95,13 @@ Dart space vs Rust: seed 203502 ends 11 MB (Rust 1.5 MB); cold sizing is a
 ponytail (2x live + 64 KiB).
 F-147 (10-13, third session): the "writer RSS growth" was compaction holding
 every input and output (10^7 build peaked 2.36 GB). Dart fixed: 201 MB max
-RSS at 10^7, 1000 kills (205000..206000) clean. **Rust collects all inputs
-into `job.entries` and keeps output extents; Java unchecked.**
+RSS at 10^7, 1000 kills (205000..206000) clean. Rust fixed the same way
+(10-13, fourth session): 1980 -> 348 MB at 10^7 (`examples/rss_scale.rs`);
+Java already streamed (`bench/RssScale` 10^7 under `-Xmx256m`, 551 MB RSS).
+Java's 10^7 file is 7.09 GB vs Rust 4.97 GB (not chased).
 Remote cleaned 10-13 (torture scratch, fuzz targets in kill clones): 37 GB free.
 `cryptand-rss` has an instrumented `cow.dart`/`rss_scale.dart`; rsync `--delete` over it.
-Next: F-147 in Rust and Java (measure 10^7 RSS first, same shape: stream
-disjoint runs, drop output bytes once placed), then M2.1 Dart fault seeds,
+Next: M2.1 Dart fault seeds,
 Dart corpus replay (M3.4), the `?`/`M5` rows of FINDINGS, SECURITY-REVIEW
 Dart rows, M6 Dart rungs.
 
@@ -133,3 +134,4 @@ Dart rows, M6 Dart rungs.
 - 2026-10-13 — F-140, F-142 fixed; F-072 Dart done (keyslots, rotate, encrypt/decrypt), gate steps 7–9 with Dart; 10⁷ open RSS 58 MB PASS; 704 Dart tests, interop green.
 - 2026-10-13 — Dart kill mix with maint ops: F-143..F-146 (F-146 S0) and F-094/F-096 Dart fixed; M2.2 Dart 1000 kills 0 failures; 709 Dart tests, gate green.
 - 2026-10-13 — remote cleaned (21 -> 37 GB free); F-147 Dart compaction streams inputs/outputs: 10^7 build 2.36 GB -> 201 MB RSS, 1000 kills clean; R+J open.
+- 2026-10-13 — F-147 Rust fixed (streamed merge, 1980 -> 348 MB at 10^7), Java not affected; gate quick green.
