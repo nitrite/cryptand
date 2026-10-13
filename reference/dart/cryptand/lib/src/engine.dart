@@ -662,15 +662,20 @@ final class Engine {
   /// and the free tree accumulates space no session may ever reuse.
   int beginPublish() {
     commitId++;
-    _refreshRetention();
+    _refreshRetention(publishing: true);
     return commitId;
   }
 
   /// Pushes §6's retention floor and the committing id into the page space.
   /// The store is what allocates, so it is what has to know both.
-  void _refreshRetention() {
+  ///
+  /// F-146: a page freed between commits is orphaned by the *next* commit,
+  /// not by [commitId], which is already durable: attributed to [commitId],
+  /// the next publish reused it (and zeroed it) while the live superblock
+  /// still named it, and a kill before that publish left a torn file.
+  void _refreshRetention({bool publishing = false}) {
     store
-      ..commitId = commitId
+      ..commitId = publishing ? commitId : commitId + 1
       ..minRetainedCommit = minRetainedCommit;
   }
 
@@ -1083,8 +1088,9 @@ final class Engine {
     // F/G: publish. Everything at or below `sequenced` is now durable.
     commitId++;
     visibleSeq = sequenced;
-    _refreshRetention();
+    _refreshRetention(publishing: true);
     publisher?.call(durability);
+    _refreshRetention();
     _pruneWrittenAt();
     _emit(StoreEvent(StoreEventKind.commit,
         commitId: commitId, visibleSeq: visibleSeq));

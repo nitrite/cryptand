@@ -116,6 +116,7 @@ void main() {
       f.closeSync();
       return ByteData.sublistView(b).getUint64(0, Endian.little);
     }
+
     final a = cid(0), b = cid(4096);
     expect(a, isNot(b), reason: 'the in-place commit wrote one slot only');
     // Destroy the newer slot: the older commit is still whole.
@@ -158,6 +159,7 @@ void main() {
           b.getUint64(slot + Sb.createdUtcMs, Endian.little)
       ];
     }
+
     final first = created()[0];
     sleep(const Duration(milliseconds: 5));
     final db = DatabaseFile.open(path);
@@ -452,11 +454,18 @@ void main() {
     // N <= min_retained_commit, which a reopened database's commit id clears.
     final before = back.engine.store.pageCount;
     final freeBefore = back.engine.store.freedPages;
+    final reopenedAt = back.engine.commitId;
+    int oldFree() => back.engine.store.freeExtents
+        .where((x) => x.commitId <= reopenedAt)
+        .fold(0, (a, x) => a + x.pages);
     for (var i = 0; i < 40; i++) {
       back.createCollection('d$i');
+      // F-146: what one commit frees is reusable from the next, never by
+      // the commit still being built.
+      back.engine.commit();
     }
-    expect(back.engine.store.freedPages, lessThan(freeBefore + 40),
-        reason: 'space was reused rather than only accumulated');
+    expect(oldFree(), lessThan(freeBefore),
+        reason: 'the file\'s free space was reused');
     expect(back.engine.store.pageCount - before, lessThan(freeBefore + 40),
         reason: 'the file grew by less than the writes, because it reused');
   });
@@ -808,8 +817,12 @@ void lockTests() {
     final raw = File(path).readAsBytesSync();
     for (final slot in [0, Profile.desktop.pageSize]) {
       final at = slot + Sb.keyslots;
-      expect(raw.sublist(at, at + Sb.keyslotSize * Sb.keyslotCount)
-          .every((b) => b == 0), isTrue, reason: 'slot at $slot kept a key');
+      expect(
+          raw
+              .sublist(at, at + Sb.keyslotSize * Sb.keyslotCount)
+              .every((b) => b == 0),
+          isTrue,
+          reason: 'slot at $slot kept a key');
     }
   });
 
@@ -832,6 +845,60 @@ void lockTests() {
     e
       ..release(snap)
       ..close();
+  });
+
+  test(
+      'F-146: no page the durable superblock names is overwritten before the next publish',
+      () {
+    final path = tmp('f146');
+    final db = DatabaseFile.create(path,
+        credential: Uint8List(32),
+        kdf: Keyslot.kdfRaw,
+        profile: Profile.desktop);
+    final e = db.engine;
+    for (var i = 0; i < 20; i++) {
+      e.put(1, CBytes(Uint8List.fromList([i])), Uint8List(i == 3 ? 7284 : 45));
+    }
+    e.commit();
+    // The pages commit N names, read through a copy of the file.
+    final copy = '$path.n';
+    File(path).copySync(copy);
+    final n = DatabaseFile.open(copy, key: Uint8List(32)).engine;
+    final live = <int>{
+      for (final t in [
+        n.manifest.tree,
+        n.freelist,
+        n.checkpoints.tree,
+        n.changeFeed.tree,
+        ...n.outerTrees.values,
+      ])
+        ...t.reachablePages(),
+      for (final r in n.manifest.all)
+        for (var i = 0; i < r.pages; i++) r.startPage + i,
+    };
+    n.close(flushMemtable: false);
+    final before = File(path).readAsBytesSync();
+    // A compaction frees N's pages between commits; the next publish must
+    // not reuse them, since a crash before it leaves N live.
+    final orig = e.publisher!;
+    var checked = false;
+    e.publisher = (d) {
+      orig(d);
+      if (checked) return; // only N+1: N's slot is overwritten by N+2
+      // N stays the fallback for a torn N+1 slot, so its pages stay too.
+      final now = File(path).readAsBytesSync();
+      final ps = e.pageSize;
+      for (final p in live) {
+        expect(now.sublist(p * ps, (p + 1) * ps),
+            before.sublist(p * ps, (p + 1) * ps),
+            reason: 'page $p of the durable commit was overwritten');
+      }
+      checked = true;
+    };
+    e.compact();
+    e.commit();
+    expect(checked, isTrue);
+    e.close();
   });
 
   test('F-145: decrypt finishes when a value-log entry has expired', () {
@@ -875,7 +942,8 @@ void lockTests() {
     expect(File(path).lengthSync(), lessThan(32 << 20)); // 202 MB before
   });
 
-  test('F-143: rotation after decrypt then encrypt skips dead pages of the old key',
+  test(
+      'F-143: rotation after decrypt then encrypt skips dead pages of the old key',
       () {
     Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);
     final path = tmp('f143');
@@ -980,7 +1048,8 @@ void lockTests() {
     expect(db.conversion().done, isFalse);
     expect(db.convertStep(), isTrue);
     db.engine.close(); // interrupted: a valid, half-converted file
-    expect(() => DatabaseFile.open(path), throwsA(isA<CannotUnlockException>()));
+    expect(
+        () => DatabaseFile.open(path), throwsA(isA<CannotUnlockException>()));
     db = DatabaseFile.open(path, key: k());
     expect(db.engine.featuresOptional & (1 << Feature.converting), isNot(0));
     check(db);
