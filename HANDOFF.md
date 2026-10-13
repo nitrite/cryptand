@@ -55,7 +55,9 @@
   (`CRYPTAND_FUZZ_DUMP` keeps only the last input replayed). Replaying
   Jazzer inputs needs `process-test-resources`: `surefire:test` reads `target/test-classes`.
 - Remote gate clone `cryptand-gate` (rsync the tree; Dart SDK `~/dart-sdk/bin`).
-- Open outside M5: **F-150 (S1, R+D)**: dead value-log space never returned (see Next action).
+- F-150 fixed (R+D; Java not affected): `space_test` in all three. Residue: tiered
+  levels keep superseded versions until the last level (§5 condition 3), so 1 MB
+  live sits in ~30 MB (Rust desktop) / ~80 MB (Dart `Engine()` default). See open question.
   M5 (Dart) left: `?` Dart cells of F-079, F-081, F-084, F-087, F-088, F-094..F-121 in FINDINGS.
 - Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
   (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
@@ -80,21 +82,17 @@
 
 ## Open questions for the human
 
+- F-150 residue: 04 §5 lets a compaction drop a superseded version only when
+  condition 3 holds (reaches the last level). Dropping an older PUT whose newer
+  visible version is in the same job is safe at any level (only tombstones need
+  condition 3) and would cut the residue ~10x. Spec change: approve or not?
+
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
 
 ## Next action
 
-**F-150 first** (S1, Rust + Dart, Java unmeasured). Probe: 30 x (open, overwrite
-the same 256 x 4 KiB values, commit Sync, close) on Desktop: both ~56 MB for
-1 MB live, linear. Dart `live_bytes` reads 31.6 MB (superseded records not
-marked dead before the last level?), manifest 5 segments, no collection fires
-(04 §6.8: MUST trigger on `vlog_space_target_pct`). Explicit compact + collect +
-shrink: Rust 86.8 MB, Dart 60.3 MB (freed extents not at the tail / not reusable?).
-Write the probe as a test in all three, find why, fix in all three.
-Then: `?` Dart cells in FINDINGS, SECURITY-REVIEW Dart rows, M6 Dart rungs.
-Done 10-13 (fifth session): M2.1 Dart (3000 seeds x 3 faults clean; F-095 Dart
-fixed), M3.4 Dart (47730 corpus inputs, F-148 R+D read-only open wrote the file,
-F-149 D), F-076 Dart writes byte 39, 10^6 Dart mutants (100 seeds x 10k, 123853 refused, 0 untyped, 0 hung).
+`?` Dart cells in FINDINGS, then SECURITY-REVIEW Dart rows, then M6 Dart rungs.
+Done 10-13 (sixth session): F-150 (see State).
 
 ## Log
 
@@ -127,3 +125,4 @@ F-149 D), F-076 Dart writes byte 39, 10^6 Dart mutants (100 seeds x 10k, 123853 
 - 2026-10-13 — remote cleaned (21 -> 37 GB free); F-147 Dart compaction streams inputs/outputs: 10^7 build 2.36 GB -> 201 MB RSS, 1000 kills clean; R+J open.
 - 2026-10-13 — F-147 Rust fixed (streamed merge, 1980 -> 348 MB at 10^7), Java not affected; gate quick green.
 - 2026-10-13 — M2.1 Dart done (3000 seeds x crash/EIO/ENOSPC, F-095 D); M3.4 Dart corpus replay (47730 inputs) found F-148 (R+D) and F-149 (D); F-076 D; F-150 (R+D space) opened; gate green.
+- 2026-10-13 — F-150 fixed: Rust level trigger + space-target GC + cold extent sizing, Dart close finishes job + free-list coalesce; Java measured unaffected; space_test R+J+D; gate quick green.

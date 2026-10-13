@@ -1,0 +1,38 @@
+//! F-150: dead value-log space must come back (04 §6.8).
+
+mod support;
+use support::*;
+
+use cryptand::container::{Durability, Profile};
+use cryptand::database::Database;
+use cryptand::value::Value;
+
+#[test]
+fn f150_overwriting_the_same_values_does_not_grow_the_file() {
+    // 100 x (open, overwrite 256 x 4 KiB, commit, close). Before the fix
+    // the file grew ~1.9 MB a cycle (56 MB at 30); now it plateaus near
+    // 30 MB: tiered levels keep up to ~12 versions until the last level
+    // drops them (§5 condition 3).
+    let (t, mut e) = engine("f150", Profile::Desktop);
+    e.close(true).unwrap();
+    let path = t.path.clone();
+    let mut at_50 = 0;
+    for cycle in 0..100u8 {
+        let mut d = Database::open(&path, None).unwrap();
+        for i in 0..256i64 {
+            d.engine.put(16, &Value::NitriteId(i), &vec![cycle; 4096]).unwrap();
+        }
+        d.commit(Durability::Sync).unwrap();
+        d.close().unwrap();
+        if cycle == 50 {
+            at_50 = std::fs::metadata(&path).unwrap().len();
+        }
+    }
+    let len = std::fs::metadata(&path).unwrap().len();
+    let mut d = Database::open(&path, None).unwrap();
+    for i in 0..256i64 {
+        assert_eq!(d.engine.get(16, &Value::NitriteId(i)).unwrap().unwrap(), vec![99u8; 4096]);
+    }
+    assert!(len <= at_50 + at_50 / 10, "still growing: {at_50} at cycle 50, {len} at 100");
+    assert!(len < 40 << 20, "file {len} bytes for 1 MiB live");
+}

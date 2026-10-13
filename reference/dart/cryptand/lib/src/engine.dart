@@ -1182,6 +1182,16 @@ final class Engine {
     _emit(const StoreEvent(StoreEventKind.closing));
     try {
       if (flushMemtable && _memtable.isNotEmpty) commit();
+      // F-150: a job in flight is finished, not dropped. Each session's
+      // bounded steps restarted the same last-level merge and none ever
+      // finished it, so superseded versions were never dropped and their
+      // value-log space never came back (460 MB for 1 MB live).
+      final pending = _job;
+      if (flushMemtable && pending != null) {
+        while (!stepCompaction(pending)) {}
+        finishCompaction(pending);
+        _job = null;
+      }
       vlog.sealOpen();
       // The seals go into tree 7 with one last commit, so a clean close
       // leaves nothing for the next open to repair.

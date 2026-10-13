@@ -291,6 +291,35 @@ final class PageStore {
     if (pageId != 0) freeExtent(pageId, 1);
   }
 
+  /// Merges adjacent reclaimable extents, as Rust's `coalesce_reclaimable`.
+  /// The merged run keeps the newest `commit_id`, still reclaimable.
+  ///
+  /// F-150: without it every one-page CoW free stayed its own extent; 300
+  /// sessions left 247 853 of them, no multi-page extent fit, every
+  /// allocation grew the file, and tree 1 (rebuilt at the end of the file
+  /// each commit) grew with the list.
+  void coalesceReclaimable() {
+    bool ok((int, int) k) => k.$1 <= minRetainedCommit && k.$1 < commitId;
+    final runs = [
+      for (final e in _free.entries)
+        if (ok(e.key)) (e.key.$2, e.key.$2 + e.value, e.key.$1)
+    ]..sort((a, b) => a.$1.compareTo(b.$1));
+    if (runs.length < 2) return;
+    _free.removeWhere((k, _) => ok(k));
+    final merged = <(int, int, int)>[];
+    for (final r in runs) {
+      final m = merged.isEmpty ? null : merged.last;
+      if (m != null && m.$2 == r.$1 && r.$2 - m.$1 <= 0xFFFFFFFF) {
+        merged.last = (m.$1, r.$2, m.$3 > r.$3 ? m.$3 : r.$3);
+      } else {
+        merged.add(r);
+      }
+    }
+    for (final r in merged) {
+      _free[(r.$3, r.$1)] = r.$2 - r.$1;
+    }
+  }
+
   /// Replaces the free tree, for a reopen that reads tree 1 back.
   void loadFree(Iterable<FreeExtent> extents) {
     _free.clear();

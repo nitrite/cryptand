@@ -199,6 +199,7 @@ abstract final class DatabaseFile {
     for (final p in free.reachablePages().toList()) {
       store.free(p);
     }
+    store.coalesceReclaimable();
     free.rebuildFresh([
       for (final x in store.freeExtents)
         (

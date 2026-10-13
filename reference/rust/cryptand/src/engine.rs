@@ -1289,7 +1289,8 @@ impl Engine {
             // F-094: sized for what the promotion or merge will move; too
             // small just rolls over into a full one.
             want = want.min(DATA_OFFSET as u64 + self.next_cold_bytes.max(need));
-            self.next_cold_bytes = 0;
+            // A rollover doubles (F-150); a merge sizes exactly and never rolls.
+            self.next_cold_bytes = full.min(2 * want);
         }
         let pages = (want + DATA_OFFSET as u64).div_ceil(page_size).max(2) as u32;
         let start = self.pager.alloc_extent(pages)?;
@@ -2510,10 +2511,17 @@ impl Engine {
             } else {
                 self.policy.tier_width.max(1)
             } as usize;
-            if refs.len() < bound {
+            // F-150: a run as small as one segment fills a group alone, so
+            // `overlap_bound` runs fill the level while `refs.len()` stays
+            // under `tier_width`; the next run then merges into a used group
+            // and the level grows forever, never cascading to the last level
+            // where superseded versions are dropped. Every group used is the
+            // level holding its `overlap_bound` runs (§3.1): it is due.
+            let full = level > 0 && self.groups_at(level)?.len() >= self.policy.overlap_bound.max(1) as usize;
+            if refs.len() < bound && !full {
                 continue;
             }
-            let score = refs.len() as f64 / bound as f64;
+            let score = (refs.len() as f64 / bound as f64).max(if full { 1.0 } else { 0.0 });
             let better = match &best {
                 None => true,
                 Some((s, l, _)) => score > *s || (score == *s && level > *l),
@@ -2628,9 +2636,12 @@ impl Engine {
             if let Some(open) = self.vlog_cold_open {
                 self.seal_vlog(open)?;
             }
-            // F-094: what this promotion can move at most.
-            self.next_cold_bytes =
-                self.vlog_stats.values().filter(|s| s.tier == Tier::Hot as u8).map(|s| s.live_bytes).sum();
+            // F-094: what this promotion can move at most. F-150: that
+            // counts every superseded version still in a tiered level, so
+            // start small and double on rollover (as F-096's hot tier); one
+            // 16 MiB extent per promotion of 1 MB set the file's high water.
+            let hot: u64 = self.vlog_stats.values().filter(|s| s.tier == Tier::Hot as u8).map(|s| s.live_bytes).sum();
+            self.next_cold_bytes = hot.min(FIRST_HOT_BYTES);
         }
         let per_output = self.segment_entries_at(target);
         let runs = RunCursor::of(&inputs);
@@ -2945,6 +2956,9 @@ impl Engine {
             self.job = Some(job);
         } else {
             self.finish_compaction(job)?;
+            if self.auto_collect {
+                self.collect_over_space_target()?;
+            }
         }
         Ok(())
     }
@@ -2989,6 +3003,7 @@ impl Engine {
         }
         if self.auto_collect {
             self.collect_while_over_debt(4)?;
+            self.collect_over_space_target()?;
         }
         if compacted {
             // At the durability the caller last asked for: a compaction adds
@@ -3372,6 +3387,36 @@ impl Engine {
             MemEntry { value_kind: value_kind::VLOG, value: np.encode().to_vec(), expiry_ms },
         );
         Ok(())
+    }
+
+    /// F-150, §6.8: collection MUST also be triggered by
+    /// `vlog_space_target_pct`. Without it a database that overwrites its
+    /// values never got a byte back: 30 rewrites of 1 MB left a 56 MB file.
+    /// Space is the extent, not the watermark: a promotion sizes its cold
+    /// extent for every hot live byte (F-094), an overstatement while tiered
+    /// levels keep superseded versions, and 1 MB of values sat in 18 MB of
+    /// pages. Victims are sealed segments at most half live; a fully dead
+    /// one is retired without a rewrite.
+    pub fn collect_over_space_target(&mut self) -> Result<()> {
+        let page = self.pager.page_size as u64;
+        let (mut space, mut live) = (0u64, 0u64);
+        for s in self.vlog_stats.values().filter(|s| !s.retired()) {
+            space += s.pages as u64 * page;
+            live += s.live_bytes;
+        }
+        if space * 100 <= live * self.sb.vlog_space_target_pct as u64 {
+            return Ok(());
+        }
+        let victims: Vec<u64> = self
+            .vlog_stats
+            .values()
+            .filter(|s| s.sealed && !s.retired() && s.live_bytes * 2 <= s.pages as u64 * page)
+            .map(|s| s.segment_id)
+            .collect();
+        if victims.is_empty() {
+            return Ok(());
+        }
+        self.rewrite_vlog_segments(victims)
     }
 
     /// §6.9's bound, enforced as an outcome. Collection is triggered when a
