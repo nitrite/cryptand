@@ -82,20 +82,22 @@
 ## Next action
 
 M5 on branch `dart-storage` (design: top of `reference/dart/cryptand/REPORT.md`).
-Done 10-13: F-140; F-142 (Dart dropped CONVERTING on commit, S1, fixed);
-**F-072 Dart complete** (`KeyApi` add/remove/cryptoErase,
-`DatabaseFile.rotateMasterKey`, `ConvertApi` encrypt/decrypt/convertStep;
-gate steps 7–9 now run Dart as converter and rotator, all green). Dart
-refuses to convert/rotate files with vector regions or descriptor-rooted
-index trees (Java writes them; Dart does not). **5.5 RSS: 10⁷ open peaks
-58 MB ≤ 128 MB** (`tool/rss_scale.dart`, AOT; RESULTS.md §3).
-Watch: Dart writer RSS reached 604 MB building 10⁷ (unbounded growth
-somewhere in the write path) and open + 10k gets took 393 s; both bear on
-the M6 Dart rungs.
-Next: add encrypt/rotate/cryptoErase to the Dart kill mix (`tools/torture.py
-dart`, remote `cryptand-kill-*`) and rerun M2.2 Dart; then the writer RSS
-growth; then M2.1 Dart fault seeds, Dart corpus replay (M3.4), the `?`/`M5`
-rows of FINDINGS, SECURITY-REVIEW Dart rows, M6 Dart rungs.
+Done 10-13 (second session): Dart kill mix runs encrypt/decrypt/rotate/erase
+(`--maint 2`; backup is a no-op in Dart, no file backup). It found F-143
+(rotate after decrypt+encrypt), F-144 (conversion under a snapshot never
+finished), F-145 (expired vlog value never marked dead), F-146 (**S0**: frees
+between commits attributed to the durable commit, reused under it; torn file
+on kill), and needed the Dart halves of F-094/F-096 (value-log extents; one
+seed grew to 182 GB and filled the remote disk). **M2.2 Dart rerun: 1000 kills
+(203000..204000, half encrypted, maint ops) 0 failures**; seed 203173 re-killed
+300x at 0-30 ms, 0 bad. Kill runs now use `ulimit -f 4000000`.
+Dart space vs Rust: seed 203502 ends 11 MB (Rust 1.5 MB); cold sizing is a
+ponytail (2x live + 64 KiB).
+Remote disk ~13 GB free; old `s205*` leftovers in `cryptand-kill-plain` (ask
+before deleting).
+Next: Dart writer RSS growth (604 MB building 10^7), then M2.1 Dart fault
+seeds, Dart corpus replay (M3.4), the `?`/`M5` rows of FINDINGS, SECURITY-REVIEW
+Dart rows, M6 Dart rungs.
 
 ## Log
 
@@ -124,3 +126,4 @@ rows of FINDINGS, SECURITY-REVIEW Dart rows, M6 Dart rungs.
 - 2026-10-12 — M5 steps 4+5 done: Engine.commit publishes in place, lock held for the session, create on file; 698 Dart tests, interop gate green.
 - 2026-10-13 — lock/created parity with R/J; F-141; M2.2 Dart 1 000 kills 0 failures (fault control caught); 699 Dart tests, interop green.
 - 2026-10-13 — F-140, F-142 fixed; F-072 Dart done (keyslots, rotate, encrypt/decrypt), gate steps 7–9 with Dart; 10⁷ open RSS 58 MB PASS; 704 Dart tests, interop green.
+- 2026-10-13 — Dart kill mix with maint ops: F-143..F-146 (F-146 S0) and F-094/F-096 Dart fixed; M2.2 Dart 1000 kills 0 failures; 709 Dart tests, gate green.
