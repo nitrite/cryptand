@@ -36,3 +36,26 @@ fn f150_overwriting_the_same_values_does_not_grow_the_file() {
     assert!(len <= at_50 + at_50 / 10, "still growing: {at_50} at cycle 50, {len} at 100");
     assert!(len < 16 << 20, "file {len} bytes for 1 MiB live");
 }
+
+#[test]
+fn f151_a_cold_point_read_reads_pages_not_the_segment() {
+    // Before the fix a page-cache miss read, decrypted and decoded the whole
+    // segment extent: 609 pages for one `get` here. Now the head, the
+    // filter (~7 pages), the manifest and one descent.
+    let (t, mut e) = engine("f151", Profile::Desktop);
+    e.close(true).unwrap();
+    let path = t.path.clone();
+    let mut d = Database::open(&path, None).unwrap();
+    for i in 0..20_000i64 {
+        d.engine.put(16, &Value::NitriteId(i), &vec![(i % 251) as u8; 100]).unwrap();
+    }
+    d.commit(Durability::Sync).unwrap();
+    d.close().unwrap();
+    let mut d = Database::open(&path, None).unwrap();
+    for i in [7i64, 12_345, 19_999] {
+        let p0 = d.engine.pager.reads();
+        assert_eq!(d.engine.get(16, &Value::NitriteId(i)).unwrap().unwrap(), vec![(i % 251) as u8; 100]);
+        let n = d.engine.pager.reads() - p0;
+        assert!(n <= 32, "a cold get of {i} read {n} pages");
+    }
+}

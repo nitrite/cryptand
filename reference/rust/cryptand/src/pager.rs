@@ -120,6 +120,9 @@ pub struct Pager {
     /// [`Pager::read_page`] last read, which [`Pager::check_nonce`] compares.
     pub written_nonce: u64,
     pub read_nonce: u64,
+    /// F-151: pages a [`SegmentPages`] fetched on demand; [`Pager::reads`]
+    /// adds them to `page_reads`.
+    pub lazy_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Pager {
@@ -209,6 +212,7 @@ impl Pager {
             strict: false,
             written_nonce: 0,
             read_nonce: 0,
+            lazy_reads: Default::default(),
         }
     }
 
@@ -719,47 +723,12 @@ impl Pager {
     /// The read half of §5.2, and §8.3's mixture: an unencrypted page in an
     /// encrypted file is returned as it is and counted, never guessed at.
     fn open_page(&mut self, page_id: u64, page: Vec<u8>) -> Result<Vec<u8>> {
-        let h = match PageHeader::parse(&page) {
-            Ok(h) => h,
-            Err(_) => return Ok(page),
-        };
-        if !h.encrypted() {
-            if self.strict && h.page_type != page_type::VLOG_SEGMENT {
-                return Err(crate::error::Error::Tamper(format!(
-                    "page {page_id} is plaintext in a fully encrypted file"
-                )));
-            }
-            self.unencrypted_pages += 1;
-            return Ok(page);
+        let (out, enc) = open_page_with(self.crypto.as_ref().map(|c| &c.ring), self.strict, page_id, page)?;
+        match enc {
+            Some(true) => self.encrypted_pages += 1,
+            Some(false) => self.unencrypted_pages += 1,
+            None => {}
         }
-        self.encrypted_pages += 1;
-        let stored = h.stored();
-        if stored < AEAD_TAG_BYTES || PAGE_HEADER_BYTES + stored > page.len() {
-            return corrupt(format!("page {page_id} declares {stored} stored bytes"));
-        }
-        let ring = match &self.crypto {
-            Some(c) => &c.ring,
-            None => return Err(crate::error::Error::CannotUnlock),
-        };
-        let pt = ring.decrypt_page(
-            page_id,
-            h.nonce,
-            &page[..PAGE_HEADER_BYTES],
-            &page[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + stored],
-        )?;
-        let mut out = vec![0u8; page.len()];
-        out[..PAGE_HEADER_BYTES].copy_from_slice(&page[..PAGE_HEADER_BYTES]);
-        out[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + pt.len()].copy_from_slice(&pt);
-        // The header a caller sees describes the plaintext it was handed.
-        let mut hh = h;
-        hh.flags &= !page_flags::ENCRYPTED;
-        // A compressed page is still compressed after it is decrypted, and
-        // `inflate_page` needs its length. Zeroing this unconditionally --
-        // which is what "same as payload_len" means -- handed the decompressor
-        // the uncompressed length as the block length.
-        hh.stored_len = if h.compressed() { pt.len() as u32 } else { 0 };
-        hh.nonce = 0;
-        hh.write_into(&mut out);
         Ok(out)
     }
 
@@ -800,6 +769,54 @@ impl Pager {
             }
         }
         Ok(out)
+    }
+
+    /// Every page this pager has read, on demand ones included (F-151).
+    pub fn reads(&self) -> u64 {
+        self.page_reads + self.lazy_reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// F-151: a segment's head page, and a reader for the rest of its pages
+    /// on demand, carrying [`Pager::read_segment`]'s replay checks page by
+    /// page. `None` for the in-memory pager, which reads the extent whole.
+    pub fn segment_pages(&mut self, start_page: u64, pages: u32, nonce: u64) -> Result<Option<(Vec<u8>, SegmentPages)>> {
+        // A new open file description, not `try_clone`: a dup shares the
+        // writer's OFD lock and keeps it held past `close` (`take_writer_lock`).
+        // ponytail: eager where the lock is process-owned, since closing any
+        // descriptor of the file would release it.
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))))]
+        return Ok(None);
+        let (Some(_), Some(path)) = (&self.file, &self.path) else { return Ok(None) };
+        let file = File::open(path)?;
+        let raw = self.read_at(self.page_offset(start_page)?, self.page_size)?;
+        self.page_reads += 1;
+        let commit_id = match &self.crypto {
+            None => None,
+            Some(_) => {
+                let head = PageHeader::parse(&raw)?;
+                if head.nonce != nonce {
+                    return Err(crate::error::Error::Tamper(format!(
+                        "segment at page {start_page} has nonce {}, the manifest recorded {nonce}: an older write replayed",
+                        head.nonce
+                    )));
+                }
+                Some(head.commit_id)
+            }
+        };
+        let head = self.open_page(start_page, raw)?;
+        self.page_offset(start_page + pages as u64)?;
+        Ok(Some((
+            head,
+            SegmentPages {
+                file,
+                start_page,
+                page_size: self.page_size,
+                ring: self.crypto.as_ref().map(|c| c.ring.clone()),
+                strict: self.strict,
+                commit_id,
+                reads: self.lazy_reads.clone(),
+            },
+        )))
     }
 
     pub fn read_extent(&mut self, start_page: u64, pages: u32) -> Result<Vec<u8>> {
@@ -1178,3 +1195,87 @@ fn lock_byte(file: &File) -> std::io::Result<bool> {
     let e = std::io::Error::last_os_error();
     if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION) { Ok(false) } else { Err(e) }
 }
+
+/// [`Pager::open_page`] without the pager: also what [`SegmentPages`] uses.
+/// The flag is `Some(encrypted)` for a page with a header.
+fn open_page_with(ring: Option<&KeyRing>, strict: bool, page_id: u64, page: Vec<u8>) -> Result<(Vec<u8>, Option<bool>)> {
+    let h = match PageHeader::parse(&page) {
+        Ok(h) => h,
+        Err(_) => return Ok((page, None)),
+    };
+    if !h.encrypted() {
+        if strict && h.page_type != page_type::VLOG_SEGMENT {
+            return Err(crate::error::Error::Tamper(format!(
+                "page {page_id} is plaintext in a fully encrypted file"
+            )));
+        }
+        return Ok((page, Some(false)));
+    }
+    let stored = h.stored();
+    if stored < AEAD_TAG_BYTES || PAGE_HEADER_BYTES + stored > page.len() {
+        return corrupt(format!("page {page_id} declares {stored} stored bytes"));
+    }
+    let Some(ring) = ring else { return Err(crate::error::Error::CannotUnlock) };
+    let pt = ring.decrypt_page(
+        page_id,
+        h.nonce,
+        &page[..PAGE_HEADER_BYTES],
+        &page[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + stored],
+    )?;
+    let mut out = vec![0u8; page.len()];
+    out[..PAGE_HEADER_BYTES].copy_from_slice(&page[..PAGE_HEADER_BYTES]);
+    out[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + pt.len()].copy_from_slice(&pt);
+    // The header a caller sees describes the plaintext it was handed.
+    let mut hh = h;
+    hh.flags &= !page_flags::ENCRYPTED;
+    // A compressed page is still compressed after it is decrypted, and
+    // `inflate_page` needs its length. Zeroing this unconditionally --
+    // which is what "same as payload_len" means -- handed the decompressor
+    // the uncompressed length as the block length.
+    hh.stored_len = if h.compressed() { pt.len() as u32 } else { 0 };
+    hh.nonce = 0;
+    hh.write_into(&mut out);
+    Ok((out, Some(true)))
+}
+
+/// F-151: reads one page of a segment by its index in the extent, on its own
+/// file handle, so a [`crate::segment::Segment`] can fetch the pages a lookup
+/// touches instead of the whole extent. ponytail: the handle survives a file
+/// swap (rotation, restore) only because those drop the segment cache.
+pub struct SegmentPages {
+    file: File,
+    start_page: u64,
+    page_size: usize,
+    ring: Option<KeyRing>,
+    strict: bool,
+    /// The head's `commit_id` on an encrypted file (F-128, 04 §2.1).
+    commit_id: Option<u64>,
+    reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl SegmentPages {
+    pub fn read(&self, index: u64) -> Result<Vec<u8>> {
+        use crate::posio::PosIo;
+        let page_id = self.start_page + index;
+        let mut raw = vec![0u8; self.page_size];
+        if let Err(e) = self.file.read_exact_at(&mut raw, page_id * self.page_size as u64) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return corrupt(format!("read past the end of the file: page {page_id}"));
+            }
+            return Err(e.into());
+        }
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(c) = self.commit_id {
+            if let Ok(h) = PageHeader::parse(&raw) {
+                if h.encrypted() && h.commit_id != c {
+                    return Err(crate::error::Error::Tamper(format!(
+                        "page {page_id} of the segment at {} has commit {}, its head {c}: an older write replayed",
+                        self.start_page, h.commit_id
+                    )));
+                }
+            }
+        }
+        Ok(open_page_with(self.ring.as_ref(), self.strict, page_id, raw)?.0)
+    }
+}
+

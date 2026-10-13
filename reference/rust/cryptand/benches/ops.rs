@@ -155,7 +155,7 @@ fn main() {
     for _ in 0..200 {
         let _ = c.get(&mut db.engine, snowflake(rng.below(n)));
     }
-    db.engine.pager.page_reads = 0;
+    let r0 = db.engine.pager.reads();
     let mut samples = Vec::with_capacity(5000);
     let reads = 5000.min(n as usize);
     for _ in 0..reads {
@@ -165,7 +165,7 @@ fn main() {
         samples.push(t.elapsed().as_nanos() as u64);
         assert!(got.is_some(), "the fixture must hold every id it reads");
     }
-    let page_reads = db.engine.pager.page_reads;
+    let page_reads = db.engine.pager.reads() - r0;
     row("point_read_us_p50", format!("{:.2}", percentile(&mut samples, 0.50) as f64 / 1000.0), "us", false);
     row("point_read_us_p99", format!("{:.2}", percentile(&mut samples, 0.99) as f64 / 1000.0), "us", false);
     row(
@@ -178,11 +178,11 @@ fn main() {
     // ------------------------------------------------------------------
     // scan
     // ------------------------------------------------------------------
-    db.engine.pager.page_reads = 0;
+    let r0 = db.engine.pager.reads();
     let t = Instant::now();
     let rows = c.scan(&mut db.engine).unwrap();
     let scan_secs = t.elapsed().as_secs_f64();
-    let scan_pages = db.engine.pager.page_reads;
+    let scan_pages = db.engine.pager.reads() - r0;
     assert_eq!(rows.len() as u64, n, "the scan must return every document");
     row("scan_rows_per_s", format!("{:.0}", rows.len() as f64 / scan_secs), "rows/s", false);
     row(

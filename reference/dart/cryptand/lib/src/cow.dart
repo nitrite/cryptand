@@ -421,6 +421,45 @@ final class PageStore {
     return out;
   }
 
+  /// F-151: [readSegment] page by page. The head now, and a reader for the
+  /// rest that a [Segment] calls as a lookup touches them, each carrying
+  /// [readSegment]'s replay check for that page.
+  ({Uint8List head, Uint8List Function(int) page}) segmentPages(
+      int startPage, int pages, int nonce) {
+    _checkExtent(startPage, pages);
+    final rawHead = readClear(startPage);
+    final head = _open(startPage, rawHead);
+    if (crypto == null) {
+      return (head: head, page: (i) => read(startPage + i));
+    }
+    final h = PageHeader.read(rawHead, pageId: startPage);
+    if (h.nonce != nonce) {
+      throw TamperException(
+          'segment at page $startPage has nonce ${h.nonce}, the manifest '
+          'recorded $nonce: an older write replayed',
+          pageId: startPage);
+    }
+    Uint8List page(int i) {
+      final id = startPage + i;
+      final raw = readClear(id);
+      PageHeader? p;
+      try {
+        p = PageHeader.read(raw, pageId: id);
+      } on CorruptionException {
+        p = null;
+      }
+      if (p != null && p.isEncrypted && p.commitId != h.commitId) {
+        throw TamperException(
+            'page $id of the segment at $startPage has commit '
+            '${p.commitId}, its head ${h.commitId}: an older write replayed',
+            pageId: id);
+      }
+      return _open(id, raw);
+    }
+
+    return (head: head, page: page);
+  }
+
   Uint8List readExtent(int startPage, int pages) {
     _checkExtent(startPage, pages);
     final out = Uint8List(pages * pageSize);
@@ -501,8 +540,9 @@ final class PageStore {
     fileWrite(file!, pageId * pageSize, page);
   }
 
-  Uint8List read(int pageId) {
-    final raw = readClear(pageId);
+  Uint8List read(int pageId) => _open(pageId, readClear(pageId));
+
+  Uint8List _open(int pageId, Uint8List raw) {
     readNonce = ByteData.sublistView(raw).getUint64(32, Endian.little);
     // §5.2's read order: verify checksum, decrypt, then decompress.
     final plain = crypto == null ? raw : _openPage(pageId, raw);

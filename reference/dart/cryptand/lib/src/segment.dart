@@ -1196,7 +1196,11 @@ final class SegmentHeader {
 
 /// An immutable segment, read from its extent.
 final class Segment {
-  Segment(this.extent, this.pageSize) {
+  Segment(Uint8List extent, this.pageSize)
+      : _extent = extent,
+        _pages = null,
+        _loader = null,
+        pageCount = extent.length ~/ pageSize {
     checkPageSize(pageSize);
     if (extent.length < pageSize || extent.length % pageSize != 0) {
       throw CorruptionException(
@@ -1206,11 +1210,62 @@ final class Segment {
     header = _readHeader();
   }
 
-  final Uint8List extent;
+  /// F-151: a segment of [pageCount] pages whose [head] is read and the rest
+  /// of which [loader] fetches as they are used: a point read touches the
+  /// head, the filter and one root-to-leaf path, not every page.
+  Segment.lazy(Uint8List head, Uint8List Function(int) loader, this.pageCount,
+      this.pageSize)
+      : _extent = null,
+        _pages = List<Uint8List?>.filled(pageCount, null),
+        _loader = loader {
+    checkPageSize(pageSize);
+    if (pageCount < 1 || head.length != pageSize) {
+      throw CorruptionException('segment of $pageCount pages');
+    }
+    _pages![0] = head;
+    _resident = pageSize;
+    header = _readHeader();
+  }
+
+  Uint8List? _extent;
+  final List<Uint8List?>? _pages;
+  final Uint8List Function(int)? _loader;
+  int _resident = 0;
   final int pageSize;
   late final SegmentHeader header;
+  final int pageCount;
 
-  int get pageCount => extent.length ~/ pageSize;
+  /// The whole extent; reads every page not yet read on a lazy segment, and
+  /// from then on serves pages from it.
+  Uint8List get extent {
+    if (_extent case final e?) return e;
+    final out = Uint8List(pageCount * pageSize);
+    for (var i = 0; i < pageCount; i++) {
+      out.setRange(i * pageSize, (i + 1) * pageSize, page(i));
+    }
+    _resident = out.length;
+    return _extent = out;
+  }
+
+  /// Page [i] of the extent, read on first use.
+  Uint8List page(int i) {
+    if (_extent case final e?) {
+      return Uint8List.sublistView(e, i * pageSize, (i + 1) * pageSize);
+    }
+    final pages = _pages!;
+    if (i < 0 || i >= pageCount) {
+      throw CorruptionException('page index $i outside the extent');
+    }
+    var p = pages[i];
+    if (p == null) {
+      p = pages[i] = _loader!(i);
+      _resident += pageSize;
+    }
+    return p;
+  }
+
+  /// Bytes of this segment held in memory: what the page cache budgets.
+  int get residentBytes => _extent?.length ?? _resident;
 
   /// Every page fetch, cached or not: the algorithmic work of the descent.
   int nodeAccesses = 0;
@@ -1250,9 +1305,7 @@ final class Segment {
       if (cached != null) return cached;
     }
     pageReads++;
-    final page = Uint8List.sublistView(
-        extent, pageIndex * pageSize, (pageIndex + 1) * pageSize);
-    final n = Node(page, pageIndex);
+    final n = Node(page(pageIndex), pageIndex);
     if (cacheEnabled) _cache[pageIndex] = n;
     return n;
   }
@@ -1261,14 +1314,12 @@ final class Segment {
   /// section 9 step 2.
   void verifyChecksums() {
     for (var i = 0; i < pageCount; i++) {
-      PageHeader.read(
-          Uint8List.sublistView(extent, i * pageSize, (i + 1) * pageSize),
-          pageId: i);
+      PageHeader.read(page(i), pageId: i);
     }
   }
 
   SegmentHeader _readHeader() {
-    final page = Uint8List.sublistView(extent, 0, pageSize);
+    final page = this.page(0);
     final h = PageHeader.read(page, pageId: 0);
     if (h.pageType != PageType.segmentHeader) {
       throw CorruptionException(
@@ -1421,8 +1472,7 @@ final class Segment {
     if (first == 0) return null;
     final out = BytesBuilder();
     for (var i = first; i < pageCount; i++) {
-      final page = Uint8List.sublistView(
-          extent, i * pageSize, (i + 1) * pageSize);
+      final page = this.page(i);
       final h = PageHeader.read(page, pageId: i);
       if (h.pageType != PageType.segmentFilter) break;
       out.add(h.payloadIn(page, pageId: i));

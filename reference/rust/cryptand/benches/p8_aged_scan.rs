@@ -55,12 +55,12 @@ fn measure(n: i64, value_bytes: usize, shape: &Shape) -> (f64, f64, f64, u64) {
         e.drain_compaction().unwrap();
     }
 
-    e.pager.page_reads = 0;
+    let r0 = e.pager.reads();
     e.counters.value_reads = 0;
     e.counters.scanned_rows = 0;
     let rows = e.scan_tree(16, None, None, None, true).unwrap();
     assert_eq!(rows.len(), n as usize);
-    let first = e.pager.page_reads;
+    let first = e.pager.reads() - r0;
 
     let mut rng = Rng::new(0xA6ED);
     for _ in 0..n * 10 {
@@ -77,12 +77,12 @@ fn measure(n: i64, value_bytes: usize, shape: &Shape) -> (f64, f64, f64, u64) {
         e.collect_while_over_debt(8).unwrap();
     }
 
-    e.pager.page_reads = 0;
+    let r0 = e.pager.reads();
     e.counters.value_reads = 0;
     e.counters.scanned_rows = 0;
     let rows = e.scan_tree(16, None, None, None, true).unwrap();
     assert_eq!(rows.len(), n as usize);
-    let second = e.pager.page_reads;
+    let second = e.pager.reads() - r0;
     let stats: Vec<_> = e.vlog_stats.values().cloned().collect();
     (
         second as f64 / first.max(1) as f64,

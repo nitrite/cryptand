@@ -476,11 +476,14 @@ final class Engine {
     final hit = extents.remove(r.segmentId);
     if (hit != null) {
       cacheHits++;
-      return extents[r.segmentId] = hit;
+      extents[r.segmentId] = hit;
+      // F-151: a lazy segment grows after it is admitted.
+      _evict(hit);
+      return hit;
     }
     cacheMisses++;
-    final seg =
-        Segment(store.readSegment(r.startPage, r.pages, r.nonce), pageSize);
+    final p = store.segmentPages(r.startPage, r.pages, r.nonce);
+    final seg = Segment.lazy(p.head, p.page, r.pages, pageSize);
     _admit(seg);
     return seg;
   }
@@ -492,15 +495,22 @@ final class Engine {
     final id = seg.header.segmentId;
     extents.remove(id);
     extents[id] = seg;
+    _evict(seg);
+  }
+
+  /// ponytail: sums every cached segment per fetch; a running total if the
+  /// cache ever holds thousands.
+  void _evict(Segment seg) {
     var resident = 0;
     for (final s in extents.values) {
-      resident += s.extent.length;
+      resident += s.residentBytes;
     }
     final budget = pageCacheBytes ?? profile.pageCacheBytes;
     while (resident > budget && extents.length > 1) {
       final victim = extents.keys.first;
+      if (identical(extents[victim], seg)) break;
       final v = extents.remove(victim)!;
-      resident -= v.extent.length;
+      resident -= v.residentBytes;
       _evictedPageReads += v.pageReads;
       cacheEvictions++;
     }

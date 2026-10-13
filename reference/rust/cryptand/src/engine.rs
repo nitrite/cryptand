@@ -95,7 +95,7 @@ impl std::ops::Deref for ValueRef {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match self {
-            ValueRef::Segment(s, r) => &s.extent[r.clone()],
+            ValueRef::Segment(s, r) => s.bytes(r.clone()),
             ValueRef::Owned(v) => v,
         }
     }
@@ -1675,7 +1675,7 @@ impl Engine {
     /// the bound needs a counter to be checkable from outside rather than an
     /// assurance.
     pub fn page_cache_resident_bytes(&self) -> usize {
-        self.segments.values().map(|s| s.extent.len()).sum()
+        self.segments.values().map(|s| s.resident_bytes() as usize).sum()
     }
 
     /// How many segment extents are resident.
@@ -1716,6 +1716,13 @@ impl Engine {
     fn admit(&mut self, id: u64, seg: Arc<Segment>) {
         self.touch(&seg);
         self.segments.insert(id, seg);
+        self.evict_over_budget(id);
+    }
+
+    /// F-151: segments fill page by page after they are admitted, so a hit
+    /// can push the cache over its budget too. ponytail: sums every cached
+    /// segment per fetch; a running total if the cache ever holds thousands.
+    fn evict_over_budget(&mut self, id: u64) {
         let budget = self.profile.page_cache_bytes;
         while self.segments.len() > 1 && self.page_cache_resident_bytes() > budget {
             let victim = self
@@ -1735,11 +1742,15 @@ impl Engine {
             let s = s.clone();
             self.counters.page_cache_hits += 1;
             self.touch(&s);
+            self.evict_over_budget(r.segment_id);
             return Ok(s);
         }
         self.counters.page_cache_misses += 1;
-        let extent = self.pager.read_segment(r.start_page, r.pages, r.nonce)?;
-        let s = Arc::new(Segment::open(extent, self.pager.page_size)?);
+        let s = match self.pager.segment_pages(r.start_page, r.pages, r.nonce)? {
+            Some((head, pages)) => Segment::lazy(head, pages, r.pages, self.pager.page_size)?,
+            None => Segment::open(self.pager.read_segment(r.start_page, r.pages, r.nonce)?, self.pager.page_size)?,
+        };
+        let s = Arc::new(s);
         self.admit(r.segment_id, s.clone());
         Ok(s)
     }
@@ -2008,11 +2019,11 @@ impl Engine {
             ReadSource::Mem(rec) => self.take_value(rec).map(|v| Some(ValueRef::Owned(v))),
             ReadSource::Seg(seg, rec) => {
                 if rec.value_kind == value_kind::VLOG {
-                    let p = VlogPointer::parse(&seg.extent[rec.value.clone()])?;
+                    let p = VlogPointer::parse(seg.bytes(rec.value.clone()))?;
                     return self.read_vlog(&p).map(|v| Some(ValueRef::Owned(v)));
                 }
                 if rec.value_kind == value_kind::BLOB {
-                    let ptr = seg.extent[rec.value.clone()].to_vec();
+                    let ptr = seg.bytes(rec.value.clone()).to_vec();
                     return self.read_blob(&ptr).map(|v| Some(ValueRef::Owned(v)));
                 }
                 Ok(Some(ValueRef::Segment(seg, rec.value)))

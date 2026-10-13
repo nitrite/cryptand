@@ -192,7 +192,7 @@ fn main() {
         let _ = c.get(&mut db.engine, snowflake(rng.below(n))).unwrap();
     }
     let reads = n.min(5_000);
-    let p0 = db.engine.pager.page_reads;
+    let p0 = db.engine.pager.reads();
     let t0 = Instant::now();
     let mut lat = Vec::with_capacity(reads as usize);
     for _ in 0..reads {
@@ -204,7 +204,7 @@ fn main() {
     }
     Phase {
         lat,
-        page_reads: db.engine.pager.page_reads - p0,
+        page_reads: db.engine.pager.reads() - p0,
         device: 0,
         ops: reads,
         secs: t0.elapsed().as_secs_f64(),
@@ -219,7 +219,7 @@ fn main() {
     // read.
     // ------------------------------------------------------------------
     let updates = n.min(5_000);
-    let p0 = db.engine.pager.page_reads;
+    let p0 = db.engine.pager.reads();
     let d0 = db.engine.pager.bytes_written_device;
     let t0 = Instant::now();
     let mut lat = Vec::with_capacity(updates as usize);
@@ -232,7 +232,7 @@ fn main() {
     db.commit(Durability::Os).unwrap();
     Phase {
         lat,
-        page_reads: db.engine.pager.page_reads - p0,
+        page_reads: db.engine.pager.reads() - p0,
         device: db.engine.pager.bytes_written_device - d0,
         ops: updates,
         secs: t0.elapsed().as_secs_f64(),
@@ -247,7 +247,7 @@ fn main() {
     // comes back at the next compaction that spans the key.
     // ------------------------------------------------------------------
     let deletes = n.min(5_000);
-    let p0 = db.engine.pager.page_reads;
+    let p0 = db.engine.pager.reads();
     let d0 = db.engine.pager.bytes_written_device;
     let t0 = Instant::now();
     let mut lat = Vec::with_capacity(deletes as usize);
@@ -261,7 +261,7 @@ fn main() {
     db.commit(Durability::Os).unwrap();
     Phase {
         lat,
-        page_reads: db.engine.pager.page_reads - p0,
+        page_reads: db.engine.pager.reads() - p0,
         device: db.engine.pager.bytes_written_device - d0,
         ops: deletes,
         secs: t0.elapsed().as_secs_f64(),
@@ -285,7 +285,7 @@ fn main() {
     // the difference between the two columns is the cost of everything the
     // best case leaves out.
     // ------------------------------------------------------------------
-    let p0 = db.engine.pager.page_reads;
+    let p0 = db.engine.pager.reads();
     let d0 = db.engine.pager.bytes_written_device;
     let mut next_new = n;
     let mut lat_read = Vec::new();
@@ -324,7 +324,7 @@ fn main() {
     row("mixed_ops_per_s", format!("{:.0}", mixed_ops as f64 / secs.max(1e-9)), "ops/s", false);
     row(
         "mixed_page_reads_per_op",
-        format!("{:.3}", (db.engine.pager.page_reads - p0) as f64 / mixed_ops.max(1) as f64),
+        format!("{:.3}", (db.engine.pager.reads() - p0) as f64 / mixed_ops.max(1) as f64),
         "pages/op",
         true,
     );

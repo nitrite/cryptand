@@ -1320,7 +1320,12 @@ impl SegmentBuilder {
 
 /// An immutable segment, read from its extent.
 pub struct Segment {
-    pub extent: Vec<u8>,
+    /// The extent's pages, filled on first use when `loader` is set (F-151):
+    /// a point read touches the head, the filter and one root-to-leaf path,
+    /// not every page.
+    pages: Vec<std::sync::OnceLock<Vec<u8>>>,
+    loader: Option<crate::pager::SegmentPages>,
+    resident: std::sync::atomic::AtomicU64,
     pub page_size: usize,
     pub header: SegmentHeader,
     /// The parsed `04-segments.md` §2.4 filter, decoded at most once per open
@@ -1390,9 +1395,33 @@ impl Segment {
                 extent.len()
             ));
         }
-        let header = SegmentHeader::parse(&extent[..page_size])?;
+        let pages = extent.chunks(page_size).map(|p| std::sync::OnceLock::from(p.to_vec())).collect();
+        Segment::with_pages(pages, None, extent.len() as u64, page_size)
+    }
+
+    /// F-151: a segment of `count` pages whose head is read and the rest of
+    /// which `loader` fetches as they are used.
+    pub fn lazy(head: Vec<u8>, loader: crate::pager::SegmentPages, count: u32, page_size: usize) -> Result<Segment> {
+        check_page_size(page_size)?;
+        if count == 0 || head.len() != page_size {
+            return corrupt(format!("segment of {count} pages"));
+        }
+        let pages: Vec<_> = (0..count).map(|_| std::sync::OnceLock::new()).collect();
+        let _ = pages[0].set(head);
+        Segment::with_pages(pages, Some(loader), page_size as u64, page_size)
+    }
+
+    fn with_pages(
+        pages: Vec<std::sync::OnceLock<Vec<u8>>>,
+        loader: Option<crate::pager::SegmentPages>,
+        resident: u64,
+        page_size: usize,
+    ) -> Result<Segment> {
+        let header = SegmentHeader::parse(pages[0].get().unwrap())?;
         Ok(Segment {
-            extent,
+            pages,
+            loader,
+            resident: std::sync::atomic::AtomicU64::new(resident),
             page_size,
             header,
             filter_cache: std::sync::OnceLock::new(),
@@ -1404,7 +1433,35 @@ impl Segment {
     }
 
     pub fn page_count(&self) -> u64 {
-        (self.extent.len() / self.page_size) as u64
+        self.pages.len() as u64
+    }
+
+    /// Page `i` of the extent, read on first use.
+    pub fn page(&self, i: u64) -> Result<&[u8]> {
+        let Some(slot) = self.pages.get(i as usize) else {
+            return corrupt(format!("page index {i} outside the extent"));
+        };
+        if let Some(p) = slot.get() {
+            return Ok(p);
+        }
+        let Some(l) = &self.loader else { return corrupt("segment page missing") };
+        if slot.set(l.read(i)?).is_ok() {
+            self.resident.fetch_add(self.page_size as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(slot.get().unwrap())
+    }
+
+    /// Bytes of this segment held in memory: what the page cache budgets.
+    pub fn resident_bytes(&self) -> u64 {
+        self.resident.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `range` of the extent, which a lookup already read: a cell never
+    /// crosses a page, and a loaded page is never dropped.
+    pub fn bytes(&self, range: std::ops::Range<usize>) -> &[u8] {
+        let at = range.start / self.page_size * self.page_size;
+        let page = self.pages[range.start / self.page_size].get().expect("a cell of a page a lookup read");
+        &page[range.start - at..range.end - at]
     }
 
     pub fn node(&self, page_index: u64) -> Result<Node<'_>> {
@@ -1419,15 +1476,13 @@ impl Segment {
         if page_index < 1 || page_index >= self.page_count() {
             return corrupt(format!("page index {page_index} outside the extent"));
         }
-        let at = page_index as usize * self.page_size;
-        Node::parse(&self.extent[at..at + self.page_size], page_index)
+        Node::parse(self.page(page_index)?, page_index)
     }
 
     /// `01-container.md` §9 step 2 — every page checksum in the extent.
     pub fn verify_checksums(&self) -> Result<()> {
         for i in 0..self.page_count() {
-            let at = i as usize * self.page_size;
-            PageHeader::verify(&self.extent[at..at + self.page_size], i)?;
+            PageHeader::verify(self.page(i)?, i)?;
         }
         Ok(())
     }
@@ -1443,8 +1498,7 @@ impl Segment {
         let cap = self.page_size - PAGE_HEADER_BYTES;
         let mut idx = self.header.filter_page;
         while idx < self.page_count() {
-            let at = idx as usize * self.page_size;
-            let page = &self.extent[at..at + self.page_size];
+            let page = self.page(idx)?;
             let h = PageHeader::parse(page)?;
             if h.page_type != page_type::SEGMENT_FILTER {
                 break;

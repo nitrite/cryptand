@@ -36,4 +36,27 @@ void main() {
         reason: 'still growing: $at75 at cycle 75');
     expect(len, lessThan(32 << 20));
   });
+
+  test('F-151: a cold point read reads pages, not the segment', () {
+    // Before the fix a cache miss read, decrypted and decoded the whole
+    // segment extent: hundreds of pages for one get.
+    final path =
+        '${Directory.systemTemp.createTempSync('cryptand-f151-').path}/db.cryptand';
+    DatabaseFile.save(Database(engine: Engine()), path);
+    var e = DatabaseFile.open(path).engine;
+    Uint8List v(int i) => Uint8List(100)..fillRange(0, 100, i % 251);
+    for (var i = 0; i < 20000; i++) {
+      e.put(16, CNitriteId(i), v(i));
+    }
+    e.commit();
+    e.close();
+    e = DatabaseFile.open(path).engine;
+    for (final i in [7, 12345, 19999]) {
+      final p0 = e.store.pageReads;
+      expect(e.get(16, CNitriteId(i)), v(i));
+      final n = e.store.pageReads - p0;
+      expect(n, lessThanOrEqualTo(32), reason: 'a cold get of $i read $n pages');
+    }
+    e.close();
+  });
 }
