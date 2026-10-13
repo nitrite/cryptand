@@ -114,6 +114,9 @@ class HostileTest {
                 } catch (CryptandException typed) {
                     // a named, typed refusal
                 }
+                // F-148: a read-only handle never changes the file.
+                assertTrue(java.util.Arrays.equals(Files.readAllBytes(f), Files.readAllBytes(copy)),
+                        f.getFileName() + " changed under a read-only open");
                 n++;
             }
         }

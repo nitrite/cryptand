@@ -278,6 +278,13 @@ final class Catalog {
   }
 
   String? nameOf(int treeId) {
+    // A read-only handle does not rebuild a missing tree 3 (F-148): scan.
+    if (byId.root == 0) {
+      for (final (name, d) in all) {
+        if (d.treeId == treeId) return name;
+      }
+      return null;
+    }
     final v = byId.get(_idKey(treeId));
     return v == null
         ? null
@@ -331,14 +338,17 @@ final class Catalog {
   /// rebuilds tree 3 from scratch, and the pages of the tree it replaces are
   /// reachable from nothing and recorded in no free tree — a leak per open,
   /// which `spec/01-container.md` §9 step 7 finds and which nothing else would.
-  void loadTreeIndex() {
+  ///
+  /// F-148: a read-only handle ([rebuild] false) writes nothing, so it leaves
+  /// tree 3 empty and [nameOf] scans the catalog instead.
+  void loadTreeIndex({bool rebuild = true}) {
     final d = get(treeIndexDescriptor);
     final root = d?.root ?? 0;
     if (root != 0) {
       byId
         ..root = root
         ..rootNonce = d!.rootNonce;
-    } else {
+    } else if (rebuild) {
       rebuildTreeIndex();
     }
   }

@@ -889,6 +889,7 @@ final class CowTree {
         final i = _find(n.keys, key);
         return i < 0 ? null : _Node.valueOf(n.payloads[i]);
       }
+      if (n.count == 0) return null; // as Rust: an empty internal node holds nothing
       at = _Node.link(n.payloads[_descend(n.keys, key)]);
     }
   }
@@ -1066,6 +1067,9 @@ final class CowTree {
       if (n.isLeaf) {
         path.add((link.$1, n, -1));
         break;
+      }
+      if (n.count == 0) {
+        throw CorruptionException('copy-on-write page ${link.$1} is an internal node with no cells');
       }
       final i = _descend(n.keys, key);
       path.add((link.$1, n, i));

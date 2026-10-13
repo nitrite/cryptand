@@ -361,6 +361,12 @@ fn every_fuzz_regress_file_is_refused_or_read() {
         let tmp = std::env::temp_dir().join(format!("cryptand-regress-{}.cryptand", std::process::id()));
         std::fs::copy(&p, &tmp).unwrap();
         let _ = exercise(&tmp);
+        // F-148: a read-only handle never changes the file.
+        std::fs::copy(&p, &tmp).unwrap();
+        if let Ok(mut e) = Engine::open_read_only(&tmp, None) {
+            let _ = e.verify();
+        }
+        assert!(std::fs::read(&p).unwrap() == std::fs::read(&tmp).unwrap(), "{} changed under a read-only open", p.display());
         n += 1;
     }
     assert!(n > 0, "the fuzz-regress corpus is empty");

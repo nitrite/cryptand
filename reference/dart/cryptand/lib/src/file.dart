@@ -1006,7 +1006,7 @@ abstract final class DatabaseFile {
         // file holds, so it does not overwrite the store metadata another SDK
         // wrote.
         initStoreMetadata: false,
-      )..catalog.loadTreeIndex();
+      )..catalog.loadTreeIndex(rebuild: !readOnly);
       if (!readOnly) e.publisher = (_) => _publishInPlace(db);
       return db;
     } catch (_) {

@@ -156,6 +156,29 @@ void main() {
         // A named, typed refusal.
       }
     }
+    // F-148: a read-only handle never changes the file (Dart threw EBADF).
+    final tmp = '${Directory.systemTemp.createTempSync('regress-').path}/db.cryptand';
+    for (final f in files) {
+      final before = f.readAsBytesSync();
+      File(tmp).writeAsBytesSync(before);
+      try {
+        final db = DatabaseFile.openReadOnly(tmp);
+        try {
+          db.engine.verifyStructure();
+          for (final (_, d) in db.catalog.all) {
+            db.catalog.nameOf(d.treeId);
+            for (final e in db.engine.scanTree(d.treeId).take(8)) {
+              db.engine.get(d.treeId, decodeKey(e.cke));
+            }
+          }
+        } finally {
+          db.engine.close(flushMemtable: false);
+        }
+      } on CryptandException {
+        // A named, typed refusal.
+      }
+      expect(File(tmp).readAsBytesSync(), equals(before), reason: '${f.path} changed under a read-only open');
+    }
   });
 
   // F-109 (M3 fuzz cke_roundtrip): a NUMBER whose magnitude does not fit its

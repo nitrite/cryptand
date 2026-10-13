@@ -43,8 +43,10 @@ void main() {
       final d = c.create('orders', kind: TreeKind.data);
       expect(c.nameOf(d.treeId), 'orders');
       c.byId.root = 0; // as if tree 3's descriptor were missing
-      expect(c.nameOf(d.treeId), isNull);
+      // F-148: answered by scanning the catalog, as a read-only handle must.
+      expect(c.nameOf(d.treeId), 'orders');
       c.rebuildTreeIndex();
+      expect(c.byId.root, isNot(0));
       expect(c.nameOf(d.treeId), 'orders');
     });
   });

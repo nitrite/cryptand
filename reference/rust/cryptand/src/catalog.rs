@@ -337,6 +337,10 @@ impl Catalog {
     }
 
     pub fn name_of(&self, pager: &mut Pager, id: u32) -> Result<Option<String>> {
+        // A read-only handle does not rebuild a missing tree 3 (F-148): scan.
+        if self.by_id.root == 0 {
+            return Ok(self.all(pager)?.into_iter().find(|(_, d)| d.tree_id() == id).map(|(n, _)| n));
+        }
         match self.by_id.get(pager, &id_key(id))? {
             Some(v) => match cve::decode_all(&v, &|_| None)? {
                 Value::Str(s) => Ok(Some(s)),

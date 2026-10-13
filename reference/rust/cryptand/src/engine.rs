@@ -831,7 +831,9 @@ impl Engine {
         };
         self.catalog.by_id.root = root;
         self.catalog.by_id.root_nonce = nonce;
-        if root == 0 {
+        // F-148: a read-only handle writes nothing, so it leaves tree 3 empty
+        // and `Catalog::name_of` scans the catalog instead.
+        if root == 0 && !self.read_only {
             self.catalog.rebuild_tree_index(&mut self.pager)?;
         }
         Ok(())
