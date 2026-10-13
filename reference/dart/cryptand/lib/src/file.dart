@@ -306,40 +306,8 @@ abstract final class DatabaseFile {
     uuid[6] = (uuid[6] & 0x0F) | 0x40;
     uuid[8] = (uuid[8] & 0x3F) | 0x80;
     final master = randomBytes(32);
-    final salt = randomBytes(32);
-    final Keyslot slot;
-    try {
-      slot = wrapMasterKey(
-        masterKey: master,
-        kek: kdf == Keyslot.kdfRaw
-            ? Uint8List.fromList(credential)
-            : deriveKek(
-                slot: Keyslot(
-                  state: Keyslot.occupied,
-                  kdf: kdf,
-                  tCost: tCost,
-                  mCostKib: mCostKib,
-                  parallelism: parallelism,
-                  salt: salt,
-                  wrapNonce: Uint8List(24),
-                  wrappedKey: Uint8List(32),
-                  wrapTag: Uint8List(16),
-                  label: label,
-                ),
-                password: credential),
-        databaseUuid: uuid,
-        slotIndex: 0,
-        wrapNonce: randomBytes(24),
-        salt: salt,
-        kdf: kdf,
-        tCost: tCost,
-        mCostKib: mCostKib,
-        parallelism: parallelism,
-        label: label,
-      );
-    } finally {
-      if (kdf != Keyslot.kdfRaw) _wipe(credential);
-    }
+    final slot = _wrapSlot(master, uuid, 0, credential, kdf, tCost, mCostKib,
+        parallelism, label);
     final keyslots = Uint8List(Sb.keyslotSize * Sb.keyslotCount)
       ..setRange(0, Keyslot.size, slot.encode());
 
@@ -935,5 +903,128 @@ extension on String {
       ..setAll(0, units)
       ..[units.length] = 0;
     return p;
+  }
+}
+
+/// Wraps [master] for keyslot [index] under [credential] (`kdf` raw: 32 key
+/// bytes; Argon2id: a password, zeroed here, F-135).
+Keyslot _wrapSlot(Uint8List master, Uint8List uuid, int index,
+    List<int> credential, int kdf, int tCost, int mCostKib, int parallelism,
+    String label) {
+  final salt = randomBytes(32);
+  try {
+    return wrapMasterKey(
+      masterKey: master,
+      kek: kdf == Keyslot.kdfRaw
+          ? Uint8List.fromList(credential)
+          : deriveKek(
+              slot: Keyslot(
+                state: Keyslot.occupied,
+                kdf: kdf,
+                tCost: tCost,
+                mCostKib: mCostKib,
+                parallelism: parallelism,
+                salt: salt,
+                wrapNonce: Uint8List(24),
+                wrappedKey: Uint8List(32),
+                wrapTag: Uint8List(16),
+                label: label,
+              ),
+              password: credential),
+      databaseUuid: uuid,
+      slotIndex: index,
+      wrapNonce: randomBytes(24),
+      salt: salt,
+      kdf: kdf,
+      tCost: tCost,
+      mCostKib: mCostKib,
+      parallelism: parallelism,
+      label: label,
+    );
+  } finally {
+    if (kdf != Keyslot.kdfRaw) DatabaseFile._wipe(credential);
+  }
+}
+
+/// `13-operations.md` §5 keyslot management on an open, encrypted database
+/// (F-072): each is a commit; no data page is touched and the master key never
+/// changes. Rust `KeyApi`, Java `Engine.addKey`/`removeKey`/`cryptoErase`.
+extension KeyApi on Database {
+  Uint8List _slots() {
+    final e = engine;
+    final area = _keyslots[e];
+    if (e.keys == null || area == null || e.publisher == null) {
+      throw const InvalidArgumentException(
+          'the database is not an open, unlocked, encrypted file');
+    }
+    return area;
+  }
+
+  List<bool> _occupied(Uint8List area) => [
+        for (var i = 0; i < Sb.keyslotCount; i++)
+          Keyslot.decode(
+                      Uint8List.sublistView(
+                          area, i * Keyslot.size, (i + 1) * Keyslot.size),
+                      i)
+                  .state ==
+              Keyslot.occupied
+      ];
+
+  /// Wraps the master key under [credential] in the first free keyslot and
+  /// returns its index.
+  int addKey(List<int> credential,
+      {int kdf = Keyslot.kdfArgon2id,
+      int tCost = 3,
+      int mCostKib = 65536,
+      int parallelism = 1,
+      String label = 'password'}) {
+    final Uint8List area;
+    try {
+      area = _slots();
+    } catch (_) {
+      if (kdf != Keyslot.kdfRaw) DatabaseFile._wipe(credential);
+      rethrow;
+    }
+    final free = _occupied(area).indexOf(false);
+    if (free < 0) {
+      if (kdf != Keyslot.kdfRaw) DatabaseFile._wipe(credential);
+      throw InvalidArgumentException(
+          'all ${Sb.keyslotCount} keyslots are occupied');
+    }
+    final slot = _wrapSlot(engine.keys!.masterKey, engine.databaseUuid, free,
+        credential, kdf, tCost, mCostKib, parallelism, label);
+    _keyslots[engine] = Uint8List.fromList(area)
+      ..setRange(free * Keyslot.size, (free + 1) * Keyslot.size, slot.encode());
+    engine.commit();
+    return free;
+  }
+
+  /// Drops keyslot [index]. Removing the last occupied one is crypto-erase
+  /// and MUST be asked for by name (14 §3.3), so it is refused here.
+  void removeKey(int index) {
+    final area = _slots();
+    if (index < 0 || index >= Sb.keyslotCount) {
+      throw InvalidArgumentException('keyslot $index does not exist');
+    }
+    final occ = _occupied(area);
+    if (occ[index] && occ.where((o) => o).length <= 1) {
+      throw const InvalidArgumentException(
+          'removing the last occupied keyslot is crypto-erase; call '
+          'cryptoErase() by name');
+    }
+    // 14 §8.2: zeros, not merely state = 0.
+    _keyslots[engine] = Uint8List.fromList(area)
+      ..fillRange(index * Keyslot.size, (index + 1) * Keyslot.size, 0);
+    engine.commit();
+  }
+
+  /// 14 §8.2: zero every keyslot in **both** superblock slots. Irreversible.
+  void cryptoErase() {
+    final area = _slots();
+    _keyslots[engine] = Uint8List(area.length);
+    // One commit per superblock slot: either may hold an intact copy.
+    engine
+      ..commit()
+      ..commit();
   }
 }

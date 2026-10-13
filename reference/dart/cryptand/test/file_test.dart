@@ -785,4 +785,31 @@ void lockTests() {
     final plain = fresh();
     expect(plain.engine.metrics().isAvailable('unencrypted_pages'), isFalse);
   });
+
+  test('F-072: addKey, removeKey and cryptoErase on the open file', () {
+    Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);
+    final path = tmp('keyapi');
+    var db = DatabaseFile.create(path,
+        credential: k(1), kdf: Keyslot.kdfRaw, profile: Profile.desktop);
+    expect(db.addKey(k(2), kdf: Keyslot.kdfRaw), 1);
+    db.engine.close();
+    db = DatabaseFile.open(path, key: k(2)); // the new slot unlocks
+    db.removeKey(0);
+    expect(() => db.removeKey(1), throwsA(isA<InvalidArgumentException>()),
+        reason: 'the last slot is crypto-erase, by name only');
+    db.engine.close();
+    expect(() => DatabaseFile.open(path, key: k(1)),
+        throwsA(isA<CannotUnlockException>()));
+    db = DatabaseFile.open(path, key: k(2));
+    db.cryptoErase();
+    db.engine.close();
+    expect(() => DatabaseFile.open(path, key: k(2)),
+        throwsA(isA<CannotUnlockException>()));
+    final raw = File(path).readAsBytesSync();
+    for (final slot in [0, Profile.desktop.pageSize]) {
+      final at = slot + Sb.keyslots;
+      expect(raw.sublist(at, at + Sb.keyslotSize * Sb.keyslotCount)
+          .every((b) => b == 0), isTrue, reason: 'slot at $slot kept a key');
+    }
+  });
 }
