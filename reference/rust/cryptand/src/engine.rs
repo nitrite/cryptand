@@ -1218,6 +1218,11 @@ impl Engine {
         if let Some(k) = feed_key {
             self.feed(tree, seq, feed_op, &k)?;
         }
+        // F-153, 10 §6: the memtable is bounded between commits, as Dart's
+        // `_write`; flushing only at commit held a whole commit in memory.
+        if self.memtable_len() >= self.memtable_entry_limit {
+            self.flush()?;
+        }
         // F-152, 10 §6.1: compaction paced at 4x the write rate, "raised while
         // a bound is in overshoot" to 64x at the hard bound, one bounded step
         // (12 §4) at a time. One step per commit let a bulk load run L0 past
@@ -3162,6 +3167,9 @@ impl Engine {
                     let res = m.remove(&mut self.pager, &r).and_then(|_| m.add(&mut self.pager, &moved));
                     self.manifest = m;
                     res?;
+                    // F-156: a cached segment reads its pages lazily (F-151)
+                    // from where it stood, which is freed below and reused.
+                    self.segments.remove(&r.segment_id);
                 }
                 Extent::Vlog(id) => {
                     // Head page in the clear and records sealed by segment id

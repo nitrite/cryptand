@@ -66,10 +66,15 @@
   `step / pace` bytes, pace 4..64 by §6 x²); L0 was 46 (Dart), Rust L1 tier at hard.
   The M6 RSS bar is PLAN 6.3's (cache + memtables + 256 MB); `scale.dart` checked
   M5.5's +64 MB open bar: Dart 10^6 read 206 MB now PASS (320).
-- Open: F-153 (Rust) write path never flushes at `memtable_entry_limit` (Dart does):
-  `rss_scale` holds 100k docs per commit, writer RSS 739 MB, keeps x=1 (pace 64).
-  F-154 (R+D) space: 10^6 files 922 MB / 1487 MB for 434 MB live (bar 1.6 once
-  settled); compaction inside a commit window cannot reuse what it frees (01 §6).
+- F-153 fixed 10-14 (Rust): `write` flushes at `memtable_entry_limit` (as Dart, Java per
+  shard). Rust 10^6: file 652 MB, writer 467 MB, levels 3/2/3/5, backpressure none.
+  Mandatory read-tail test sets the limit to 501 so its own flush+drain still runs.
+- F-156 (S0, Rust, regression from F-151) fixed 10-14: `relocate_down` left a moved
+  segment cached; its lazy loader read the old place. Any new code that moves an
+  extent keeping its segment id MUST evict it. Hop flake = layout varies with Java timing.
+- Open: F-154 (R+D) space: 10^6 files Rust 652 MB, Dart 1487 MB for 434 MB live (bar 1.6
+  once settled); compaction inside a commit window cannot reuse what it frees (01 §6).
+  F-155 (Rust) 10^6 build RSS 467 MB > 352 (desktop 64 + 32 + 256); 470 before F-152.
 - Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
   (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
   `CRYPTAND_CORPUS_DIRS` (remote: `cryptand-gate/.../fuzz/{corpus,artifacts}` + `cryptand-kill-plain/reference/java/.cifuzz-corpus/...JazzerTest`).
@@ -97,10 +102,11 @@
 
 ## Next action
 
-F-153: Rust `Engine::write` flushes when `memtable_len() >= memtable_entry_limit`
-(as Dart `_write`); test fails with it reverted; then re-run the 10^6 rung on
-`cryptand-m6` (`~/m6-run/go.sh`, rsync src/lib first) and measure F-154's space
-amp after a final compact + reopen before deciding its fix. Then 10^7, 10^8.
+F-154: measure space amp after a settle (final `compact()` + commit + reopen, both
+languages, 10^6 on `cryptand-m6`; Dart `tool/lv.dart` levels via /tmp/lv.dart on
+remote). If it stays > 1.6, the fix is likely commit-window reuse (a paced compaction
+publishing its own commit, as Java does). Then F-155 (profile the Rust build), then
+the 10^7 and 10^8 rungs.
 
 ## Log
 
@@ -140,3 +146,4 @@ amp after a final compact + reopen before deciding its fix. Then 10^7, 10^8.
 - 2026-10-13 — M6 started: `tool/scale.dart` (Dart rung, JSON line) and Rust `rss_scale read`; 10^6 rung: F-151 (whole-segment reads per cache miss, R+D) Dart get p50 36 ms, Rust 7.6 ms.
 - 2026-10-13 — F-151 fixed R+D (page-granular segment reads); 10^6 rung: Rust p50 7.6 ms -> 5 us, Dart 36 ms -> 29 us, Dart read RSS 153 MB (budget 128) open; gate quick green.
 - 2026-10-14 — Dart read RSS was the wrong bar (M5.5 +64 vs 6.3 +256): 206 MB PASS; F-152 (R+D compaction pacing, L0 46 -> 2) fixed; F-153, F-154 opened; gate quick green.
+- 2026-10-14 — F-153 (Rust memtable unbounded between commits) fixed; F-155 opened (Rust build RSS 467 > 352); F-156 S0 (Rust shrink + lazy cache) found by the hop, fixed.

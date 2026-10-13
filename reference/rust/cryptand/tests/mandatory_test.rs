@@ -102,7 +102,9 @@ fn read_tail_p99_is_at_most_2_and_p99_9_at_most_3() {
     // give every flush a disjoint key range, so manifest pruning alone leaves
     // one candidate and the measurement means nothing.
     let (_t, mut e) = engine("readtail", Profile::Desktop);
-    e.memtable_entry_limit = 500;
+    // One above the loop's own flush at 500, so the loop (which drains after
+    // each flush) flushes rather than `write`'s F-153 bound.
+    e.memtable_entry_limit = 501;
     let n = 20_000i64;
     let mut rng = Rng::new(0x5EED);
     let mut ids: Vec<i64> = (0..n).collect();

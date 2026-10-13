@@ -733,3 +733,35 @@ fn a_bulk_load_keeps_l0_under_its_hard_bound() {
     eprintln!("F-152 rust worst l0={worst} hard={hard}");
     assert!(worst <= hard, "L0 reached {worst}, hard bound {hard}");
 }
+
+/// F-153, 10 §6: the memtable is bounded between commits too. Rust flushed
+/// only at commit, so one commit's worth of puts sat in memory whatever its
+/// size (10^6 `rss_scale`: 739 MB writer RSS).
+#[test]
+fn puts_without_a_commit_keep_the_memtable_bounded() {
+    let (_t, mut db) = db("f153", Profile::Desktop);
+    let (_, limit) = db.engine.memtable_pressure();
+    for i in 0..(3 * limit) as i64 {
+        db.engine.put(T, &Value::NitriteId(i), b"v").unwrap();
+    }
+    let (len, _) = db.engine.memtable_pressure();
+    assert!(len <= limit, "memtable {len} entries, limit {limit}");
+    assert_eq!(db.engine.get(T, &Value::NitriteId(5)).unwrap().as_deref(), Some(&b"v"[..]));
+}
+
+/// F-156: a segment cached before `shrink` moved it read its unread pages
+/// (F-151 reads lazily) from where it used to stand: freed, reused or cut.
+/// Found by the oplog hop (f053, rust leg after a Dart one).
+#[test]
+fn reads_on_the_same_handle_after_shrink_moved_a_cached_segment() {
+    let t = TempDb::new("f156");
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    compacted(&mut e, 200);
+    e.close(false).unwrap();
+    let mut e = Engine::open(&t.path, None).unwrap();
+    assert_eq!(e.get(T, &Value::NitriteId(3000)).unwrap(), expected(3000, 200));
+    e.shrink().unwrap();
+    for i in 0..4000i64 {
+        assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap(), expected(i, 200), "key {i}");
+    }
+}
