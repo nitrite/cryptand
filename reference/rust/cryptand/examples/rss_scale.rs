@@ -2,6 +2,7 @@
 //! Dart `tool/rss_scale.dart build` (same document shape, commit per 100k).
 //!
 //!     cargo run --release --example rss_scale PATH N
+//!     cargo run --release --example rss_scale PATH N read   # 10k uniform gets
 //!
 //! Run under `/usr/bin/time -l` for max RSS.
 
@@ -35,6 +36,23 @@ fn main() -> cryptand::Result<()> {
     let a: Vec<String> = std::env::args().collect();
     let path = std::path::Path::new(&a[1]);
     let n: i64 = a[2].parse().unwrap();
+    if a.get(3).map(String::as_str) == Some("read") {
+        let t = std::time::Instant::now();
+        let mut db = Database { engine: Engine::open(path, None)? };
+        let open_ms = t.elapsed().as_millis();
+        let c = db.collection("c")?;
+        let (mut s, mut us) = (0x51ED_C0DEu64, Vec::with_capacity(10_000));
+        for _ in 0..10_000 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let t = std::time::Instant::now();
+            let id = 1767225600000 * 4194304 + ((s >> 33) as i64 % n) * 4096 + 1;
+            assert!(c.get(&mut db.engine, id)?.is_some());
+            us.push(t.elapsed().as_micros());
+        }
+        us.sort_unstable();
+        println!("open_ms={open_ms} get_uniform_us p50={} p99={} p999={}", us[5000], us[9900], us[9990]);
+        return Ok(());
+    }
     let _ = std::fs::remove_file(path);
     let mut db = Database { engine: Engine::create(path, Profile::Desktop)? };
     let mut c = db.collection("c")?;

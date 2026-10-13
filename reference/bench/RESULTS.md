@@ -192,7 +192,7 @@ segment qualifies, and whether an emptied one is dropped), not a leak.
 
 ## 3. Dart open at 10⁷ documents (PLAN 5.5 Verify)
 
-`dart/cryptand/tool/rss_scale.dart`, AOT (`dart compile exe`), remote Mac
+`dart/cryptand/tool/rss_scale.dart` (now `tool/scale.dart`), AOT (`dart compile exe`), remote Mac
 (Apple M1, 16 GB, internal SSD), 2026-10-13, branch `dart-storage` 63319c3.
 `build`: 10⁷ `benchDoc` documents, commit per 10⁵, desktop profile, plaintext:
 6 892 027 904 B file; writer RSS 121–604 MB (sampled at each commit).
@@ -200,6 +200,17 @@ segment qualifies, and whether an emptied one is dropped), not a leak.
 **peak RSS 58 MB** (`/usr/bin/time -l`: 61 652 992 B) against the budget
 128 MB (desktop page cache 64 MB + 64 MB): **PASS**. Wall 393 s (336 s user).
 Under `dart run` (JIT) the same check peaks near 265 MB from the compiler alone.
+
+## 5. Scale rungs (PLAN M6)
+
+Remote M1, 16 GB, internal SSD, desktop profile, plaintext, `benchDoc`
+(516 B logical), commit per 10^5. Dart: `tool/scale.dart` AOT; Rust:
+`examples/rss_scale.rs` (build, then `read`: open + 10k uniform gets).
+
+| rung | impl | load docs/s | file | space amp | writer RSS | get p50 / p99 uniform | read RSS | verify | bars |
+|---|---|---|---|---|---|---|---|---|---|
+| 10^6 | Dart (10-13) | 18 641 | 744 MB | 1.44 | 159 MB | 36 / 72 ms | 814 MB | 3.6 s sound | FAIL: F-151 |
+| 10^6 | Rust (10-13) | — | 487 MB | 0.94 | — | 7.6 / 7.7 ms | — | — | FAIL: F-151 |
 
 ## Running it
 

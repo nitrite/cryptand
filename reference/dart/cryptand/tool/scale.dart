@@ -1,0 +1,98 @@
+/// M6 Dart rung (PLAN 6.2) and the M5.5 RSS check. Each phase prints one
+/// JSON metrics line.
+///
+/// ```
+/// dart compile exe tool/scale.dart -o scale
+/// ./scale build PATH N   # load, commit per 100k
+/// ./scale read PATH N    # fresh process: cold open, gets, scan, verify
+/// ```
+///
+/// `read` ends with PASS/FAIL against desktop page cache + 64 MB RSS. Run
+/// AOT: under `dart run` the JIT alone peaks near 265 MB.
+library;
+
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+
+import 'package:cryptand/cryptand.dart';
+
+import '../bench/harness.dart';
+
+CValue id(int i) => CNitriteId(snowflakeId(i));
+
+void main(List<String> args) {
+  final path = args[1];
+  final n = int.parse(args[2]);
+  final out = <String, Object>{'impl': 'dart', 'phase': args[0], 'n': n};
+  final sw = Stopwatch()..start();
+  if (args[0] == 'build') {
+    DatabaseFile.save(Database(engine: Engine())..createCollection('c'), path);
+    final db = DatabaseFile.open(path);
+    final c = db.collection('c')!;
+    var peak = 0;
+    for (var i = 0; i < n; i++) {
+      c.put(id(i), benchDoc(i));
+      if ((i + 1) % 100000 == 0 || i + 1 == n) {
+        db.engine.commit();
+        peak = math.max(peak, ProcessInfo.currentRss >> 20);
+      }
+    }
+    db.engine.close();
+    final bytes = File(path).lengthSync();
+    out
+      ..['load_docs_per_s'] = (n * 1e6 / sw.elapsedMicroseconds).round()
+      ..['file_bytes'] = bytes
+      // 516 B logical record per benchDoc (harness.dart).
+      ..['space_amp'] = double.parse((bytes / (n * 516)).toStringAsFixed(2))
+      ..['writer_rss_mb'] = peak;
+    stdout.writeln(jsonEncode(out));
+    return;
+  }
+
+  final db = DatabaseFile.open(path);
+  out['open_ms'] = sw.elapsedMilliseconds;
+  final c = db.collection('c')!;
+  final rnd = math.Random(0x51EDC0DE);
+  var missing = 0;
+  // ponytail: zipf by inverse power (s~1.2 skew), not an exact Zipf(0.99).
+  int zipf() => (n * math.pow(rnd.nextDouble(), 6)).floor() % n;
+  for (final (name, pick) in [
+    ('uniform', () => rnd.nextInt(n)),
+    ('zipf', zipf),
+  ]) {
+    final us = <int>[];
+    for (var k = 0; k < 10000; k++) {
+      final t = Stopwatch()..start();
+      if (c.get(id(pick())) == null) missing++;
+      us.add(t.elapsedMicroseconds);
+    }
+    us.sort();
+    for (final (q, p) in [('p50', 0.5), ('p99', 0.99), ('p999', 0.999)]) {
+      out['get_${name}_${q}_us'] = us[(us.length * p).floor()];
+    }
+  }
+  sw.reset();
+  var rows = 0;
+  final lo = rnd.nextInt(math.max(1, n - 100000));
+  for (final _ in db.engine.scanTree(c.treeId,
+      range: KeyRange(encodeKey(id(lo)), encodeKey(id(lo + 100000))))) {
+    rows++;
+  }
+  out['scan_rows_per_s'] = (rows * 1e6 / sw.elapsedMicroseconds).round();
+  sw.reset();
+  final sound =
+      db.engine.verifyStructure(claims: db.indexClaims()).isSound;
+  out
+    ..['verify_ms'] = sw.elapsedMilliseconds
+    ..['verify_sound'] = sound
+    ..['missing'] = missing;
+  db.engine.close();
+  final rss = ProcessInfo.maxRss >> 20;
+  final budget = (Profile.desktop.pageCacheBytes >> 20) + 64;
+  out
+    ..['max_rss_mb'] = rss
+    ..['budget_mb'] = budget
+    ..['pass'] = rss <= budget && missing == 0 && sound;
+  stdout.writeln(jsonEncode(out));
+}

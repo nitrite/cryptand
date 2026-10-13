@@ -88,8 +88,13 @@
 
 ## Next action
 
-M6 Dart rungs (PLAN M6; scale 10^6..10^8 on the remote).
-Done 10-13 (seventh session): SECURITY-REVIEW Dart rows (2 new tests, row 13 n/a: Dart vector regions are in memory only).
+Fix F-151 (S1, R+D): page-granular segment reads, the shape Java's `lsm/Segment.page`
+already has (header + filter + node pages fetched by index into the page-cache LRU,
+not whole extents). Show the cliff first with a counter test (bytes read per cold
+`get` <= a few pages; fails today). Then re-run the 10^6 rung on remote clone
+`cryptand-m6` (rsync the tree; Dart `tool/scale.dart build|read`, Rust
+`examples/rss_scale.rs PATH N [read]`) and continue 10^7, 10^8.
+Also check the Dart read-phase RSS (814 MB at 10^6 with deep verify) after the fix.
 
 ## Log
 
@@ -126,3 +131,4 @@ Done 10-13 (seventh session): SECURITY-REVIEW Dart rows (2 new tests, row 13 n/a
 - 2026-10-13 — F-150 residue: 04 §5 superseded versions drop at any level (approved), R+J+D; Rust 30->13 MB, Dart 80->26 MB.
 - 2026-10-13 — Dart FINDINGS cells: 34 resolved (13 ported tests in `findings_test`), F-079 Dart verify fixed, interop step 12 verifies with Dart.
 - 2026-10-13 — committed F-150 residue + Dart FINDINGS (gate quick green); SECURITY-REVIEW Dart rows done (F-124, F-122 Dart tests).
+- 2026-10-13 — M6 started: `tool/scale.dart` (Dart rung, JSON line) and Rust `rss_scale read`; 10^6 rung: F-151 (whole-segment reads per cache miss, R+D) Dart get p50 36 ms, Rust 7.6 ms.
