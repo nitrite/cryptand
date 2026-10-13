@@ -606,7 +606,7 @@ final class Engine {
     store.crypto = PageCrypto(ring, nonces);
     // F-127: the read rule follows the MAC'd superblock, never the pages.
     store.strict =
-        (superblock?.featuresOptional ?? 0) & (1 << Feature.converting) == 0;
+        featuresOptional & (1 << Feature.converting) == 0;
     vlog.crypto = VlogCrypto(ring, nonces.allocate, strict: store.strict);
   }
 
@@ -616,6 +616,10 @@ final class Engine {
   /// it. `spec/01-container.md` §9 step 8 needs it: `sb_mac` is verified
   /// against the fields it authenticates, and only the container has them.
   Superblock? superblock;
+
+  /// The superblock's `features_optional`, carried across commits (F-142):
+  /// bit 16 CONVERTING is what keeps a half-converted file readable (F-127).
+  int featuresOptional = 0;
 
   /// Section 11: "an implementation MUST zero the master key and every subkey
   /// on close()."

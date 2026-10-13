@@ -854,6 +854,21 @@ void lockTests() {
     expect(sealed, greaterThan(10));
     expect(same, 0, reason: '$same pages kept their old ciphertext');
   });
+
+  test('F-142: a commit to a converting file keeps CONVERTING', () {
+    final path = tmp('converting');
+    File('../../conformance/files/v1.0-security-converting.cryptand')
+        .copySync(path);
+    final key = [for (var b = 1; b <= 32; b++) b];
+    var db = DatabaseFile.open(path, key: key);
+    db.createCollection('more').put(const CStr('k'), CDoc(const {}));
+    db.engine.close();
+    db = DatabaseFile.open(path, key: [for (var b = 1; b <= 32; b++) b]);
+    expect(db.engine.superblock!.featuresOptional & (1 << Feature.converting),
+        isNot(0));
+    expect(db.engine.verifyStructure().findings, isEmpty);
+    db.engine.close();
+  });
 }
 
 bool _eq(List<int> a, List<int> b) {

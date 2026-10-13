@@ -260,6 +260,8 @@ abstract final class DatabaseFile {
       cipher: e.keys == null ? 0 : 1,
       featuresRequired:
           (1 << Feature.core) | (e.keys == null ? 0 : (1 << Feature.cipher)),
+      // F-142: carried, so a commit to a converting file keeps CONVERTING.
+      featuresOptional: e.featuresOptional,
       nextNonce: e.nonces?.publishedWatermark ?? 0,
       keyslots: keyslots ?? _keyslots[db.engine],
       vlogMin: e.vlogMin,
@@ -858,7 +860,9 @@ abstract final class DatabaseFile {
       // in the superblock are what the engine already runs on.
       if (sb.profile.pageSize == sb.pageSize) e.setProfile(sb.profile);
       e.durabilityAchieved = Durability.fromCode(sb.durabilityAchieved);
-      e.superblock = sb;
+      e
+        ..superblock = sb
+        ..featuresOptional = sb.featuresOptional;
       _keyslots[e] = Uint8List.fromList(sb.keyslots);
 
       if (ring != null) {
