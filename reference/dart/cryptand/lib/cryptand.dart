@@ -141,7 +141,7 @@ export 'src/wkb.dart'
         GeometryType,
         decodeWkb,
         encodeWkb;
-export 'src/file.dart' show DatabaseFile, KeyApi, encodeVlogStats;
+export 'src/file.dart' show Conversion, ConvertApi, DatabaseFile, KeyApi, encodeVlogStats;
 export 'src/filter.dart'
     show BlockedBloom, Hash64, blockCountFor, cfh64, kBlockBits, probesFor;
 export 'src/limits.dart';

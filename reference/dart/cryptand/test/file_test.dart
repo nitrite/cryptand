@@ -869,6 +869,59 @@ void lockTests() {
     expect(db.engine.verifyStructure().findings, isEmpty);
     db.engine.close();
   });
+
+  test('F-072: encrypt and decrypt in place, interrupted and resumed', () {
+    Uint8List k() => Uint8List(32)..fillRange(0, 32, 7);
+    final path = tmp('convert');
+    DatabaseFile.save(Database(engine: Engine())..createCollection('c'), path);
+    var db = DatabaseFile.open(path);
+    CDoc doc(int i) => CDoc({'i': CStr('v' * (i.isEven ? 2000 : 8) + '$i')});
+    for (var i = 0; i < 400; i++) {
+      db.collection('c')!.put(CStr('k$i'), doc(i));
+    }
+    db.engine.close();
+    void check(Database d) {
+      final c = d.collection('c')!;
+      for (var i = 0; i < 400; i++) {
+        expect(c.get(CStr('k$i')), doc(i), reason: 'k$i');
+      }
+      expect(d.engine.verifyStructure().findings, isEmpty);
+    }
+
+    db = DatabaseFile.open(path);
+    db.encrypt(k(), kdf: Keyslot.kdfRaw);
+    expect(db.fullyEncrypted, isFalse);
+    expect(db.conversion().done, isFalse);
+    expect(db.convertStep(), isTrue);
+    db.engine.close(); // interrupted: a valid, half-converted file
+    expect(() => DatabaseFile.open(path), throwsA(isA<CannotUnlockException>()));
+    db = DatabaseFile.open(path, key: k());
+    expect(db.engine.featuresOptional & (1 << Feature.converting), isNot(0));
+    check(db);
+    var steps = 0;
+    while (db.convertStep()) {
+      expect(++steps, lessThan(10));
+    }
+    expect(db.fullyEncrypted, isTrue);
+    expect(db.conversion().fraction, 1.0);
+    db.engine.close();
+    db = DatabaseFile.open(path, key: k());
+    expect(db.engine.featuresOptional & (1 << Feature.converting), 0);
+    expect(db.engine.store.strict, isTrue);
+    check(db);
+
+    expect(() => db.decrypt(), throwsA(isA<InvalidArgumentException>()));
+    db.decrypt(confirmRemoveEncryption: true);
+    steps = 0;
+    while (db.convertStep()) {
+      expect(++steps, lessThan(10));
+    }
+    db.engine.close();
+    db = DatabaseFile.open(path); // no key: plaintext again
+    expect(db.engine.superblock!.cipher, 0);
+    check(db);
+    db.engine.close();
+  });
 }
 
 bool _eq(List<int> a, List<int> b) {

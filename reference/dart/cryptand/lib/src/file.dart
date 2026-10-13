@@ -33,6 +33,7 @@ import 'cow.dart';
 import 'cve.dart';
 import 'database.dart';
 import 'engine.dart';
+import 'manifest.dart' show SegmentRef;
 import 'errors.dart';
 import 'profile.dart';
 import 'security.dart';
@@ -1221,5 +1222,267 @@ extension KeyApi on Database {
     engine
       ..commit()
       ..commit();
+  }
+}
+
+/// 14 §8.3's fraction: objects in the target mode and objects not yet,
+/// counted as Rust and Java count them (segments, tree pages, value-log
+/// segments), each rewritten whole.
+final class Conversion {
+  const Conversion(this.converted, this.remaining);
+  final int converted;
+  final int remaining;
+  bool get done => remaining == 0;
+  double get fraction {
+    final all = converted + remaining;
+    return all == 0 ? 1.0 : converted / all;
+  }
+}
+
+/// `13-operations.md` §5 `encrypt()`/`decrypt()` and 14 §8.3/§8.4 (F-072):
+/// encryption turned on or off in place. The switch is one durable
+/// superblock; [convertStep] then rewrites what is not yet in the target
+/// mode, one kind of object per step. A file interrupted anywhere is valid
+/// (CONVERTING is set) and the next call carries on. Rust `ConvertApi`, Java
+/// `Engine.encrypt`/`decrypt`/`convertStep`.
+///
+/// ponytail: one step is one whole kind of object, not a slice bounded by
+/// 12 §4's stall budget, as in Rust and Java. Refused on a file holding
+/// descriptor-rooted index trees or vector regions (Java writes them, Dart
+/// does not; their pages are not Dart's to re-lay).
+extension ConvertApi on Database {
+  static const int _converting = 1 << Feature.converting;
+
+  void _requireFile() {
+    if (engine.publisher == null || engine.store.file == null) {
+      throw const InvalidArgumentException('needs a database open on a file');
+    }
+    for (final (name, d) in catalog.all) {
+      if (d.param('vector_region') != null ||
+          ((d.root ?? 0) != 0 &&
+              !d.levelled &&
+              // Tree 3 is the catalog's own index, in [Engine.outerTrees].
+              d.treeId != TreeId.treeIndex)) {
+        throw UnsupportedFeatureException(
+            '$name: Dart does not convert vector regions or descriptor-rooted '
+            'index trees; convert this file with Rust or Java');
+      }
+    }
+  }
+
+  /// Turns encryption on: [credential] is 32 raw key bytes for
+  /// `Keyslot.kdfRaw`, a password (zeroed, F-135) for Argon2id.
+  void encrypt(List<int> credential,
+      {int kdf = Keyslot.kdfArgon2id,
+      int tCost = 3,
+      int mCostKib = 65536,
+      int parallelism = 1,
+      String label = 'keyslot 0'}) {
+    final e = engine;
+    try {
+      _requireFile();
+      if (e.keys != null || e.superblock!.cipher != 0) {
+        throw const InvalidArgumentException('the file is already encrypted');
+      }
+    } catch (_) {
+      if (kdf != Keyslot.kdfRaw) DatabaseFile._wipe(credential);
+      rethrow;
+    }
+    // A quiet state; the open value-log segments sealed so none mixes
+    // plaintext and encrypted framing.
+    e.commit();
+    e.vlog.sealOpen();
+    e.commit();
+    final master = randomBytes(32);
+    final uuid = Uint8List.fromList(e.databaseUuid);
+    final slot = _wrapSlot(master, uuid, 0, credential, kdf, tCost, mCostKib,
+        parallelism, label);
+    final area = Uint8List(Sb.keyslotSize * Sb.keyslotCount)
+      ..setRange(0, Keyslot.size, slot.encode());
+    _keyslots[e] = area;
+    e.featuresOptional |= _converting;
+    // The switch is durable before the first nonce is handed out (14 §4.1
+    // rule 1): the floor publish installKeys makes writes this superblock,
+    // cipher = 1 with its keyslot, sealed, to both slots.
+    final image = e.superblock!.encode();
+    final bd = ByteData.sublistView(image);
+    bd
+      ..setUint8(Sb.cipher, 1)
+      ..setUint64(
+          Sb.featuresRequired,
+          e.superblock!.featuresRequired | (1 << Feature.cipher),
+          Endian.little)
+      ..setUint64(Sb.featuresOptional, e.featuresOptional, Endian.little);
+    image.setRange(Sb.keyslots, Sb.keyslots + area.length, area);
+    bd.setUint32(Sb.checksum, crc32c(image, 0, Sb.checksum), Endian.little);
+    final sb = Superblock.tryDecode(image)!;
+    final ring = KeyRing(master, uuid);
+    final raf = e.store.file!;
+    e
+      ..superblock = sb
+      ..installKeys(
+          ring,
+          NonceAllocator.open(sb.nextNonce,
+              (floor) => DatabaseFile._publishNonceFloor(
+                  raf, e.superblock!, ring, floor)));
+    e.commit();
+  }
+
+  /// 14 §8.3's mirror, which "MUST make the user confirm it": refused unless
+  /// [confirmRemoveEncryption]. New writes go plaintext; the cipher and the
+  /// keyslots stay until [convertStep] has rewritten every encrypted object.
+  /// Not persisted: after a reopen, call it again to carry on.
+  void decrypt({bool confirmRemoveEncryption = false}) {
+    if (!confirmRemoveEncryption) {
+      throw const InvalidArgumentException(
+          'decrypt() removes encryption from the whole file; it needs '
+          'confirmRemoveEncryption: true');
+    }
+    _requireFile();
+    final e = engine;
+    final ring = e.keys, nonces = e.nonces;
+    if (ring == null || nonces == null) {
+      throw const InvalidArgumentException(
+          'the file is not encrypted, or is not unlocked');
+    }
+    e.commit();
+    e.vlog.sealOpen();
+    e.featuresOptional |= _converting;
+    e.installKeys(ring, nonces); // strict off: plaintext is now expected
+    e.store.writePlain = true;
+    e.vlog.writePlain = true;
+    e.commit();
+  }
+
+  bool get _decrypting => engine.store.writePlain;
+
+  /// The objects not yet in the target mode, read from the objects.
+  ({int converted, List<SegmentRef> segments, int treePages, int vlogs})
+      _census() {
+    final e = engine;
+    final store = e.store;
+    final want = !_decrypting;
+    bool sealed(int page) =>
+        PageHeader.read(store.readClear(page), pageId: page).isEncrypted;
+    var converted = 0, treePages = 0, vlogs = 0;
+    final segments = <SegmentRef>[];
+    for (final r in e.manifest.all) {
+      if (r.startPage == 0) continue;
+      if (sealed(r.startPage) == want) {
+        converted++;
+      } else {
+        segments.add(r);
+      }
+    }
+    final pages = <int>{
+      for (final t in [
+        e.manifest.tree,
+        e.freelist,
+        e.checkpoints.tree,
+        e.changeFeed.tree,
+        ...e.outerTrees.values,
+      ])
+        ...t.reachablePages()
+    };
+    for (final p in pages) {
+      if (sealed(p) == want) {
+        converted++;
+      } else {
+        treePages++;
+      }
+    }
+    for (final v in e.vlog.segments.values) {
+      if (v.startPage == 0 || v.bytes == 0) continue;
+      // F-132: byte 39 is not written (F-076), so the first record says.
+      final at = v.startPage * e.pageSize + VlogSegment.dataOffset;
+      final head = store.readAt(at, v.bytes < 10 ? v.bytes : 10);
+      final r = ByteReader(head, 0, head.length);
+      final len = r.uvar();
+      if (len < 5 || len > v.bytes) {
+        throw CorruptionException('value-log segment ${v.id} first record');
+      }
+      final raw = store.readAt(at + r.position, len);
+      final plain = crc32c(raw, 0, len - 4) ==
+          ByteData.sublistView(raw).getUint32(len - 4, Endian.little);
+      if (plain != want) {
+        converted++;
+      } else {
+        vlogs++;
+      }
+    }
+    return (
+      converted: converted,
+      segments: segments,
+      treePages: treePages,
+      vlogs: vlogs
+    );
+  }
+
+  Conversion conversion() {
+    final c = _census();
+    return Conversion(
+        c.converted, c.segments.length + c.treePages + c.vlogs);
+  }
+
+  /// True only when the file is encrypted and nothing plaintext remains
+  /// (14 §8.3: never a reassuring answer while plaintext remains).
+  bool get fullyEncrypted =>
+      engine.store.strict && !_decrypting && conversion().done;
+
+  /// Rewrites one kind of object not yet in the target mode, then commits.
+  /// Returns true while more steps are needed.
+  bool convertStep() {
+    _requireFile();
+    final e = engine;
+    if (e.keys == null) {
+      throw const InvalidArgumentException(
+          'the file is not encrypted, or is not unlocked; call encrypt() first');
+    }
+    e.commit();
+    final c = _census();
+    if (c.segments.isNotEmpty || c.vlogs > 0) {
+      // Every segment, every level, into the last level in one job, values
+      // moved (recluster): never a subset, or stale versions win (Rust M2.1).
+      final all = [for (var l = 0; l <= e.lastLevel; l++) ...e.refsAt(l)];
+      final job = e.beginCompaction(all, e.lastLevel, forceRecluster: true);
+      if (job != null) {
+        while (!e.stepCompaction(job)) {}
+        e.finishCompaction(job);
+      }
+    } else if (c.treePages > 0) {
+      for (final t in [
+        e.manifest.tree,
+        e.checkpoints.tree,
+        e.changeFeed.tree,
+        ...e.outerTrees.values,
+      ]) {
+        t.relocate();
+      }
+    } else if (_decrypting) {
+      // Nothing encrypted remains: one superblock drops the cipher and the
+      // keyslots together (14 §6.1), twice so neither slot keeps them; with
+      // cipher = 0 `sb_mac` is written as zero (§6.2).
+      _keyslots[e] = Uint8List(Sb.keyslotSize * Sb.keyslotCount);
+      e.featuresOptional &= ~(_converting | (1 << Feature.cipher));
+      e
+        ..destroyKeys()
+        ..commit()
+        ..commit();
+      e.store.writePlain = false;
+      e.vlog.writePlain = false;
+      return false;
+    } else {
+      // F-127: nothing plaintext remains; the MAC'd superblock now says so,
+      // and from here a plaintext object is tampering.
+      if (e.featuresOptional & _converting != 0) {
+        e.featuresOptional &= ~_converting;
+        e
+          ..installKeys(e.keys!, e.nonces!)
+          ..commit();
+      }
+      return false;
+    }
+    e.commit();
+    return true;
   }
 }

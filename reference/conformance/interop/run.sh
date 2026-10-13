@@ -223,7 +223,7 @@ fi
 # same in every implementation, half-converted (plaintext and encrypted pages
 # and value-log segments side by side; 14 §5.2 says a reader decides per
 # object) and fully converted.
-for conv in rust java; do
+for conv in rust java dart; do
 for mode in half full; do
   say "7. $conv encrypts in place ($mode); every implementation reads and verifies"
   ef="$work/encrypt-$conv-$mode.cryptand"

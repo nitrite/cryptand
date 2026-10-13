@@ -292,7 +292,12 @@ List<int>? keyArg;
 /// gate also crosses the KDF (F-126). Opening takes it as [keyArg].
 bool passwordArg = false;
 
+/// `--half`: `encrypt`/`decrypt` stop part-way (gate steps 7 and 8).
+bool halfArg = false;
+
 void main(List<String> args) {
+  halfArg = args.contains('--half');
+  args = [for (final a in args) if (a != '--half') a];
   final pw = args.indexOf('--password');
   if (pw >= 0) {
     passwordArg = true;
@@ -325,6 +330,25 @@ void main(List<String> args) {
         cmdMutate(args[1], args[2]);
       case 'verify':
         exit(cmdVerify(args[1]));
+      case 'encrypt':
+        // F-072, gate step 7: `--key` is the new raw key; `--half` stops
+        // right after the switch, nothing rewritten yet.
+        final db = DatabaseFile.open(args[1])
+          ..encrypt(keyArg!, kdf: Keyslot.kdfRaw);
+        if (!halfArg) {
+          while (db.convertStep()) {}
+        }
+        db.engine.close();
+      case 'decrypt':
+        // Gate step 8: `--half` stops after one conversion step.
+        final db = DatabaseFile.open(args[1], key: keyArg)
+          ..decrypt(confirmRemoveEncryption: true);
+        if (halfArg) {
+          db.convertStep();
+        } else {
+          while (db.convertStep()) {}
+        }
+        db.engine.close();
       case 'rotate':
         // F-072: copy-and-swap to the raw key args[2] (gate step 9).
         final hex = args[2];

@@ -448,6 +448,10 @@ final class ValueLog {
   /// unencrypted database; set by the engine when the ring is installed.
   VlogCrypto? crypto;
 
+  /// F-072 `decrypt()`: records are appended in the clear while [crypto]
+  /// still reads the encrypted ones.
+  bool writePlain = false;
+
   final int segmentBytes;
 
   /// Pages the reader may hold. Bounded, because an unbounded cache would make
@@ -533,7 +537,8 @@ final class ValueLog {
             // of the framing (section 5.3).
     final need = value.length + ckeKey.length + (crypto == null ? 24 : 48);
     final seg = _segmentFor(tier, heat, need);
-    final ptr = seg.append(treeId, ckeKey, value, crypto: crypto);
+    final ptr = seg.append(treeId, ckeKey, value,
+        crypto: writePlain ? null : crypto);
     if (ptr == null) {
       throw StateError('value-log segment ${seg.id} rejected a sized append');
     }

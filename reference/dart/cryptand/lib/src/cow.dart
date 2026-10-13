@@ -119,6 +119,12 @@ final class PageStore {
   /// plaintext page is not a converting file's mixture but a forgery.
   bool strict = false;
 
+  /// F-072, 14 §8.3 `decrypt()`: the cipher stays installed so encrypted pages
+  /// still read, but new pages are written in the clear.
+  bool writePlain = false;
+
+  bool get _seals => crypto != null && !writePlain;
+
   /// F-128, `14-security.md` §5.5: the header `nonce` of the page [write]
   /// (or the head of the extent [writeExtent]) last wrote, which its parent
   /// records, and of the page [read] last read, which [checkNonce] compares.
@@ -179,7 +185,7 @@ final class PageStore {
   /// reserved *before* the cells are laid out: a page filled to
   /// `page_size - 40` has nowhere to put 16 more bytes, and discovering that
   /// at write time means a page that cannot be written at all.
-  int get tagReserve => crypto == null ? 0 : 16;
+  int get tagReserve => _seals ? 16 : 0;
 
   int get payloadCap => pageSize - PageHeader.size - tagReserve;
 
@@ -480,7 +486,7 @@ final class PageStore {
     // §7's order, and §5.2 restates it: compress, then encrypt. The other
     // order compresses ciphertext, which does not compress.
     final deflated = _deflatePage(page) ?? page;
-    _rawWrite(pageId, crypto == null ? deflated : _sealPage(pageId, deflated));
+    _rawWrite(pageId, _seals ? _sealPage(pageId, deflated) : deflated);
   }
 
   /// A page that belongs to a multi-page extent: encrypted like any other, and
@@ -500,7 +506,7 @@ final class PageStore {
     }
     pageWrites++;
     writtenNonce = 0;
-    _rawWrite(pageId, crypto == null ? page : _sealPage(pageId, page));
+    _rawWrite(pageId, _seals ? _sealPage(pageId, page) : page);
   }
 
   /// §7 — compress a header-bearing page's payload, if the default codec is
@@ -1131,6 +1137,19 @@ final class CowTree {
   /// pages on the cross-language CRUD matrix. Allocating out of that list
   /// would be worse: a page both free and in use, which
   /// `spec/01-container.md` §9 calls a double allocation.
+  /// F-072, 14 §8.3: every page rewritten in the store's current write mode,
+  /// the old ones freed. Rebuilt from the rows, never re-sealed in place: a
+  /// full plaintext page has no room for the tag.
+  void relocate() {
+    if (root == 0) return;
+    final old = reachablePages().toList();
+    final rows = scan().toList();
+    rebuildFresh(rows);
+    for (final p in old) {
+      store.free(p);
+    }
+  }
+
   void rebuildFresh(List<(Uint8List, Uint8List)> entries) {
     if (entries.isEmpty) {
       _setRoot((0, 0));
