@@ -308,7 +308,7 @@ void main(List<String> args) {
     args = [...args]..removeRange(at, at + 2);
   }
   if (args.length < 2) {
-    stderr.writeln('interop write|read|mutate <tag>|verify <file> [--key <hex>]');
+    stderr.writeln('interop write|read|mutate <tag>|verify <file> | rotate <file> <new hex> [--key <hex>]');
     exit(2);
   }
   try {
@@ -325,6 +325,18 @@ void main(List<String> args) {
         cmdMutate(args[1], args[2]);
       case 'verify':
         exit(cmdVerify(args[1]));
+      case 'rotate':
+        // F-072: copy-and-swap to the raw key args[2] (gate step 9).
+        final hex = args[2];
+        DatabaseFile.rotateMasterKey(
+                DatabaseFile.open(args[1], key: keyArg),
+                [
+                  for (var i = 0; i + 1 < hex.length; i += 2)
+                    int.parse(hex.substring(i, i + 2), radix: 16)
+                ],
+                kdf: Keyslot.kdfRaw)
+            .engine
+            .close();
       default:
         stderr.writeln('unknown command ${args[0]}');
         exit(2);

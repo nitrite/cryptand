@@ -25,7 +25,9 @@ import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'bytes.dart';
 import 'cke.dart';
+import 'crc32c.dart';
 import 'container.dart';
 import 'cow.dart';
 import 'cve.dart';
@@ -422,6 +424,195 @@ abstract final class DatabaseFile {
   /// encrypted database may contain the master key even after a clean close.
   /// Treat process memory as in scope for whatever protects the key file.
   static Database open(String path, {List<int>? key}) => _open(path, key);
+
+  /// `13-operations.md` §5 `rotate_master_key()` (F-072), by copy-and-swap
+  /// as Rust and Java: the file is copied to `<path>.rotate`, every encrypted
+  /// page and value-log record in the copy is re-sealed under a fresh master
+  /// key (same counters, offsets and lengths), the superblock gets one new
+  /// keyslot, and the copy is renamed over the original. A crash before the
+  /// rename leaves the original intact. Closes [db]; returns the file reopened
+  /// under [credential] (`kdf` raw: 32 key bytes; Argon2id: a password).
+  ///
+  /// Pages are found by scanning the file rather than walking each structure:
+  /// a page is re-sealed exactly when its header is intact, says ENCRYPTED and
+  /// opens under the old key, which AEAD makes impossible by accident. An
+  /// intact encrypted page that does *not* open is tampering, and stops it.
+  ///
+  /// ponytail: one synchronous pass with 2x the file on disk, refused while
+  /// checkpoints exist or a vector region is named (Dart writes none; their
+  /// chunks are not pages). Step it, as 14 §8.4 allows, if large files need
+  /// rotating online.
+  static Database rotateMasterKey(Database db, List<int> credential,
+      {int kdf = Keyslot.kdfArgon2id,
+      int tCost = 3,
+      int mCostKib = 65536,
+      int parallelism = 1,
+      String label = 'keyslot 0'}) {
+    // The credential wraps the new slot and then reopens the file; wrapping
+    // zeroes a password (F-135), so keep a copy for the open, zeroed by it.
+    final again = Uint8List.fromList(credential);
+    try {
+      return _rotate(db, credential, again, kdf, tCost, mCostKib, parallelism,
+          label);
+    } catch (_) {
+      _wipe(credential);
+      _wipe(again);
+      rethrow;
+    }
+  }
+
+  static Database _rotate(Database db, List<int> credential, Uint8List again,
+      int kdf, int tCost, int mCostKib, int parallelism, String label) {
+    final e = db.engine;
+    final old = e.keys;
+    final path = e.store.file?.path;
+    if (old == null || path == null || e.publisher == null) {
+      throw const InvalidArgumentException(
+          'rotateMasterKey() needs an open, unlocked, encrypted file');
+    }
+    if (e.checkpoints.all.isNotEmpty) {
+      throw const InvalidArgumentException(
+          'rotateMasterKey() refuses while checkpoints exist; drop them first');
+    }
+    if (db.catalog.all.any((d) => d.$2.param('vector_region') != null)) {
+      throw const UnsupportedFeatureException(
+          'rotateMasterKey() does not re-seal vector regions');
+    }
+    // A quiet, durable state: memtable flushed, value-log segments sealed.
+    e.close();
+    final ps = e.pageSize;
+    final vlogs = [
+      for (final v in e.vlog.segments.values)
+        if (v.startPage != 0) v
+    ];
+    final skip = <int>{0, 1};
+    for (final v in vlogs) {
+      for (var i = 0; i < v.pageCount; i++) {
+        skip.add(v.startPage + i);
+      }
+    }
+
+    final master = randomBytes(32);
+    final uuid = Uint8List.fromList(e.databaseUuid);
+    final ring = KeyRing(master, uuid);
+    final tmp = '$path.rotate';
+    final t = File(tmp);
+    if (t.existsSync()) t.deleteSync();
+    _writeOwnerOnly(tmp, Uint8List(0));
+    final src = File(path).openSync();
+    final f = t.openSync(mode: FileMode.append);
+    try {
+      for (Uint8List b; (b = src.readSync(1 << 20)).isNotEmpty;) {
+        f.writeFromSync(b);
+      }
+      final pageCount = f.lengthSync() ~/ ps;
+      Uint8List read(int at, int n) {
+        f.setPositionSync(at);
+        return f.readSync(n);
+      }
+
+      void write(int at, List<int> b) => f
+        ..setPositionSync(at)
+        ..writeFromSync(b);
+
+      for (var p = 0; p < pageCount; p++) {
+        if (skip.contains(p)) continue;
+        final buf = read(p * ps, ps);
+        final PageHeader h;
+        try {
+          h = PageHeader.read(buf, pageId: p);
+        } on CryptandException {
+          continue; // not a page: unwritten, or the middle of an extent
+        }
+        if (!h.isEncrypted) continue;
+        final end = PageHeader.size + h.stored;
+        final header = Uint8List.sublistView(buf, 0, PageHeader.size);
+        final pt = decryptPagePayload(
+            keys: old,
+            pageId: p,
+            nonceCounter: h.nonce,
+            pageHeader40: header,
+            sealed: Uint8List.sublistView(buf, PageHeader.size, end));
+        final ct = encryptPagePayload(
+            keys: ring,
+            pageId: p,
+            nonceCounter: h.nonce,
+            pageHeader40: header,
+            payload: pt);
+        buf.setRange(PageHeader.size, end, ct);
+        h.writeInto(buf); // the CRC covers the payload as stored
+        write(p * ps, buf);
+      }
+
+      for (final v in vlogs) {
+        final base = v.startPage * ps;
+        final raw = read(base, VlogSegment.dataOffset + v.bytes);
+        final bd = ByteData.sublistView(raw);
+        var off = VlogSegment.dataOffset;
+        while (off < raw.length) {
+          final r = ByteReader(raw, off, raw.length);
+          final len = r.uvar();
+          if (len < 5 || len > r.remaining) {
+            // F-138: a file value, checked before it places the CRC.
+            throw CorruptionException(
+                'value-log record at ${v.id}+$off declares $len bytes');
+          }
+          final body = r.position, crcAt = body + len - 4;
+          final next = body + len;
+          // F-132: a converting file's plaintext records stay as they are.
+          if (crc32c(raw, body, crcAt) != bd.getUint32(crcAt, Endian.little)) {
+            final counter = bd.getUint64(body, Endian.little);
+            final treeId = bd.getUint32(body + 8, Endian.little);
+            final pt = decryptVlogRecord(
+                keys: old,
+                segmentId: v.id,
+                recordOffset: off,
+                treeId: treeId,
+                nonceCounter: counter,
+                ciphertext: Uint8List.sublistView(raw, body + 12, crcAt - 16),
+                tag: Uint8List.sublistView(raw, crcAt - 16, crcAt));
+            if (pt == null) {
+              throw CorruptionException(
+                  'value-log record ${v.id}+$off does not open under the key');
+            }
+            final c = encryptVlogRecord(
+                keys: ring,
+                segmentId: v.id,
+                recordOffset: off,
+                treeId: treeId,
+                nonceCounter: counter,
+                body: pt);
+            raw
+              ..setRange(body + 12, crcAt - 16, c.ciphertext)
+              ..setRange(crcAt - 16, crcAt, c.tag);
+            bd.setUint32(crcAt, crc32c(raw, body + 8, crcAt), Endian.little);
+            write(base + off, Uint8List.sublistView(raw, off, next));
+          }
+          off = next;
+        }
+      }
+
+      // One keyslot under the new master, in both superblock slots, so the
+      // fallback cannot carry a keyslot for the old one.
+      final sb = Superblock.open(read(0, Sb.size), read(ps, Sb.size));
+      final slot = _wrapSlot(master, uuid, 0, credential, kdf, tCost,
+          mCostKib, parallelism, label);
+      sb.keyslots
+        ..fillRange(0, sb.keyslots.length, 0)
+        ..setRange(0, Keyslot.size, slot.encode());
+      final image = sb.encode();
+      sealSuperblock(image, ring);
+      write(0, image);
+      write(ps, image);
+      f.flushSync();
+    } finally {
+      f.closeSync();
+      src.closeSync();
+      ring.destroy();
+    }
+    t.renameSync(path);
+    return open(path, key: again);
+  }
 
   /// Opens a database **without writing to the file**.
   ///

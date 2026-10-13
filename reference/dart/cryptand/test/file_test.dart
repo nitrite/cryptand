@@ -812,4 +812,53 @@ void lockTests() {
           .every((b) => b == 0), isTrue, reason: 'slot at $slot kept a key');
     }
   });
+
+  test('F-072: rotateMasterKey re-seals pages and value-log records', () {
+    Uint8List k(int b) => Uint8List(32)..fillRange(0, 32, b);
+    final path = tmp('rotate');
+    var db = DatabaseFile.create(path,
+        credential: k(1), kdf: Keyslot.kdfRaw, profile: Profile.desktop);
+    final c = db.createCollection('c');
+    CDoc doc(int i, int n) => CDoc({'i': CStr('x' * n + '$i')});
+    for (var i = 0; i < 300; i++) {
+      c.put(CStr('k$i'), doc(i, i.isEven ? 3000 : 10)); // even: value log
+    }
+    db.engine.commit();
+    for (var i = 0; i < 300; i += 3) {
+      c.put(CStr('k$i'), doc(i, 20)); // frees pages sealed under the old key
+    }
+    db.engine.commit();
+    final before = File(path).readAsBytesSync();
+    db = DatabaseFile.rotateMasterKey(db, k(2), kdf: Keyslot.kdfRaw);
+    db.engine.close();
+    expect(File('$path.rotate').existsSync(), isFalse);
+    expect(() => DatabaseFile.open(path, key: k(1)),
+        throwsA(isA<CannotUnlockException>()));
+    db = DatabaseFile.open(path, key: k(2));
+    final back = db.collection('c')!;
+    for (var i = 0; i < 300; i++) {
+      final n = i % 3 == 0 ? 20 : (i.isEven ? 3000 : 10);
+      expect(back.get(CStr('k$i')), doc(i, n), reason: 'k$i');
+    }
+    expect(db.engine.verifyStructure().findings, isEmpty);
+    db.engine.close();
+    // Every sealed byte changed: no page payload survives the rotation.
+    final after = File(path).readAsBytesSync();
+    var same = 0, sealed = 0;
+    for (var p = 2; p < before.length ~/ 4096; p++) {
+      final a = before.sublist(p * 4096 + 40, p * 4096 + 72);
+      if (before[p * 4096 + 5] & 0x02 == 0) continue; // ENCRYPTED only
+      sealed++;
+      if (_eq(a, after.sublist(p * 4096 + 40, p * 4096 + 72))) same++;
+    }
+    expect(sealed, greaterThan(10));
+    expect(same, 0, reason: '$same pages kept their old ciphertext');
+  });
+}
+
+bool _eq(List<int> a, List<int> b) {
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }

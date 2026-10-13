@@ -260,7 +260,7 @@ for mode in half full; do
 done
 done
 
-for rot in rust java; do
+for rot in rust java dart; do
 say "9. $rot rotates the master key (copy-and-swap); every implementation reads with the new key only"
 rf="$work/rotate-$rot.cryptand"
 KEY=0909090909090909090909090909090909090909090909090909090909090909
