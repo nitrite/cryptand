@@ -55,8 +55,11 @@
   (`CRYPTAND_FUZZ_DUMP` keeps only the last input replayed). Replaying
   Jazzer inputs needs `process-test-resources`: `surefire:test` reads `target/test-classes`.
 - Remote gate clone `cryptand-gate` (rsync the tree; Dart SDK `~/dart-sdk/bin`).
-- Open outside M5: none. M5 (Dart): F-035, F-038, Dart checks of F-079, F-081, F-084, F-087, F-088, F-094..F-121
-  (`?`/`M5` in FINDINGS), Dart corpus replay (M3.4).
+- Open outside M5: **F-150 (S1, R+D)**: dead value-log space never returned (see Next action).
+  M5 (Dart) left: `?` Dart cells of F-079, F-081, F-084, F-087, F-088, F-094..F-121 in FINDINGS.
+- Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
+  (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
+  `CRYPTAND_CORPUS_DIRS` (remote: `cryptand-gate/.../fuzz/{corpus,artifacts}` + `cryptand-kill-plain/reference/java/.cifuzz-corpus/...JazzerTest`).
 - Traps: corpus test without `--features harness` reuses a stale `interop`
   binary (the gate passes the feature); Rust `stall_test` fails while another job fsyncs on /Volumes/External;
   never build Java in a clone where a hop, torture or Jazzer runs; rebuilding
@@ -81,29 +84,17 @@
 
 ## Next action
 
-M5 on branch `dart-storage` (design: top of `reference/dart/cryptand/REPORT.md`).
-Done 10-13 (second session): Dart kill mix runs encrypt/decrypt/rotate/erase
-(`--maint 2`; backup is a no-op in Dart, no file backup). It found F-143
-(rotate after decrypt+encrypt), F-144 (conversion under a snapshot never
-finished), F-145 (expired vlog value never marked dead), F-146 (**S0**: frees
-between commits attributed to the durable commit, reused under it; torn file
-on kill), and needed the Dart halves of F-094/F-096 (value-log extents; one
-seed grew to 182 GB and filled the remote disk). **M2.2 Dart rerun: 1000 kills
-(203000..204000, half encrypted, maint ops) 0 failures**; seed 203173 re-killed
-300x at 0-30 ms, 0 bad. Kill runs now use `ulimit -f 4000000`.
-Dart space vs Rust: seed 203502 ends 11 MB (Rust 1.5 MB); cold sizing is a
-ponytail (2x live + 64 KiB).
-F-147 (10-13, third session): the "writer RSS growth" was compaction holding
-every input and output (10^7 build peaked 2.36 GB). Dart fixed: 201 MB max
-RSS at 10^7, 1000 kills (205000..206000) clean. Rust fixed the same way
-(10-13, fourth session): 1980 -> 348 MB at 10^7 (`examples/rss_scale.rs`);
-Java already streamed (`bench/RssScale` 10^7 under `-Xmx256m`, 551 MB RSS).
-Java's 10^7 file is 7.09 GB vs Rust 4.97 GB (not chased).
-Remote cleaned 10-13 (torture scratch, fuzz targets in kill clones): 37 GB free.
-`cryptand-rss` has an instrumented `cow.dart`/`rss_scale.dart`; rsync `--delete` over it.
-Next: M2.1 Dart fault seeds,
-Dart corpus replay (M3.4), the `?`/`M5` rows of FINDINGS, SECURITY-REVIEW
-Dart rows, M6 Dart rungs.
+**F-150 first** (S1, Rust + Dart, Java unmeasured). Probe: 30 x (open, overwrite
+the same 256 x 4 KiB values, commit Sync, close) on Desktop: both ~56 MB for
+1 MB live, linear. Dart `live_bytes` reads 31.6 MB (superseded records not
+marked dead before the last level?), manifest 5 segments, no collection fires
+(04 §6.8: MUST trigger on `vlog_space_target_pct`). Explicit compact + collect +
+shrink: Rust 86.8 MB, Dart 60.3 MB (freed extents not at the tail / not reusable?).
+Write the probe as a test in all three, find why, fix in all three.
+Then: `?` Dart cells in FINDINGS, SECURITY-REVIEW Dart rows, M6 Dart rungs.
+Done 10-13 (fifth session): M2.1 Dart (3000 seeds x 3 faults clean; F-095 Dart
+fixed), M3.4 Dart (47730 corpus inputs, F-148 R+D read-only open wrote the file,
+F-149 D), F-076 Dart writes byte 39, 10^6 Dart mutants (100 seeds x 10k, 123853 refused, 0 untyped, 0 hung).
 
 ## Log
 
@@ -135,3 +126,4 @@ Dart rows, M6 Dart rungs.
 - 2026-10-13 — Dart kill mix with maint ops: F-143..F-146 (F-146 S0) and F-094/F-096 Dart fixed; M2.2 Dart 1000 kills 0 failures; 709 Dart tests, gate green.
 - 2026-10-13 — remote cleaned (21 -> 37 GB free); F-147 Dart compaction streams inputs/outputs: 10^7 build 2.36 GB -> 201 MB RSS, 1000 kills clean; R+J open.
 - 2026-10-13 — F-147 Rust fixed (streamed merge, 1980 -> 348 MB at 10^7), Java not affected; gate quick green.
+- 2026-10-13 — M2.1 Dart done (3000 seeds x crash/EIO/ENOSPC, F-095 D); M3.4 Dart corpus replay (47730 inputs) found F-148 (R+D) and F-149 (D); F-076 D; F-150 (R+D space) opened; gate green.
