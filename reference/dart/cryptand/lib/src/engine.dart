@@ -62,12 +62,13 @@ final class CompactionJob {
   final int target;
   final bool levelled;
   final int group;
-  final List<SegmentCursor> sources;
+  final List<RunCursor> sources;
   final List<VlogPointer> dead = [];
 
   /// BLOB pointers of dropped entries; their extents are freed at finish.
   final List<Uint8List> deadBlobs = [];
-  final List<Segment> outputs = [];
+  /// Placed as each one fills, so a job holds one output in memory, not all.
+  final List<SegmentRef> outputs = [];
 
   SegmentBuilder out;
   Uint8List? lastUserKey;
@@ -88,6 +89,52 @@ final class CompactionJob {
   /// underneath it (§5: "A job whose input segments were removed by another
   /// job in the meantime MUST abort and be rescheduled").
   Set<int> get inputIds => {for (final r in inputs) r.segmentId};
+}
+
+/// Disjoint input segments merged as one source, read one at a time, so a
+/// compaction holds a resident segment per run rather than the whole level
+/// (10^7 build peaked at 2.3 GB RSS merging the last level).
+final class RunCursor {
+  RunCursor(this._engine, this._refs) {
+    _open();
+  }
+
+  final Engine _engine;
+  final List<SegmentRef> _refs;
+  var _i = 0;
+  SegmentCursor? _c;
+
+  void _open() {
+    _c = null;
+    while (_i < _refs.length) {
+      final c = _engine.segment(_refs[_i++]).cursor()..seekFirst();
+      if (c.isValid) {
+        _c = c;
+        return;
+      }
+    }
+  }
+
+  bool get isValid => _c != null;
+  Uint8List key() => _c!.key();
+  SegRecord record() => _c!.record();
+  void next() {
+    if (!_c!.next()) _open();
+  }
+
+  /// Interval partitioning: segments sorted by `min_key`, each appended to
+  /// the first run it follows strictly. Overlapping segments get their own.
+  static List<RunCursor> of(Engine e, List<SegmentRef> refs) {
+    final sorted = [...refs]..sort((a, b) => compareKeys(a.minKey, b.minKey));
+    final runs = <List<SegmentRef>>[];
+    for (final r in sorted) {
+      final run = runs
+          .where((run) => compareKeys(run.last.maxKey, r.minKey) < 0)
+          .firstOrNull;
+      run == null ? runs.add([r]) : run.add(r);
+    }
+    return [for (final run in runs) RunCursor(e, run)];
+  }
 }
 
 /// One buffered write, before it reaches a segment.
@@ -1435,7 +1482,13 @@ final class Engine {
   /// "The partially built output is just a prefix — abandoning it costs the
   /// work done and nothing else, and no reader can see it." Called whenever
   /// the manifest moves under a job: a checkpoint restore, or a repair.
-  void abandonCompaction() => _job = null;
+  /// Its placed outputs are owned by nothing, so their pages go back.
+  void abandonCompaction() {
+    for (final r in _job?.outputs ?? const <SegmentRef>[]) {
+      store.freeExtent(r.startPage, r.pages);
+    }
+    _job = null;
+  }
 
   /// Merges everything down into the last level.
   ///
@@ -1554,9 +1607,7 @@ final class Engine {
       target: target,
       levelled: levelled,
       group: group,
-      sources: [
-        for (final r in all) segment(r).cursor()..seekFirst(),
-      ],
+      sources: RunCursor.of(this, all),
       out: _builder(level: target, group: group),
       // §5's conditions 2 and 3: a version may be dropped only at the last
       // level, and only once the version superseding it is visible to every
@@ -1583,7 +1634,7 @@ final class Engine {
       // Pick the smallest internal key across the sources. Newest-first is
       // built into the key: seq is inverted (§1), so the first entry seen for
       // a user key is the newest version of it.
-      SegmentCursor? pick;
+      RunCursor? pick;
       for (final c in job.sources) {
         if (!c.isValid) continue;
         if (pick == null || compareKeys(c.key(), pick.key()) < 0) pick = c;
@@ -1669,7 +1720,8 @@ final class Engine {
 
   void _rotate(CompactionJob job) {
     if (job.out.entryCount == 0) return;
-    job.outputs.add(Segment(job.out.build(), pageSize));
+    job.outputs.add(place(Segment(job.out.build(), pageSize),
+        level: job.target, group: job.group));
     job.out = _builder(level: job.target, group: job.group);
   }
 
@@ -1679,8 +1731,8 @@ final class Engine {
     for (final r in job.inputs) {
       _retire(r);
     }
-    for (final s in job.outputs) {
-      manifest.add(place(s, level: job.target, group: job.group));
+    for (final r in job.outputs) {
+      manifest.add(r);
     }
     _levelCache.remove(job.target);
     _invalidateCandidateOrder();
