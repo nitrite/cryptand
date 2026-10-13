@@ -190,6 +190,17 @@ A workload where every document goes to the value log does not end at the same
 file size in all three. The difference is value-log collection policy (when a
 segment qualifies, and whether an emptied one is dropped), not a leak.
 
+## 3. Dart open at 10⁷ documents (PLAN 5.5 Verify)
+
+`dart/cryptand/tool/rss_scale.dart`, AOT (`dart compile exe`), remote Mac
+(Apple M1, 16 GB, internal SSD), 2026-10-13, branch `dart-storage` 63319c3.
+`build`: 10⁷ `benchDoc` documents, commit per 10⁵, desktop profile, plaintext:
+6 892 027 904 B file; writer RSS 121–604 MB (sampled at each commit).
+`open` (fresh process): open + 10 000 random gets, 0 missing:
+**peak RSS 58 MB** (`/usr/bin/time -l`: 61 652 992 B) against the budget
+128 MB (desktop page cache 64 MB + 64 MB): **PASS**. Wall 393 s (336 s user).
+Under `dart run` (JIT) the same check peaks near 265 MB from the compiler alone.
+
 ## Running it
 
 ```bash

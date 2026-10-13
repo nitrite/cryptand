@@ -1,6 +1,6 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-12, IST)
+## State (2026-10-13, IST)
 
 - Branch `packaging/v1.0.0`. Manifests 1.0.0, nothing published, no tags.
 - Done: M0, M1.1, M1.2 (Rust, Java), M2.1–2.3 (Rust, Java), M3 (8 cargo-fuzz
@@ -55,8 +55,7 @@
   (`CRYPTAND_FUZZ_DUMP` keeps only the last input replayed). Replaying
   Jazzer inputs needs `process-test-resources`: `surefire:test` reads `target/test-classes`.
 - Remote gate clone `cryptand-gate` (rsync the tree; Dart SDK `~/dart-sdk/bin`).
-- Open outside M5: none. M5 (Dart): F-035, F-038, F-072,
-  M2.2 Dart, Dart checks of F-079, F-081, F-084, F-087, F-088, F-094..F-121
+- Open outside M5: none. M5 (Dart): F-035, F-038, Dart checks of F-079, F-081, F-084, F-087, F-088, F-094..F-121
   (`?`/`M5` in FINDINGS), Dart corpus replay (M3.4).
 - Traps: corpus test without `--features harness` reuses a stale `interop`
   binary (the gate passes the feature); Rust `stall_test` fails while another job fsyncs on /Volumes/External;
@@ -82,19 +81,21 @@
 
 ## Next action
 
-M5 on branch `dart-storage`; design = top of `reference/dart/cryptand/REPORT.md`.
-Steps (1)–(6) done (commit in place, write-through, lock held). Writer lock
-now matches R/J: a second in-process writer is refused (process registry),
-a reader's close re-takes the fcntl lock, `Engine.close` releases the handle
-even if its last commit throws; `created_utc_ms` carried. F-141 fixed (Dart
-verify: locality debt is a warning). **M2.2 Dart done:** `tools/torture.py
-dart`, 1 000 kills (201000..202000, half `--encrypted`, default mix + gc),
-0 failures; `TORTURE_FAULT` control 16/30 caught. Remote clones
-`cryptand-kill-plain`/`-enc` (git clones of `dart-storage`).
-Dart cannot run the maint ops encrypt/decrypt/rotate/backup/erase yet
-(F-072f); add them to the Dart mix when they exist.
-Not tested: Windows (registry makes it behave as POSIX does).
-Next: 10^7 RSS check (5.5 Verify), F-140, F-072f.
+M5 on branch `dart-storage` (design: top of `reference/dart/cryptand/REPORT.md`).
+Done 10-13: F-140; F-142 (Dart dropped CONVERTING on commit, S1, fixed);
+**F-072 Dart complete** (`KeyApi` add/remove/cryptoErase,
+`DatabaseFile.rotateMasterKey`, `ConvertApi` encrypt/decrypt/convertStep;
+gate steps 7–9 now run Dart as converter and rotator, all green). Dart
+refuses to convert/rotate files with vector regions or descriptor-rooted
+index trees (Java writes them; Dart does not). **5.5 RSS: 10⁷ open peaks
+58 MB ≤ 128 MB** (`tool/rss_scale.dart`, AOT; RESULTS.md §3).
+Watch: Dart writer RSS reached 604 MB building 10⁷ (unbounded growth
+somewhere in the write path) and open + 10k gets took 393 s; both bear on
+the M6 Dart rungs.
+Next: add encrypt/rotate/cryptoErase to the Dart kill mix (`tools/torture.py
+dart`, remote `cryptand-kill-*`) and rerun M2.2 Dart; then the writer RSS
+growth; then M2.1 Dart fault seeds, Dart corpus replay (M3.4), the `?`/`M5`
+rows of FINDINGS, SECURITY-REVIEW Dart rows, M6 Dart rungs.
 
 ## Log
 
@@ -122,3 +123,4 @@ Next: 10^7 RSS check (5.5 Verify), F-140, F-072f.
 - 2026-10-12 — M5 step 5 core: save on the open file commits in place, slots alternate; 695 Dart tests, interop gate green.
 - 2026-10-12 — M5 steps 4+5 done: Engine.commit publishes in place, lock held for the session, create on file; 698 Dart tests, interop gate green.
 - 2026-10-13 — lock/created parity with R/J; F-141; M2.2 Dart 1 000 kills 0 failures (fault control caught); 699 Dart tests, interop green.
+- 2026-10-13 — F-140, F-142 fixed; F-072 Dart done (keyslots, rotate, encrypt/decrypt), gate steps 7–9 with Dart; 10⁷ open RSS 58 MB PASS; 704 Dart tests, interop green.
