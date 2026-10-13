@@ -57,8 +57,10 @@
 - Remote gate clone `cryptand-gate` (rsync the tree; Dart SDK `~/dart-sdk/bin`).
 - F-150 fixed (R+D; Java not affected): `space_test` in all three. Residue: tiered
   levels keep superseded versions until the last level (§5 condition 3), so 1 MB
-  live sits in ~30 MB (Rust desktop) / ~80 MB (Dart `Engine()` default). See open question.
-  M5 (Dart) left: `?` Dart cells of F-079, F-081, F-084, F-087, F-088, F-094..F-121 in FINDINGS.
+  live sits in ~30 MB (Rust desktop) / ~80 MB (Dart `Engine()` default). Residue fixed 10-13 (human approved
+  04 §5 change: superseded non-RANGE_DELETE versions drop at any level, R+J+D): ~13 / ~26 MB.
+  Dart FINDINGS cells done 10-13 (`test/findings_test.dart` ports the R/J repros); F-079 was a Dart
+  verify false-leak bug, fixed (`Database.indexClaims`). Left `?`: F-007/008/010/012 (M6 scale).
 - Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
   (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
   `CRYPTAND_CORPUS_DIRS` (remote: `cryptand-gate/.../fuzz/{corpus,artifacts}` + `cryptand-kill-plain/reference/java/.cifuzz-corpus/...JazzerTest`).
@@ -82,16 +84,11 @@
 
 ## Open questions for the human
 
-- F-150 residue: 04 §5 lets a compaction drop a superseded version only when
-  condition 3 holds (reaches the last level). Dropping an older PUT whose newer
-  visible version is in the same job is safe at any level (only tombstones need
-  condition 3) and would cut the residue ~10x. Spec change: approve or not?
-
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
 
 ## Next action
 
-`?` Dart cells in FINDINGS, then SECURITY-REVIEW Dart rows, then M6 Dart rungs.
+SECURITY-REVIEW Dart rows, then M6 Dart rungs.
 Done 10-13 (sixth session): F-150 (see State).
 
 ## Log
@@ -126,3 +123,5 @@ Done 10-13 (sixth session): F-150 (see State).
 - 2026-10-13 — F-147 Rust fixed (streamed merge, 1980 -> 348 MB at 10^7), Java not affected; gate quick green.
 - 2026-10-13 — M2.1 Dart done (3000 seeds x crash/EIO/ENOSPC, F-095 D); M3.4 Dart corpus replay (47730 inputs) found F-148 (R+D) and F-149 (D); F-076 D; F-150 (R+D space) opened; gate green.
 - 2026-10-13 — F-150 fixed: Rust level trigger + space-target GC + cold extent sizing, Dart close finishes job + free-list coalesce; Java measured unaffected; space_test R+J+D; gate quick green.
+- 2026-10-13 — F-150 residue: 04 §5 superseded versions drop at any level (approved), R+J+D; Rust 30->13 MB, Dart 80->26 MB.
+- 2026-10-13 — Dart FINDINGS cells: 34 resolved (13 ported tests in `findings_test`), F-079 Dart verify fixed, interop step 12 verifies with Dart.

@@ -117,7 +117,12 @@ final class VerifyReport {
 extension EngineVerify on Engine {
   /// Verifies structure. [deep] also walks every entry of every segment,
   /// which is what invariants 1, 3, 4, 5 and 7 need.
-  VerifyReport verifyStructure({bool deep = true}) {
+  ///
+  /// [claims] are pages owned through catalog descriptors, which the engine
+  /// cannot see (F-079): `Database.indexClaims`.
+  VerifyReport verifyStructure(
+      {bool deep = true,
+      List<(int start, int pages, String what)> claims = const []}) {
     final f = <Finding>[];
     var segs = 0;
     var entries = 0;
@@ -156,7 +161,7 @@ extension EngineVerify on Engine {
 
     _checkDisjointness(f, byLevel);
     _checkLocalityDebt(f);
-    _checkPageAccounting(f);
+    _checkPageAccounting(f, claims);
     return VerifyReport(f, segs, entries);
   }
 
@@ -175,7 +180,8 @@ extension EngineVerify on Engine {
   /// A double-allocation is the finding that matters here and it is corruption:
   /// two live structures naming one page means one of them is about to be
   /// overwritten by a write to the other.
-  void _checkPageAccounting(List<Finding> f) {
+  void _checkPageAccounting(
+      List<Finding> f, List<(int, int, String)> claims) {
     final owner = <int, String>{};
     void claim(Iterable<int> pages, String what) {
       for (final p in pages) {
@@ -242,6 +248,10 @@ extension EngineVerify on Engine {
           extentPages(seg.startPage, seg.pageCount,
               'value-log segment ${seg.id}'),
           'value-log segment ${seg.id}');
+    }
+
+    for (final (start, pages, what) in claims) {
+      claim(extentPages(start, pages, what), what);
     }
 
     final free = <int>{};

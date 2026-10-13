@@ -11,8 +11,8 @@ void main() {
   test('F-150: overwriting the same values does not grow the file', () {
     // 150 x (open, overwrite 256 x 4 KiB, commit, close), as Rust's
     // space_test. Before the fix: 460 MB at 100 and superlinear (1 GB at
-    // 300). Now flat near 80 MB: this policy's tiered levels keep up to ~36
-    // versions until the last level drops them (§5 condition 3).
+    // 300). Then flat near 80 MB with tiered levels keeping every version;
+    // since §5 drops a superseded version at any level (F-150), ~26 MB.
     final path =
         '${Directory.systemTemp.createTempSync('cryptand-f150-').path}/db.cryptand';
     DatabaseFile.save(Database(engine: Engine()), path);
@@ -34,6 +34,6 @@ void main() {
     e.close();
     expect(len, lessThanOrEqualTo(at75 + at75 ~/ 20),
         reason: 'still growing: $at75 at cycle 75');
-    expect(len, lessThan(100 << 20));
+    expect(len, lessThan(32 << 20));
   });
 }

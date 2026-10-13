@@ -23,9 +23,11 @@ library;
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'bytes.dart';
+import 'catalog.dart' show IndexType;
 import 'cke.dart';
 import 'crc32c.dart';
 import 'container.dart';
@@ -36,6 +38,7 @@ import 'engine.dart';
 import 'manifest.dart' show SegmentRef;
 import 'errors.dart';
 import 'profile.dart';
+import 'rtree.dart' show RTreeNode;
 import 'security.dart';
 import 'txn.dart';
 import 'value.dart';
@@ -1272,6 +1275,51 @@ final class Conversion {
 /// 12 §4's stall budget, as in Rust and Java. Refused on a file holding
 /// descriptor-rooted index trees or vector regions (Java writes them, Dart
 /// does not; their pages are not Dart's to re-lay).
+/// F-079: pages owned through catalog descriptors, for `verifyStructure`:
+/// trees rooted in a descriptor (R-trees, vector graphs; Java writes them)
+/// walked in their own format, and vector regions (`09-vector.md` §5).
+extension IndexClaims on Database {
+  List<(int, int, String)> indexClaims() {
+    final store = engine.store;
+    final out = <(int, int, String)>[];
+    for (final (name, d) in catalog.all) {
+      final region = (d.param('vector_region') as CInt?)?.magnitude.lo ?? 0;
+      if (region != 0) {
+        out.add((
+          region,
+          math.max(1, PageHeader.read(store.readClear(region)).extentPages),
+          'vector region of $name'
+        ));
+      }
+      final root = d.root ?? 0;
+      if (root == 0 || d.levelled || d.treeId == TreeId.treeIndex) continue;
+      final spatial = (d.param('index_type') as CStr?)?.value == IndexType.spatial;
+      if (!spatial) {
+        for (final p in CowTree(store,
+                treeId: d.treeId, root: root, rootNonce: d.rootNonce)
+            .reachablePages()) {
+          out.add((p, 1, 'index tree $name'));
+        }
+        continue;
+      }
+      final stack = [(root, d.rootNonce)];
+      final seen = <int>{};
+      while (stack.isNotEmpty) {
+        final (p, nonce) = stack.removeLast();
+        // A hostile file's cycle: claimed once; a double claim is reported.
+        if (!seen.add(p)) continue;
+        out.add((p, 1, 'index tree $name'));
+        final n = RTreeNode.decode(store.readBound(p, nonce));
+        if (n.isLeaf) continue;
+        for (final e in n.entries) {
+          stack.add((e.childPage, e.childNonce));
+        }
+      }
+    }
+    return out;
+  }
+}
+
 extension ConvertApi on Database {
   static const int _converting = 1 << Feature.converting;
 

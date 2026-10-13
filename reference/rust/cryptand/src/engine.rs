@@ -2697,7 +2697,9 @@ impl Engine {
         // version, not only the newest -- with the newest above the floor,
         // the version under a dropped tombstone used to survive and the
         // oldest snapshot read it.
-        let drop_it = same_key && job.floor_seen && reaches_last;
+        // F-150: condition 3 only for a RANGE_DELETE, which is not a version of
+        // its start key; any other older version is shadowed at every level.
+        let drop_it = same_key && job.floor_seen && (reaches_last || rec.op() != op::RANGE_DELETE);
         if seq <= min_retained {
             job.floor_seen = true;
         }

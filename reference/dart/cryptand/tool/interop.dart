@@ -253,15 +253,17 @@ void cmdMutate(String path, String tag) {
 }
 
 int cmdVerify(String path) {
-  final io = Interop.open(path);
-  final findings = io.e.verify();
-  final structure = io.e.verifyStructure();
+  // Any file, not only the gate's orders fixture (F-079: Java's indexed file).
+  final db = DatabaseFile.open(path, key: keyArg);
+  final e = db.engine;
+  final findings = e.verify();
+  final structure = e.verifyStructure(claims: db.indexClaims());
   // `spec/01-container.md` §9 step 8: with a key, `sb_mac`, every page's AEAD
   // tag, and no `(key, nonce)` pair twice. Reported as its own class because
   // §9 is explicit that tampering is neither corruption nor a leak.
-  final crypto = io.e.verifyEncryption();
+  final crypto = e.verifyEncryption();
   final leaks = structure.of(FindingClass.leak);
-  stdout.writeln('verify: ${io.e.manifest.all.length} segments, '
+  stdout.writeln('verify: ${e.manifest.all.length} segments, '
       '${findings.length + structure.findings.length + crypto.length} '
       'findings (${leaks.length} of them leaks)');
   for (final f in findings) {

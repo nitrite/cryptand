@@ -1701,17 +1701,14 @@ final class Engine {
           job.out.add(_promote(rec, parsed.treeId, job.dead, job.recluster,
               levelled: job.levelled));
         }
-      } else if (job.levelled &&
-          job.newestSeq <= job.retained &&
+      } else if (job.newestSeq <= job.retained &&
           // F-033: a RANGE_DELETE is keyed at its start key but is not a
           // version of it; dropped as "superseded" by a newer put there, it
           // took every row it covered back with it.
           rec.op != Op.rangeDelete) {
-        // §5 condition 3 holds only at the last level, so a superseded version
-        // may be dropped only here — and only once the version that supersedes
-        // it is itself visible to every live snapshot (condition 2). A tiered
-        // compaction keeps every version, which is what makes tiering cheap on
-        // the write side.
+        // §5 (F-150): a superseded version may be dropped at any level once
+        // the version that supersedes it is visible to every live snapshot
+        // (condition 2); the newer version shadows everything below it.
         if (rec.valueKind == ValueKind.vlog) {
           // §6.7 lets liveness be decremented only when a compaction has
           // *observed* the value superseded, which is here.

@@ -2557,9 +2557,11 @@ public final class Engine implements AutoCloseable {
                 }
 
                 boolean drop = false;
-                if (!newUserKey && sawNewerVisible && bottommost) {
+                if (!newUserKey && sawNewerVisible && (bottommost || op != BtreePage.Op.RANGE_DELETE)) {
                     // Conditions 1 and 2: a newer version exists in this compaction
-                    // and its seq is at or below the oldest live snapshot.
+                    // and its seq is at or below the oldest live snapshot. F-150:
+                    // condition 3 only for a RANGE_DELETE, which is not a version
+                    // of its start key.
                     drop = true;
                 }
                 if (!drop && bottommost && op != BtreePage.Op.RANGE_DELETE) {

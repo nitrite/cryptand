@@ -10,9 +10,9 @@ use cryptand::value::Value;
 #[test]
 fn f150_overwriting_the_same_values_does_not_grow_the_file() {
     // 100 x (open, overwrite 256 x 4 KiB, commit, close). Before the fix
-    // the file grew ~1.9 MB a cycle (56 MB at 30); now it plateaus near
-    // 30 MB: tiered levels keep up to ~12 versions until the last level
-    // drops them (§5 condition 3).
+    // the file grew ~1.9 MB a cycle (56 MB at 30); it plateaued near
+    // 30 MB with tiered levels keeping every version; since §5 drops a
+    // superseded version at any level (F-150), ~13 MB.
     let (t, mut e) = engine("f150", Profile::Desktop);
     e.close(true).unwrap();
     let path = t.path.clone();
@@ -34,5 +34,5 @@ fn f150_overwriting_the_same_values_does_not_grow_the_file() {
         assert_eq!(d.engine.get(16, &Value::NitriteId(i)).unwrap().unwrap(), vec![99u8; 4096]);
     }
     assert!(len <= at_50 + at_50 / 10, "still growing: {at_50} at cycle 50, {len} at 100");
-    assert!(len < 40 << 20, "file {len} bytes for 1 MiB live");
+    assert!(len < 16 << 20, "file {len} bytes for 1 MiB live");
 }

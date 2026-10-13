@@ -283,7 +283,7 @@ done
 
 # F-079: index structures rooted in descriptors (R-tree, vector graph and
 # region) survive conversion and rotation by either converter, and both Rust
-# and Java verify them clean. Dart verify waits for M5 (its index storage).
+# Java and Dart verify them clean (Dart refuses to convert them).
 for conv in rust java; do
   say "12. $conv encrypts, rotates and decrypts a java file with spatial and vector indexes"
   xf="$work/indexed-$conv.cryptand"
@@ -292,12 +292,13 @@ for conv in rust java; do
   K1=0909090909090909090909090909090909090909090909090909090909090909
   K2=0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b
   ok_idx() {  # ok_idx <stage>
-    local q v1 v2
+    local q v1 v2 v3
     q="$(run_impl java check-indexed "$xf" 2>&1 | tail -1)"
     v1="$(run_impl rust verify "$xf" 2>&1 | tail -1)"
     v2="$(run_impl java verify "$xf" 2>&1 | tail -1)"
-    if [[ "$q" == "indexed: ok" && "$v1" == *" 0 findings"* && "$v2" == *" 0 findings"* ]]; then ok "$1: $q; rust $v1; java $v2"
-    else bad "$1: $q; rust $v1; java $v2"; fi
+    v3="$(run_impl dart verify "$xf" 2>&1 | head -1)"
+    if [[ "$q" == "indexed: ok" && "$v1" == *" 0 findings"* && "$v2" == *" 0 findings"* && "$v3" == *" 0 findings"* ]]; then ok "$1: $q; rust $v1; java $v2; dart $v3"
+    else bad "$1: $q; rust $v1; java $v2; dart $v3"; fi
   }
   KEY=$K1
   run_impl $conv encrypt "$xf" >/dev/null || bad "$conv could not encrypt"

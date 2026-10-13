@@ -637,12 +637,18 @@ rewrites keys.
 Normative outcome, not mechanism: after a compaction, every `get` at every live
 snapshot returns exactly what it returned before.
 
-An entry may be dropped only when **all** hold:
+The conditions:
 
-1. a newer version of the same user key exists in the same compaction, **and**
-2. that newer version's `seq` is ≤ the oldest live snapshot's seq, **and**
+1. a newer version of the same user key exists in the same compaction;
+2. that newer version's `seq` is ≤ the oldest live snapshot's seq;
 3. the compaction includes every segment that could hold an older version of
    that key — i.e. it reaches the last level, or no lower level overlaps the key.
+
+An entry other than a `RANGE_DELETE` may be dropped when conditions 1 and 2
+hold, at any level: the newer version shadows it, and every older version below
+it, at every live snapshot. A `RANGE_DELETE` is keyed at its start but is not a
+version of that key; a newer version there drops it only when condition 3 also
+holds (and then by the tombstone rule below).
 
 An expired entry (§9) may be dropped when condition 3 holds and its deadline is
 older than the oldest live snapshot's wall-clock floor.
