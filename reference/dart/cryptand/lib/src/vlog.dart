@@ -100,6 +100,7 @@ final class VlogSegment {
     required this.pageSize,
     required this.capacity,
     this.createdSeq = 0,
+    this.encrypted = false,
     PageStore? store,
   }) : store = store ?? PageStore(pageSize: pageSize) {
     startPage = this.store.allocExtent(pageCount);
@@ -217,6 +218,10 @@ final class VlogSegment {
   Uint8List? _lastKey;
   bool _orderHolds = true;
 
+  /// Head byte 39 (F-076): fixed at creation; every mode switch seals the
+  /// open segments first, so a segment never mixes framings.
+  bool encrypted = false;
+
   int get pageCount => (dataOffset + capacity + pageSize - 1) ~/ pageSize;
   int get remaining => capacity - bytes;
 
@@ -232,7 +237,7 @@ final class VlogSegment {
       ..u8(tier)
       ..u8(heatClass)
       ..u8(0) // codec
-      ..u8(0) // encrypted
+      ..u8(encrypted ? 1 : 0)
       ..u64(0) // nonce_base
       ..bytes(Uint8List(16));
     final page = Uint8List(pageSize)
@@ -538,6 +543,7 @@ final class ValueLog {
       heatClass: heat,
       pageSize: pageSize,
       capacity: max(want, need),
+      encrypted: crypto != null && !writePlain,
       store: store,
     );
     segments[seg.id] = seg;

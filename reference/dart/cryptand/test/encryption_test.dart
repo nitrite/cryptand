@@ -4,15 +4,17 @@ library;
 
 import 'dart:typed_data';
 
-import 'package:cryptand/src/container.dart';
-import 'package:cryptand/src/errors.dart';
-import 'package:cryptand/src/security.dart';
+import 'dart:io';
+
+import 'package:cryptand/cryptand.dart';
 import 'package:test/test.dart';
 
 Uint8List seq(int n, [int from = 0]) =>
     Uint8List.fromList(List.generate(n, (i) => (from + i) & 0xFF));
 
 void main() {
+  _f076();
+
   final master = seq(32);
   final uuid = seq(16, 0xA0);
   final keys = KeyRing(Uint8List.fromList(master), uuid);
@@ -358,5 +360,33 @@ void main() {
       expect(k.macKey.every((b) => b == 0), isTrue);
       expect(k.masterKey.every((b) => b == 0), isTrue);
     });
+  });
+}
+
+/// F-076: the value-log head says whether its records are encrypted (byte 39
+/// of the head, 04 §6.2); Rust trusts it (F-073).
+void _f076() {
+  test('value-log head byte 39 says whether the segment is encrypted', () {
+    for (final enc in [false, true]) {
+      final dir = Directory.systemTemp.createTempSync('f076-');
+      final path = '${dir.path}/db.cryptand';
+      final key = Uint8List(32)..fillRange(0, 32, 9);
+      if (enc) {
+        DatabaseFile.create(path, credential: Uint8List.fromList(key), kdf: Keyslot.kdfRaw)
+            .engine
+            .close();
+      } else {
+        DatabaseFile.save(Database(engine: Engine(pageSize: Profile.desktop.pageSize)..setProfile(Profile.desktop)), path);
+      }
+      final db = DatabaseFile.open(path, key: enc ? key : null);
+      final e = db.engine;
+      e.put(TreeId.firstUserTree, CBytes(Uint8List(4)), Uint8List(8192));
+      e.commit();
+      final seg = e.vlog.segments.values.single;
+      final head = e.store.readClear(seg.startPage);
+      expect(head[PageHeader.size + 39], enc ? 1 : 0, reason: 'encrypted=$enc');
+      e.close();
+      dir.deleteSync(recursive: true);
+    }
   });
 }
