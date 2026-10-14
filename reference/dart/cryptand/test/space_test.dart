@@ -62,6 +62,19 @@ void main() {
     e.close();
   });
 
+  test('F-158: compaction keeps the page cache within its budget', () {
+    // Before the fix each compaction output was admitted whole: a 10^7 build
+    // held a 100 MB output extent in a 64 MB cache.
+    final e = Engine(memtableEntries: 500)..pageCacheBytes = 64 << 10;
+    Uint8List v(int i) => Uint8List(100)..fillRange(0, 100, i % 251);
+    for (var i = 0; i < 20000; i++) {
+      e.put(16, CNitriteId(i), v(i));
+    }
+    e.compact();
+    final resident = e.extents.values.fold(0, (n, s) => n + s.residentBytes);
+    expect(resident, lessThanOrEqualTo(64 << 10));
+  });
+
   test('F-152: a bulk load keeps L0 under its hard bound', () {
     // 10 §6: flushes that outgrow one compaction step must not run L0 past
     // l0_trigger x 4; the step is raised while a bound is in overshoot.

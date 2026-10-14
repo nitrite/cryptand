@@ -17,6 +17,16 @@ import '../bench/harness.dart';
 const int tree = 17;
 Uint8List doc(NameDict d, int i) => encodeValue(benchDoc(i), dict: d);
 
+/// Flips a byte of page [page] of [r] where it is stored, as a bad block
+/// would, and drops the cached copy so the next read sees it.
+void damage(Engine e, SegmentRef r, int page) {
+  final id = r.startPage + page;
+  final p = Uint8List.fromList(e.store.readClear(id));
+  p[100] ^= 0xFF;
+  e.store.writeClear(id, p);
+  e.extents.remove(r.segmentId);
+}
+
 void main() {
   late NameDict dict;
   setUp(() => dict = benchDict());
@@ -44,8 +54,7 @@ void main() {
 
       // Corrupt a page in the middle of one segment, the way a bad block would.
       final victim = refs[refs.length ~/ 2];
-      e.extents[victim.segmentId]!.extent[victim.pages ~/ 2 * 4096 + 100] ^=
-          0xFF;
+      damage(e, victim, victim.pages ~/ 2);
 
       // Step 1 and 2: verification finds it and names the affected range.
       final bad = e.verify();
@@ -78,7 +87,7 @@ void main() {
       // key was deleted".
       final e = seeded();
       final victim = e.refsAt(e.lastLevel)[1];
-      e.extents[victim.segmentId]!.extent[4096 + 100] ^= 0xFF;
+      damage(e, victim, 1);
       e.verify();
 
       var sawSpecificError = false;
@@ -103,7 +112,7 @@ void main() {
       final e = seeded();
       expect(e.affectedTrees, isEmpty);
       final victim = e.refsAt(e.lastLevel).first;
-      e.extents[victim.segmentId]!.extent[4096 + 100] ^= 0xFF;
+      damage(e, victim, 1);
       e.verify();
       expect(e.affectedTrees, contains(tree));
     });
@@ -270,7 +279,7 @@ void main() {
       e.compact();
       expect(e.metrics().unavailableRanges, 0);
       final victim = e.refsAt(e.lastLevel).first;
-      e.extents[victim.segmentId]!.extent[4096 + 100] ^= 0xFF;
+      damage(e, victim, 1);
       e.verify();
       expect(e.metrics().unavailableRanges, 1);
     });

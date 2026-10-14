@@ -22,6 +22,16 @@ import '../bench/harness.dart';
 const int tree = 17;
 Uint8List doc(NameDict d, int i) => encodeValue(benchDoc(i), dict: d);
 
+/// Flips a byte of page [page] of [r] where it is stored, as a bad block
+/// would, and drops the cached copy so the next read sees it.
+void damage(Engine e, SegmentRef r, int page) {
+  final id = r.startPage + page;
+  final p = Uint8List.fromList(e.store.readClear(id));
+  p[100] ^= 0xFF;
+  e.store.writeClear(id, p);
+  e.extents.remove(r.segmentId);
+}
+
 void main() {
   late NameDict dict;
   setUp(() => dict = benchDict());
@@ -107,7 +117,7 @@ void main() {
         hasRangeDeletes: victim.hasRangeDeletes,
         pages: victim.pages,
         trees: victim.trees,
-      ));
+      ).placedAt(victim.startPage, victim.nonce));
       e.clearLevelCache();
       final r = e.verifyStructure(deep: false);
       expect(r.findings.map((f) => f.invariant), contains('11.5'));
@@ -119,7 +129,7 @@ void main() {
       // is why section 2.4 is specified to the bit.
       final e = seeded();
       final ref = e.refsAt(e.lastLevel).first;
-      final seg = e.extents[ref.segmentId]!;
+      final seg = e.segment(ref);
       expect(seg.filter, isNotNull);
       // Every key present must pass its own filter.
       final r = e.verifyStructure();
@@ -130,7 +140,7 @@ void main() {
       // spec/01-container.md section 9: verification REPORTS.
       final e = seeded();
       final victim = e.refsAt(e.lastLevel).first;
-      e.extents[victim.segmentId]!.extent[4096 + 100] ^= 0xFF;
+      damage(e, victim, 1);
       final r = e.verifyStructure();
       expect(r.isSound, isFalse);
       expect(r.findings.first.invariant, '01§9.2');

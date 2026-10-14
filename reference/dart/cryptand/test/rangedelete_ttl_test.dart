@@ -125,7 +125,7 @@ void main() {
       e.removeRange(tree, const CNitriteId(10), const CNitriteId(20));
       e.flush(); // segment B: the range delete, and NO point key of 10..19
 
-      final withRd = e.extents.values
+      final withRd = e.liveSegments
           .where((s) => s.header.hasRangeDeletes)
           .toList();
       expect(withRd, hasLength(1), reason: 'exactly one segment carries one');
@@ -148,7 +148,7 @@ void main() {
       // Section 4 SHOULDs an in-memory summary "so rd_sources is normally
       // empty after an in-memory test rather than after a page read".
       final e = seeded();
-      for (final s in e.extents.values) {
+      for (final s in e.liveSegments) {
         expect(s.header.hasRangeDeletes, isFalse);
         expect(s.rangeDeletes, isEmpty);
       }
@@ -209,7 +209,7 @@ void main() {
       expect(e.scanTree(tree).length, 1);
       // The entries are gone from the segments, not merely hidden.
       var live = 0;
-      for (final s in e.extents.values) {
+      for (final s in e.liveSegments) {
         live += s.header.entryCount;
       }
       expect(live, 1, reason: 'expired entries were dropped, not just hidden');
@@ -225,7 +225,7 @@ void main() {
       e.nowMs = 3000;
       e.compact();
       var live = 0;
-      for (final x in e.extents.values) {
+      for (final x in e.liveSegments) {
         live += x.header.entryCount;
       }
       expect(live, 1, reason: 'the pinned entry must survive compaction');
@@ -237,7 +237,7 @@ void main() {
       e.put(tree, const CNitriteId(1), doc(dict, 1), expiryMs: 9000);
       e.put(tree, const CNitriteId(2), doc(dict, 2), expiryMs: 4000);
       e.flush();
-      final seg = e.extents.values.single;
+      final seg = e.liveSegments.single;
       expect(seg.header.minExpiry, 4000);
       expect(seg.header.flags & SegFlags.hasTtl, isNot(0));
     });

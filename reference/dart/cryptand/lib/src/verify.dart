@@ -136,7 +136,7 @@ extension EngineVerify on Engine {
       for (final ref in entry.value) {
         final Segment seg;
         try {
-          seg = segment(ref);
+          seg = segmentStream(ref); // F-158: every page, uncached
         } on Exception catch (e) {
           f.add(Finding('01§9.2',
               'manifest names segment ${ref.segmentId}, unreadable: $e',

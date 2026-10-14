@@ -107,7 +107,7 @@ final class RunCursor {
   void _open() {
     _c = null;
     while (_i < _refs.length) {
-      final c = _engine.segment(_refs[_i++]).cursor()..seekFirst();
+      final c = _engine.segmentStream(_refs[_i++]).cursor()..seekFirst();
       if (c.isValid) {
         _c = c;
         return;
@@ -488,6 +488,15 @@ final class Engine {
     return seg;
   }
 
+  /// F-158: [r] read front to back outside the cache, holding no page the
+  /// cursor has left: compaction inputs, as Rust's `SegmentStream`.
+  /// Never the cached copy: filling every page into it pinned the extent.
+  Segment segmentStream(SegmentRef r) {
+    final p = store.segmentPages(r.startPage, r.pages, r.nonce);
+    return Segment.lazy(p.head, p.page, r.pages, pageSize, retain: false)
+      ..cacheEnabled = false;
+  }
+
   /// `spec/12-profiles.md` §1's page cache budget, as Rust `Engine::admit`:
   /// evict least recently used until under budget, never [seg] itself.
   /// ponytail: whole segments, not pages (REPORT M5.1 item 2).
@@ -517,10 +526,13 @@ final class Engine {
   }
 
   /// Writes [seg]'s extent into the store and returns its placed entry.
-  SegmentRef place(Segment seg, {required int level, required int group}) {
+  /// F-158: a compaction output is not admitted ([admit] false), as Rust
+  /// `rotate_output`: a whole output extent evicted the cache and stayed.
+  SegmentRef place(Segment seg,
+      {required int level, required int group, bool admit = true}) {
     final start = store.allocExtent(seg.pageCount);
     store.writeExtent(start, seg.extent);
-    _admit(seg);
+    if (admit) _admit(seg);
     return SegmentRef.of(seg, level: level, group: group)
         .placedAt(start, store.writtenNonce);
   }
@@ -568,7 +580,7 @@ final class Engine {
       for (final r in refsAt(l)) {
         if (quarantined.containsKey(r.segmentId)) continue;
         try {
-          segment(r).verifyChecksums();
+          segmentStream(r).verifyChecksums(); // F-158
         } on CorruptionException {
           bad.add(quarantine(r.segmentId));
         }
@@ -1913,7 +1925,7 @@ final class Engine {
   void _rotate(CompactionJob job) {
     if (job.out.entryCount == 0) return;
     job.outputs.add(place(Segment(job.out.build(), pageSize),
-        level: job.target, group: job.group));
+        level: job.target, group: job.group, admit: false));
     job.out = _builder(level: job.target, group: job.group);
   }
 

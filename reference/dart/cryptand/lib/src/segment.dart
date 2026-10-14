@@ -355,6 +355,7 @@ final class SegmentBuilder {
   late final int _payloadSize;
 
   final List<Uint8List> _pages = []; // page 0 reserved for the header
+  static final Uint8List _released = Uint8List(0);
   _PendingPage? _leaf;
 
   /// Leaves are level 0; internal levels are 1 and above.
@@ -602,8 +603,11 @@ final class SegmentBuilder {
     final header = _buildHeader(rootPage, rootEntries, filterPage);
     final out = Uint8List(pageSize * (_pages.length + 1))
       ..setRange(0, pageSize, header);
+    // F-158: each page is released once copied, so the output is held once,
+    // not twice, at its peak.
     for (var i = 0; i < _pages.length; i++) {
       out.setRange(pageSize * (i + 1), pageSize * (i + 2), _pages[i]);
+      _pages[i] = _released;
     }
     return out;
   }
@@ -1200,6 +1204,7 @@ final class Segment {
       : _extent = extent,
         _pages = null,
         _loader = null,
+        _retain = true,
         pageCount = extent.length ~/ pageSize {
     checkPageSize(pageSize);
     if (extent.length < pageSize || extent.length % pageSize != 0) {
@@ -1213,9 +1218,15 @@ final class Segment {
   /// F-151: a segment of [pageCount] pages whose [head] is read and the rest
   /// of which [loader] fetches as they are used: a point read touches the
   /// head, the filter and one root-to-leaf path, not every page.
+  ///
+  /// F-158: [retain] false keeps no page once returned (a compaction input
+  /// read front to back, as Rust's `SegmentStream`); set [cacheEnabled] false
+  /// with it.
   Segment.lazy(Uint8List head, Uint8List Function(int) loader, this.pageCount,
-      this.pageSize)
-      : _extent = null,
+      this.pageSize,
+      {bool retain = true})
+      : _retain = retain,
+        _extent = null,
         _pages = List<Uint8List?>.filled(pageCount, null),
         _loader = loader {
     checkPageSize(pageSize);
@@ -1230,6 +1241,7 @@ final class Segment {
   Uint8List? _extent;
   final List<Uint8List?>? _pages;
   final Uint8List Function(int)? _loader;
+  final bool _retain;
   int _resident = 0;
   final int pageSize;
   late final SegmentHeader header;
@@ -1256,6 +1268,7 @@ final class Segment {
     if (i < 0 || i >= pageCount) {
       throw CorruptionException('page index $i outside the extent');
     }
+    if (!_retain && i != 0) return _loader!(i);
     var p = pages[i];
     if (p == null) {
       p = pages[i] = _loader!(i);
