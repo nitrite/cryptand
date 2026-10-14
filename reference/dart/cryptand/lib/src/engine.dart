@@ -1584,7 +1584,15 @@ final class Engine {
       final to = store.allocBelow(pages, start);
       if (to == null) continue;
       if (what is SegmentRef) {
-        store.writeExtent(to, store.readSegment(start, pages, what.nonce));
+        // F-157: page by page; a full compaction leaves the last level as one
+        // segment, and moving it whole held the whole store in memory.
+        final src = store.segmentPages(start, pages, what.nonce);
+        store.writeInExtent(to, src.head);
+        final head = store.writtenNonce;
+        for (var i = 1; i < pages; i++) {
+          store.writeInExtent(to + i, src.page(i));
+        }
+        store.writtenNonce = head;
         // F-128: the head's nonce, before the manifest edit writes pages.
         final moved = what.placedAt(to, store.writtenNonce);
         manifest

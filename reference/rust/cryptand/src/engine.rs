@@ -213,6 +213,7 @@ struct RunCursor {
     refs: Vec<SegmentRef>,
     next: usize,
     buf: std::collections::VecDeque<SegRecord>,
+    stream: Option<crate::segment::SegmentStream>,
 }
 
 impl RunCursor {
@@ -228,15 +229,25 @@ impl RunCursor {
                 None => runs.push(vec![r]),
             }
         }
-        runs.into_iter().map(|refs| RunCursor { refs, next: 0, buf: Default::default() }).collect()
+        runs.into_iter().map(|refs| RunCursor { refs, next: 0, buf: Default::default(), stream: None }).collect()
     }
 
     /// Whether the run has a record left, loading its next segment if needed.
     fn fill(&mut self, engine: &mut Engine) -> Result<bool> {
-        while self.buf.is_empty() && self.next < self.refs.len() {
-            let seg = engine.segment(&self.refs[self.next])?;
-            self.next += 1;
-            self.buf = seg.iter().collect::<Result<_>>()?;
+        // F-157: a batch at a time, from a segment the cache never holds.
+        while self.buf.is_empty() {
+            if self.stream.is_none() {
+                if self.next == self.refs.len() {
+                    break;
+                }
+                let seg = engine.segment_uncached(&self.refs[self.next])?;
+                self.next += 1;
+                self.stream = Some(crate::segment::SegmentStream::new(seg));
+            }
+            self.stream.as_mut().unwrap().next_batch(256, &mut self.buf)?;
+            if self.buf.is_empty() {
+                self.stream = None;
+            }
         }
         Ok(!self.buf.is_empty())
     }
@@ -1764,6 +1775,13 @@ impl Engine {
         }
     }
 
+    fn segment_uncached(&mut self, r: &SegmentRef) -> Result<Segment> {
+        match self.pager.segment_pages(r.start_page, r.pages, r.nonce)? {
+            Some((head, pages)) => Segment::lazy(head, pages, r.pages, self.pager.page_size),
+            None => Segment::open(self.pager.read_segment(r.start_page, r.pages, r.nonce)?, self.pager.page_size),
+        }
+    }
+
     pub fn segment(&mut self, r: &SegmentRef) -> Result<Arc<Segment>> {
         if let Some(s) = self.segments.get(&r.segment_id) {
             let s = s.clone();
@@ -1773,11 +1791,7 @@ impl Engine {
             return Ok(s);
         }
         self.counters.page_cache_misses += 1;
-        let s = match self.pager.segment_pages(r.start_page, r.pages, r.nonce)? {
-            Some((head, pages)) => Segment::lazy(head, pages, r.pages, self.pager.page_size)?,
-            None => Segment::open(self.pager.read_segment(r.start_page, r.pages, r.nonce)?, self.pager.page_size)?,
-        };
-        let s = Arc::new(s);
+        let s = Arc::new(self.segment_uncached(r)?);
         self.admit(r.segment_id, s.clone());
         Ok(s)
     }
@@ -3159,8 +3173,7 @@ impl Engine {
             };
             match what {
                 Extent::Segment(r) => {
-                    let bytes = self.pager.read_segment(start, pages, r.nonce)?;
-                    self.pager.write_extent(to, &bytes)?;
+                    self.pager.move_segment(start, to, pages, r.nonce)?;
                     let mut m = std::mem::replace(&mut self.manifest, Manifest::new((0, 0)));
                     m.tree.commit_id = self.sb.commit_id;
                     let moved = SegmentRef { start_page: to, nonce: self.pager.written_nonce, ..r.clone() };

@@ -864,6 +864,67 @@ impl Pager {
         self.write_at(start_page * self.page_size as u64, &out)
     }
 
+    /// F-157: [`Pager::read_segment`] then [`Pager::write_extent`], 256 pages
+    /// at a time. A full compaction leaves the last level as one segment, so
+    /// moving it whole held the whole store in memory (923 MB at 10^7).
+    /// Returns the head's new nonce (0 unencrypted).
+    pub fn move_segment(&mut self, from: u64, to: u64, pages: u32, nonce: u64) -> Result<u64> {
+        let mut head = 0u64;
+        let mut head_nonce = 0u64;
+        let mut done = 0u32;
+        while done < pages {
+            let n = (pages - done).min(256);
+            let at = from + done as u64;
+            let raw = self.read_at(self.page_offset(at)?, n as usize * self.page_size)?;
+            self.page_reads += n as u64;
+            if !self.seals() && self.crypto.is_none() {
+                self.write_at((to + done as u64) * self.page_size as u64, &raw)?;
+                self.page_writes += n as u64;
+                done += n;
+                continue;
+            }
+            let mut out = Vec::with_capacity(raw.len());
+            for i in 0..n as usize {
+                let page = raw[i * self.page_size..(i + 1) * self.page_size].to_vec();
+                if self.crypto.is_some() {
+                    if done == 0 && i == 0 {
+                        let h = PageHeader::parse(&page)?;
+                        if h.nonce != nonce {
+                            return Err(crate::error::Error::Tamper(format!(
+                                "segment at page {from} has nonce {}, the manifest recorded {nonce}: an older write replayed",
+                                h.nonce
+                            )));
+                        }
+                        head = h.commit_id;
+                    } else if let Ok(h) = PageHeader::parse(&page) {
+                        if h.encrypted() && h.commit_id != head {
+                            return Err(crate::error::Error::Tamper(format!(
+                                "page {} of the segment at {from} has commit {}, its head {head}: an older write replayed",
+                                at + i as u64,
+                                h.commit_id
+                            )));
+                        }
+                    }
+                }
+                let clear = self.open_page(at + i as u64, page)?;
+                let page_id = to + done as u64 + i as u64;
+                if self.seals() {
+                    out.extend_from_slice(&self.seal_page(page_id, &clear)?);
+                    if done == 0 && i == 0 {
+                        head_nonce = self.written_nonce;
+                    }
+                } else {
+                    out.extend_from_slice(&clear);
+                }
+            }
+            self.write_at((to + done as u64) * self.page_size as u64, &out)?;
+            self.page_writes += n as u64;
+            done += n;
+        }
+        self.written_nonce = head_nonce;
+        Ok(head_nonce)
+    }
+
     // ---------------------------------------------------------------------
     // `14-security.md` §5.4 — extents without page headers
     // ---------------------------------------------------------------------

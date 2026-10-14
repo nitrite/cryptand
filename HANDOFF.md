@@ -104,10 +104,10 @@
 
 ## Next action
 
-10^7 rung done 10-14 (remote, `time -l`): Rust build 72 s / 322 MB footprint, get p50 94 us p99 286,
-settle 923 MB (F-157 FAIL), space amp 0.86 (est.); Dart build 702 s / 381 MB (F-158 FAIL), get p50
-1.06 ms (F-159), read 242 MB, settle 343 MB, amp 1.42, verify sound. Fix F-157 first (S2, O(n) in
-Rust settle), then F-159, F-158; Java column of each. Then 10^8. Side question: Dart segments ~40% larger.
+F-157 fixed 10-14 (R+D): 10^7 Rust settle 923 -> 251 MB footprint, build 291, get p50 4 us. Remaining
+10^7: F-159 (Dart get p50 1 ms) then F-158 (Dart build 381 MB; Dart lazy segments retain every page
+read, as Rust's did: likely the same cause, check its compaction `_engine.segment()` path). Java column
+of each (Java 10^7 settle unmeasured). Then 10^8. Side question: Dart segments ~40% larger.
 
 ## Log
 
@@ -151,3 +151,4 @@ Rust settle), then F-159, F-158; Java column of each. Then 10^8. Side question: 
 - 2026-10-14 — F-154: settle measured (Rust 495 MB passes); Dart `shrink()` stub replaced by a relocate+truncate port, 1487 -> 688 MB; 734 Dart tests.
 - 2026-10-14 — F-155 profiled: Rust live heap 25 MB, footprint 304 MB (pass), RSS is shared/freed pages; metric question to the human.
 - 2026-10-14 — 6.3 bar = peak footprint (human); 10^7 rung R+D: F-157 (R settle 923 MB), F-158 (D build 381 MB), F-159 (D get 1 ms) opened.
+- 2026-10-14 — F-157 fixed (R: streamed compaction runs + sliced segment moves; D: page-by-page move): Rust 10^7 settle 923 -> 251 MB; gate quick green.

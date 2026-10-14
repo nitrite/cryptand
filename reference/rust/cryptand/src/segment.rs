@@ -2144,6 +2144,66 @@ pub struct SegmentEntries<'a> {
     leaf: Option<u64>,
 }
 
+/// F-157: [`Segment::iter`] in batches over a segment it owns, dropping each
+/// page once the cursor has left it. A compaction run collected a whole input
+/// segment, and a lazy segment keeps every page it read: one run of each
+/// level held at once came to 921 MB at 10^7.
+pub struct SegmentStream {
+    seg: Segment,
+    path: Path,
+    valid: bool,
+    started: bool,
+    leaves: std::collections::HashSet<u64>,
+    leaf: Option<u64>,
+}
+
+impl SegmentStream {
+    pub fn new(seg: Segment) -> SegmentStream {
+        SegmentStream { seg, path: Path::default(), valid: false, started: false, leaves: Default::default(), leaf: None }
+    }
+
+    /// Up to `n` more entries into `out`; fewer only at the end.
+    pub fn next_batch(&mut self, n: usize, out: &mut std::collections::VecDeque<SegRecord>) -> Result<()> {
+        let mut it = SegmentEntries {
+            cursor: SegmentCursor { seg: &self.seg, path: std::mem::take(&mut self.path), valid: self.valid },
+            started: self.started,
+            leaves: std::mem::take(&mut self.leaves),
+            leaf: self.leaf,
+        };
+        let mut res = Ok(());
+        for _ in 0..n {
+            match it.next() {
+                Some(Ok(r)) => out.push_back(r),
+                Some(Err(e)) => {
+                    res = Err(e);
+                    break;
+                }
+                None => break,
+            }
+        }
+        let SegmentEntries { cursor, started, leaves, leaf } = it;
+        (self.path, self.valid, self.started, self.leaves, self.leaf) = (cursor.path, cursor.valid, started, leaves, leaf);
+        // Only a lazy segment can read a page again.
+        if self.seg.loader.is_some() {
+            let mut keep = vec![0u64];
+            let mut p = Path::default();
+            while let Some(v) = self.path.pop() {
+                keep.push(v.0);
+                p.push(v);
+            }
+            while let Some(v) = p.pop() {
+                self.path.push(v);
+            }
+            for (i, slot) in self.seg.pages.iter_mut().enumerate() {
+                if !keep.contains(&(i as u64)) && slot.take().is_some() {
+                    *self.seg.resident.get_mut() -= self.seg.page_size as u64;
+                }
+            }
+        }
+        res
+    }
+}
+
 impl<'a> Iterator for SegmentEntries<'a> {
     type Item = Result<SegRecord>;
 
