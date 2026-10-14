@@ -100,13 +100,16 @@
 
 ## Open questions for the human
 
+- **[H] Remote disk for 10^8:** free ~80 GB on the remote Mac or attach an external disk (path?).
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
 
 ## Next action
 
 10^7 Dart passes 6.3 (AOT: build 343 MB, thin; read 270; get p50 30 us). Measure Dart rungs AOT only
 (`dart compile exe tool/scale.dart`; `dart run` adds ~230 MB of JIT). F-158 Rust done (build 291 -> 282).
-Next: Java 10^7 column (watch `SegmentBuilder.build` hold + admit, F-158 J) (settle unmeasured), then 10^8.
+Java 10^7 done (RESULTS §5; `RssScale PATH N build|read|settle`, runner
+`cryptand-m6/reference/bench/runs/java-rung.sh N`; measure Java at -Xmx128m, the JVM footprint tracks -Xmx).
+Next: 10^8 R+J, blocked on remote disk (29 GB free; 10^8 needs ~46 GB Rust, ~71 GB Java).
 Side question: Dart segments ~40% larger than Rust's.
 
 ## Log
@@ -155,3 +158,4 @@ Side question: Dart segments ~40% larger than Rust's.
 - 2026-10-14 — F-159 closed as a harness bug (Dart rung ran 4 MB cache): p50 1058 -> 29 us; F-158 now 603 MB build at Desktop pages.
 - 2026-10-14 — Engine() default 8 KB page (human); F-158 fixed (D: outputs not admitted, builder single-hold, uncached compaction/verify streams): 10^7 AOT build 343 MB, read 270.
 - 2026-10-14 — F-158 R: `SegmentBuilder::build` drains pages; Rust 10^7 build footprint 291 -> 282 MB; 40 Rust test binaries green.
+- 2026-10-14 — Java 10^7 column: build footprint 301 MB at -Xmx128m (PASS), get p50 86 us, settled amp 1.37; F-158 J bounded; 10^8 blocked on remote disk.
