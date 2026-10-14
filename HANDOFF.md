@@ -104,8 +104,10 @@
 
 ## Next action
 
-The 10^7 rung (Rust and Dart, build + read + settle), running on remote: `cryptand-m6/r7.log` (script /tmp/f155/r7.sh).
-Side question: why Dart's settled segments are ~40% larger.
+10^7 rung done 10-14 (remote, `time -l`): Rust build 72 s / 322 MB footprint, get p50 94 us p99 286,
+settle 923 MB (F-157 FAIL), space amp 0.86 (est.); Dart build 702 s / 381 MB (F-158 FAIL), get p50
+1.06 ms (F-159), read 242 MB, settle 343 MB, amp 1.42, verify sound. Fix F-157 first (S2, O(n) in
+Rust settle), then F-159, F-158; Java column of each. Then 10^8. Side question: Dart segments ~40% larger.
 
 ## Log
 
@@ -148,3 +150,4 @@ Side question: why Dart's settled segments are ~40% larger.
 - 2026-10-14 — F-153 (Rust memtable unbounded between commits) fixed; F-155 opened (Rust build RSS 467 > 352); F-156 S0 (Rust shrink + lazy cache) found by the hop, fixed.
 - 2026-10-14 — F-154: settle measured (Rust 495 MB passes); Dart `shrink()` stub replaced by a relocate+truncate port, 1487 -> 688 MB; 734 Dart tests.
 - 2026-10-14 — F-155 profiled: Rust live heap 25 MB, footprint 304 MB (pass), RSS is shared/freed pages; metric question to the human.
+- 2026-10-14 — 6.3 bar = peak footprint (human); 10^7 rung R+D: F-157 (R settle 923 MB), F-158 (D build 381 MB), F-159 (D get 1 ms) opened.
