@@ -113,6 +113,7 @@ final class Fixture {
     final db = key == null
         ? Database(
             engine: Engine(
+                pageSize: 4096, // the frozen vectors predate the 8 KB default
                 memtableEntries: flushEvery,
                 vlogMin: 1024,
                 vlogSegmentBytes: corpusVlogSegmentBytes))

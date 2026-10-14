@@ -26,7 +26,8 @@ String tmp(String tag) {
 /// index, a catalog and a name dictionary. A fixture of one segment fuzzes one
 /// decoder.
 Uint8List fixtureImage(String path) {
-  final db = Database(engine: Engine(memtableEntries: 60, vlogMin: 256));
+  final db = Database(
+      engine: Engine(pageSize: 4096, memtableEntries: 60, vlogMin: 256));
   final c = db.createCollection('orders');
   final idx = c.createIndex(['country']);
   const countries = ['de', 'fr', 'uk', 'in', 'us'];
@@ -95,7 +96,8 @@ void main() {
     // Two superblock slots plus a header and a payload head per headed page.
     expect(targets.length, greaterThan(20),
         reason: 'a fixture with no headed pages fuzzes nothing');
-    expect(targets.map((x) => x.what).where((w) => w.contains('payload')).length,
+    expect(
+        targets.map((x) => x.what).where((w) => w.contains('payload')).length,
         greaterThan(8));
   });
 

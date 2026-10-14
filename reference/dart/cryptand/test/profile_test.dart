@@ -50,7 +50,8 @@ void main() {
       // profile exists to avoid.
       for (final p in Profile.values) {
         expect(p.vlogMin, lessThanOrEqualTo(p.pageSize ~/ 4),
-            reason: '${p.name}: vlog_min ${p.vlogMin} vs page_size ${p.pageSize}');
+            reason:
+                '${p.name}: vlog_min ${p.vlogMin} vs page_size ${p.pageSize}');
       }
     });
 
@@ -63,9 +64,10 @@ void main() {
     });
 
     test('the Argon2id costs match spec/14-security.md section 3.2', () {
-      expect(Profile.mobile.argon2, (tCost: 3, mCostKib: 65536, parallelism: 1));
-      expect(Profile.desktop.argon2,
-          (tCost: 4, mCostKib: 262144, parallelism: 4));
+      expect(
+          Profile.mobile.argon2, (tCost: 3, mCostKib: 65536, parallelism: 1));
+      expect(
+          Profile.desktop.argon2, (tCost: 4, mCostKib: 262144, parallelism: 4));
     });
   });
 
@@ -83,7 +85,7 @@ void main() {
     /// that cares should warm the path.
     void warmUp() {
       final dict2 = benchDict();
-      final w = Engine(memtableEntries: 200, vlogMin: 1024);
+      final w = Engine(pageSize: 4096, memtableEntries: 200, vlogMin: 1024);
       for (var i = 0; i < 3000; i++) {
         w.put(tree, CNitriteId(i), doc(dict2, i));
       }
@@ -100,10 +102,11 @@ void main() {
       // every later one measures 0.4-1.1 ms. With the path compiled, every
       // sample must still be inside the budget.
       warmUp();
-      final e = Engine(memtableEntries: 100000, vlogMin: 1024)
+      final e = Engine(pageSize: 4096, memtableEntries: 100000, vlogMin: 1024)
         ..setProfile(Profile.mobile);
       for (var i = 0; i < 4000; i++) {
-        e.timedForeground('put', () => e.put(tree, CNitriteId(i), doc(dict, i)));
+        e.timedForeground(
+            'put', () => e.put(tree, CNitriteId(i), doc(dict, i)));
       }
       // The mechanism, deterministically: no put flushed.
       expect(e.refsAt(0), isEmpty);
@@ -146,13 +149,14 @@ void main() {
       // printed, so a real regression is still visible in the log rather than
       // silently tolerated.
       warmUp();
-      final e = Engine(memtableEntries: 200, vlogMin: 1024)
+      final e = Engine(pageSize: 4096, memtableEntries: 200, vlogMin: 1024)
         ..setProfile(Profile.mobile)
         ..compactionStepBytes = Profile.mobile.compactionStepBytes;
       expect(e.profile.maxForegroundStallMs, 8);
 
       for (var i = 0; i < 4000; i++) {
-        e.timedForeground('put', () => e.put(tree, CNitriteId(i), doc(dict, i)));
+        e.timedForeground(
+            'put', () => e.put(tree, CNitriteId(i), doc(dict, i)));
       }
 
       // The mechanism, deterministically.
@@ -197,16 +201,18 @@ void main() {
       warmUp();
       const bound = 256 << 10;
 
-      final bounded = Engine(memtableEntries: 200, vlogMin: 1024)
-        ..setProfile(Profile.mobile)
-        ..compactionStepBytes = bound;
+      final bounded =
+          Engine(pageSize: 4096, memtableEntries: 200, vlogMin: 1024)
+            ..setProfile(Profile.mobile)
+            ..compactionStepBytes = bound;
       for (var i = 0; i < 4000; i++) {
         bounded.put(tree, CNitriteId(i), doc(dict, i));
       }
 
-      final unbounded = Engine(memtableEntries: 200, vlogMin: 1024)
-        ..setProfile(Profile.mobile)
-        ..compactionStepBytes = 1 << 30; // effectively unbounded
+      final unbounded =
+          Engine(pageSize: 4096, memtableEntries: 200, vlogMin: 1024)
+            ..setProfile(Profile.mobile)
+            ..compactionStepBytes = 1 << 30; // effectively unbounded
       for (var i = 0; i < 4000; i++) {
         unbounded.put(tree, CNitriteId(i), doc(dict, i));
       }
@@ -231,7 +237,7 @@ void main() {
     test('a part-done compaction publishes nothing', () {
       // Section 5.2: "the partially built output is just a prefix -- abandoning
       // it costs the work done and nothing else, and no reader can see it."
-      final e = Engine(memtableEntries: 100, vlogMin: 1024)
+      final e = Engine(pageSize: 4096, memtableEntries: 100, vlogMin: 1024)
         ..compactionStepBytes = 4096; // tiny, so jobs are always part-done
       for (var i = 0; i < 2000; i++) {
         e.put(tree, CNitriteId(i), doc(dict, i));
@@ -258,7 +264,8 @@ void main() {
       // request as a bulk operation". compact() is exactly such a request --
       // and section 5.2's stepwise decomposition, which this implementation
       // does not have, is what would bring it inside the budget.
-      final e = Engine(memtableEntries: 200)..setProfile(Profile.mobile);
+      final e = Engine(pageSize: 4096, memtableEntries: 200)
+        ..setProfile(Profile.mobile);
       for (var i = 0; i < 2000; i++) {
         e.put(tree, CNitriteId(i), doc(dict, i));
       }
@@ -270,7 +277,7 @@ void main() {
 
   group('host hints, section 5', () {
     test('mobile defers non-urgent maintenance until idle or charging', () {
-      final e = Engine()..setProfile(Profile.mobile);
+      final e = Engine(pageSize: 4096)..setProfile(Profile.mobile);
       expect(e.shouldRunMaintenance, isFalse);
       e.hints = const HostHints(idle: true);
       expect(e.shouldRunMaintenance, isTrue);
@@ -289,7 +296,7 @@ void main() {
     test('thermal pressure trickles but never stops', () {
       // Section 5: "reduce compaction threads to 1 and pacing to a trickle;
       // never stop entirely."
-      final e = Engine()..setProfile(Profile.mobile);
+      final e = Engine(pageSize: 4096)..setProfile(Profile.mobile);
       e.hints = const HostHints(thermalPressure: true);
       expect(e.maintenancePacing, greaterThan(0));
       expect(e.maintenancePacing, lessThan(1.0));
@@ -298,7 +305,8 @@ void main() {
     test('backpressure overrides the hint — no deadlock waiting for one', () {
       // Section 5: "the engine must never deadlock waiting for a hint that
       // never arrives."
-      final e = Engine(memtableEntries: 4)..setProfile(Profile.mobile);
+      final e = Engine(pageSize: 4096, memtableEntries: 4)
+        ..setProfile(Profile.mobile);
       expect(e.shouldRunMaintenance, isFalse, reason: 'idle, and not urgent');
       for (var i = 0; i < 200; i++) {
         e.put(tree, CNitriteId(i), doc(dict, i));
@@ -325,7 +333,7 @@ void main() {
       //
       // The point of the test is section 2's claim: a profile changes how a
       // WRITER behaves and nothing about how a file is READ.
-      final e = Engine(memtableEntries: 100, vlogMin: 1024)
+      final e = Engine(pageSize: 4096, memtableEntries: 100, vlogMin: 1024)
         ..setProfile(Profile.mobile);
       final expected = <int, Uint8List>{};
       for (var i = 0; i < 800; i++) {
@@ -361,7 +369,8 @@ void main() {
       // creation. Changing it requires a full copy through
       // spec/13-operations.md section 2."
       final e = Engine(pageSize: 4096)..setProfile(Profile.mobile);
-      expect(() => e.setProfile(Profile.desktop), // 8 KiB pages
+      expect(
+          () => e.setProfile(Profile.desktop), // 8 KiB pages
           throwsA(isA<InvalidProfileChange>()));
       try {
         e.setProfile(Profile.server);
@@ -370,6 +379,5 @@ void main() {
         expect(ex.message, contains('full copy'));
       }
     });
-
   });
 }

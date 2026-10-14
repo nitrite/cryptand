@@ -27,8 +27,7 @@ void main() {
     Engine seeded() {
       // Small segments so the last level holds several of them: containment
       // is only observable when there is something left to serve.
-      final e = Engine(
-          memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
+      final e = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
       for (var i = 0; i < 2000; i++) {
         e.put(tree, CNitriteId(i), doc(dict, i));
       }
@@ -45,7 +44,8 @@ void main() {
 
       // Corrupt a page in the middle of one segment, the way a bad block would.
       final victim = refs[refs.length ~/ 2];
-      e.extents[victim.segmentId]!.extent[victim.pages ~/ 2 * 4096 + 100] ^= 0xFF;
+      e.extents[victim.segmentId]!.extent[victim.pages ~/ 2 * 4096 + 100] ^=
+          0xFF;
 
       // Step 1 and 2: verification finds it and names the affected range.
       final bad = e.verify();
@@ -218,7 +218,8 @@ void main() {
       e.compact();
       final r = e.scanDocuments();
       final m = e.metrics();
-      expect(m.valueReadsPerScannedRow, closeTo(r.valueReadsPerScannedRow, 1e-9));
+      expect(
+          m.valueReadsPerScannedRow, closeTo(r.valueReadsPerScannedRow, 1e-9));
       expect(m.valueReadsPerScannedRow, greaterThan(0));
     });
 
@@ -233,7 +234,8 @@ void main() {
     });
 
     test('stall_events counts real budget violations', () {
-      final e = Engine(memtableEntries: 100)..setProfile(Profile.mobile);
+      final e = Engine(pageSize: 4096, memtableEntries: 100)
+        ..setProfile(Profile.mobile);
       expect(e.metrics().stallEvents, 0);
     });
 

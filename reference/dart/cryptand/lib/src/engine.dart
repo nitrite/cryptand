@@ -237,7 +237,7 @@ final class LevelPolicy {
 /// A store over the trees of one file.
 final class Engine {
   Engine({
-    this.pageSize = 4096,
+    this.pageSize = 8192, // Profile.desktop.pageSize, the default profile
     int? vlogMin,
     this.memtableEntries = 20000,
     this.policy = const LocalityPolicy(),

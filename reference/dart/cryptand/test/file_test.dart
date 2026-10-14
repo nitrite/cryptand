@@ -18,8 +18,9 @@ String tmp(String tag) {
   return '${d.path}/db.cryptand';
 }
 
-Database fresh({int memtableEntries = 200}) =>
-    Database(engine: Engine(memtableEntries: memtableEntries, vlogMin: 256));
+Database fresh({int memtableEntries = 200}) => Database(
+    engine:
+        Engine(pageSize: 4096, memtableEntries: memtableEntries, vlogMin: 256));
 
 void main() {
   encryptionTests();
@@ -638,7 +639,8 @@ void encryptionTests() {
     expect(encrypted, greaterThan(4), reason: 'the probe found nothing');
   });
 
-  test('F-124: a value-log segment from a crashed session is sealed, not '
+  test(
+      'F-124: a value-log segment from a crashed session is sealed, not '
       're-appended', () {
     // 14 §4.3: appending to a segment not opened this session reuses nonces.
     final path = tmp('reappend');
