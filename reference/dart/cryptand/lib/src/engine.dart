@@ -1522,6 +1522,148 @@ final class Engine {
   /// bounded form instead.
   void drainCompaction() => maybeCompact();
 
+  /// `01-container.md` §6's `shrink()`: relocate live extents downward and
+  /// truncate, as Rust `relocate_and_truncate`. An ordinary sequence of
+  /// commits. Returns the pages cut off the file.
+  ///
+  /// ponytail: no hop over a hole below the highest extent (Rust's `hop`);
+  /// add it if a settled file still ends above its live data.
+  int relocateAndTruncate() {
+    final pending = _job;
+    if (pending != null) {
+      while (!stepCompaction(pending)) {}
+      finishCompaction(pending);
+      _job = null;
+    }
+    // An open value-log segment takes positioned appends where it stands.
+    vlog.sealOpen();
+    final before = store.pageCount;
+    // What was freed since the last commit is reusable from the next.
+    commit();
+    store.lowFirst = true;
+    try {
+      _relocateTrees();
+      for (var pass = 0; pass < 2; pass++) {
+        store.coalesceReclaimable();
+        _relocateDown();
+        commit();
+      }
+      _relocateTrees();
+    } finally {
+      store.lowFirst = false;
+    }
+    _cutTail();
+    return before - store.pageCount;
+  }
+
+  List<CowTree> get _relocatableTrees => [
+        manifest.tree,
+        checkpoints.tree,
+        changeFeed.tree,
+        ...outerTrees.values,
+      ];
+
+  void _relocateTrees() {
+    for (final t in _relocatableTrees) {
+      t.relocate(low: true);
+    }
+    commit();
+  }
+
+  /// Highest extent first, each into the lowest free extent below it that
+  /// fits.
+  void _relocateDown() {
+    final all = <(int, int, Object)>[
+      for (var l = 0; l <= lastLevel; l++)
+        for (final r in refsAt(l))
+          if (!quarantined.containsKey(r.segmentId)) (r.startPage, r.pages, r),
+      for (final v in vlog.segments.values)
+        if (v.startPage != 0) (v.startPage, v.pageCount, v),
+    ]..sort((a, b) => b.$1.compareTo(a.$1));
+    for (final (start, pages, what) in all) {
+      final to = store.allocBelow(pages, start);
+      if (to == null) continue;
+      if (what is SegmentRef) {
+        store.writeExtent(to, store.readSegment(start, pages, what.nonce));
+        // F-128: the head's nonce, before the manifest edit writes pages.
+        final moved = what.placedAt(to, store.writtenNonce);
+        manifest
+          ..remove(what)
+          ..add(moved);
+        // F-156: a cached segment reads its pages lazily (F-151) from where
+        // it stood, which is freed below and reused.
+        extents.remove(what.segmentId);
+        clearLevelCache();
+      } else if (what is VlogSegment) {
+        // Head in the clear and records sealed by segment id and offset
+        // (14 §5.3): the bytes move as they are, in 256-page slices.
+        for (var done = 0; done < pages; done += 256) {
+          final n = pages - done < 256 ? pages - done : 256;
+          store.writeExtentClear(
+              to + done, store.readExtentClear(start + done, n));
+        }
+        what.startPage = to;
+      }
+      store.freeExtent(start, pages);
+    }
+  }
+
+  /// Ends the file at its highest live page. The commit rewrites tree 1 at
+  /// that page while the live superblock still names the old tree 1, so the
+  /// cut is skipped when the two could overlap (Rust `cut_tail`).
+  void _cutTail() {
+    var high = 2;
+    void top(int end) => high = end > high ? end : high;
+    for (var l = 0; l <= lastLevel; l++) {
+      for (final r in refsAt(l)) {
+        top(r.startPage + r.pages);
+      }
+    }
+    for (final v in vlog.segments.values) {
+      if (v.startPage != 0) top(v.startPage + v.pageCount);
+    }
+    for (final t in _relocatableTrees) {
+      for (final p in t.reachablePages()) {
+        top(p + 1);
+      }
+    }
+    // A retained snapshot or checkpoint can still read what it freed. An
+    // extent freed at [commitId] is named only by the superblock before it,
+    // in the slot the cut's own commit overwrites.
+    for (final e in store.freeExtents) {
+      if (e.commitId > minRetainedCommit + 1) {
+        top(e.startPage + e.pages);
+      }
+    }
+    final old = freelist.reachablePages().toList();
+    // Never below a page that is neither free nor tree 1's own (F-054).
+    final spare = {
+      ...old,
+      for (final e in store.freeExtents)
+        for (var p = e.startPage; p < e.startPage + e.pages; p++) p,
+    };
+    var end = store.pageCount;
+    while (end > high && spare.contains(end - 1)) {
+      end--;
+    }
+    high = end;
+    final room = old.length + 8;
+    if (high + room >= store.pageCount ||
+        old.any((p) => p >= high && p < high + room)) {
+      return;
+    }
+    store.cutAt(high);
+    // Released here rather than by the commit, which would read it back from
+    // past the new end.
+    for (final p in old) {
+      if (p < high) store.free(p);
+    }
+    freelist.dropRoot();
+    commit();
+    // Only now: until that superblock, the old one named pages past it.
+    store.truncateFile();
+  }
+
   /// Drops a part-done compaction, §5.2.
   ///
   /// "The partially built output is just a prefix — abandoning it costs the

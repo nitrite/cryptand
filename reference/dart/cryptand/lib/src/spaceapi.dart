@@ -77,12 +77,14 @@ extension EngineSpaceApi on Engine {
 
   /// `shrink()`, §5 — relocate live extents downward and truncate.
   ///
-  /// Reports what *would* be reclaimed. This implementation holds extents in
-  /// memory with no file under them (`REPORT.md` §5), so there is nothing to
-  /// truncate; the number is the orphaned page count the free tree would own.
+  /// On a file, the bytes cut off its end (F-154). In memory there is no
+  /// file to truncate; the number is the orphaned page count the free tree
+  /// would own.
   MaintenanceStep shrink() => MaintenanceStep(
         done: true,
-        bytesProcessed: store.freedPages * store.pageSize,
+        bytesProcessed: store.file == null
+            ? store.freedPages * store.pageSize
+            : relocateAndTruncate() * store.pageSize,
       );
 
   /// `add_key()`, §5 and `14-security.md` §3.3 — one superblock write, no data

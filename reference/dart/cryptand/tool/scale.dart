@@ -4,6 +4,7 @@
 /// ```
 /// dart compile exe tool/scale.dart -o scale
 /// ./scale build PATH N   # load, commit per 100k
+/// ./scale settle PATH N  # compact + commit + shrink, file size (F-154)
 /// ./scale read PATH N    # fresh process: cold open, gets, scan, verify
 /// ```
 ///
@@ -46,6 +47,22 @@ void main(List<String> args) {
       // 516 B logical record per benchDoc (harness.dart).
       ..['space_amp'] = double.parse((bytes / (n * 516)).toStringAsFixed(2))
       ..['writer_rss_mb'] = peak;
+    stdout.writeln(jsonEncode(out));
+    return;
+  }
+
+  if (args[0] == 'settle') {
+    final db = DatabaseFile.open(path);
+    db.engine
+      ..compact()
+      ..commit()
+      ..shrink()
+      ..close();
+    final bytes = File(path).lengthSync();
+    out
+      ..['settle_ms'] = sw.elapsedMilliseconds
+      ..['file_bytes'] = bytes
+      ..['space_amp'] = double.parse((bytes / (n * 516)).toStringAsFixed(2));
     stdout.writeln(jsonEncode(out));
     return;
   }

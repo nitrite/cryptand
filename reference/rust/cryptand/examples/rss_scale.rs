@@ -4,6 +4,8 @@
 //!     cargo run --release --example rss_scale PATH N
 //!     cargo run --release --example rss_scale PATH N read   # 10k uniform gets
 //!
+//!     cargo run --release --example rss_scale PATH N settle # compact+commit+shrink (F-154)
+//!
 //! Run under `/usr/bin/time -l` for max RSS.
 
 use cryptand::container::{Durability, Profile};
@@ -51,6 +53,17 @@ fn main() -> cryptand::Result<()> {
         }
         us.sort_unstable();
         println!("open_ms={open_ms} get_uniform_us p50={} p99={} p999={}", us[5000], us[9900], us[9990]);
+        return Ok(());
+    }
+    if a.get(3).map(String::as_str) == Some("settle") {
+        use cryptand::spaceapi::SpaceApi;
+        let mut db = Database { engine: Engine::open(path, None)? };
+        db.engine.compact()?;
+        db.commit(Durability::Sync)?;
+        db.engine.shrink()?;
+        db.close()?;
+        let b = std::fs::metadata(path)?.len();
+        println!("settled bytes={b} space_amp={:.2}", b as f64 / (n as f64 * 516.0));
         return Ok(());
     }
     let _ = std::fs::remove_file(path);

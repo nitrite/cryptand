@@ -72,9 +72,10 @@
 - F-156 (S0, Rust, regression from F-151) fixed 10-14: `relocate_down` left a moved
   segment cached; its lazy loader read the old place. Any new code that moves an
   extent keeping its segment id MUST evict it. Hop flake = layout varies with Java timing.
-- Open: F-154 (R+D) space: 10^6 files Rust 652 MB, Dart 1487 MB for 434 MB live (bar 1.6
-  once settled); compaction inside a commit window cannot reuse what it frees (01 §6).
-  F-155 (Rust) 10^6 build RSS 467 MB > 352 (desktop 64 + 32 + 256); 470 before F-152.
+- F-154 fixed 10-14 (D): Dart `shrink()` was a stub; now ports Rust relocate+truncate. Settled
+  10^6 (`scale settle` / `rss_scale PATH N settle`): Rust 495 MB (1.14x live), Dart 688 MB (1.58x,
+  bar 1.6: thin margin; Dart segments run ~40% larger than Rust's for the same data, unexplained).
+  Open: F-155 (Rust) 10^6 build RSS 467 MB > 352 (desktop 64 + 32 + 256); settle RSS 470.
 - Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
   (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
   `CRYPTAND_CORPUS_DIRS` (remote: `cryptand-gate/.../fuzz/{corpus,artifacts}` + `cryptand-kill-plain/reference/java/.cifuzz-corpus/...JazzerTest`).
@@ -102,11 +103,8 @@
 
 ## Next action
 
-F-154: measure space amp after a settle (final `compact()` + commit + reopen, both
-languages, 10^6 on `cryptand-m6`; Dart `tool/lv.dart` levels via /tmp/lv.dart on
-remote). If it stays > 1.6, the fix is likely commit-window reuse (a paced compaction
-publishing its own commit, as Java does). Then F-155 (profile the Rust build), then
-the 10^7 and 10^8 rungs.
+F-155: profile the Rust 10^6 build RSS (467 MB vs 352). Then the 10^7 and 10^8 rungs (both
+languages, with a settle phase). Side question: why Dart's settled segments are ~40% larger.
 
 ## Log
 
@@ -147,3 +145,4 @@ the 10^7 and 10^8 rungs.
 - 2026-10-13 — F-151 fixed R+D (page-granular segment reads); 10^6 rung: Rust p50 7.6 ms -> 5 us, Dart 36 ms -> 29 us, Dart read RSS 153 MB (budget 128) open; gate quick green.
 - 2026-10-14 — Dart read RSS was the wrong bar (M5.5 +64 vs 6.3 +256): 206 MB PASS; F-152 (R+D compaction pacing, L0 46 -> 2) fixed; F-153, F-154 opened; gate quick green.
 - 2026-10-14 — F-153 (Rust memtable unbounded between commits) fixed; F-155 opened (Rust build RSS 467 > 352); F-156 S0 (Rust shrink + lazy cache) found by the hop, fixed.
+- 2026-10-14 — F-154: settle measured (Rust 495 MB passes); Dart `shrink()` stub replaced by a relocate+truncate port, 1487 -> 688 MB; 734 Dart tests.

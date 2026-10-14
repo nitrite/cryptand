@@ -29,7 +29,8 @@ void main() {
     final len = File(path).lengthSync();
     final e = DatabaseFile.open(path).engine;
     for (var i = 0; i < 256; i++) {
-      expect(e.get(16, CNitriteId(i)), Uint8List(4096)..fillRange(0, 4096, 149));
+      expect(
+          e.get(16, CNitriteId(i)), Uint8List(4096)..fillRange(0, 4096, 149));
     }
     e.close();
     expect(len, lessThanOrEqualTo(at75 + at75 ~/ 20),
@@ -55,7 +56,8 @@ void main() {
       final p0 = e.store.pageReads;
       expect(e.get(16, CNitriteId(i)), v(i));
       final n = e.store.pageReads - p0;
-      expect(n, lessThanOrEqualTo(32), reason: 'a cold get of $i read $n pages');
+      expect(n, lessThanOrEqualTo(32),
+          reason: 'a cold get of $i read $n pages');
     }
     e.close();
   });
@@ -82,4 +84,56 @@ void main() {
     e.close();
     expect(worst, lessThanOrEqualTo(hard));
   });
+
+  for (final encrypted in [false, true]) {
+    test(
+        'F-154: shrink relocates live extents down and truncates the file'
+        '${encrypted ? ' (encrypted)' : ''}', () {
+      // Before the fix Dart's shrink() truncated nothing: a settled 10^6 file
+      // stayed 1487 MB with 800 MB of it free, its tail included.
+      final path =
+          '${Directory.systemTemp.createTempSync('cryptand-f154-').path}/db.cryptand';
+      // Encrypted: a moved segment's manifest entry records its new head nonce.
+      final key = List.filled(32, 7);
+      Engine reopen() => DatabaseFile.open(path,
+              key: encrypted ? Uint8List.fromList(key) : null)
+          .engine;
+      if (encrypted) {
+        DatabaseFile.create(path,
+                credential: Uint8List.fromList(key), kdf: Keyslot.kdfRaw)
+            .engine
+            .close();
+      } else {
+        DatabaseFile.save(Database(engine: Engine()), path);
+      }
+      var e = reopen();
+      // Small values in segments, 4 KiB ones in the value log.
+      Uint8List v(int i, int round) =>
+          Uint8List(i.isEven ? 100 : 4096)..fillRange(0, 8, (i + round) % 251);
+      for (var round = 0; round < 4; round++) {
+        for (var i = 0; i < 4000; i++) {
+          e.put(16, CNitriteId(i), v(i, round));
+        }
+        e.commit();
+      }
+      e
+        ..compact()
+        ..commit();
+      final before = File(path).lengthSync();
+      final cut = e.shrink().bytesProcessed;
+      final after = File(path).lengthSync();
+      e.close();
+      expect(cut, greaterThan(0));
+      e = reopen();
+      for (var i = 0; i < 4000; i++) {
+        expect(e.get(16, CNitriteId(i)), v(i, 3));
+      }
+      expect(e.verifyStructure().isSound, isTrue);
+      e.close();
+      // Encrypted (8 KiB pages here) keeps holes freed too late to reuse in
+      // this shrink: 69 -> 51 MB, plaintext 48 -> 21 MB.
+      expect(after, lessThan(encrypted ? before * 3 ~/ 4 : before ~/ 2),
+          reason: '$before -> $after');
+    });
+  }
 }

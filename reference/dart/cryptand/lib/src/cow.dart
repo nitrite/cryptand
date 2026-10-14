@@ -220,6 +220,13 @@ final class PageStore {
   /// `commit_id <= min_retained_commit`; failing that, extend the file at
   /// `page_count`."
   int allocExtent(int pages) {
+    if (lowFirst) {
+      final low = allocBelow(pages, 1 << 62);
+      if (low != null) return low;
+      final start = _pageCount;
+      _grow(pages);
+      return start;
+    }
     (int, int)? bestKey;
     var bestPages = 1 << 62;
     for (final e in _free.entries) {
@@ -250,6 +257,48 @@ final class PageStore {
     _grow(pages);
     return start;
   }
+
+  /// `shrink()` (01 §6): allocate the lowest reclaimable extent that fits,
+  /// so relocated extents pack toward the start of the file.
+  bool lowFirst = false;
+
+  /// The lowest reclaimable free extent that fits [pages] and starts below
+  /// [limit], as Rust `alloc_below`; null when none does.
+  int? allocBelow(int pages, int limit) {
+    (int, int)? best;
+    for (final e in _free.entries) {
+      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId) continue;
+      if (e.value >= pages &&
+          e.key.$2 < limit &&
+          (best == null || e.key.$2 < best.$2)) {
+        best = e.key;
+      }
+    }
+    if (best == null) return null;
+    final n = _free.remove(best)!;
+    if (n > pages) _free[(best.$1, best.$2 + pages)] = n - pages;
+    for (var i = 0; i < pages; i++) {
+      _zero(best.$2 + i);
+    }
+    return best.$2;
+  }
+
+  /// Ends the page space at [top]: free extents at or past it are dropped,
+  /// one straddling it is trimmed. The file is truncated by [truncateFile],
+  /// once a superblock naming the new `page_count` is durable.
+  void cutAt(int top) {
+    for (final k in _free.keys.toList()) {
+      final n = _free[k]!;
+      if (k.$2 >= top) {
+        _free.remove(k);
+      } else if (k.$2 + n > top) {
+        _free[k] = top - k.$2;
+      }
+    }
+    _pageCount = top;
+  }
+
+  void truncateFile() => file?.truncateSync(_pageCount * pageSize);
 
   /// One page at the end of the file, never out of the free list. For the
   /// tree that records the free list: see [CowTree.rebuildFresh].
@@ -1229,17 +1278,23 @@ final class CowTree {
   /// F-072, 14 §8.3: every page rewritten in the store's current write mode,
   /// the old ones freed. Rebuilt from the rows, never re-sealed in place: a
   /// full plaintext page has no room for the tag.
-  void relocate() {
+  /// [low]: `shrink()` places the copy in the lowest free pages instead of
+  /// at the end of the file.
+  void relocate({bool low = false}) {
     if (root == 0) return;
     final old = reachablePages().toList();
     final rows = scan().toList();
-    rebuildFresh(rows);
+    rebuildFresh(rows, low: low);
     for (final p in old) {
       store.free(p);
     }
   }
 
-  void rebuildFresh(List<(Uint8List, Uint8List)> entries) {
+  /// Drops the root without freeing its pages, for a `shrink()` that cuts
+  /// them off the end of the file.
+  void dropRoot() => _setRoot((0, 0));
+
+  void rebuildFresh(List<(Uint8List, Uint8List)> entries, {bool low = false}) {
     if (entries.isEmpty) {
       _setRoot((0, 0));
       return;
@@ -1250,7 +1305,8 @@ final class CowTree {
       final keys = <Uint8List>[];
       final payloads = <Uint8List>[];
       for (final n in level) {
-        final (id, nonce) = _writeAt(store.allocFresh(), n);
+        final (id, nonce) =
+            _writeAt(low ? store.alloc() : store.allocFresh(), n);
         keys.add(n.keys.first);
         payloads.add(_Node.childPayload(id, n.subtreeEntries, nonce));
       }
