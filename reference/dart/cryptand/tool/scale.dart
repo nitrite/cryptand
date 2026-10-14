@@ -28,7 +28,10 @@ void main(List<String> args) {
   final out = <String, Object>{'impl': 'dart', 'phase': args[0], 'n': n};
   final sw = Stopwatch()..start();
   if (args[0] == 'build') {
-    DatabaseFile.save(Database(engine: Engine())..createCollection('c'), path);
+    DatabaseFile.save(
+        Database(engine: Engine(pageSize: Profile.desktop.pageSize))
+          ..createCollection('c'),
+        path);
     final db = DatabaseFile.open(path);
     final c = db.collection('c')!;
     var peak = 0;
@@ -85,6 +88,9 @@ void main(List<String> args) {
       us.add(t.elapsedMicroseconds);
     }
     us.sort();
+    out['${name}_misses'] = db.engine.cacheMisses;
+    out['${name}_evictions'] = db.engine.cacheEvictions;
+    out['${name}_cached'] = db.engine.extents.length;
     for (final (q, p) in [('p50', 0.5), ('p99', 0.99), ('p999', 0.999)]) {
       out['get_${name}_${q}_us'] = us[(us.length * p).floor()];
     }
@@ -98,8 +104,7 @@ void main(List<String> args) {
   }
   out['scan_rows_per_s'] = (rows * 1e6 / sw.elapsedMicroseconds).round();
   sw.reset();
-  final sound =
-      db.engine.verifyStructure(claims: db.indexClaims()).isSound;
+  final sound = db.engine.verifyStructure(claims: db.indexClaims()).isSound;
   out
     ..['verify_ms'] = sw.elapsedMilliseconds
     ..['verify_sound'] = sound

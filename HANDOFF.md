@@ -104,10 +104,12 @@
 
 ## Next action
 
-F-157 fixed 10-14 (R+D): 10^7 Rust settle 923 -> 251 MB footprint, build 291, get p50 4 us. Remaining
-10^7: F-159 (Dart get p50 1 ms) then F-158 (Dart build 381 MB; Dart lazy segments retain every page
-read, as Rust's did: likely the same cause, check its compaction `_engine.segment()` path). Java column
-of each (Java 10^7 settle unmeasured). Then 10^8. Side question: Dart segments ~40% larger.
+F-158 (Dart 10^7 memory). F-159 was the harness: `scale.dart` built 4 KB-page `custom` files (4 MB
+cache); now Desktop page size, p50 29 us. At equal settings Dart build peak footprint is 603 MB
+(bar 352) and read max RSS 475 (320): profile the build (lazy segments retain pages read in
+compaction `_engine.segment()`?) and the read. Remote file `cryptand-m6/.../dart/cryptand/d7.db`.
+Then the Java 10^7 column, then 10^8. Question for the human: should `Engine()`'s default page size
+be Desktop's 8 KB (today 4 KB, so a default engine saves as `custom`)?
 
 ## Log
 
@@ -152,3 +154,4 @@ of each (Java 10^7 settle unmeasured). Then 10^8. Side question: Dart segments ~
 - 2026-10-14 — F-155 profiled: Rust live heap 25 MB, footprint 304 MB (pass), RSS is shared/freed pages; metric question to the human.
 - 2026-10-14 — 6.3 bar = peak footprint (human); 10^7 rung R+D: F-157 (R settle 923 MB), F-158 (D build 381 MB), F-159 (D get 1 ms) opened.
 - 2026-10-14 — F-157 fixed (R: streamed compaction runs + sliced segment moves; D: page-by-page move): Rust 10^7 settle 923 -> 251 MB; gate quick green.
+- 2026-10-14 — F-159 closed as a harness bug (Dart rung ran 4 MB cache): p50 1058 -> 29 us; F-158 now 603 MB build at Desktop pages.
