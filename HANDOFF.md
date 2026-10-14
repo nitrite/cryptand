@@ -105,8 +105,8 @@
 ## Next action
 
 10^7 Dart passes 6.3 (AOT: build 343 MB, thin; read 270; get p50 30 us). Measure Dart rungs AOT only
-(`dart compile exe tool/scale.dart`; `dart run` adds ~230 MB of JIT). Next: Rust check of F-158's
-builder double-hold (Rust build 291), Java 10^7 column (settle unmeasured), then 10^8.
+(`dart compile exe tool/scale.dart`; `dart run` adds ~230 MB of JIT). F-158 Rust done (build 291 -> 282).
+Next: Java 10^7 column (watch `SegmentBuilder.build` hold + admit, F-158 J) (settle unmeasured), then 10^8.
 Side question: Dart segments ~40% larger than Rust's.
 
 ## Log
@@ -154,3 +154,4 @@ Side question: Dart segments ~40% larger than Rust's.
 - 2026-10-14 — F-157 fixed (R: streamed compaction runs + sliced segment moves; D: page-by-page move): Rust 10^7 settle 923 -> 251 MB; gate quick green.
 - 2026-10-14 — F-159 closed as a harness bug (Dart rung ran 4 MB cache): p50 1058 -> 29 us; F-158 now 603 MB build at Desktop pages.
 - 2026-10-14 — Engine() default 8 KB page (human); F-158 fixed (D: outputs not admitted, builder single-hold, uncached compaction/verify streams): 10^7 AOT build 343 MB, read 270.
+- 2026-10-14 — F-158 R: `SegmentBuilder::build` drains pages; Rust 10^7 build footprint 291 -> 282 MB; 40 Rust test binaries green.

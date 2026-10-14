@@ -1210,8 +1210,10 @@ impl SegmentBuilder {
         let header = self.build_header(root_page, root_entries, filter_page)?;
         let mut out = Vec::with_capacity(self.page_size * (self.pages.len() + 1));
         out.extend_from_slice(&header);
-        for p in &self.pages {
-            out.extend_from_slice(p);
+        // F-158: each page is dropped once copied, so the output is held once,
+        // not twice, at its peak.
+        for p in self.pages.drain(..) {
+            out.extend_from_slice(&p);
         }
         Ok(out)
     }
