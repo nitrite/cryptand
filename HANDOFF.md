@@ -100,7 +100,7 @@
 
 ## Open questions for the human
 
-- **[H] Remote disk for 10^8:** free ~80 GB on the remote Mac or attach an external disk (path?).
+- **[H] F-161 fix: A (stream builders, no spec change) or B (cap outputs, 04 §3.1 edit)?**
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
 
 ## Next action
@@ -109,7 +109,9 @@
 (`dart compile exe tool/scale.dart`; `dart run` adds ~230 MB of JIT). F-158 Rust done (build 291 -> 282).
 Java 10^7 done (RESULTS §5; `RssScale PATH N build|read|settle`, runner
 `cryptand-m6/reference/bench/runs/java-rung.sh N`; measure Java at -Xmx128m, the JVM footprint tracks -Xmx).
-Next: 10^8 R+J, blocked on remote disk (29 GB free; 10^8 needs ~46 GB Rust, ~71 GB Java).
+10^8 run 10-15 (remote 96 GB free): F-160 fixed (R EMFILE); F-161 open: compaction outputs grow
+2x per level and builders hold them whole: Java OOM ~2x10^7, Rust settle 408 MB.
+Next: the human picks F-161's fix (A: stream builder pages to disk; B: cap outputs + count runs, 04 §3.1 edit), then all three, rerun 10^8.
 Side question: Dart segments ~40% larger than Rust's.
 
 ## Log
@@ -159,3 +161,4 @@ Side question: Dart segments ~40% larger than Rust's.
 - 2026-10-14 — Engine() default 8 KB page (human); F-158 fixed (D: outputs not admitted, builder single-hold, uncached compaction/verify streams): 10^7 AOT build 343 MB, read 270.
 - 2026-10-14 — F-158 R: `SegmentBuilder::build` drains pages; Rust 10^7 build footprint 291 -> 282 MB; 40 Rust test binaries green.
 - 2026-10-14 — Java 10^7 column: build footprint 301 MB at -Xmx128m (PASS), get p50 86 us, settled amp 1.37; F-158 J bounded; 10^8 blocked on remote disk.
+- 2026-10-15 — 10^8: Rust build 736 s / 281 MB, read p50 226 us (after F-160 EMFILE fix), settle 408 MB FAIL; Java OOM at ~2x10^7: F-161 to the human.

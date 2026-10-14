@@ -212,6 +212,8 @@ Remote M1, 16 GB, internal SSD, desktop profile, plaintext, `benchDoc`
 | 10^6 | Dart (10-13) | 18 641 | 744 MB | 1.44 | 159 MB | 36 / 72 ms | 814 MB | 3.6 s sound | FAIL: F-151 |
 | 10^6 | Rust (10-13) | — | 487 MB | 0.94 | — | 7.6 / 7.7 ms | — | — | FAIL: F-151 |
 | 10^7 | Java (10-14) | 135 000 | 7.07 GB | 1.37 settled | 682 MB at -Xmx512m, 438 at 256m, 301 at 128m | 86 / 582 us | 220 MB | — | PASS at -Xmx128m (JVM footprint tracks -Xmx, not N); open 111 ms |
+| 10^8 | Rust (10-15) | 136 000 | 44.9 GB | 0.84 settled | 281 MB | 226 / 1035 us (p999 2601) | 291 MB | — | FAIL: settle footprint 408 MB (F-161); read needed F-160 |
+| 10^8 | Java (10-15) | — | OOM at 15 GB | — | OOM at -Xmx128m (~2x10^7 docs) | — | — | — | FAIL: F-161 |
 
 ## Running it
 
