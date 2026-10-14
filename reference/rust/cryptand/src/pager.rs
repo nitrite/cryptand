@@ -123,6 +123,9 @@ pub struct Pager {
     /// F-151: pages a [`SegmentPages`] fetched on demand; [`Pager::reads`]
     /// adds them to `page_reads`.
     pub lazy_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// F-160: the one read handle every [`SegmentPages`] shares; one per
+    /// segment ran out of descriptors (256 on macOS) at 10^8 documents.
+    reader: Option<std::sync::Arc<File>>,
 }
 
 impl Pager {
@@ -213,6 +216,7 @@ impl Pager {
             written_nonce: 0,
             read_nonce: 0,
             lazy_reads: Default::default(),
+            reader: None,
         }
     }
 
@@ -246,6 +250,7 @@ impl Pager {
     /// release; nothing else can do it.
     pub fn release(&mut self) {
         self.file = None;
+        self.reader = None;
         self.locked = false;
     }
 
@@ -787,7 +792,10 @@ impl Pager {
         #[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))))]
         return Ok(None);
         let (Some(_), Some(path)) = (&self.file, &self.path) else { return Ok(None) };
-        let file = File::open(path)?;
+        let file = match &self.reader {
+            Some(f) => f.clone(),
+            None => self.reader.insert(std::sync::Arc::new(File::open(path)?)).clone(),
+        };
         let raw = self.read_at(self.page_offset(start_page)?, self.page_size)?;
         self.page_reads += 1;
         let commit_id = match &self.crypto {
@@ -1304,7 +1312,7 @@ fn open_page_with(ring: Option<&KeyRing>, strict: bool, page_id: u64, page: Vec<
 /// touches instead of the whole extent. ponytail: the handle survives a file
 /// swap (rotation, restore) only because those drop the segment cache.
 pub struct SegmentPages {
-    file: File,
+    file: std::sync::Arc<File>,
     start_page: u64,
     page_size: usize,
     ring: Option<KeyRing>,

@@ -59,3 +59,29 @@ fn f151_a_cold_point_read_reads_pages_not_the_segment() {
         assert!(n <= 32, "a cold get of {i} read {n} pages");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn f160_reading_many_segments_holds_one_descriptor() {
+    // Before the fix each lazily read segment opened its own descriptor:
+    // 10^8 documents ran out at open (EMFILE, macOS limit 256).
+    let (t, mut e) = engine("f160", Profile::Desktop);
+    e.close(true).unwrap();
+    let path = t.path.clone();
+    let mut d = Database::open(&path, None).unwrap();
+    for i in 0..40_000i64 {
+        d.engine.put(16, &Value::NitriteId(i * 7919 % 40_000), &vec![(i % 251) as u8; 100]).unwrap();
+        if i % 1_000 == 999 {
+            d.commit(Durability::Sync).unwrap();
+        }
+    }
+    d.close().unwrap();
+    let fds = || std::fs::read_dir("/dev/fd").unwrap().count();
+    let mut d = Database::open(&path, None).unwrap();
+    let before = fds();
+    for i in (0..40_000i64).step_by(97) {
+        assert!(d.engine.get(16, &Value::NitriteId(i)).unwrap().is_some());
+    }
+    let grew = fds() - before;
+    assert!(grew <= 1, "{grew} descriptors opened by reads");
+}
