@@ -75,7 +75,8 @@
 - F-154 fixed 10-14 (D): Dart `shrink()` was a stub; now ports Rust relocate+truncate. Settled
   10^6 (`scale settle` / `rss_scale PATH N settle`): Rust 495 MB (1.14x live), Dart 688 MB (1.58x,
   bar 1.6: thin margin; Dart segments run ~40% larger than Rust's for the same data, unexplained).
-  Open: F-155 (Rust) 10^6 build RSS 467 MB > 352 (desktop 64 + 32 + 256); settle RSS 470.
+  F-155 profiled 10-14: live heap 25 MB; max RSS is shared `__LINKEDIT` + freed-dirty malloc;
+  peak footprint 304 MB < 352. Awaits the human's metric call.
 - Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
   (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
   `CRYPTAND_CORPUS_DIRS` (remote: `cryptand-gate/.../fuzz/{corpus,artifacts}` + `cryptand-kill-plain/reference/java/.cifuzz-corpus/...JazzerTest`).
@@ -100,11 +101,13 @@
 ## Open questions for the human
 
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
+- F-155: measure PLAN 6.3's memory bar as peak footprint (`time -l`, what jetsam counts) instead of
+  max RSS? Rust 10^6 build: footprint 304 MB passes 352; max RSS 394–468 fails, live heap 25 MB.
 
 ## Next action
 
-F-155: profile the Rust 10^6 build RSS (467 MB vs 352). Then the 10^7 and 10^8 rungs (both
-languages, with a settle phase). Side question: why Dart's settled segments are ~40% larger.
+The 10^7 rung (Rust and Dart, build + read + settle), recording both max RSS and peak footprint.
+Side question: why Dart's settled segments are ~40% larger.
 
 ## Log
 
@@ -146,3 +149,4 @@ languages, with a settle phase). Side question: why Dart's settled segments are 
 - 2026-10-14 — Dart read RSS was the wrong bar (M5.5 +64 vs 6.3 +256): 206 MB PASS; F-152 (R+D compaction pacing, L0 46 -> 2) fixed; F-153, F-154 opened; gate quick green.
 - 2026-10-14 — F-153 (Rust memtable unbounded between commits) fixed; F-155 opened (Rust build RSS 467 > 352); F-156 S0 (Rust shrink + lazy cache) found by the hop, fixed.
 - 2026-10-14 — F-154: settle measured (Rust 495 MB passes); Dart `shrink()` stub replaced by a relocate+truncate port, 1487 -> 688 MB; 734 Dart tests.
+- 2026-10-14 — F-155 profiled: Rust live heap 25 MB, footprint 304 MB (pass), RSS is shared/freed pages; metric question to the human.
