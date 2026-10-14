@@ -76,7 +76,7 @@
   10^6 (`scale settle` / `rss_scale PATH N settle`): Rust 495 MB (1.14x live), Dart 688 MB (1.58x,
   bar 1.6: thin margin; Dart segments run ~40% larger than Rust's for the same data, unexplained).
   F-155 profiled 10-14: live heap 25 MB; max RSS is shared `__LINKEDIT` + freed-dirty malloc;
-  peak footprint 304 MB < 352. Awaits the human's metric call.
+  peak footprint 304 MB < 352. Human 10-14: 6.3 bar is peak footprint (PLAN edited).
 - Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
   (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
   `CRYPTAND_CORPUS_DIRS` (remote: `cryptand-gate/.../fuzz/{corpus,artifacts}` + `cryptand-kill-plain/reference/java/.cifuzz-corpus/...JazzerTest`).
@@ -101,12 +101,10 @@
 ## Open questions for the human
 
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
-- F-155: measure PLAN 6.3's memory bar as peak footprint (`time -l`, what jetsam counts) instead of
-  max RSS? Rust 10^6 build: footprint 304 MB passes 352; max RSS 394–468 fails, live heap 25 MB.
 
 ## Next action
 
-The 10^7 rung (Rust and Dart, build + read + settle), recording both max RSS and peak footprint.
+The 10^7 rung (Rust and Dart, build + read + settle), running on remote: `cryptand-m6/r7.log` (script /tmp/f155/r7.sh).
 Side question: why Dart's settled segments are ~40% larger.
 
 ## Log

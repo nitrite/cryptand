@@ -310,8 +310,9 @@ Nothing has run above 10⁶ documents. The target is 10⁹ for Rust and Java, an
   update/delete; peak RSS; cold open time (after `purge`); file size and space
   amplification; device bytes written (P2); `verify`, `shrink` and `backup`
   times; compaction debt.
-- [ ] **6.3** Pass bars per rung (a miss is a finding): RSS ≤ profile budget +
-  memtables + 256 MB, so nothing O(n) in memory; cold open ≤ 2 s at 10⁹,
+- [ ] **6.3** Pass bars per rung (a miss is a finding): peak footprint (`/usr/bin/time -l`, what
+  jetsam counts; max RSS also counts shared and freed-dirty pages, F-155) ≤ profile
+  budget + memtables + 256 MB, so nothing O(n) in memory; cold open ≤ 2 s at 10⁹,
   excluding Argon2id; point-read p99 at 10⁹ ≤ 3× p99 at 10⁶; load rate at 10⁹ ≥
   0.4× the rate at 10⁶; space amplification ≤ 1.6 on `desktop` once compaction
   settles; `verify` completes; no 32-bit overflow anywhere.
