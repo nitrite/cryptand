@@ -213,7 +213,9 @@ Remote M1, 16 GB, internal SSD, desktop profile, plaintext, `benchDoc`
 | 10^6 | Rust (10-13) | — | 487 MB | 0.94 | — | 7.6 / 7.7 ms | — | — | FAIL: F-151 |
 | 10^7 | Java (10-14) | 135 000 | 7.07 GB | 1.37 settled | 682 MB at -Xmx512m, 438 at 256m, 301 at 128m | 86 / 582 us | 220 MB | — | PASS at -Xmx128m (JVM footprint tracks -Xmx, not N); open 111 ms |
 | 10^8 | Rust (10-15) | 136 000 | 44.9 GB | 0.84 settled | 281 MB | 226 / 1035 us (p999 2601) | 291 MB | — | FAIL: settle footprint 408 MB (F-161); read needed F-160 |
+| 10^8 | Rust (10-15, F-161 B) | 135 000 | 43.7 GB | 0.84 settled | 189 MB | 228 / 980 us (p999 1226) | 290 MB | — | PASS: settle footprint 315 MB (was 408) |
 | 10^8 | Java (10-15) | — | OOM at 15 GB | — | OOM at -Xmx128m (~2x10^7 docs) | — | — | — | FAIL: F-161 |
+| 10^8 | Java (10-15, F-161 B) | ~10 docs/s after stall | 0.45 GB at 10.7 h | — | — | — | — | — | FAIL: F-164 (compactor OOM, writer stalled forever) |
 
 ## Running it
 

@@ -104,13 +104,15 @@
 
 ## Next action
 
-F-161 fixed by option B (human 10-15; A rejected: builders also hold ~8 B/key of filter hashes plus
-the whole filter). 04 §3.1 writer rule: outputs capped at `segment_target_bytes`, split between user
-keys, tiered level due when all groups hold a run, last-level compaction absorbs a neighbour under
-target/4. R+J+D. F-163 (Dart tree 1 into fresh pages each save, F-080 port) fixed. F-162 (Java hang
-after OOM) open.
-Next: rerun 10^8 on the remote (Rust build/read/settle, Java build at -Xmx128m, Dart AOT), fill RESULTS,
-close F-161; then F-162. Side question: Dart segments ~40% larger than Rust's.
+10^8 rerun (10-15): Rust PASS (build 189 MB, read 290 MB p99 980 us, settle 315 MB < 352 bar; was 408).
+Java FAIL, F-164: F-161's 32 MiB output cap OOMs the compactor at -Xmx128m (`SegmentBuilder.finish`
+holds tree pages + a full `byte[] extent` copy); repro 5x10^6 build dies within 2x10^5 docs (remote
+`cryptand-gate`). The writer then stalls 100 ms/commit forever (dead compactor unseen, now in F-162).
+Remote run `rung-1e8.sh` (cryptand-m6, java pid 89598) is still alive but useless: **[H] kill it and
+`rm /tmp/j1e8.db`** (the auto-mode classifier blocked me).
+Next: F-164 Java (finish writes page by page, as Rust F-158; check Dart's builder the same way), repro
+5x10^6 at -Xmx128m green; F-162 (compactor death surfaces to writers, R+J+D); then Java 10^8 + Dart AOT
+10^8. Side question: Dart segments ~40% larger than Rust's.
 
 ## Log
 
@@ -161,3 +163,4 @@ close F-161; then F-162. Side question: Dart segments ~40% larger than Rust's.
 - 2026-10-14 — Java 10^7 column: build footprint 301 MB at -Xmx128m (PASS), get p50 86 us, settled amp 1.37; F-158 J bounded; 10^8 blocked on remote disk.
 - 2026-10-15 — 10^8: Rust build 736 s / 281 MB, read p50 226 us (after F-160 EMFILE fix), settle 408 MB FAIL; Java OOM at ~2x10^7: F-161 to the human.
 - 2026-10-15 — F-161 option B (04 §3.1 writer rule: byte-capped outputs, run trigger, small-neighbour absorb) R+J+D; F-163 Dart tree-1 placement; F-162 filed.
+- 2026-10-15 — 10^8 rerun: Rust PASS (settle 315 MB); Java compactor OOM (F-164, F-161 regression), writer stalled 10.7 h; F-162 widened to dead-compactor liveness.
