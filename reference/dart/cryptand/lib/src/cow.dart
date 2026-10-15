@@ -300,6 +300,28 @@ final class PageStore {
 
   void truncateFile() => file?.truncateSync(_pageCount * pageSize);
 
+  /// F-163 (F-080's Rust `take_for_free_tree`): the lowest reclaimable
+  /// extent longer than [pages], its first [pages] taken off the list for
+  /// tree 1. Null when none is. Undone by [giveBack].
+  (int, int, int)? takeForFreeTree(int pages) {
+    (int, int)? best;
+    for (final e in _free.entries) {
+      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId) continue;
+      if (e.value > pages && (best == null || e.key.$2 < best.$2)) {
+        best = e.key;
+      }
+    }
+    if (best == null) return null;
+    final n = _free.remove(best)!;
+    _free[(best.$1, best.$2 + pages)] = n - pages;
+    return (best.$1, best.$2, n);
+  }
+
+  void giveBack((int, int, int) taken, int pages) {
+    _free.remove((taken.$1, taken.$2 + pages));
+    _free[(taken.$1, taken.$2)] = taken.$3;
+  }
+
   /// One page at the end of the file, never out of the free list. For the
   /// tree that records the free list: see [CowTree.rebuildFresh].
   int allocFresh() {
@@ -1294,7 +1316,25 @@ final class CowTree {
   /// them off the end of the file.
   void dropRoot() => _setRoot((0, 0));
 
-  void rebuildFresh(List<(Uint8List, Uint8List)> entries, {bool low = false}) {
+  /// Pages [rebuildFresh] writes for [entries], counted without writing
+  /// (a child payload is fixed-width, so the count does not depend on ids).
+  int pagesNeeded(List<(Uint8List, Uint8List)> entries) {
+    if (entries.isEmpty) return 0;
+    var level = _split(_Node(true, [for (final e in entries) e.$1],
+        [for (final e in entries) _Node.leafPayload(e.$2)]));
+    var n = 0;
+    while (true) {
+      n += level.length;
+      if (level.length == 1) return n;
+      level = _split(_Node(false, [for (final x in level) x.keys.first],
+          [for (final _ in level) _Node.childPayload(0, 0, 0)]));
+    }
+  }
+
+  /// [at]: F-163, the pages from [at] on, which the caller took off the free
+  /// list before snapshotting it.
+  void rebuildFresh(List<(Uint8List, Uint8List)> entries,
+      {bool low = false, int? at}) {
     if (entries.isEmpty) {
       _setRoot((0, 0));
       return;
@@ -1305,8 +1345,13 @@ final class CowTree {
       final keys = <Uint8List>[];
       final payloads = <Uint8List>[];
       for (final n in level) {
-        final (id, nonce) =
-            _writeAt(low ? store.alloc() : store.allocFresh(), n);
+        final (id, nonce) = _writeAt(
+            at != null
+                ? at++
+                : low
+                    ? store.alloc()
+                    : store.allocFresh(),
+            n);
         keys.add(n.keys.first);
         payloads.add(_Node.childPayload(id, n.subtreeEntries, nonce));
       }

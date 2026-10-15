@@ -203,16 +203,26 @@ abstract final class DatabaseFile {
       store.free(p);
     }
     store.coalesceReclaimable();
-    free.rebuildFresh([
-      for (final x in store.freeExtents)
-        (
-          encodeKey(CArray([
-            CInt.of(NumType.u64, x.commitId),
-            CInt.of(NumType.u64, x.startPage),
-          ])),
-          encodeValue(CDoc({'pages': CInt.of(NumType.u32, x.pages)}))
-        )
-    ]..sort((a, b) => compareKeys(a.$1, b.$1)));
+    List<(Uint8List, Uint8List)> rows() => [
+          for (final x in store.freeExtents)
+            (
+              encodeKey(CArray([
+                CInt.of(NumType.u64, x.commitId),
+                CInt.of(NumType.u64, x.startPage),
+              ])),
+              encodeValue(CDoc({'pages': CInt.of(NumType.u32, x.pages)}))
+            )
+        ]..sort((a, b) => compareKeys(a.$1, b.$1));
+    // F-163 (Rust F-080): tree 1 goes into an extent taken off the list
+    // before the snapshot; fresh end-of-file pages grew the file each save.
+    final need = free.pagesNeeded(rows());
+    final taken = need == 0 ? null : store.takeForFreeTree(need);
+    if (taken != null && free.pagesNeeded(rows()) == need) {
+      free.rebuildFresh(rows(), at: taken.$2);
+    } else {
+      if (taken != null) store.giveBack(taken, need);
+      free.rebuildFresh(rows());
+    }
 
     // 4. The superblock, last.
     return Superblock(
