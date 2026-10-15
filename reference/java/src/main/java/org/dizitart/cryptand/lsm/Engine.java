@@ -1149,6 +1149,17 @@ public final class Engine implements AutoCloseable {
         checkCommitter();
     }
 
+    /**
+     * F-162: a background thread that dies takes the engine with it. An Error
+     * (OOM) used to escape uncaught, and nothing told the writers: they stalled
+     * in backpressure forever, waiting for a compactor that was gone.
+     */
+    private void died(Throwable e) {
+        committerFailure = e instanceof RuntimeException ? (RuntimeException) e
+                : new IllegalStateException("cryptand background thread died", e);
+        signalVisible();
+    }
+
     private void checkCommitter() {
         RuntimeException f = committerFailure;
         if (f != null) {
@@ -1199,9 +1210,8 @@ public final class Engine implements AutoCloseable {
                 vlog.abandonEmptyOpen();
                 java.util.concurrent.locks.LockSupport.parkNanos(100_000_000L);
                 committerFailure = null;
-            } catch (RuntimeException e) {
-                committerFailure = e;
-                signalVisible();
+            } catch (RuntimeException | Error e) {
+                died(e);
                 return;
             }
         }
@@ -2343,6 +2353,10 @@ public final class Engine implements AutoCloseable {
     private void compactorLoop() {
         while (!closing) {
             try {
+                Runnable hook = compactorHook;
+                if (hook != null) {
+                    hook.run();
+                }
                 maintain();
             } catch (java.io.UncheckedIOException e) {
                 // A full or failing device is not a broken database (M2.3):
@@ -2351,8 +2365,8 @@ public final class Engine implements AutoCloseable {
                 vlog.abandonEmptyOpen();
                 java.util.concurrent.locks.LockSupport.parkNanos(1_000_000_000L);
                 continue;
-            } catch (RuntimeException e) {
-                committerFailure = e;
+            } catch (RuntimeException | Error e) {
+                died(e);
                 return;
             }
             if (closing) {
@@ -3154,6 +3168,8 @@ public final class Engine implements AutoCloseable {
     static volatile Runnable afterEntriesHook;
     /** Test seam (F-101): runs between tree 7's publish and the superblock. */
     static volatile Runnable afterStatsHook;
+    /** Test seam (F-162): runs at the top of each compactor round. */
+    static volatile Runnable compactorHook;
 
     private long rewriteIfCurrent(int treeId, byte[] key, VlogPointer was, BtreePage.Leaf old,
                                   VlogPointer moved, long now) {

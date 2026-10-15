@@ -25,7 +25,7 @@ use std::thread::JoinHandle;
 
 use crate::container::{Durability, Profile};
 use crate::engine::{Engine, MemEntry};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::segment::{internal_key, op, user_part, value_kind};
 use crate::value::Value;
 
@@ -122,6 +122,7 @@ impl Store {
         for (k, v) in rows {
             encoded.push((crate::cke::encode(k)?, v.as_slice()));
         }
+        self.check_committer()?;
         encoded.sort_by(|a, b| a.0.cmp(&b.0));
         let base = self.shared.next_seq.fetch_add(rows.len() as u64, Ordering::SeqCst);
         self.shared.issued.fetch_add(rows.len() as u64, Ordering::SeqCst);
@@ -136,6 +137,7 @@ impl Store {
     }
 
     fn write(&self, tree: u32, key: &Value, op_code: u8, value: &[u8]) -> Result<u64> {
+        self.check_committer()?;
         let cke_key = crate::cke::encode(key)?;
         // Step 4: one fetch_add.
         let seq = self.shared.next_seq.fetch_add(1, Ordering::SeqCst);
@@ -264,6 +266,19 @@ impl Store {
         }));
     }
 
+    /// F-162: a committer that died (it panicked, poisoning the engine) fails
+    /// the next write; writers used to buffer, and waiters spin, forever.
+    fn committer_dead(&self) -> bool {
+        !self.shared.stop.load(Ordering::SeqCst) && self.committer.as_ref().is_some_and(|h| h.is_finished())
+    }
+
+    fn check_committer(&self) -> Result<()> {
+        if self.committer_dead() {
+            return Err(Error::Io("committer thread died".into()));
+        }
+        Ok(())
+    }
+
     /// §2 step 7 — wait until `visible_seq >= seq`, per the durability mode.
     /// `none` and `os` return immediately.
     pub fn wait_durable(&self, seq: u64) {
@@ -276,6 +291,7 @@ impl Store {
             if self.shared.stop.load(Ordering::SeqCst) {
                 return;
             }
+            assert!(!self.committer_dead(), "committer thread died (F-162)");
             let (ng, _t) = self
                 .shared
                 .woken
@@ -331,5 +347,34 @@ impl Engine {
     /// Takes one already-sequenced row from a `Store` shard.
     pub fn adopt(&mut self, ik: Vec<u8>, e: MemEntry) {
         self.adopt_entry(ik, e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-162: a dead committer fails the next write instead of buffering forever.
+    #[test]
+    fn dead_committer_fails_writes() {
+        let mut store = Store::create_in_memory(Profile::Desktop).unwrap();
+        store.durability = Durability::Os;
+        let engine = store.engine.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = engine.lock().unwrap();
+            panic!("poison the engine");
+        })
+        .join();
+        store.spawn_committer(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut i = 0i64;
+        while std::time::Instant::now() < deadline {
+            if store.put(1, &Value::NitriteId(i), b"v").is_err() {
+                return;
+            }
+            i += 1;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("writes kept going for 10 s after the committer died");
     }
 }

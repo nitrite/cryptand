@@ -346,7 +346,11 @@ public final class SegmentBuilder {
         meta.startPage = start;
         meta.pages = pages;
 
-        byte[] extent = new byte[pages * pager.pageSize()];
+        // F-164: written in chunks, not one extent-sized buffer. F-161 caps
+        // outputs at segment_target_bytes (32 MiB Desktop), and a second copy of
+        // every tree page ran the compactor out of a 128 MiB heap.
+        int ps = pager.pageSize();
+        byte[] chunk = new byte[Math.min(pages, CHUNK_PAGES) * ps];
         PageHeader head = new PageHeader();
         head.pageType = PageHeader.Type.SEGMENT_HEADER;
         head.flags = PageHeader.Flags.EXTENT_HEAD;
@@ -354,25 +358,30 @@ public final class SegmentBuilder {
         long commit = pager.commitId(); // one for the whole extent (F-128)
         byte[] headPage = pager.buildExtentPage(start, head, meta.encodeHeadPayload(), commit);
         meta.nonce = head.nonce; // F-128: what the manifest entry records
-        System.arraycopy(headPage, 0, extent, 0, headPage.length);
-
-        int index = 1;
-        for (byte[] payload : treePages) {
-            PageHeader h = new PageHeader();
-            h.pageType = BtreePage.isLeafPayload(payload)
-                    ? PageHeader.Type.BTREE_LEAF : PageHeader.Type.BTREE_INTERNAL;
-            pager.buildExtentPageInto(start + index, h, payload, extent, index * pager.pageSize(), commit);
-            index++;
-        }
-        for (byte[] payload : filterPages) {
-            PageHeader h = new PageHeader();
-            h.pageType = PageHeader.Type.SEGMENT_FILTER;
-            pager.buildExtentPageInto(start + index, h, payload, extent, index * pager.pageSize(), commit);
-            index++;
-        }
+        System.arraycopy(headPage, 0, chunk, 0, headPage.length);
 
         try {
-            pager.writeAt(pager.offsetOf(start), extent);
+            int index = 1;
+            int chunkStart = 0;
+            for (int i = 0; i < treePages.size() + filterPages.size(); i++, index++) {
+                if (index - chunkStart == CHUNK_PAGES) {
+                    pager.writeAt(pager.offsetOf(start + chunkStart), chunk);
+                    chunkStart = index;
+                }
+                PageHeader h = new PageHeader();
+                byte[] payload;
+                if (i < treePages.size()) {
+                    payload = treePages.get(i);
+                    h.pageType = BtreePage.isLeafPayload(payload)
+                            ? PageHeader.Type.BTREE_LEAF : PageHeader.Type.BTREE_INTERNAL;
+                } else {
+                    payload = filterPages.get(i - treePages.size());
+                    h.pageType = PageHeader.Type.SEGMENT_FILTER;
+                }
+                pager.buildExtentPageInto(start + index, h, payload, chunk, (index - chunkStart) * ps, commit);
+            }
+            pager.writeAt(pager.offsetOf(start + chunkStart),
+                    Arrays.copyOf(chunk, (index - chunkStart) * ps));
         } catch (RuntimeException x) {
             // ENOSPC (M2.3): owned by nothing, the extent would leak.
             pager.abandonExtent(start, pages);
@@ -386,6 +395,8 @@ public final class SegmentBuilder {
         }
         return meta;
     }
+
+    private static final int CHUNK_PAGES = 128;
 
     private void flushTreeSpan() {
         if (lastTreeCount > 0) {
