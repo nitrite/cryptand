@@ -107,9 +107,8 @@
 10^8 rerun (10-15): Rust PASS (build 189 MB, read 290 MB p99 980 us, settle 315 MB < 352 bar; was 408).
 Java failed on F-164 (compactor OOM, a regression from F-161's 32 MiB outputs) and F-162 (a dead
 compactor went unseen, so the writer stalled forever). Both fixed 10-15; the 5x10^6 repro at -Xmx128m now passes (214 MB).
-The old Java 10^8 run (cryptand-m6, java pid 89598, pre-fix classes) is still alive but useless:
-**[H] kill it and `rm /tmp/j1e8.db`** (the auto-mode classifier blocked me).
-Next: Java 10^8 rerun at -Xmx128m (build/read/settle) in a clone with ee3a58b+ fixes, then Dart AOT 10^8;
+Running (10-16 01:05): remote clone `cryptand-1e8` @1eac7ba, `reference/bench/runs/jd-1e8.sh` -> `jd-1e8.log`:
+Java 10^8 build/read/settle at -Xmx128m, then Dart AOT (`/tmp/scale1e8`). Next: read the log,
 fill RESULTS, close F-161. Side question: Dart segments ~40% larger than Rust's.
 
 ## Log
@@ -163,3 +162,4 @@ fill RESULTS, close F-161. Side question: Dart segments ~40% larger than Rust's.
 - 2026-10-15 — F-161 option B (04 §3.1 writer rule: byte-capped outputs, run trigger, small-neighbour absorb) R+J+D; F-163 Dart tree-1 placement; F-162 filed.
 - 2026-10-15 — 10^8 rerun: Rust PASS (settle 315 MB); Java compactor OOM (F-164, F-161 regression), writer stalled 10.7 h; F-162 widened to dead-compactor liveness.
 - 2026-10-15 — F-162 fixed (J+R: dead background thread fails the next write), F-164 fixed (J: chunked extent write); Java 5x10^6 at 128m PASS.
+- 2026-10-16 — Java + Dart AOT 10^8 rung launched on remote (`cryptand-1e8`, jd-1e8.sh).
