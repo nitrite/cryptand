@@ -246,7 +246,7 @@ final class Engine {
     this.localityDebtPct = 20,
     this.filters = true,
     this.earlyExit = true,
-    int? segmentEntries,
+    this.segmentTargetBytes,
     int? vlogSegmentBytes,
     int cachePages = 256,
     PageStore? store,
@@ -258,7 +258,6 @@ final class Engine {
   })  : // F-140: 00 §8 caps vlog_min at page_size / 4, the value every
         // profile uses (12 §2.5).
         vlogMin = vlogMin ?? pageSize ~/ 4,
-        segmentEntries = segmentEntries ?? memtableEntries,
         store = store ?? PageStore(pageSize: pageSize) {
     vlog = ValueLog(
       pageSize: pageSize,
@@ -305,9 +304,9 @@ final class Engine {
   final int vlogMin;
   final int memtableEntries;
 
-  /// Entries per L0 segment; higher levels scale from it, see
-  /// [segmentEntriesAt].
-  final int segmentEntries;
+  /// §3.1 (F-161): compaction outputs are capped at this many bytes; null
+  /// takes the profile's `segment_target_bytes`.
+  final int? segmentTargetBytes;
 
   final LocalityPolicy policy;
   final LevelPolicy levels;
@@ -1260,8 +1259,8 @@ final class Engine {
         Bound('l0_segment_count', refsAt(0).length, levels.l0Trigger,
             levels.l0Trigger * 4),
         for (var l = 1; l < lastLevel; l++)
-          Bound('segments_at_L$l', refsAt(l).length, levels.tierWidth,
-              levels.tierWidth * 2),
+          Bound('runs_at_L$l', groupsAt(l).length, levels.overlapBound,
+              levels.overlapBound * 2),
         Bound('memtable_entries', _memtable.length, memtableEntries,
             memtableEntries * 2),
         Bound('vlog_space_amplification', vlog.spaceAmplification,
@@ -1315,24 +1314,6 @@ final class Engine {
   /// Settable so a test can shrink it; the profile default is what a real
   /// caller gets.
   int compactionStepBytes = 256 << 10;
-
-  /// Entries per output segment at [level].
-  ///
-  /// §3.1 wants a tiered level to hold up to `tier_width` **size-similar**
-  /// segments arranged in `overlap_bound` disjoint runs. That fixes the size:
-  /// a run at level 1 is `l0_trigger` memtables, a run at level *l* is
-  /// `overlap_bound` runs of the level below, and a run occupies
-  /// `tier_width / overlap_bound` segments. Sizing outputs any other way makes
-  /// one of the two bounds unreachable and the level policy thrash.
-  int segmentEntriesAt(int level) {
-    if (level == 0) return segmentEntries;
-    var runEntries = levels.l0Trigger * segmentEntries;
-    for (var i = 1; i < level; i++) {
-      runEntries *= levels.overlapBound;
-    }
-    final perRun = (levels.tierWidth ~/ levels.overlapBound).clamp(1, 1 << 20);
-    return (runEntries / perRun).ceil();
-  }
 
   SegmentBuilder _builder({required int level, int group = 0}) =>
       SegmentBuilder(
@@ -1519,8 +1500,9 @@ final class Engine {
     }
     for (var l = 1; l < lastLevel; l++) {
       final refs = refsAt(l);
-      if (refs.length > levels.tierWidth ||
-          groupsAt(l).length > levels.overlapBound) {
+      // §3.1 (F-161): a tiered level counts runs (groups), not segments;
+      // outputs are capped in bytes, so a run may be many segments.
+      if (groupsAt(l).length >= levels.overlapBound) {
         return (refs, l + 1 >= lastLevel ? lastLevel : l + 1);
       }
     }
@@ -1775,6 +1757,24 @@ final class Engine {
           all.add(r);
         }
       }
+      // §3.1 (F-161): an undersized neighbour joins, or sequential keys
+      // leave a trail of tiny last-level segments that nothing merges.
+      SegmentRef? before, after;
+      for (final r in refsAt(lastLevel)) {
+        if (seen.contains(r.segmentId) || all.contains(r)) continue;
+        if (compareKeys(r.maxKey, lo) < 0 &&
+            (before == null || compareKeys(r.maxKey, before.maxKey) > 0)) {
+          before = r;
+        }
+        if (compareKeys(_userLow(r.minKey), hi) > 0 &&
+            (after == null || compareKeys(r.minKey, after.minKey) < 0)) {
+          after = r;
+        }
+      }
+      final small = (segmentTargetBytes ?? profile.segmentTargetBytes) ~/ 4;
+      for (final r in [before, after]) {
+        if (r != null && r.pages * pageSize < small) all.add(r);
+      }
     }
 
     // §6.8 step 1: collection is triggered by whichever bound is breached
@@ -1869,7 +1869,9 @@ final class Engine {
         // A segment boundary is only legal between user keys: two versions of
         // one key in two segments of the same disjoint run would break the
         // "at most one segment per group covers a key" invariant of §3.1.
-        if (job.out.entryCount >= segmentEntriesAt(job.target)) _rotate(job);
+        if (job.out.bytes >= (segmentTargetBytes ?? profile.segmentTargetBytes)) {
+          _rotate(job);
+        }
         if (job.levelled &&
             (rec.op == Op.delete ||
                 _isExpired(rec, job.nowMs) && rec.op != Op.rangeDelete) &&

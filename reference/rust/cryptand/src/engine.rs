@@ -200,7 +200,7 @@ pub struct CompactionJob {
     builder: Option<SegmentBuilder>,
     /// F-147: placed as each one fills; only the ref is kept, not the bytes.
     outputs: Vec<SegmentRef>,
-    per_output: u64,
+    cap_bytes: u64,
     pub bytes_written: u64,
     /// F-050: BLOB pointers of dropped entries, freed when the job publishes.
     dead_blobs: Vec<Vec<u8>>,
@@ -1632,24 +1632,6 @@ impl Engine {
         }
     }
 
-    /// §3.1's output-size rule. Both bounds require it, and an implementation
-    /// that picks the size freely cannot satisfy them: a fixed size makes
-    /// every tiered level compact after its *second* run, so no level ever
-    /// holds more than one run.
-    pub fn segment_entries_at(&self, level: u8) -> u64 {
-        let l0 = self.memtable_entry_limit as u64;
-        if level == 0 {
-            return l0;
-        }
-        let ob = self.policy.overlap_bound.max(1) as u64;
-        let mut run = self.policy.l0_trigger.max(1) as u64 * l0;
-        for _ in 1..level {
-            run *= ob;
-        }
-        let segments_per_run = (self.policy.tier_width.max(1) as u64 / ob).max(1);
-        run.div_ceil(segments_per_run).max(1)
-    }
-
     /// §2 step D. `10-transactions.md` §8: `visible_seq` advances whenever a
     /// batch's records become durable, which for a single writer is this
     /// flush — an engine whose watermark never advances retains every
@@ -2558,11 +2540,7 @@ impl Engine {
         let mut best: Option<(f64, u8, Vec<SegmentRef>)> = None;
         for level in 0..last {
             let refs = self.healthy_refs_at(level)?;
-            let bound = if level == 0 {
-                self.policy.l0_trigger.max(1)
-            } else {
-                self.policy.tier_width.max(1)
-            } as usize;
+            let bound = self.policy.l0_trigger.max(1) as usize;
             // F-150: a run as small as one segment fills a group alone, so
             // `overlap_bound` runs fill the level while `refs.len()` stays
             // under `tier_width`; the next run then merges into a used group
@@ -2570,10 +2548,12 @@ impl Engine {
             // where superseded versions are dropped. Every group used is the
             // level holding its `overlap_bound` runs (§3.1): it is due.
             let full = level > 0 && self.groups_at(level)?.len() >= self.policy.overlap_bound.max(1) as usize;
-            if refs.len() < bound && !full {
+            // §3.1 (F-161): a tiered level counts runs, not segments; its
+            // outputs are capped in bytes, so one run may be many segments.
+            if (level == 0 && refs.len() < bound) || (level > 0 && !full) {
                 continue;
             }
-            let score = (refs.len() as f64 / bound as f64).max(if full { 1.0 } else { 0.0 });
+            let score = if level == 0 { refs.len() as f64 / bound as f64 } else { 1.0 };
             let better = match &best {
                 None => true,
                 Some((s, l, _)) => score > *s || (score == *s && level > *l),
@@ -2638,6 +2618,28 @@ impl Engine {
                     break;
                 }
             }
+            // §3.1 (F-161): an undersized neighbour joins, or sequential keys
+            // leave a trail of tiny last-level segments that nothing merges.
+            let small = self.profile.segment_target_bytes as u64 / 4;
+            let page = self.pager.page_size as u64;
+            let mut before: Option<SegmentRef> = None;
+            let mut after: Option<SegmentRef> = None;
+            for r in self.healthy_refs_at(last)? {
+                if have.contains(&r.segment_id) {
+                    continue;
+                }
+                if user_part(&r.max_key) < &lo[..] && before.as_ref().map_or(true, |b| r.max_key > b.max_key) {
+                    before = Some(r.clone());
+                }
+                if user_part(&r.min_key) > &hi[..] && after.as_ref().map_or(true, |a| r.min_key < a.min_key) {
+                    after = Some(r);
+                }
+            }
+            for r in [before, after].into_iter().flatten() {
+                if r.pages as u64 * page < small {
+                    inputs.push(r);
+                }
+            }
         }
         // §3.1: a tiered level's group is mutually disjoint. With no group
         // free, the output joins a used one, so that group's segments under
@@ -2695,7 +2697,9 @@ impl Engine {
             let hot: u64 = self.vlog_stats.values().filter(|s| s.tier == Tier::Hot as u8).map(|s| s.live_bytes).sum();
             self.next_cold_bytes = hot.min(FIRST_HOT_BYTES);
         }
-        let per_output = self.segment_entries_at(target);
+        // §3.1 (F-161): outputs are capped in bytes, so a builder holds at
+        // most one target's worth whatever the level or database size.
+        let cap_bytes = self.profile.segment_target_bytes as u64;
         let runs = RunCursor::of(&inputs);
         Ok(Some(CompactionJob {
             inputs,
@@ -2710,7 +2714,7 @@ impl Engine {
             floor_seen: false,
             builder: None,
             outputs: Vec::new(),
-            per_output,
+            cap_bytes,
             bytes_written: 0,
             dead_blobs: Vec::new(),
         }))
@@ -2829,6 +2833,14 @@ impl Engine {
         let mut spent = 0u64;
         while let Some(rec) = self.next_merged(job)? {
             let Some(mut e) = self.compaction_keep(job, rec)? else { continue };
+            // §3.1.1: split only between user keys, or two segments of one
+            // group (or of the last level) overlap on a user key.
+            let split = job.builder.as_ref().is_some_and(|b| {
+                b.bytes() >= job.cap_bytes && b.last_user_key() != Some(user_part(&e.internal_key))
+            });
+            if split {
+                self.rotate_output(job)?;
+            }
             if job.builder.is_none() {
                 let b = SegmentBuilder::with_reserve(
                     self.pager.page_size,
@@ -2862,10 +2874,6 @@ impl Engine {
             job.builder.as_mut().unwrap().add(e)?;
             spent += bytes as u64;
             job.bytes_written += bytes as u64;
-            let full = job.builder.as_ref().unwrap().entry_count() >= job.per_output;
-            if full {
-                self.rotate_output(job)?;
-            }
             if spent >= budget {
                 return Ok(true);
             }

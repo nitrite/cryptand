@@ -1011,6 +1011,16 @@ impl SegmentBuilder {
         self.pages.len() + 1
     }
 
+    /// Bytes built so far, the open leaf excluded: what §3.1's cap measures.
+    pub fn bytes(&self) -> u64 {
+        (self.page_count() * self.page_size) as u64
+    }
+
+    /// The user key of the last entry added.
+    pub fn last_user_key(&self) -> Option<&[u8]> {
+        self.prev_key.as_deref().map(user_part)
+    }
+
     /// Appends one entry. Keys MUST arrive strictly increasing: bulk
     /// construction is the only construction, so an out-of-order entry is a
     /// caller bug, not something to sort around.

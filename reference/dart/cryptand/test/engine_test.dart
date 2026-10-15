@@ -41,8 +41,9 @@ void main() {
 
   test('F-053: a lookup does not stop at an older version in a newer run', () {
     // L1 is tiered: its groups hold runs of any age, so the run with the
-    // higher segment id can carry the *older* version of a key.
-    final e = Engine();
+    // higher segment id can carry the *older* version of a key. Three groups,
+    // so two runs do not yet make L1 due (§3.1, F-161).
+    final e = Engine(levels: const LevelPolicy(tierWidth: 6, overlapBound: 3));
     void l0ToL1([List<SegmentRef> extra = const []]) {
       e.flush();
       final job = e.beginCompaction([...e.refsAt(0), ...extra], 1)!;
@@ -409,6 +410,8 @@ void main() {
 
     test('a segment holds a filter, and it prunes', () {
       final e = aged();
+      // F-158: compaction outputs are not cached; a read loads one.
+      e.get(17, CNitriteId(snowflakeId(7)));
       final seg = e.extents.values.first;
       expect(seg.filter, isNotNull);
       expect(seg.header.filterPage, greaterThan(0));

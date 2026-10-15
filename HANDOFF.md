@@ -100,19 +100,17 @@
 
 ## Open questions for the human
 
-- **[H] F-161 fix: A (stream builders, no spec change) or B (cap outputs, 04 §3.1 edit)?**
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
 
 ## Next action
 
-10^7 Dart passes 6.3 (AOT: build 343 MB, thin; read 270; get p50 30 us). Measure Dart rungs AOT only
-(`dart compile exe tool/scale.dart`; `dart run` adds ~230 MB of JIT). F-158 Rust done (build 291 -> 282).
-Java 10^7 done (RESULTS §5; `RssScale PATH N build|read|settle`, runner
-`cryptand-m6/reference/bench/runs/java-rung.sh N`; measure Java at -Xmx128m, the JVM footprint tracks -Xmx).
-10^8 run 10-15 (remote 96 GB free): F-160 fixed (R EMFILE); F-161 open: compaction outputs grow
-2x per level and builders hold them whole: Java OOM ~2x10^7, Rust settle 408 MB.
-Next: the human picks F-161's fix (A: stream builder pages to disk; B: cap outputs + count runs, 04 §3.1 edit), then all three, rerun 10^8.
-Side question: Dart segments ~40% larger than Rust's.
+F-161 fixed by option B (human 10-15; A rejected: builders also hold ~8 B/key of filter hashes plus
+the whole filter). 04 §3.1 writer rule: outputs capped at `segment_target_bytes`, split between user
+keys, tiered level due when all groups hold a run, last-level compaction absorbs a neighbour under
+target/4. R+J+D. F-163 (Dart tree 1 into fresh pages each save, F-080 port) fixed. F-162 (Java hang
+after OOM) open.
+Next: rerun 10^8 on the remote (Rust build/read/settle, Java build at -Xmx128m, Dart AOT), fill RESULTS,
+close F-161; then F-162. Side question: Dart segments ~40% larger than Rust's.
 
 ## Log
 
@@ -162,3 +160,4 @@ Side question: Dart segments ~40% larger than Rust's.
 - 2026-10-14 — F-158 R: `SegmentBuilder::build` drains pages; Rust 10^7 build footprint 291 -> 282 MB; 40 Rust test binaries green.
 - 2026-10-14 — Java 10^7 column: build footprint 301 MB at -Xmx128m (PASS), get p50 86 us, settled amp 1.37; F-158 J bounded; 10^8 blocked on remote disk.
 - 2026-10-15 — 10^8: Rust build 736 s / 281 MB, read p50 226 us (after F-160 EMFILE fix), settle 408 MB FAIL; Java OOM at ~2x10^7: F-161 to the human.
+- 2026-10-15 — F-161 option B (04 §3.1 writer rule: byte-capped outputs, run trigger, small-neighbour absorb) R+J+D; F-163 Dart tree-1 placement; F-162 filed.

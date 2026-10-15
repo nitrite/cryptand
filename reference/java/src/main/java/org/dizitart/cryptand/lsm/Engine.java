@@ -2386,7 +2386,7 @@ public final class Engine implements AutoCloseable {
      * levelled and disjoint. A reader MUST NOT depend on any of it — it reads
      * the manifest and resolves by {@code seq} — but a writer that picks output
      * sizes freely cannot satisfy both bounds, so §3.1's sizing rule is a
-     * writer rule and is implemented in {@link #segmentEntries}.
+     * writer rule: outputs capped at {@code segment_target_bytes}, levels due by runs.
      */
     private boolean compactOnce() {
         structure.lock();
@@ -2397,7 +2397,9 @@ public final class Engine implements AutoCloseable {
                 return true;
             }
             for (int l = 1; l < last; l++) {
-                if (manifest.at(l).size() > Math.max(1, sb.tierWidth)) {
+                // §3.1 (F-161): a tiered level counts runs (groups), not
+                // segments; outputs are capped in bytes, so a run may be many.
+                if (groupsUsed(manifest.at(l)) >= Math.max(1, sb.overlapBound)) {
                     compactLevel(l);
                     return true;
                 }
@@ -2412,25 +2414,8 @@ public final class Engine implements AutoCloseable {
         return Math.max(1, sb.levelCount - 1);
     }
 
-    /**
-     * {@code run_entries(1) = l0_trigger × memtable_entries};
-     * {@code run_entries(L) = overlap_bound × run_entries(L−1)};
-     * {@code segment_entries(L) = ceil(run_entries(L) ÷ (tier_width ÷ overlap_bound))}.
-     *
-     * <p>Stated in the spec because the reference implementation's first
-     * version used one fixed output size at every level, so every tiered level
-     * crossed {@code tier_width} after its <em>second</em> run and compacted
-     * immediately. No level ever held more than one run, and range partitioning
-     * had no opportunity to do anything.
-     */
-    long segmentEntries(int level) {
-        long overlap = Math.max(1, sb.overlapBound);
-        long run = (long) Math.max(1, sb.l0Trigger) * Math.max(1, options.memtableEntries);
-        for (int l = 2; l <= level; l++) {
-            run *= overlap;
-        }
-        long runsPerLevel = Math.max(1, Math.max(1, sb.tierWidth) / overlap);
-        return Math.max(1, (run + runsPerLevel - 1) / runsPerLevel);
+    private static int groupsUsed(List<SegmentMeta> level) {
+        return (int) level.stream().mapToInt(m -> m.group).distinct().count();
     }
 
     /** Requires {@link #structure}. Merges every segment at {@code level} into {@code level + 1}. */
@@ -2495,6 +2480,38 @@ public final class Engine implements AutoCloseable {
                 inputs.add(m);
             }
         }
+        if (!everything && target >= last) {
+            // §3.1 (F-161): an undersized neighbour joins, or sequential keys
+            // leave a trail of tiny last-level segments that nothing merges.
+            Set<Long> have = new HashSet<>();
+            for (SegmentMeta m : inputs) {
+                have.add(m.segmentId);
+            }
+            SegmentMeta before = null;
+            SegmentMeta after = null;
+            for (SegmentMeta m : manifest.at(target)) {
+                if (have.contains(m.segmentId)) {
+                    continue;
+                }
+                if (BtreePage.memcmp(Ikey.userKeyOf(m.maxKey), Ikey.userKeyOf(lo)) < 0
+                        && (before == null || BtreePage.memcmp(m.maxKey, before.maxKey) > 0)) {
+                    before = m;
+                }
+                if (BtreePage.memcmp(Ikey.userKeyOf(m.minKey), Ikey.userKeyOf(hi)) > 0
+                        && (after == null || BtreePage.memcmp(m.minKey, after.minKey) < 0)) {
+                    after = m;
+                }
+            }
+            long small = Math.max(1, sb.segmentTargetBytes) / 4;
+            if (before != null && (long) before.pages * sb.pageSize() < small) {
+                inputs.add(before);
+                lo = before.minKey;
+            }
+            if (after != null && (long) after.pages * sb.pageSize() < small) {
+                inputs.add(after);
+                hi = after.maxKey;
+            }
+        }
 
         // Condition 3 of §5: an entry may be dropped only if the compaction
         // includes every segment that could hold an older version.
@@ -2525,7 +2542,7 @@ public final class Engine implements AutoCloseable {
 
         long floor = sb.minRetainedSeq;
         long nowMs = options.clock.getAsLong();
-        long targetEntries = segmentEntries(target);
+        long targetBytes = Math.max(1, sb.segmentTargetBytes); // §3.1 (F-161)
         List<SegmentMeta> outputs = new ArrayList<>();
         SegmentBuilder builder = null;
         byte[] lastUserKey = null;
@@ -2658,7 +2675,7 @@ public final class Engine implements AutoCloseable {
                 // would otherwise have collapsed, which is exactly what the
                 // concurrency test creates. So a segment rolls over only on a user
                 // key boundary.
-                if (builder != null && newUserKey && builder.entryCount() >= targetEntries) {
+                if (builder != null && newUserKey && builder.emittedBytes() >= targetBytes) {
                     outputs.add(builder.finish());
                     builder = null;
                 }
@@ -3452,13 +3469,9 @@ public final class Engine implements AutoCloseable {
             worst = x;
             cause = "l0_segments";
         }
-        for (int l = 1; l < lastLevel(); l++) {
-            x = overshoot(state.at(l), Math.max(1, sb.tierWidth), Math.max(1, sb.tierWidth) * 2);
-            if (x > worst) {
-                worst = x;
-                cause = "tier_width@L" + l;
-            }
-        }
+        // ponytail: no tiered-level stall (F-161): a tiered level is due once
+        // its groups fill and holds at most overlap_bound runs; L0's stall is
+        // the backstop. Add one if a tiered backlog is ever measured.
         // A counter, not `ConcurrentSkipListMap.size()`. That method is
         // documented O(n) — it walks the list — and this ran on **every**
         // commit, over every shard: a single-document write counted the whole

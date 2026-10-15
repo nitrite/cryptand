@@ -37,7 +37,7 @@ void main() {
     Engine seeded() {
       // Small segments so the last level holds several of them: containment
       // is only observable when there is something left to serve.
-      final e = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
+      final e = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192);
       for (var i = 0; i < 2000; i++) {
         e.put(tree, CNitriteId(i), doc(dict, i));
       }
@@ -272,7 +272,7 @@ void main() {
     });
 
     test('unavailable_ranges surfaces containment in the metrics', () {
-      final e = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
+      final e = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192);
       for (var i = 0; i < 1000; i++) {
         e.put(tree, CNitriteId(i), doc(dict, i));
       }

@@ -24,7 +24,7 @@ void main() {
   setUp(() => dict = benchDict());
 
   Engine seeded({int n = 600}) {
-    final e = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50)
+    final e = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192)
       ..databaseUuid = uuid(1);
     for (var i = 0; i < n; i++) {
       e.put(tree, CNitriteId(i), doc(dict, i));
@@ -36,7 +36,7 @@ void main() {
   group('backup, section 2', () {
     test('a full backup copies every segment and reads identically', () {
       final src = seeded();
-      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
+      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192);
       final r = Backup.full(src, dst, newUuid: uuid(2));
 
       expect(r.segmentsCopied, greaterThan(1));
@@ -52,7 +52,7 @@ void main() {
       // immutability -- every extent the backup reads is one nothing will ever
       // modify."
       final src = seeded();
-      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
+      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192);
       Backup.full(src, dst, newUuid: uuid(2));
       src.put(tree, const CNitriteId(9999), doc(dict, 1));
       src.flush();
@@ -119,7 +119,7 @@ void main() {
       // changed, not to what the changes touched" -- the property an LSM's
       // immutable segments give and an in-place B-tree cannot.
       final src = seeded(n: 600);
-      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
+      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192);
       final first = Backup.full(src, dst, newUuid: uuid(2));
       expect(first.segmentsCopied, greaterThan(1));
 
@@ -142,7 +142,7 @@ void main() {
 
     test('a segment deleted at the source is dropped at the destination', () {
       final src = seeded(n: 600);
-      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
+      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192);
       Backup.full(src, dst, newUuid: uuid(2));
       final before = dst.refsAt(dst.lastLevel).length;
       src.compact(); // rewrites the last level into different segment ids
@@ -156,7 +156,7 @@ void main() {
     test('a compacting backup is smaller and still verifies', () {
       // Section 2.1: "A compacting backup is usually smaller than the source,
       // and it is the recommended way to reclaim space fully."
-      final src = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50)
+      final src = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192)
         ..databaseUuid = uuid(1);
       for (var round = 0; round < 4; round++) {
         for (var i = 0; i < 200; i++) {
@@ -165,7 +165,7 @@ void main() {
         src.flush();
       }
       src.drainCompaction();
-      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
+      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192);
       final r = Backup.full(src, dst, newUuid: uuid(2), compacting: true);
       expect(r.verified, isTrue);
       expect(dst.scanTree(tree).length, 200);
@@ -175,7 +175,7 @@ void main() {
       // Section 2.3: "An implementation MUST run the verification pass over a
       // restored file before reporting success."
       final src = seeded(n: 200);
-      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentEntries: 50);
+      final dst = Engine(memtableEntries: 100, vlogMin: 1024, segmentTargetBytes: 8192);
       final r = Backup.full(src, dst, newUuid: uuid(2));
       expect(r.verified, isTrue);
       expect(dst.verifyStructure().isSound, isTrue);

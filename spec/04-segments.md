@@ -435,26 +435,22 @@ Cost: a compaction producing a tiered level must respect the group's key
 boundaries, which occasionally forces a split. That is cheap — segments are
 bulk-built anyway — and it converts an unbounded read tail into a bounded one.
 
-**The two bounds fix the output segment size, and an implementation that picks
-it freely cannot satisfy both.** A tiered level holds up to `tier_width`
-size-similar segments arranged in `overlap_bound` disjoint runs, so a run
-occupies `tier_width / overlap_bound` segments; a run at L1 is `l0_trigger`
-memtables and a run at level *L* is `overlap_bound` runs of the level below.
-A conforming writer therefore sizes its outputs so that
+**A writer caps each output segment at `segment_target_bytes`** and splits only
+between user keys (§3.1.1), so a run is one or more disjoint segments in one
+group. **A tiered level is due when every one of its `overlap_bound` groups
+holds a run**, and L0 when it holds `l0_trigger` segments. Counting segments
+instead of runs is wrong twice over. With one fixed output size, every tiered
+level crossed `tier_width` after its *second* run and compacted, so range
+partitioning never had anything to do. Sizing outputs to dodge that
+(`segment_entries(L)` doubling per level, as the 1.0 draft did) made the largest
+segment grow with the database, and a builder's memory with it (F-161).
+A compaction into the last level also takes the last-level segment just
+before and just after its span when that segment is under
+`segment_target_bytes / 4`. Otherwise sequential keys, which never overlap
+what is already there, leave a trail of tiny segments that nothing merges.
 
-```
-run_entries(1)    = l0_trigger × memtable_entries
-run_entries(L)    = overlap_bound × run_entries(L−1)
-segment_entries(L) = ceil( run_entries(L) ÷ (tier_width ÷ overlap_bound) )
-```
-
-This is a **writer** rule, not a format rule — the paragraph below still holds,
-a reader MUST NOT depend on the policy — but it is stated because the reference
-implementation's first version used one fixed output size at every level, and
-every tiered level then crossed `tier_width` after its *second* run and
-compacted immediately. No level ever held more than one run, so range
-partitioning had no opportunity to do anything, and the read-tail measurement
-that follows would have been meaningless.
+This is a **writer** rule, not a format rule: the paragraph below still holds,
+and a reader MUST NOT depend on the policy.
 
 **Plain tiering is this policy with `overlap_bound = tier_width`**, and nothing
 else changed: `tier_width` runs of one whole-range segment each. That equality

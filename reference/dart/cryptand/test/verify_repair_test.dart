@@ -36,11 +36,11 @@ void main() {
   late NameDict dict;
   setUp(() => dict = benchDict());
 
-  Engine seeded({int n = 600, int? segmentEntries}) {
+  Engine seeded({int n = 600}) {
     final e = Engine(
         memtableEntries: 100,
         vlogMin: 128,
-        segmentEntries: segmentEntries ?? 50);
+        segmentTargetBytes: 8192);
     for (var i = 0; i < n; i++) {
       e.put(tree, CNitriteId(i), doc(dict, i));
     }

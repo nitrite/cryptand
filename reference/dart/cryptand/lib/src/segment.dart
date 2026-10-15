@@ -389,6 +389,9 @@ final class SegmentBuilder {
 
   int get entryCount => _entryCount;
 
+  /// Bytes of pages emitted so far, the head included: §3.1's cap.
+  int get bytes => _pages.length * pageSize;
+
   /// Appends one entry. Keys MUST arrive strictly increasing.
   void add(SegEntry e) {
     final k = e.internalKey;
