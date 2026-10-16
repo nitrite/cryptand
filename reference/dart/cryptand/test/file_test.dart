@@ -426,6 +426,30 @@ void main() {
     expect(leaks, isEmpty, reason: leaks.join('\n'));
   });
 
+  test('F-165: a page claimed twice is a double allocation', () {
+    // `spec/01-container.md` §9 step 7, on the extent sweep that replaced the
+    // per-page owner map: an extra claim over a placed segment overlaps it.
+    final path = tmp('doubleclaim');
+    final db = fresh();
+    for (var i = 0; i < 100; i++) {
+      db.engine.put(t, CNitriteId(i), Uint8List.fromList([i]));
+    }
+    db.engine.flush();
+    DatabaseFile.save(db, path);
+    db.engine.close();
+    final back = DatabaseFile.open(path);
+    final seg = back.engine.manifest.all.firstWhere((r) => r.pages > 1);
+    final bad = back.engine
+        .verifyStructure(claims: [(seg.startPage + 1, 2, 'intruder')])
+        .of(FindingClass.corruption);
+    expect(bad.map((f) => '$f'), [
+      contains('pages ${seg.startPage + 1}..${seg.startPage + 2} are claimed '
+          'by both segment ${seg.segmentId} and intruder')
+    ]);
+    expect(back.engine.verifyStructure().of(FindingClass.corruption), isEmpty);
+    back.engine.close();
+  });
+
   test('the free tree is written, read back, and its space reused', () {
     // `spec/01-container.md` §6 and §9 step 7. Without tree 1 in the file,
     // another SDK reconciling reachable pages against an empty free tree

@@ -90,8 +90,10 @@ final class VerifyReport {
   final int entriesChecked;
 
   /// Findings of one class.
-  List<Finding> of(FindingClass c) =>
-      [for (final f in findings) if (f.kind == c) f];
+  List<Finding> of(FindingClass c) => [
+        for (final f in findings)
+          if (f.kind == c) f
+      ];
 
   /// Nothing at all was found — including leaks and warnings.
   bool get isClean => findings.isEmpty;
@@ -180,18 +182,40 @@ extension EngineVerify on Engine {
   /// A double-allocation is the finding that matters here and it is corruption:
   /// two live structures naming one page means one of them is about to be
   /// overwritten by a write to the other.
-  void _checkPageAccounting(
-      List<Finding> f, List<(int, int, String)> claims) {
-    final owner = <int, String>{};
-    void claim(Iterable<int> pages, String what) {
+  void _checkPageAccounting(List<Finding> f, List<(int, int, String)> claims) {
+    // F-165: extents, not pages. A map entry per page cost ~500 MB at 10^8
+    // documents (8.6M pages); this list grows with the structures instead:
+    // one run per segment, value-log segment, free extent and tree page run.
+    // `owner` -1 is free; `>= 0` indexes `names`.
+    final runs = <(int start, int end, int owner)>[];
+    final names = <String>[];
+    void claimRun(int start, int end, int owner) {
+      if (end > start) runs.add((start, end, owner));
+    }
+
+    void claimPages(Iterable<int> pages, String what) {
+      final limit = store.pageCount;
+      final sorted = <int>[];
       for (final p in pages) {
-        final prior = owner[p];
-        if (prior != null) {
-          f.add(Finding('01§9.7', 'page $p is claimed by both $prior and $what',
+        if (p < 0 || p >= limit) {
+          f.add(Finding(
+              '01§9.7', '$what names page $p, but the file holds $limit',
               kind: FindingClass.corruption));
           continue;
         }
-        owner[p] = what;
+        sorted.add(p);
+      }
+      sorted.sort();
+      final id = names.length;
+      names.add(what);
+      var i = 0;
+      while (i < sorted.length) {
+        var j = i + 1;
+        while (j < sorted.length && sorted[j] == sorted[j - 1] + 1) {
+          j++;
+        }
+        claimRun(sorted[i], sorted[j - 1] + 1, id);
+        i = j;
       }
     }
 
@@ -205,20 +229,17 @@ extension EngineVerify on Engine {
     ];
     for (final (tree, name) in trees) {
       try {
-        claim(tree.reachablePages(), name);
+        claimPages(tree.reachablePages(), name);
       } on CryptandException catch (e) {
         f.add(Finding('01§9.7', '$name is not walkable: ${e.runtimeType}',
             kind: FindingClass.corruption));
       }
     }
-    // `startPage` and `pages` come out of the file and are untrusted. Yielding
-    // them lazily and refusing an extent that runs past the end of the file is
-    // section 9.1's "bounds-check ... **before allocating**": the materialized
-    // form below built one list element per declared page, so a manifest entry
-    // claiming 0xFFFFFFFF pages asked for a 32 GiB list before anything looked
-    // at it. That is the same hazard the leak report at the end of this method
-    // already caps itself against, reached by two callers it did not cover.
-    Iterable<int> extentPages(int startPage, int pages, String what) sync* {
+    // `startPage` and `pages` come out of the file and are untrusted: section
+    // 9.1's "bounds-check ... **before allocating**". An extent that runs past
+    // the end of the file is a finding and claims nothing.
+    void claimExtent(int startPage, int pages, String what,
+        {bool free = false}) {
       final limit = store.pageCount;
       if (pages < 0 ||
           startPage < 0 ||
@@ -228,39 +249,37 @@ extension EngineVerify on Engine {
         f.add(Finding(
             '01§9.7',
             '$what claims $pages pages from $startPage, '
-            'but the file holds $limit',
+                'but the file holds $limit',
             kind: FindingClass.corruption));
         return;
       }
-      for (var i = 0; i < pages; i++) {
-        yield startPage + i;
+      if (free) {
+        claimRun(startPage, startPage + pages, -1);
+        return;
       }
+      names.add(what);
+      claimRun(startPage, startPage + pages, names.length - 1);
     }
 
     for (final ref in manifest.all) {
       if (ref.startPage == 0 || ref.pages == 0) continue;
-      claim(extentPages(ref.startPage, ref.pages, 'segment ${ref.segmentId}'),
-          'segment ${ref.segmentId}');
+      claimExtent(ref.startPage, ref.pages, 'segment ${ref.segmentId}');
     }
     for (final seg in vlog.segments.values) {
       if (seg.startPage == 0) continue;
-      claim(
-          extentPages(seg.startPage, seg.pageCount,
-              'value-log segment ${seg.id}'),
-          'value-log segment ${seg.id}');
+      claimExtent(seg.startPage, seg.pageCount, 'value-log segment ${seg.id}');
     }
-
     for (final (start, pages, what) in claims) {
-      claim(extentPages(start, pages, what), what);
+      claimExtent(start, pages, what);
     }
-
-    final free = <int>{};
     for (final e in store.freeExtents) {
       // F-114: the free list is the file's word too.
-      free.addAll(extentPages(e.startPage, e.pages, 'free extent'));
+      claimExtent(e.startPage, e.pages, 'free extent', free: true);
     }
-    // Pages 0 and 1 are the superblock slots, reserved before anything is
-    // allocated and owned by no tree.
+
+    // One sweep in start order. Two owned runs overlapping is the
+    // double-allocation; a page no run covers is a leak. Pages 0 and 1 are
+    // the superblock slots, reserved before anything is allocated.
     //
     // **The findings are capped.** `page_count` comes out of the file, and one
     // finding per leaked page means a hostile superblock claiming four billion
@@ -268,20 +287,51 @@ extension EngineVerify on Engine {
     // "MUST NOT ... allocate unboundedly" applies to the verifier's own output,
     // not only to its decoders. The count is exact either way; only the list of
     // page ids is bounded, and the page ids are the part that repeats.
+    runs.sort((x, y) => x.$1.compareTo(y.$1));
     const maxListed = 64;
-    var leaked = 0;
-    for (var p = 2; p < store.pageCount; p++) {
-      if (owner.containsKey(p) || free.contains(p)) continue;
-      leaked++;
-      if (leaked <= maxListed) {
+    var listed = 0;
+    void leak(int from, int to) {
+      for (var p = from; p < to && listed < maxListed; p++, listed++) {
         f.add(Finding('01§9.7', 'page $p is neither reachable nor free',
             kind: FindingClass.leak));
       }
     }
-    if (leaked > maxListed) {
-      f.add(Finding('01§9.7',
-          '$leaked pages are neither reachable nor free; '
-          'the first $maxListed are listed above',
+
+    var covered = 2; // every page below this is accounted for
+    var ownedEnd = 0, ownedBy = -1; // furthest-reaching owned run so far
+    var leakTotal = 0;
+    for (final (start, end, owner) in runs) {
+      if (start > covered) {
+        leakTotal += start - covered;
+        leak(covered, start);
+      }
+      if (owner >= 0) {
+        if (start < ownedEnd) {
+          final to = end < ownedEnd ? end : ownedEnd;
+          f.add(Finding(
+              '01§9.7',
+              to - start == 1
+                  ? 'page $start is claimed by both ${names[ownedBy]} and ${names[owner]}'
+                  : 'pages $start..${to - 1} are claimed by both '
+                      '${names[ownedBy]} and ${names[owner]}',
+              kind: FindingClass.corruption));
+        }
+        if (end > ownedEnd) {
+          ownedEnd = end;
+          ownedBy = owner;
+        }
+      }
+      if (end > covered) covered = end;
+    }
+    if (store.pageCount > covered) {
+      leakTotal += store.pageCount - covered;
+      leak(covered, store.pageCount);
+    }
+    if (leakTotal > maxListed) {
+      f.add(Finding(
+          '01§9.7',
+          '$leakTotal pages are neither reachable nor free; '
+              'the first $maxListed are listed above',
           kind: FindingClass.leak));
     }
   }
@@ -350,9 +400,11 @@ extension EngineVerify on Engine {
       if (filter != null) {
         final user = Uint8List.sublistView(k, 0, k.length - 9);
         if (!filter.mayContain(user)) {
-          f.add(Finding('11.7',
+          f.add(Finding(
+              '11.7',
               'filter false negative at entry $n — a key that is present '
-              'would not be found', segmentId: ref.segmentId));
+                  'would not be found',
+              segmentId: ref.segmentId));
         }
       }
 
@@ -389,8 +441,8 @@ extension EngineVerify on Engine {
             segmentId: ref.segmentId));
       }
       if (h.minExpiry != minExpiry) {
-        f.add(Finding('11.5',
-            'header min_expiry ${h.minExpiry} != actual $minExpiry',
+        f.add(Finding(
+            '11.5', 'header min_expiry ${h.minExpiry} != actual $minExpiry',
             segmentId: ref.segmentId));
       }
       if (h.entryCount != n) {
@@ -436,8 +488,8 @@ extension EngineVerify on Engine {
             f.add(Finding(
                 '11.6',
                 'segments ${prev.segmentId} and ${cur.segmentId} overlap in '
-                'user keys at level $level group ${g.key}'
-                '${level == lastLevel ? " (the levelled level MUST be disjoint)" : ""}',
+                    'user keys at level $level group ${g.key}'
+                    '${level == lastLevel ? " (the levelled level MUST be disjoint)" : ""}',
                 segmentId: cur.segmentId));
           }
         }
@@ -507,9 +559,10 @@ extension EngineVerify on Engine {
     if (debt > localityDebtPct) {
       // F-141: a bound the format permits exceeding (§6.9 holds it only
       // when not under write pressure), so a warning, as Rust and Java.
-      f.add(Finding('11.11',
+      f.add(Finding(
+          '11.11',
           'locality_debt ${debt.toStringAsFixed(1)}% exceeds '
-          'locality_debt_pct $localityDebtPct%',
+              'locality_debt_pct $localityDebtPct%',
           kind: FindingClass.warning));
     }
   }

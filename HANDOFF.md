@@ -104,11 +104,12 @@
 
 ## Next action
 
-10^8 Dart AOT (10-16, remote): build 223 MB footprint PASS, settle 113 MB PASS, **read 637 MB FAIL**
-(bar 320): F-165 opened, profile Dart read open/verify memory next. Java 10^8 run 10-16 failed:
-`/tmp/j1e8.db` vanished at 1189 s of build (NoSuchFileException; cause unknown, macOS /tmp?).
-Rerun running (10-16 21:48): `cryptand-1e8/reference/bench/runs/j-1e8.sh` -> `j-1e8.log`, db and
-per-rung full output in remote `~/j1e8/`. Then: fill RESULTS, close F-161.
+10^8 (10-16/17, remote): Dart build/settle PASS, read 637 MB FAIL (F-165); Java build PASS
+(228 MB, 1154 s), read OOM in filter decode (F-166: filters cached forever, R+J+D), settle OOM
+in `cutTail` (F-167, per-page HashSet). F-165 = per-page verify maps in all three; human chose an
+extent sweep, Dart done (10-17). Next: R+J verify sweep, then F-166 (bound filters) R+J+D, F-167,
+then rerun the 10^8 rungs. Remote keeps the Java 10^8 file `~/j1e8/j1e8.db` (85 GB, disk 29 GB free)
+for repros: delete it before any new 10^8 build.
 
 ## Log
 
@@ -163,3 +164,4 @@ per-rung full output in remote `~/j1e8/`. Then: fill RESULTS, close F-161.
 - 2026-10-15 — F-162 fixed (J+R: dead background thread fails the next write), F-164 fixed (J: chunked extent write); Java 5x10^6 at 128m PASS.
 - 2026-10-16 — Java + Dart AOT 10^8 rung launched on remote (`cryptand-1e8`, jd-1e8.sh).
 - 2026-10-16 — 10^8 Dart: build/settle PASS, read 637 MB FAIL (F-165); Java db vanished from /tmp, rerun under ~/j1e8.
+- 2026-10-17 — Java 10^8 build PASS, read OOM (F-166 filters unbounded, R+J+D), settle OOM (F-167); F-165 Dart verify extent sweep.
