@@ -104,12 +104,11 @@
 
 ## Next action
 
-10^8 rerun (10-15): Rust PASS (build 189 MB, read 290 MB p99 980 us, settle 315 MB < 352 bar; was 408).
-Java failed on F-164 (compactor OOM, a regression from F-161's 32 MiB outputs) and F-162 (a dead
-compactor went unseen, so the writer stalled forever). Both fixed 10-15; the 5x10^6 repro at -Xmx128m now passes (214 MB).
-Running (10-16 01:05): remote clone `cryptand-1e8` @1eac7ba, `reference/bench/runs/jd-1e8.sh` -> `jd-1e8.log`:
-Java 10^8 build/read/settle at -Xmx128m, then Dart AOT (`/tmp/scale1e8`). Next: read the log,
-fill RESULTS, close F-161. Side question: Dart segments ~40% larger than Rust's.
+10^8 Dart AOT (10-16, remote): build 223 MB footprint PASS, settle 113 MB PASS, **read 637 MB FAIL**
+(bar 320): F-165 opened, profile Dart read open/verify memory next. Java 10^8 run 10-16 failed:
+`/tmp/j1e8.db` vanished at 1189 s of build (NoSuchFileException; cause unknown, macOS /tmp?).
+Rerun running (10-16 21:48): `cryptand-1e8/reference/bench/runs/j-1e8.sh` -> `j-1e8.log`, db and
+per-rung full output in remote `~/j1e8/`. Then: fill RESULTS, close F-161.
 
 ## Log
 
@@ -163,3 +162,4 @@ fill RESULTS, close F-161. Side question: Dart segments ~40% larger than Rust's.
 - 2026-10-15 — 10^8 rerun: Rust PASS (settle 315 MB); Java compactor OOM (F-164, F-161 regression), writer stalled 10.7 h; F-162 widened to dead-compactor liveness.
 - 2026-10-15 — F-162 fixed (J+R: dead background thread fails the next write), F-164 fixed (J: chunked extent write); Java 5x10^6 at 128m PASS.
 - 2026-10-16 — Java + Dart AOT 10^8 rung launched on remote (`cryptand-1e8`, jd-1e8.sh).
+- 2026-10-16 — 10^8 Dart: build/settle PASS, read 637 MB FAIL (F-165); Java db vanished from /tmp, rerun under ~/j1e8.
