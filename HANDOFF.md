@@ -104,12 +104,12 @@
 
 ## Next action
 
-10^8 (10-16/17, remote): Dart build/settle PASS, read 637 MB FAIL (F-165); Java build PASS
-(228 MB, 1154 s), read OOM in filter decode (F-166: filters cached forever, R+J+D), settle OOM
-in `cutTail` (F-167, per-page HashSet). F-165 = per-page verify maps in all three; human chose an
-extent sweep, Dart done (10-17). Next: R+J verify sweep, then F-166 (bound filters) R+J+D, F-167,
-then rerun the 10^8 rungs. Remote keeps the Java 10^8 file `~/j1e8/j1e8.db` (85 GB, disk 29 GB free)
-for repros: delete it before any new 10^8 build.
+F-165 (verify extent sweep) and F-166 (filter probe reads one block through the page cache) fixed
+R+J+D 10-17, gate quick green. Rerun running (10-17 08:43): remote `cryptand-1e8` @8fdbc3c,
+`reference/bench/runs/r-1e8.sh` -> `r-1e8.log`: Java read+settle on the kept 10^8 file, then Dart AOT
+build/read/settle (~3.5 h); full per-rung output in remote `~/j1e8/`. Next: read the log; Java settle
+likely still hits F-167 (`cutTail` per-page HashSet, J; R/D unchecked). Then fill RESULTS, close
+F-161/F-165/F-166. Side question: Dart segments ~40% larger than Rust's.
 
 ## Log
 
@@ -165,3 +165,4 @@ for repros: delete it before any new 10^8 build.
 - 2026-10-16 — Java + Dart AOT 10^8 rung launched on remote (`cryptand-1e8`, jd-1e8.sh).
 - 2026-10-16 — 10^8 Dart: build/settle PASS, read 637 MB FAIL (F-165); Java db vanished from /tmp, rerun under ~/j1e8.
 - 2026-10-17 — Java 10^8 build PASS, read OOM (F-166 filters unbounded, R+J+D), settle OOM (F-167); F-165 Dart verify extent sweep.
+- 2026-10-17 — F-165 R+J, F-166 R+J+D fixed (human chose extent sweep + page-cache filters); 10^8 rerun launched.
