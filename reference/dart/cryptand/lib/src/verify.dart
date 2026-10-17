@@ -375,6 +375,8 @@ extension EngineVerify on Engine {
     var maxSeq = 0;
     var minExpiry = 0;
     var tombstones = 0;
+    // Once per segment: `filter` decodes the whole filter each call (F-168).
+    final filter = seg.filter;
 
     final c = seg.cursor()..seekFirst();
     while (c.isValid) {
@@ -394,7 +396,6 @@ extension EngineVerify on Engine {
 
       // §11.7: every key in a segment passes that segment's filter. A false
       // negative here is a LOST KEY, not a slow lookup.
-      final filter = seg.filter;
       if (filter != null) {
         final user = Uint8List.sublistView(k, 0, k.length - 9);
         if (!filter.mayContain(user)) {
