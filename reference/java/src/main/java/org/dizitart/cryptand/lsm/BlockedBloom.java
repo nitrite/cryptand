@@ -131,7 +131,7 @@ public final class BlockedBloom {
     }
 
     private void addHash(long hash) {
-        int base = blockOf(hash) * BLOCK_BYTES;
+        int base = blockOf(hash, blockCount) * BLOCK_BYTES;
         int h1 = (int) hash;
         int h2 = (int) (hash >>> 32) | 1;
         for (int i = 0; i < probes; i++) {
@@ -152,7 +152,11 @@ public final class BlockedBloom {
 
     /** {@link #mayContain} for a key whose {@code cfh64} the caller already has. */
     public boolean mayContainHash(long hash) {
-        int base = blockOf(hash) * BLOCK_BYTES;
+        return probeBlock(blocks, blockOf(hash, blockCount) * BLOCK_BYTES, hash, probes);
+    }
+
+    /** §2.4's probe of the one 64-byte block at {@code base} of {@code blocks}. */
+    public static boolean probeBlock(byte[] blocks, int base, long hash, int probes) {
         int h1 = (int) hash;
         int h2 = (int) (hash >>> 32) | 1;
         for (int i = 0; i < probes; i++) {
@@ -165,7 +169,7 @@ public final class BlockedBloom {
     }
 
     /** {@code block = (h1 * block_count) >> 32} — a u64 multiply, keeping the high half. */
-    private int blockOf(long hash) {
+    public static int blockOf(long hash, int blockCount) {
         long h1 = hash & 0xFFFFFFFFL;
         return (int) ((h1 * blockCount) >>> 32);
     }

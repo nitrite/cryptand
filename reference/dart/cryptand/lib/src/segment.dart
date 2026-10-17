@@ -1474,16 +1474,13 @@ final class Segment {
     return _rangeDeletes = out;
   }
 
-  BlockedBloom? _filter;
-  bool _filterLoaded = false;
-
-  /// The segment's membership filter, or null when `filter_page = 0`.
+  /// The segment's whole membership filter, decoded afresh on every call
+  /// (verify and tests; probes go through [mayContainHash]), or null when
+  /// `filter_page = 0`.
   ///
   /// §4: a reader with no filter MUST treat every probe as a hit, which is
   /// what a null here means at the call site.
   BlockedBloom? get filter {
-    if (_filterLoaded) return _filter;
-    _filterLoaded = true;
     final first = header.filterPage;
     if (first == 0) return null;
     final out = BytesBuilder();
@@ -1493,7 +1490,86 @@ final class Segment {
       if (h.pageType != PageType.segmentFilter) break;
       out.add(h.payloadIn(page, pageId: i));
     }
-    return _filter = BlockedBloom.decodePayload(out.takeBytes());
+    return BlockedBloom.decodePayload(out.takeBytes());
+  }
+
+  /// Whether the segment has a filter at all (`filter_page != 0`).
+  bool get hasFilter => header.filterPage != 0;
+
+  /// F-166: the filter's header and page layout, not its blocks. A decoded
+  /// filter per cached segment was charged to nothing; a probe now reads its
+  /// one block from the segment's pages, which the page cache budgets.
+  ({int blockCount, int probes, List<int> starts, List<int> lens})? _layout;
+
+  ({int blockCount, int probes, List<int> starts, List<int> lens})
+      _filterLayout() {
+    if (_layout case final l?) return l;
+    final first = header.filterPage;
+    final starts = <int>[], lens = <int>[];
+    var have = 0;
+    for (var i = first; i < pageCount; i++) {
+      final page = this.page(i);
+      final h = PageHeader.read(page, pageId: i);
+      if (h.pageType != PageType.segmentFilter) break;
+      final n = h.payloadIn(page, pageId: i).length;
+      starts.add(have);
+      lens.add(n);
+      have += n;
+    }
+    if (lens.isEmpty || lens[0] < 20) {
+      throw const CorruptionException('filter page shorter than its header');
+    }
+    final head = page(first);
+    final r = ByteReader(
+        Uint8List.sublistView(head, PageHeader.size, PageHeader.size + 20));
+    if (r.u32() != 0x43465031) {
+      throw const CorruptionException('bad filter page magic (expected CFP1)');
+    }
+    final blockCount = r.u32();
+    r.u16();
+    final probes = r.u16();
+    if (blockCount < 1 || probes < 1 || probes > 16) {
+      throw const CorruptionException('filter header out of range');
+    }
+    if (20 + blockCount * kBlockBytes > have) {
+      throw CorruptionException(
+          'filter declares $blockCount blocks but has ${have - 20} bytes');
+    }
+    return _layout =
+        (blockCount: blockCount, probes: probes, starts: starts, lens: lens);
+  }
+
+  /// [mayContainHash] of `cfh64(userKeyPrefix)`.
+  bool mayContain(List<int> userKeyPrefix) =>
+      mayContainHash(cfh64(userKeyPrefix));
+
+  /// §2.4's probe, reading one block through the segment's cached pages.
+  /// True without a filter.
+  bool mayContainHash(int h) {
+    if (!hasFilter) return true;
+    final l = _filterLayout();
+    final off = 20 + BlockedBloom.blockOf(h, l.blockCount) * kBlockBytes;
+    final block = Uint8List(kBlockBytes);
+    var got = 0;
+    // A block may straddle two filter pages.
+    var i = l.starts.length - 1;
+    while (l.starts[i] > off) {
+      i--;
+    }
+    while (got < kBlockBytes) {
+      if (i >= l.starts.length) {
+        throw const CorruptionException('filter block past its pages');
+      }
+      final from = off + got - l.starts[i];
+      final n = (kBlockBytes - got) < (l.lens[i] - from)
+          ? kBlockBytes - got
+          : l.lens[i] - from;
+      final page = this.page(header.filterPage + i);
+      block.setRange(got, got + n, page, PageHeader.size + from);
+      got += n;
+      i++;
+    }
+    return BlockedBloom.probeBlock(block, 0, h, l.probes);
   }
 
   /// True when this segment's key range can contain [userKeyPrefix].

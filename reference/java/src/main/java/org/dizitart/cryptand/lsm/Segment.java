@@ -35,8 +35,26 @@ public final class Segment {
     private final SegmentMeta meta;
     /** 04 §2.1, F-128: every headed page of the extent carries this commit id. */
     private final long headCommit;
-    private BlockedBloom filter;
-    private boolean filterLoaded;
+    /**
+     * F-166: the filter's header and page layout, not its blocks. A decoded
+     * filter per open segment was O(keys) of heap for the engine's life (Java
+     * keeps every live segment open): ~125 MB at 10^8 documents, an OOM at
+     * -Xmx128m. A probe reads its one block through the pager's page cache.
+     */
+    private volatile FilterLayout layout;
+
+    /** Block count, probes, and where each filter page's payload starts in the filter. */
+    private static final class FilterLayout {
+        final int blockCount;
+        final int probes;
+        final long[] starts; // starts[i] = offset in the filter of page filterPage + i
+
+        FilterLayout(int blockCount, int probes, long[] starts) {
+            this.blockCount = blockCount;
+            this.probes = probes;
+            this.starts = starts;
+        }
+    }
 
     private Segment(Pager pager, long startPage, SegmentMeta meta, long headCommit) {
         this.pager = pager;
@@ -78,19 +96,14 @@ public final class Segment {
     }
 
     /**
-     * The membership filter, demand-loaded.
+     * The whole membership filter, decoded afresh on every call (verify reads
+     * it once per segment; probes go through {@link #mayContainHash}).
      *
      * <p>{@code filter_page = 0} means no filter, and a reader MUST then treat
      * every probe as a hit — never as a miss, which would lose keys.
      */
     public BlockedBloom filter() {
-        if (!filterLoaded) {
-            filterLoaded = true;
-            if (meta.filterPage != 0) {
-                filter = readFilter();
-            }
-        }
-        return filter;
+        return meta.filterPage == 0 ? null : readFilter();
     }
 
     private BlockedBloom readFilter() {
@@ -116,6 +129,53 @@ public final class Segment {
         return BlockedBloom.decode(w.toBytes());
     }
 
+    /** The header checks of {@link BlockedBloom#decode}, once per segment, and the page layout. */
+    private FilterLayout layout() {
+        FilterLayout l = layout;
+        if (l != null) {
+            return l;
+        }
+        long first = absolute(meta.filterPage);
+        byte[] h = new byte[BlockedBloom.HEADER_BYTES];
+        int len = pager.copyPayload(first, headCommit, 0, h, 0, 0);
+        if (len < BlockedBloom.HEADER_BYTES) {
+            throw new CorruptionException("filter page shorter than its 20-byte header", first, null);
+        }
+        pager.copyPayload(first, headCommit, 0, h, 0, BlockedBloom.HEADER_BYTES);
+        ByteReader r = new ByteReader(h);
+        int magic = r.u32();
+        if (magic != BlockedBloom.MAGIC) {
+            throw new CorruptionException(String.format(
+                    "filter page magic is %08x, expected %08x", magic, BlockedBloom.MAGIC));
+        }
+        int blockCount = r.u32();
+        r.u16();
+        int probes = r.u16();
+        if (blockCount < 1) {
+            throw new CorruptionException("filter block_count is " + blockCount);
+        }
+        if (probes < 1 || probes > 16) {
+            throw new CorruptionException("filter probes is " + probes + ", outside 1..16");
+        }
+        long needed = BlockedBloom.HEADER_BYTES + (long) blockCount * BlockedBloom.BLOCK_BYTES;
+        java.util.List<Long> starts = new java.util.ArrayList<>();
+        long have = 0;
+        long page = first;
+        while (have < needed) {
+            starts.add(have);
+            // absolute() bounds the walk to the extent.
+            have += pager.copyPayload(absolute(page - startPage), headCommit, 0, h, 0, 0);
+            page++;
+        }
+        long[] s = new long[starts.size()];
+        for (int i = 0; i < s.length; i++) {
+            s[i] = starts.get(i);
+        }
+        l = new FilterLayout(blockCount, probes, s);
+        layout = l;
+        return l;
+    }
+
     /** A page of this extent: 04 §2.1, F-128, it carries the head's commit id. */
     private byte[] readOwn(long page) {
         byte[] raw = pager.readRaw(page);
@@ -126,14 +186,34 @@ public final class Segment {
 
     /** Whether this segment may hold {@code userKey}; a segment with no filter always may. */
     public boolean mayContain(byte[] userKey) {
-        BlockedBloom f = filter();
-        return f == null || f.mayContain(userKey);
+        return mayContainHash(org.dizitart.cryptand.util.Cfh64.hash(userKey));
     }
 
-    /** {@link #mayContain} given the user key's {@code cfh64}. */
+    /** {@link #mayContain} given the user key's {@code cfh64}: one block, through the page cache. */
     public boolean mayContainHash(long hash) {
-        BlockedBloom f = filter();
-        return f == null || f.mayContainHash(hash);
+        if (meta.filterPage == 0) {
+            return true;
+        }
+        FilterLayout l = layout();
+        long off = BlockedBloom.HEADER_BYTES
+                + (long) BlockedBloom.blockOf(hash, l.blockCount) * BlockedBloom.BLOCK_BYTES;
+        byte[] block = new byte[BlockedBloom.BLOCK_BYTES];
+        int got = 0;
+        // A block may straddle two filter pages.
+        int i = java.util.Arrays.binarySearch(l.starts, off);
+        if (i < 0) {
+            i = -i - 2;
+        }
+        long first = absolute(meta.filterPage);
+        while (got < block.length) {
+            int from = (int) (off + got - l.starts[i]);
+            int n = (int) Math.min(block.length - got,
+                    (i + 1 < l.starts.length ? l.starts[i + 1] : Long.MAX_VALUE) - (off + got));
+            pager.copyPayload(first + i, headCommit, from, block, got, n);
+            got += n;
+            i++;
+        }
+        return BlockedBloom.probeBlock(block, 0, hash, l.probes);
     }
 
     /**

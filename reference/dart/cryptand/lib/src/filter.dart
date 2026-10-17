@@ -94,18 +94,25 @@ final class BlockedBloom {
 
   /// [mayContain] for a key whose hash the caller already has -- which must be
   /// this filter's hash of it; a filter decoded from a segment uses [cfh64].
-  bool mayContainHash(int h) {
+  bool mayContainHash(int h) =>
+      probeBlock(blocks, _blockOf(h & 0xFFFFFFFF) * kBlockBytes, h, probes);
+
+  /// Section 2.4's probe of the one 64-byte block at [base] of [bytes].
+  static bool probeBlock(Uint8List bytes, int base, int h, int probes) {
     final h1 = h & 0xFFFFFFFF;
     final h2 = ((h >>> 32) | 1) & 0xFFFFFFFF;
-    final base = _blockOf(h1) * kBlockBytes;
     var probe = h1;
     for (var i = 0; i < probes; i++) {
       final bit = probe & (kBlockBits - 1);
-      if (blocks[base + (bit >> 3)] & (1 << (bit & 7)) == 0) return false;
+      if (bytes[base + (bit >> 3)] & (1 << (bit & 7)) == 0) return false;
       probe = (probe + h2) & 0xFFFFFFFF;
     }
     return true;
   }
+
+  /// `block = (h1 * block_count) >> 32` for hash [h].
+  static int blockOf(int h, int blockCount) =>
+      ((h & 0xFFFFFFFF) * blockCount) >> 32;
 
   /// Filter page payload, section 2.4.
   Uint8List encodePayload() {

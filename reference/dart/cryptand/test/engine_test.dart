@@ -10,6 +10,7 @@ import 'package:cryptand/src/cve.dart';
 import 'package:cryptand/src/engine.dart';
 import 'package:cryptand/src/manifest.dart' show SegmentRef;
 import 'package:cryptand/src/errors.dart';
+import 'package:cryptand/src/filter.dart' show cfh64;
 import 'package:cryptand/src/limits.dart';
 import 'package:cryptand/src/value.dart';
 import 'package:cryptand/src/vlog.dart';
@@ -406,6 +407,23 @@ void main() {
       }
       expect(fast.get(17, CNitriteId(snowflakeId(7))),
           docBytes(dict, 7));
+    });
+
+    test('F-166: a block probe answers as the decoded filter does', () {
+      final e = aged();
+      e.get(17, CNitriteId(snowflakeId(7)));
+      var multiPage = false;
+      for (final seg in e.extents.values) {
+        final f = seg.filter;
+        if (f == null) continue;
+        multiPage |= f.blocks.length + 20 > seg.pageSize - 40;
+        for (var i = 0; i < 40000; i++) {
+          final h = cfh64(Uint8List.fromList([i & 0xFF, i >> 8, 17, i >> 16]));
+          expect(seg.mayContainHash(h), f.mayContainHash(h), reason: 'probe $i');
+        }
+      }
+      expect(multiPage, isTrue,
+          reason: 'no filter spans pages, so the straddle path went untested');
     });
 
     test('a segment holds a filter, and it prunes', () {

@@ -33,6 +33,21 @@ pub struct BlockedBloom {
     pub distinct_keys: u64,
 }
 
+/// §2.4's block for `hash`: `(h1 * block_count) >> 32`.
+pub fn block_of(hash: u64, block_count: u64) -> usize {
+    (((hash & 0xFFFF_FFFF) * block_count) >> 32) as usize
+}
+
+/// §2.4's probe of one 64-byte `block`.
+pub fn probe_block(block: &[u8], hash: u64, probes: u32) -> bool {
+    let h1 = (hash & 0xFFFF_FFFF) as u32;
+    let h2 = ((hash >> 32) as u32) | 1; // forced odd, so the probes spread
+    (0..probes).all(|i| {
+        let bit = h1.wrapping_add(i.wrapping_mul(h2)) % BLOCK_BITS as u32;
+        block[(bit / 8) as usize] & (1 << (bit % 8)) != 0
+    })
+}
+
 impl BlockedBloom {
     pub fn build(keys: &[Vec<u8>], bits_per_key: u32, distinct_keys: u64) -> BlockedBloom {
         Self::build_from_hashes(
@@ -93,12 +108,8 @@ impl BlockedBloom {
     /// already has: the point read hashes the key once for this and for the
     /// segment's point index.
     pub fn may_contain_hash(&self, hash: u64) -> bool {
-        let (block, h1, h2) = self.locate_hash(hash);
-        (0..self.probes).all(|i| {
-            let bit = h1.wrapping_add(i.wrapping_mul(h2)) % BLOCK_BITS as u32;
-            let byte = block * BLOCK_BYTES + (bit / 8) as usize;
-            self.blocks[byte] & (1 << (bit % 8)) != 0
-        })
+        let block = block_of(hash, self.block_count) * BLOCK_BYTES;
+        probe_block(&self.blocks[block..block + BLOCK_BYTES], hash, self.probes)
     }
 
     /// The filter page payload, after the 40-byte page header.

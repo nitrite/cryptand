@@ -741,6 +741,39 @@ public final class Pager {
     }
 
     /**
+     * F-166: {@code len} bytes at {@code from} of page {@code pageId}'s decoded
+     * payload, through the budgeted payload cache, so a filter probe holds one
+     * cached page rather than a whole decoded filter per segment. A miss checks
+     * the page's commit id against its segment head (F-128). Returns the
+     * payload's length; copies nothing when {@code len} is 0.
+     */
+    public int copyPayload(long pageId, long headCommit, int from, byte[] dst, int at, int len) {
+        byte[] hit;
+        synchronized (cache) {
+            hit = payloads.get(pageId);
+        }
+        if (hit != null) {
+            cacheHits.incrementAndGet();
+        } else {
+            cacheMisses.incrementAndGet();
+            pageReads.incrementAndGet();
+            byte[] page = new byte[pageSize];
+            checkInFile(pageId);
+            file.readFully(offsetOf(pageId), page, 0, pageSize);
+            PageHeader h = PageHeader.verify(page, pageId);
+            checkCommit(pageId, h, headCommit);
+            hit = decodePayload(page, h, pageId);
+            admitPayload(pageId, hit);
+        }
+        if (from < 0 || len < 0 || from + len > hit.length) {
+            throw new CorruptionException("page " + pageId + ": bytes " + from + ".." + (from + len)
+                    + " past its " + hit.length + "-byte payload", pageId, null);
+        }
+        System.arraycopy(hit, from, dst, at, len);
+        return hit.length;
+    }
+
+    /**
      * Caches a decoded payload, evicting to stay inside
      * {@code 12-profiles.md} §1's budget. Pages 0 and 1 are excluded for the
      * same reason as in {@link #admit}: the engine writes the superblock slots

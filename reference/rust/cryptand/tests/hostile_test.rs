@@ -495,3 +495,18 @@ fn value_log_record_length_near_two_to_the_64_is_corrupt() {
         assert!(matches!(cryptand::vlog::decode_record(&b, encrypted), Err(cryptand::Error::Corrupt(_))));
     }
 }
+
+/// F-166: the probe reads its one block from the segment's pages instead of a
+/// decoded copy, and must answer exactly as the decoded filter does, on a
+/// filter that spans pages (so a block can straddle two).
+#[test]
+fn f166_block_probe_matches_the_decoded_filter() {
+    let seg = Segment::open(segment_with_filter(20_000), PAGE).unwrap();
+    let f = seg.filter().unwrap().unwrap();
+    assert!(20 + f.blocks.len() > PAGE - 40, "the filter fits one page; the straddle path is untested");
+    for i in 0..40_000i64 {
+        let c = cke::encode(&Value::NitriteId(i)).unwrap();
+        let h = cryptand::hash::cfh64(&cryptand::filter::user_key_prefix(T, &c));
+        assert_eq!(seg.may_contain_hash(h), f.may_contain_hash(h), "probe {i}");
+    }
+}

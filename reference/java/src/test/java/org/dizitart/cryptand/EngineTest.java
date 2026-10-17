@@ -674,6 +674,33 @@ class EngineTest {
     }
 
     @Test
+    @DisplayName("F-166: a block probe through the page cache answers as the decoded filter does")
+    void blockProbeMatchesDecodedFilter(@TempDir Path dir) {
+        try (Engine e = Engine.create(dir.resolve("f166.cryptand"), options())) {
+            for (int i = 0; i < 40_000; i++) {
+                e.batch().put(TREE, key("key-" + i), val("v")).commit();
+            }
+            e.commitNow();
+            e.compact();
+            e.commitNow();
+            boolean multiPage = false;
+            for (Segment s : e.segments()) {
+                org.dizitart.cryptand.lsm.BlockedBloom f = s.filter();
+                if (f == null) {
+                    continue;
+                }
+                multiPage |= f.blocks().length + 20 > e.pager().pageSize() - 40;
+                for (int i = 0; i < 80_000; i++) {
+                    long h = org.dizitart.cryptand.util.Cfh64.hash(
+                            org.dizitart.cryptand.lsm.BlockedBloom.userKey(TREE, key("key-" + i)));
+                    assertEquals(f.mayContainHash(h), s.mayContainHash(h), "probe " + i);
+                }
+            }
+            assertTrue(multiPage, "no filter spans pages, so the straddle path went untested");
+        }
+    }
+
+    @Test
     @DisplayName("skip(n) lands where n steps of next() land")
     void skipMatchesStepping(@TempDir Path dir) {
         try (Engine e = Engine.create(dir.resolve("n.cryptand"), options())) {

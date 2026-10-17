@@ -90,10 +90,8 @@ final class VerifyReport {
   final int entriesChecked;
 
   /// Findings of one class.
-  List<Finding> of(FindingClass c) => [
-        for (final f in findings)
-          if (f.kind == c) f
-      ];
+  List<Finding> of(FindingClass c) =>
+      [for (final f in findings) if (f.kind == c) f];
 
   /// Nothing at all was found — including leaks and warnings.
   bool get isClean => findings.isEmpty;
@@ -400,11 +398,9 @@ extension EngineVerify on Engine {
       if (filter != null) {
         final user = Uint8List.sublistView(k, 0, k.length - 9);
         if (!filter.mayContain(user)) {
-          f.add(Finding(
-              '11.7',
+          f.add(Finding('11.7',
               'filter false negative at entry $n — a key that is present '
-                  'would not be found',
-              segmentId: ref.segmentId));
+              'would not be found', segmentId: ref.segmentId));
         }
       }
 
@@ -441,8 +437,8 @@ extension EngineVerify on Engine {
             segmentId: ref.segmentId));
       }
       if (h.minExpiry != minExpiry) {
-        f.add(Finding(
-            '11.5', 'header min_expiry ${h.minExpiry} != actual $minExpiry',
+        f.add(Finding('11.5',
+            'header min_expiry ${h.minExpiry} != actual $minExpiry',
             segmentId: ref.segmentId));
       }
       if (h.entryCount != n) {
@@ -488,8 +484,8 @@ extension EngineVerify on Engine {
             f.add(Finding(
                 '11.6',
                 'segments ${prev.segmentId} and ${cur.segmentId} overlap in '
-                    'user keys at level $level group ${g.key}'
-                    '${level == lastLevel ? " (the levelled level MUST be disjoint)" : ""}',
+                'user keys at level $level group ${g.key}'
+                '${level == lastLevel ? " (the levelled level MUST be disjoint)" : ""}',
                 segmentId: cur.segmentId));
           }
         }
@@ -559,10 +555,9 @@ extension EngineVerify on Engine {
     if (debt > localityDebtPct) {
       // F-141: a bound the format permits exceeding (§6.9 holds it only
       // when not under write pressure), so a warning, as Rust and Java.
-      f.add(Finding(
-          '11.11',
+      f.add(Finding('11.11',
           'locality_debt ${debt.toStringAsFixed(1)}% exceeds '
-              'locality_debt_pct $localityDebtPct%',
+          'locality_debt_pct $localityDebtPct%',
           kind: FindingClass.warning));
     }
   }

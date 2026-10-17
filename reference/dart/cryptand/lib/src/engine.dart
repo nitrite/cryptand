@@ -2214,13 +2214,13 @@ final class Engine {
     for (final ref in _candidateRefs()) {
       if (!ref.covers(userKeyPrefix)) continue;
       final seg = segment(ref);
-      final f = seg.filter;
+      final f = seg.hasFilter;
       // §4: a segment that may hold a covering range delete MUST NOT be
       // pruned by its filter, which contains point keys only.
-      if (f != null && !ref.hasRangeDeletes && !f.mayContain(userKeyPrefix)) {
+      if (f && !ref.hasRangeDeletes && !seg.mayContain(userKeyPrefix)) {
         continue;
       }
-      if (f != null) filterAdmitted++;
+      if (f) filterAdmitted++;
       out.add(seg);
     }
     return out;
@@ -2308,19 +2308,19 @@ final class Engine {
       }
       if (!ref.covers(prefix)) continue;
       final s = segment(ref);
-      final f = s.filter;
+      final f = s.hasFilter;
       // §4: a segment that may hold a covering range delete MUST NOT be
       // pruned by its filter, which contains point keys only.
-      if (f != null && !ref.hasRangeDeletes && !f.mayContainHash(hash)) {
+      if (f && !ref.hasRangeDeletes && !s.mayContainHash(hash)) {
         continue;
       }
-      if (f != null) filterAdmitted++;
+      if (f) filterAdmitted++;
       if (stop) continue;
       probed++;
       var rec = s.pointLookup(prefix, hash, ceiling);
       if (identical(rec, Segment.unindexed)) rec = _seekIn(s, prefix, ceiling);
       if (rec == null) {
-        if (f != null) filterFalsePositives++;
+        if (f) filterFalsePositives++;
         continue;
       }
       if (best == null || rec.seq > best.seq) best = rec;

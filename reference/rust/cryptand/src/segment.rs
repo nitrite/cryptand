@@ -1330,6 +1330,15 @@ impl SegmentBuilder {
 // Reading a segment
 // ---------------------------------------------------------------------------
 
+/// Where a segment's filter lives in its pages (F-166).
+struct FilterLayout {
+    block_count: u64,
+    probes: u32,
+    /// Offset in the filter of each filter page's payload, and its length.
+    starts: Vec<usize>,
+    lens: Vec<usize>,
+}
+
 /// An immutable segment, read from its extent.
 pub struct Segment {
     /// The extent's pages, filled on first use when `loader` is set (F-151):
@@ -1344,7 +1353,10 @@ pub struct Segment {
     /// segment. See [`Segment::may_contain`] for why it is not decoded per
     /// probe. `OnceLock` rather than `OnceCell` because a `Segment` is held in
     /// an `Arc` and probed from every reader thread.
-    filter_cache: std::sync::OnceLock<Option<BlockedBloom>>,
+    /// F-166: the filter's header and page layout, not its blocks; a probe
+    /// reads its block from the segment's own pages, which the page cache
+    /// budgets. The decoded copy this replaced was charged to nothing.
+    filter_layout: std::sync::OnceLock<Option<FilterLayout>>,
     /// How many times the filter payload has actually been decoded. A counter,
     /// so the caching above is provable rather than merely faster.
     pub filter_parses: std::sync::atomic::AtomicU64,
@@ -1436,7 +1448,7 @@ impl Segment {
             resident: std::sync::atomic::AtomicU64::new(resident),
             page_size,
             header,
-            filter_cache: std::sync::OnceLock::new(),
+            filter_layout: std::sync::OnceLock::new(),
             filter_parses: std::sync::atomic::AtomicU64::new(0),
             last_used: std::sync::atomic::AtomicU64::new(0),
             point_index: std::sync::OnceLock::new(),
@@ -1576,10 +1588,74 @@ impl Segment {
 
     /// [`Segment::may_contain`] given the key's `cfh64`.
     pub fn may_contain_hash(&self, hash: u64) -> bool {
-        match self.filter_cache.get_or_init(|| self.filter().ok().flatten()) {
-            Some(f) => f.may_contain_hash(hash),
-            None => true,
+        let Some(l) = self.filter_layout.get_or_init(|| self.filter_layout().ok().flatten()) else {
+            return true;
+        };
+        let off = 20 + crate::filter::block_of(hash, l.block_count) * crate::filter::BLOCK_BYTES;
+        let mut block = [0u8; crate::filter::BLOCK_BYTES];
+        let mut got = 0;
+        // A block may straddle two filter pages.
+        let mut i = l.starts.partition_point(|&s| s <= off) - 1;
+        while got < block.len() {
+            let Ok(page) = self.page(self.header.filter_page + i as u64) else { return true };
+            let payload = &page[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + l.lens[i]];
+            let from = off + got - l.starts[i];
+            let n = (block.len() - got).min(payload.len().saturating_sub(from));
+            if n == 0 {
+                return true; // checked at layout time; "maybe" is always sound
+            }
+            block[got..got + n].copy_from_slice(&payload[from..from + n]);
+            got += n;
+            i += 1;
+            if i >= l.starts.len() && got < block.len() {
+                return true;
+            }
         }
+        crate::filter::probe_block(&block, hash, l.probes)
+    }
+
+    /// [`Segment::filter`]'s header checks and the filter's page layout,
+    /// without copying its blocks.
+    fn filter_layout(&self) -> Result<Option<FilterLayout>> {
+        if self.header.filter_page == 0 {
+            return Ok(None);
+        }
+        self.filter_parses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cap = self.page_size - PAGE_HEADER_BYTES;
+        let (mut starts, mut lens, mut have) = (Vec::new(), Vec::new(), 0usize);
+        let mut idx = self.header.filter_page;
+        while idx < self.page_count() {
+            let page = self.page(idx)?;
+            let h = PageHeader::parse(page)?;
+            if h.page_type != page_type::SEGMENT_FILTER {
+                break;
+            }
+            let n = (h.payload_len as usize).min(cap);
+            starts.push(have);
+            lens.push(n);
+            have += n;
+            idx += 1;
+        }
+        let first = self.page(self.header.filter_page)?;
+        let head = &first[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + lens.first().copied().unwrap_or(0)];
+        if head.len() < 20 {
+            return corrupt("filter page shorter than its 20-byte header");
+        }
+        if u32::from_le_bytes(head[0..4].try_into().unwrap()) != FILTER_MAGIC {
+            return corrupt("filter magic is not CFP1");
+        }
+        let block_count = u32::from_le_bytes(head[4..8].try_into().unwrap()) as u64;
+        let probes = u16le(head, 10) as u32;
+        if block_count < 1 {
+            return corrupt("filter block_count is 0");
+        }
+        if !(1..=16).contains(&probes) {
+            return corrupt(format!("filter probes is {probes}, outside 1..16"));
+        }
+        if have < 20 + block_count as usize * crate::filter::BLOCK_BYTES {
+            return corrupt("filter blocks truncated");
+        }
+        Ok(Some(FilterLayout { block_count, probes, starts, lens }))
     }
 
     /// A cursor positioned at the first entry at or after `target` (§8's
