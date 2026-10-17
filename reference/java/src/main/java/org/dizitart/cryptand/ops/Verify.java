@@ -173,7 +173,12 @@ public final class Verify {
     private final Engine engine;
     private final Pager pager;
     private final List<Finding> findings = new ArrayList<>();
-    private final Map<Long, String> owners = new HashMap<>();
+    /**
+     * F-165: owned runs, not a map entry per page (two boxed entries per page
+     * cost O(pages): ~8.6M at 10^8 documents). Swept once in
+     * {@link #verifyFreeSpace}.
+     */
+    private final List<Run> owned = new ArrayList<>();
     private long reachable;
 
     private Verify(Engine engine) {
@@ -657,36 +662,76 @@ public final class Verify {
      * report names precisely what is affected rather than only counting.
      */
     private void verifyFreeSpace(Superblock sb) {
-        Map<Long, String> free = new HashMap<>();
+        List<Run> runs = new ArrayList<>(owned);
         for (Pager.FreeExtent e : pager.freeList()) {
             // F-114: the free list is the file's word; an extent past the page
-            // space is a finding, not four billion map entries.
+            // space is a finding, not four billion entries.
             if (e.startPage() < 0 || e.pages() < 0 || e.startPage() + e.pages() > pager.pageCount()) {
                 findings.add(new Finding(Kind.CORRUPTION, "free extent of " + e.pages() + " pages from "
                         + e.startPage() + " runs past the " + pager.pageCount() + "-page file"));
                 continue;
             }
-            for (long p = e.startPage(); p < e.startPage() + e.pages(); p++) {
-                if (owners.containsKey(p)) {
-                    findings.add(new Finding(Kind.DOUBLE_ALLOCATION, "page " + p
-                            + " is both free (from commit " + e.commitId() + ") and in use by "
-                            + owners.get(p)));
-                }
-                String previous = free.put(p, "free@" + e.commitId());
-                if (previous != null) {
-                    findings.add(new Finding(Kind.DOUBLE_ALLOCATION,
-                            "page " + p + " appears in the free tree twice"));
-                }
-            }
+            runs.add(new Run(e.startPage(), e.startPage() + e.pages(), null, e.commitId()));
         }
+        runs.sort((x, y) -> Long.compare(x.start, y.start));
+        // One sweep in start order, keeping the furthest-reaching owned and
+        // free run seen so far: an overlap with either is a double allocation.
         // The pager's count, not the superblock's: a verifier run on a live
         // engine must see pages allocated since the last superblock write, or
         // it reports a database as whole while an allocation is in flight.
-        for (long p = 2; p < pager.pageCount(); p++) {
-            if (!owners.containsKey(p) && !free.containsKey(p)) {
-                findings.add(new Finding(Kind.LEAK,
-                        "page " + p + " is neither reachable nor free"));
+        Run lastOwned = null;
+        Run lastFree = null;
+        long covered = 2;
+        for (Run r : runs) {
+            for (long p = covered; p < r.start; p++) {
+                findings.add(new Finding(Kind.LEAK, "page " + p + " is neither reachable nor free"));
             }
+            if (lastOwned != null && r.start < lastOwned.end) {
+                for (long p = r.start; p < Math.min(r.end, lastOwned.end); p++) {
+                    if (r.what == null) {
+                        findings.add(new Finding(Kind.DOUBLE_ALLOCATION, "page " + p
+                                + " is both free (from commit " + r.commitId + ") and in use by " + lastOwned.what));
+                    } else if (!r.what.equals(lastOwned.what)) {
+                        findings.add(new Finding(Kind.DOUBLE_ALLOCATION,
+                                "page " + p + " is claimed by both " + lastOwned.what + " and " + r.what));
+                    }
+                }
+            }
+            if (lastFree != null && r.start < lastFree.end) {
+                for (long p = r.start; p < Math.min(r.end, lastFree.end); p++) {
+                    findings.add(new Finding(Kind.DOUBLE_ALLOCATION, r.what == null
+                            ? "page " + p + " appears in the free tree twice"
+                            : "page " + p + " is both free (from commit " + lastFree.commitId
+                                    + ") and in use by " + r.what));
+                }
+            }
+            if (r.what != null) {
+                reachable += Math.max(0, r.end - Math.max(r.start, lastOwned == null ? 0 : lastOwned.end));
+                if (lastOwned == null || r.end > lastOwned.end) {
+                    lastOwned = r;
+                }
+            } else if (lastFree == null || r.end > lastFree.end) {
+                lastFree = r;
+            }
+            covered = Math.max(covered, r.end);
+        }
+        for (long p = covered; p < pager.pageCount(); p++) {
+            findings.add(new Finding(Kind.LEAK, "page " + p + " is neither reachable nor free"));
+        }
+    }
+
+    /** Pages {@code [start, end)}: owned by {@code what}, or free when it is null. */
+    private static final class Run {
+        final long start;
+        final long end;
+        final String what;
+        final long commitId;
+
+        Run(long start, long end, String what, long commitId) {
+            this.start = start;
+            this.end = end;
+            this.what = what;
+            this.commitId = commitId;
         }
     }
 
@@ -706,9 +751,7 @@ public final class Verify {
     }
 
     private void claim(long start, int pages, String what) {
-        // `start` and `pages` come out of the file and are untrusted. This loop
-        // puts one map entry per page in the range, so an extent claiming two
-        // billion pages is two billion entries and an OutOfMemoryError —
+        // `start` and `pages` come out of the file and are untrusted:
         // `14-security.md` §9.1's "MUST bounds-check ... **before allocating**"
         // applies to the verifier's own working set, not only to its decoders.
         long limit = pager.pageCount();
@@ -718,15 +761,7 @@ public final class Verify {
                             + ", but the file holds " + limit));
             return;
         }
-        for (long p = start; p < start + pages; p++) {
-            String previous = owners.put(p, what);
-            if (previous != null && !previous.equals(what)) {
-                findings.add(new Finding(Kind.DOUBLE_ALLOCATION,
-                        "page " + p + " is claimed by both " + previous + " and " + what));
-            } else if (previous == null) {
-                reachable++;
-            }
-        }
+        owned.add(new Run(start, start + pages, what, 0));
     }
 
     /**

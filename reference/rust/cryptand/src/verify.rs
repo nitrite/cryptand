@@ -6,7 +6,7 @@
 //! neither** — it is tampering, because "your disk has a bad sector" and
 //! "someone edited your database" call for different responses.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::container::PageHeader;
 use crate::engine::Engine;
@@ -116,10 +116,11 @@ impl EngineVerify for Engine {
         let refs = self.all_refs()?;
         r.segments = refs.len() as u64;
         const BLOB_OWNER: u64 = u64::MAX - 3;
-        let mut reachable: HashMap<u64, u64> = HashMap::new(); // page -> owner
+        // F-165: owned runs `(start, end, owner)`, swept once at step 7. A map
+        // entry per page cost O(pages): ~8.6M at 10^8 documents.
+        let mut reachable: Vec<(u64, u64, u64)> = Vec::new();
         // Pages 0 and 1 are the superblock slots.
-        reachable.insert(0, u64::MAX);
-        reachable.insert(1, u64::MAX);
+        reachable.push((0, 2, u64::MAX));
 
         for rf in &refs {
             let seg = match self.segment(rf) {
@@ -209,14 +210,8 @@ impl EngineVerify for Engine {
                     let chunk = if enc { ps - 24 } else { ps };
                     let head = chunk - crate::container::PAGE_HEADER_BYTES as u64;
                     let pages = 1 + len.saturating_sub(head).div_ceil(chunk);
-                    for p in start..start.saturating_add(pages) {
-                        // Versions of one key may share a blob; only a foreign owner collides.
-                        if let Some(other) = reachable.insert(p, BLOB_OWNER) {
-                            if other != BLOB_OWNER {
-                                r.add(Class::Corruption, format!("page {p} is allocated to both {other} and a blob"));
-                            }
-                        }
-                    }
+                    // Versions of one key may share a blob; only a foreign owner collides.
+                    reachable.push((start, start.saturating_add(pages), BLOB_OWNER));
                 }
                 // §9 step 4 and §11 invariant 8.
                 if rec.value_kind == crate::segment::value_kind::VLOG {
@@ -287,16 +282,7 @@ impl EngineVerify for Engine {
                         rf.segment_id, rf.pages, rf.start_page, self.pager.page_count
                     ),
                 ),
-                Some(range) => {
-                    for p in range {
-                        if let Some(other) = reachable.insert(p, rf.segment_id) {
-                            r.add(
-                                Class::Corruption,
-                                format!("page {p} is allocated to both {other} and {}", rf.segment_id),
-                            );
-                        }
-                    }
-                }
+                Some(range) => reachable.push((range.start, range.end, rf.segment_id)),
             }
         }
 
@@ -400,15 +386,7 @@ impl EngineVerify for Engine {
                         s.segment_id, s.pages, s.start_page, self.pager.page_count
                     ),
                 ),
-                Some(range) => {
-                    for p in range {
-                        if let Some(other) = reachable.insert(p, u64::MAX - 1) {
-                            if other != u64::MAX - 1 {
-                                r.add(Class::Corruption, format!("page {p} is double-allocated"));
-                            }
-                        }
-                    }
-                }
+                Some(range) => reachable.push((range.start, range.end, u64::MAX - 1)),
             }
         }
 
@@ -427,13 +405,7 @@ impl EngineVerify for Engine {
             let mut pages = Vec::new();
             let tree = crate::cow::CowTree::new(t.tree_id, t.root, t.root_nonce);
             tree.reachable(&mut self.pager, &mut pages)?;
-            for p in pages {
-                if let Some(other) = reachable.insert(p, u64::MAX - 2) {
-                    if other != u64::MAX - 2 {
-                        r.add(Class::Corruption, format!("page {p} is double-allocated"));
-                    }
-                }
-            }
+            reachable.extend(pages.into_iter().map(|p| (p, p + 1, u64::MAX - 2)));
         }
         // F-079: trees rooted in their descriptors (R-trees, vector graphs,
         // Java's and Dart's trees 4 and 5) and vector regions. Unclaimed, they
@@ -451,25 +423,21 @@ impl EngineVerify for Engine {
                 Err(e) => r.add(Class::Corruption, format!("vector region of {name} at page {start}: {e}")),
             }
         }
-        for (start, pages, what) in claims {
-            match extent_pages(start, pages, self.pager.page_count) {
+        // Each claim is its own owner (tag `CLAIM - i`), so two claims collide.
+        const CLAIM: u64 = u64::MAX - 4;
+        for (i, (start, pages, what)) in claims.iter().enumerate() {
+            match extent_pages(*start, *pages, self.pager.page_count) {
                 None => r.add(Class::Corruption, format!("{what} claims {pages} pages from {start}, past the file")),
-                Some(range) => {
-                    for p in range {
-                        if reachable.insert(p, u64::MAX - 4).is_some() {
-                            r.add(Class::Corruption, format!("page {p} is double-allocated ({what})"));
-                        }
-                    }
-                }
+                Some(range) => reachable.push((range.start, range.end, CLAIM - i as u64)),
             }
         }
         let page_count = self.pager.page_count;
-        let mut free: HashSet<u64> = self
+        let mut free: Vec<(u64, u64)> = self
             .pager
             .free_list()
             .into_iter()
             .filter_map(|e| extent_pages(e.start_page, e.pages as u64, page_count))
-            .flatten()
+            .map(|r| (r.start, r.end))
             .collect();
         // Pages an edit since the last commit orphaned, which the next commit
         // moves into the list (`persist_freelist`). Opening a file whose writer
@@ -486,13 +454,58 @@ impl EngineVerify for Engine {
             &self.changefeed,
             &self.freelist,
         ] {
-            free.extend(t.freed.iter().copied());
+            free.extend(t.freed.iter().map(|&p| (p, p + 1)));
         }
-        r.pages_reachable = reachable.len() as u64;
-        for p in 2..self.pager.page_count {
-            if !reachable.contains_key(&p) && !free.contains(&p) {
+        let name = |tag: u64| match tag {
+            u64::MAX => "the superblock".to_string(),
+            t if t == u64::MAX - 1 => "the value log".to_string(),
+            t if t == u64::MAX - 2 => "a tree".to_string(),
+            BLOB_OWNER => "a blob".to_string(),
+            t if t <= CLAIM && CLAIM - t < claims.len() as u64 => claims[(CLAIM - t) as usize].2.clone(),
+            t => t.to_string(),
+        };
+        // One sweep in start order. Two owned runs with different owners
+        // overlapping is the double-allocation; a page no run covers is a leak.
+        reachable.sort_unstable_by_key(|&(s, e, _)| (s, e));
+        free.sort_unstable();
+        let (mut owned_end, mut owned_by, mut union) = (0u64, u64::MAX, 0u64);
+        for &(start, end, owner) in &reachable {
+            if start < owned_end && owner != owned_by {
+                for p in start..end.min(owned_end) {
+                    r.add(
+                        Class::Corruption,
+                        format!("page {p} is allocated to both {} and {}", name(owned_by), name(owner)),
+                    );
+                }
+            }
+            union += end.saturating_sub(start.max(owned_end));
+            if end > owned_end {
+                (owned_end, owned_by) = (end, owner);
+            }
+        }
+        r.pages_reachable = union;
+        let (mut covered, mut i, mut j) = (2u64, 0, 0);
+        while covered < page_count {
+            // The next run of either kind, by start.
+            let next = match (reachable.get(i), free.get(j)) {
+                (Some(a), Some(b)) if a.0 <= b.0 => {
+                    i += 1;
+                    (a.0, a.1)
+                }
+                (_, Some(b)) => {
+                    j += 1;
+                    (b.0, b.1)
+                }
+                (Some(a), None) => {
+                    i += 1;
+                    (a.0, a.1)
+                }
+                (None, None) => (page_count, page_count),
+            };
+            for p in covered..next.0.min(page_count) {
                 r.add(Class::Leak, format!("page {p} is neither reachable nor free"));
             }
+            covered = covered.max(next.1).max(next.0.min(page_count));
         }
 
         // §11 invariant 11.

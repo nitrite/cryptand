@@ -166,6 +166,24 @@ class VerifyTest {
     }
 
     @Test
+    @DisplayName("F-165: a segment page also on the free list is a double allocation")
+    void freedSegmentPageIsDoubleAllocation(@TempDir Path dir) {
+        try (Engine e = Engine.create(dir.resolve("e.cryptand"), options())) {
+            for (int i = 0; i < 300; i++) {
+                e.batch().put(TREE, key(i), val("v" + i)).commit();
+            }
+            e.compact();
+            e.commitNow();
+            org.dizitart.cryptand.lsm.SegmentMeta m = e.manifest().all().get(0);
+            e.pager().freeExtent(m.startPage + 1, 2);
+            Verify.Report r = Verify.run(e);
+            assertEquals(2, r.of(Verify.Kind.DOUBLE_ALLOCATION).size(), r.toString());
+            assertTrue(r.toString().contains("page " + (m.startPage + 1)
+                    + " is both free"), r.toString());
+        }
+    }
+
+    @Test
     @DisplayName("an encrypted database verifies without the key, and cleanly with it")
     void encryptedVerification(@TempDir Path dir) {
         Path f = dir.resolve("g.cryptand");

@@ -765,3 +765,27 @@ fn reads_on_the_same_handle_after_shrink_moved_a_cached_segment() {
         assert_eq!(e.get(T, &Value::NitriteId(i)).unwrap(), expected(i, 200), "key {i}");
     }
 }
+
+#[test]
+fn f165_verify_sweep_finds_leaks_and_counts_reachable_pages() {
+    // F-165: page accounting is an extent sweep, not a per-page map. Pages
+    // past everything referenced are leaks, one finding each (repair parses
+    // them), and the reachable count does not change by growing the file.
+    let t = TempDb::new("f165-sweep");
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    for i in 0..300i64 {
+        e.put(T, &Value::NitriteId(i), b"v").unwrap();
+    }
+    e.flush().unwrap();
+    e.commit(Durability::Sync).unwrap();
+    let before = e.verify().unwrap();
+    assert!(before.of(Class::Leak).is_empty() && before.of(Class::Corruption).is_empty(), "{:?}", before.findings);
+    let start = e.pager.alloc_fresh(3).unwrap();
+    let r = e.verify().unwrap();
+    let leaks: Vec<_> = r.of(Class::Leak).into_iter().map(|f| f.what.clone()).collect();
+    assert_eq!(
+        leaks,
+        (start..start + 3).map(|p| format!("page {p} is neither reachable nor free")).collect::<Vec<_>>()
+    );
+    assert_eq!(r.pages_reachable, before.pages_reachable);
+}
