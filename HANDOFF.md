@@ -106,8 +106,9 @@
 
 10^8 Java PASS 10-17 (build 214 MB, read 182 MB, settle 203 MB footprint, amp 1.34; RESULTS).
 F-168 fixed c4f80d9 (D only: verify decoded each segment's whole filter per entry since F-166).
-Next: rerun Dart 10^8 build+read on remote `cryptand-1e8` (~3 h build; `r-1e8.sh` Dart half) to
-confirm read footprint <= 320 MB and verify time. Then close F-161/F-165/F-166/F-168.
+Running (10-18 00:32): remote `cryptand-1e8` @50d7821, `reference/bench/runs/d-1e8.sh` ->
+`d-1e8.log` (build ~3 h, then read, settle; outputs `~/j1e8/d*.out`). Next: read it; confirm read
+footprint <= 320 MB and verify time. Then close F-161/F-165/F-166/F-168.
 Gap: R/J `read` rungs time only open + 10k gets; PLAN 6.2/6.3 also want zipf, scan, verify times.
 Side question: Dart segments ~40% larger than Rust's.
 
