@@ -3251,13 +3251,17 @@ impl Engine {
         // Java's BLOB extents are not among them, and a cut through one
         // truncated a live value.
         {
-            let mut spare: HashSet<u64> = old.iter().copied().collect();
+            // Keyed by end page: O(extents), not O(pages) (F-167).
+            let mut start_by_end: HashMap<u64, u64> = old.iter().map(|&p| (p + 1, p)).collect();
             for e in self.pager.free_list() {
-                spare.extend(e.start_page..e.start_page + e.pages as u64);
+                start_by_end.insert(e.start_page + e.pages as u64, e.start_page);
             }
             let mut top = self.pager.page_count;
-            while top > high && spare.contains(&(top - 1)) {
-                top -= 1;
+            while top > high {
+                match start_by_end.get(&top) {
+                    Some(&start) => top = start.max(high),
+                    None => break,
+                }
             }
             high = high.max(top);
         }

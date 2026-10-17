@@ -36,6 +36,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -4230,17 +4231,19 @@ public final class Engine implements AutoCloseable {
      */
     private void cutTail() {
         List<Long> tree1 = freeTree.pages();
-        Set<Long> gone = new HashSet<>(tree1);
+        // Keyed by end page, so the walk costs O(extents), not O(pages) (F-167).
+        Map<Long, Long> startByEnd = new HashMap<>();
+        for (long p : tree1) {
+            startByEnd.put(p + 1, p);
+        }
         for (Pager.FreeExtent e : pager.freeList()) {
             if (e.commitId() <= sb.minRetainedCommit) {
-                for (long p = e.startPage(); p < e.startPage() + e.pages(); p++) {
-                    gone.add(p);
-                }
+                startByEnd.put(e.startPage() + e.pages(), e.startPage());
             }
         }
         long end = pager.pageCount();
-        while (end > 2 && gone.contains(end - 1)) {
-            end--;
+        for (Long start; end > 2 && (start = startByEnd.get(end)) != null; ) {
+            end = Math.max(start, 2);
         }
         long room = tree1.size() + 8L;
         if (end + room >= pager.pageCount()) {

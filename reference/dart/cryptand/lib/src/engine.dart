@@ -1639,14 +1639,16 @@ final class Engine {
     }
     final old = freelist.reachablePages().toList();
     // Never below a page that is neither free nor tree 1's own (F-054).
-    final spare = {
-      ...old,
-      for (final e in store.freeExtents)
-        for (var p = e.startPage; p < e.startPage + e.pages; p++) p,
+    // Keyed by end page: O(extents), not O(pages) (F-167).
+    final startByEnd = <int, int>{
+      for (final p in old) p + 1: p,
+      for (final e in store.freeExtents) e.startPage + e.pages: e.startPage,
     };
     var end = store.pageCount;
-    while (end > high && spare.contains(end - 1)) {
-      end--;
+    while (end > high) {
+      final start = startByEnd[end];
+      if (start == null) break;
+      end = start > high ? start : high;
     }
     high = end;
     final room = old.length + 8;
