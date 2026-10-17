@@ -104,11 +104,12 @@
 
 ## Next action
 
-F-167 fixed R+J+D 10-17 (5f0365e, gate quick green): `cut_tail` walks free extents keyed by end
-page. Java 10^8 rerun running (10-17 20:28): remote `cryptand-1e8`, `reference/bench/runs/j-1e8.sh`
--> `j-1e8.log`, build+read+settle (~25 min; the old file was deleted). Then: fill RESULTS with the
-10^8 columns (Java read PASS 177 MB; Dart build/settle PASS, read FAIL), close F-161/F-165/F-166/F-167,
-profile F-168 (Dart read 467 MB, verify 8.4 h). Side question: Dart segments ~40% larger than Rust's.
+10^8 Java PASS 10-17 (build 214 MB, read 182 MB, settle 203 MB footprint, amp 1.34; RESULTS).
+F-168 fixed c4f80d9 (D only: verify decoded each segment's whole filter per entry since F-166).
+Next: rerun Dart 10^8 build+read on remote `cryptand-1e8` (~3 h build; `r-1e8.sh` Dart half) to
+confirm read footprint <= 320 MB and verify time. Then close F-161/F-165/F-166/F-168.
+Gap: R/J `read` rungs time only open + 10k gets; PLAN 6.2/6.3 also want zipf, scan, verify times.
+Side question: Dart segments ~40% larger than Rust's.
 
 ## Log
 
@@ -166,3 +167,4 @@ profile F-168 (Dart read 467 MB, verify 8.4 h). Side question: Dart segments ~40
 - 2026-10-17 — Java 10^8 build PASS, read OOM (F-166 filters unbounded, R+J+D), settle OOM (F-167); F-165 Dart verify extent sweep.
 - 2026-10-17 — F-165 R+J, F-166 R+J+D fixed (human chose extent sweep + page-cache filters); 10^8 rerun launched.
 - 2026-10-17 — rerun: Java read PASS (F-166), settle OOM F-167 fixed R+J+D; Dart 10^8 read FAIL 467 MB / verify 8.4 h (F-168); Java rerun launched.
+- 2026-10-17 — F-167 fixed R+J+D; Java 10^8 all PASS; F-168 (D verify filter per entry, F-166 regression) fixed.
