@@ -218,6 +218,7 @@ Remote M1, 16 GB, internal SSD, desktop profile, plaintext, `benchDoc`
 | 10^8 | Java (10-15, F-161 B) | ~10 docs/s after stall | 0.45 GB at 10.7 h | — | — | — | — | — | FAIL: F-164 (compactor OOM, writer stalled forever) |
 | 10^8 | Java (10-17, F-167) | 87 600 | 69.1 GB | 1.34 settled | 214 MB footprint at -Xmx128m | 241 / 1051 us (p999 1653) | 182 MB footprint | — | PASS: build, read (open 304 ms), settle 203 MB footprint |
 | 10^8 | Dart AOT (10-17, @8fdbc3c) | 9 655 | 70.3 GB | 1.36 | 223 MB footprint | 642 / 1422 us (zipf p50 222) | 467 MB footprint | 8.4 h sound | FAIL: read footprint (F-168, verify filter decoded per entry; fixed c4f80d9, rerun pending); settle PASS 113 MB |
+| 10^8 | Dart AOT (10-18, F-168+F-169) | 9 665 | 70.3 GB | 1.36 | 221 MB footprint | 650 / 1397 us (zipf p50 223) | 246 MB footprint | 510 s sound | PASS: build, read (scan 436k rows/s), settle 113 MB |
 
 ## Running it
 
