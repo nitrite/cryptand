@@ -6,7 +6,8 @@
 //!
 //!     cargo run --release --example rss_scale PATH N settle # compact+commit+shrink (F-154)
 //!
-//! Run under `/usr/bin/time -l` for max RSS.
+//! Run under `/usr/bin/time -l` for max RSS. `CRYPTAND_ENC=1` makes every
+//! mode use an encrypted file (fixed raw key, kdf 0: Argon2id excluded).
 
 use cryptand::container::{Durability, Profile};
 use cryptand::database::Database;
@@ -38,9 +39,12 @@ fn main() -> cryptand::Result<()> {
     let a: Vec<String> = std::env::args().collect();
     let path = std::path::Path::new(&a[1]);
     let n: i64 = a[2].parse().unwrap();
+    // ponytail: fixed bench key, never a real secret.
+    let key = std::env::var_os("CRYPTAND_ENC").map(|_| [7u8; 32]);
+    let key = key.as_ref().map(|k| &k[..]);
     if a.get(3).map(String::as_str) == Some("read") {
         let t = std::time::Instant::now();
-        let mut db = Database { engine: Engine::open(path, None)? };
+        let mut db = Database { engine: Engine::open(path, key)? };
         let open_ms = t.elapsed().as_millis();
         let c = db.collection("c")?;
         let id = |k: i64| 1767225600000 * 4194304 + k * 4096 + 1;
@@ -92,7 +96,7 @@ fn main() -> cryptand::Result<()> {
     }
     if a.get(3).map(String::as_str) == Some("settle") {
         use cryptand::spaceapi::SpaceApi;
-        let mut db = Database { engine: Engine::open(path, None)? };
+        let mut db = Database { engine: Engine::open(path, key)? };
         db.engine.compact()?;
         db.commit(Durability::Sync)?;
         db.engine.shrink()?;
@@ -102,7 +106,10 @@ fn main() -> cryptand::Result<()> {
         return Ok(());
     }
     let _ = std::fs::remove_file(path);
-    let mut db = Database { engine: Engine::create(path, Profile::Desktop)? };
+    let mut db = Database { engine: match key {
+        Some(k) => Engine::create_encrypted(path, Profile::Desktop, k, 0, 0, 0, 0)?,
+        None => Engine::create(path, Profile::Desktop)?,
+    } };
     let mut c = db.collection("c")?;
     for i in 0..n {
         c.insert(&mut db.engine, &doc(i))?;
