@@ -104,9 +104,10 @@
 
 ## Next action
 
-10^8 read rungs PASS R+J+D (10-18). Human 10-18: 10^9 deferred past 1.0 (remote disk 108 GB
-free); 10^8 is the top rung; remote `r1e8.db` deleted. Next: 6.2 encrypted 10^8 Rust rung on
-remote (one clone, nohup), then the `mobile` profile, then 6.4 suspects. Side question: Dart
+Encrypted 10^8 Rust rung running on remote since 10-18 19:00 (clone `cryptand-enc1e8`,
+`~/e1e8/run.sh`: build, read, settle under `time -l`, `CRYPTAND_ENC=1`; outputs
+`~/e1e8/{build,read,settle}.out`). Next: record it in RESULTS Scale table against the bars,
+then `mobile` profile, then 6.4 suspects. 10^9 deferred past 1.0 (human). Side question: Dart
 segments ~40% larger than Rust's.
 
 ## Log
@@ -171,3 +172,4 @@ segments ~40% larger than Rust's.
 - 2026-10-18 — F-170 fixed (human: for 1.0): Rust `scan_cursor` (04 §8), pages released on long scans; Rust 10^8 read 305 MB PASS; gate quick green.
 - 2026-10-18 — F-171 (R+D: unbounded scan unpruned; Rust `collection` opened every segment): Rust 10^8 open 230 -> 3 MB, read 180 MB.
 - 2026-10-18 — 10^9 deferred past 1.0 (human, disk); PLAN M6 row updated; remote r1e8.db freed (108 GB free).
+- 2026-10-18 — rss_scale `CRYPTAND_ENC=1`; encrypted 10^8 Rust rung launched on remote.
