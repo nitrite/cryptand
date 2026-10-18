@@ -1757,7 +1757,7 @@ impl Engine {
         }
     }
 
-    fn segment_uncached(&mut self, r: &SegmentRef) -> Result<Segment> {
+    pub(crate) fn segment_uncached(&mut self, r: &SegmentRef) -> Result<Segment> {
         match self.pager.segment_pages(r.start_page, r.pages, r.nonce)? {
             Some((head, pages)) => Segment::lazy(head, pages, r.pages, self.pager.page_size),
             None => Segment::open(self.pager.read_segment(r.start_page, r.pages, r.nonce)?, self.pager.page_size),
@@ -2283,6 +2283,8 @@ impl Engine {
         self.scan_examined = 0;
     }
 
+    /// [`Engine::scan_cursor`] collected: every live row of `tree` in
+    /// `[lower, upper)`. Memory is O(rows returned); use the cursor to stream.
     pub fn scan_tree(
         &mut self,
         tree: u32,
@@ -2291,108 +2293,70 @@ impl Engine {
         at: Option<&Snapshot>,
         values: bool,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let ceiling = at.map(|s| s.seq).unwrap_or(u64::MAX);
-        let rds = self.range_deletes_for(tree)?;
+        let mut c = self.scan_cursor(tree, lower, upper, at, values)?;
+        let mut out = Vec::new();
+        while let Some(row) = c.next(self)? {
+            out.push(row);
+        }
+        Ok(out)
+    }
 
-        // The bounds, as **user keys** — `u32be(tree_id) || CKE(key)`, which is
-        // the order a segment is laid out in (§1). Pushing them down here is
-        // what makes a bounded scan cost the range rather than the tree.
-        //
-        // It did not, and the shape of the miss is worth keeping: every
-        // segment's every record was collected into a `BTreeMap` and `lower` /
-        // `upper` were applied to the *result*. A one-row index lookup on
-        // 20 000 documents therefore walked all 20 000 index entries and all
-        // 20 000 data entries, and measured **7.76 ms**. The page-read counter
-        // read 2 the whole time, because the segments were already in memory —
-        // so the counter this project relies on as its primary result was
-        // perfect while the CPU cost was linear in the tree. `04-segments.md`
-        // §8 makes cursors mandatory for exactly this reason.
-        let lower_uk: Option<Vec<u8>> = lower.map(|l| {
+    /// `04-segments.md` §8: a streaming cursor over `tree` in `[lower, upper)`,
+    /// both CKE keys. F-170: `scan_tree` collected every version in range into
+    /// a map before returning, so a scan's memory was O(range) (+84 MB for 100k
+    /// rows at 10^8; a full scan of a large tree could not run). The cursor
+    /// holds one batch per source and one §8.1 readahead window.
+    ///
+    /// The bounds are pushed down as **user keys** -- `u32be(tree_id) ||
+    /// CKE(key)`, the order a segment is laid out in (§1) -- and a segment
+    /// whose manifest `[min_key, max_key]` misses them is never opened. Each
+    /// source seeks to the lower bound, or to this **tree's own prefix** when
+    /// there is none -- never to the first cell: a segment holds every tree an
+    /// L0 flush covered, so cell 0 lands in whichever tree sorts first (an
+    /// unbounded index-tree scan once returned zero rows that way).
+    pub fn scan_cursor(
+        &mut self,
+        tree: u32,
+        lower: Option<&[u8]>,
+        upper: Option<&[u8]>,
+        at: Option<&Snapshot>,
+        values: bool,
+    ) -> Result<ScanCursor> {
+        let with_tree = |k: &[u8]| {
             let mut v = tree.to_be_bytes().to_vec();
-            v.extend_from_slice(l);
+            v.extend_from_slice(k);
             v
-        });
-        let upper_uk: Option<Vec<u8>> = upper.map(|u| {
-            let mut v = tree.to_be_bytes().to_vec();
-            v.extend_from_slice(u);
-            v
-        });
-        let in_range = |uk: &[u8]| -> bool {
-            if uk.len() < 4 || uk[..4] != tree.to_be_bytes() {
-                return false;
-            }
-            if let Some(l) = &lower_uk {
-                if uk < l.as_slice() {
-                    return false;
-                }
-            }
-            if let Some(u) = &upper_uk {
-                if uk >= u.as_slice() {
-                    return false;
-                }
-            }
-            true
         };
-
-        // Collect every version in range, then collapse per user key.
-        let mut best: BTreeMap<Vec<u8>, SegRecord> = BTreeMap::new();
-        let consider = |best: &mut BTreeMap<Vec<u8>, SegRecord>, rec: SegRecord| {
-            if rec.seq() > ceiling {
-                return;
-            }
-            let uk = rec.user_key().to_vec();
-            match best.get(&uk) {
-                Some(b) if b.seq() >= rec.seq() => {}
-                _ => {
-                    best.insert(uk, rec);
-                }
-            }
-        };
+        let lower_uk = lower.map(with_tree);
+        let upper_uk = upper.map(with_tree);
+        let start = lower_uk.clone().unwrap_or_else(|| tree.to_be_bytes().to_vec());
+        let mut sources = Vec::new();
+        // The memtable is bounded (`memtable_entry_limit`), so its part of the
+        // range is copied once: the cursor then sees one point in time.
         for shard in &self.memtable {
-            // The memtable is ordered by internal key, so the range is a
-            // sub-map rather than a filtered walk.
-            let from = lower_uk.clone().unwrap_or_else(|| tree.to_be_bytes().to_vec());
             let bounds = (
-                std::ops::Bound::Included(crate::compare::MemSlice::new(&from)),
+                std::ops::Bound::Included(crate::compare::MemSlice::new(&start)),
                 std::ops::Bound::Unbounded,
             );
+            let mut buf = std::collections::VecDeque::new();
             for (ik, e) in shard.range::<crate::compare::MemSlice, _>(bounds) {
-                if !in_range(&ik[..ik.len().saturating_sub(9)]) {
-                    // Past the upper bound, or into another tree: both mean
-                    // there is nothing further to find in this shard.
-                    if ik.len() >= 4 && ik[..4] == tree.to_be_bytes() {
-                        if let Some(u) = &upper_uk {
-                            if &ik[..ik.len() - 9] >= u.as_slice() {
-                                break;
-                            }
-                        }
-                        continue;
-                    }
+                let uk = &ik[..ik.len().saturating_sub(9)];
+                if !ScanCursor::in_tree(tree, upper_uk.as_deref(), uk) {
                     break;
                 }
-                let p = parse_internal_key(ik)?;
-                if p.op == op::RANGE_DELETE {
-                    continue;
-                }
-                consider(
-                    &mut best,
-                    SegRecord {
-                        internal_key: ik.0.clone(),
-                        value_kind: e.value_kind,
-                        value: e.value.clone(),
-                        expiry_ms: e.expiry_ms,
-                    },
-                );
+                buf.push_back(SegRecord {
+                    internal_key: ik.0.clone(),
+                    value_kind: e.value_kind,
+                    value: e.value.clone(),
+                    expiry_ms: e.expiry_ms,
+                });
             }
+            sources.push(ScanSource { seg: None, batches: 0, buf, resume: Vec::new(), done: true });
         }
-        let refs = self.all_refs()?;
-        for r in refs {
+        for r in self.all_refs()? {
             if self.quarantined.contains_key(&r.segment_id) {
                 continue;
             }
-            // The manifest already carries each segment's `[min_key, max_key]`
-            // as user keys, so a segment that cannot hold anything in range is
-            // never opened at all.
             if let Some(u) = &upper_uk {
                 if !r.min_key.is_empty() && r.min_key.as_slice() >= u.as_slice() {
                     continue;
@@ -2404,89 +2368,25 @@ impl Engine {
                 }
             }
             let seg = self.segment(&r)?;
-            // Seek to the lower bound, or to this **tree's own prefix** when
-            // there is none -- never to the first cell. A segment holds the
-            // entries of every tree an L0 flush covered, ordered by
-            // `u32be(tree_id) || CKE(key)`, so seeking to cell 0 lands in
-            // whichever tree sorts first and the `break` below would end the
-            // walk before reaching this one. That is what it did: an unbounded
-            // scan of an index tree returned zero rows.
-            let seek_to = lower_uk.clone().unwrap_or_else(|| tree.to_be_bytes().to_vec());
-            let mut cur = seg.seek(&seek_to)?;
-            let mut examined = 0u64;
-            while let Some(rec) = cur.record()? {
-                examined += 1;
-                let uk = rec.user_key();
-                if uk.len() >= 4 && uk[..4] != tree.to_be_bytes() {
-                    // Past this tree: the order is by tree id first, and the
-                    // seek above started at or after this tree's prefix.
-                    break;
-                }
-                if let Some(u) = &upper_uk {
-                    if uk >= u.as_slice() {
-                        break;
-                    }
-                }
-                if in_range(uk) && rec.op() != op::RANGE_DELETE {
-                    consider(&mut best, rec);
-                }
-                cur.next()?;
-            }
-            self.scan_examined += examined;
+            sources.push(ScanSource {
+                seg: Some(ScanSeg::Cached(seg, r)),
+                batches: 0,
+                buf: Default::default(),
+                resume: start.clone(),
+                done: false,
+            });
         }
-
-        let mut out = Vec::new();
-        // §8.1 — a cursor that dereferences values MUST issue its value-log
-        // reads in non-decreasing (segment, offset) order within a sliding
-        // window of at least `readahead_window` entries. Collecting the
-        // pointers for a window and sorting them is exactly that.
-        let window = self.sb.readahead_window.max(1) as usize;
-        let mut pending: Vec<(usize, VlogPointer)> = Vec::new();
-        let mut rows: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
-        for (uk, rec) in best {
-            let cke_key = &uk[4..];
-            if let Some(l) = lower {
-                if cke_key < l {
-                    continue;
-                }
-            }
-            if let Some(u) = upper {
-                if cke_key >= u {
-                    continue;
-                }
-            }
-            let rd = rds
-                .iter()
-                .filter(|d| d.covers(&uk) && d.seq <= ceiling)
-                .map(|d| d.seq)
-                .max()
-                .unwrap_or(0);
-            if rd > rec.seq() || rec.op() == op::DELETE || self.expired(&rec) {
-                continue;
-            }
-            self.counters.scanned_rows += 1;
-            if !values {
-                rows.push((cke_key.to_vec(), None));
-                continue;
-            }
-            if rec.value_kind == value_kind::VLOG {
-                pending.push((rows.len(), VlogPointer::parse(&rec.value)?));
-                rows.push((cke_key.to_vec(), None));
-                if pending.len() >= window {
-                    self.drain_readahead(&mut pending, &mut rows)?;
-                }
-            } else if rec.value_kind == value_kind::BLOB {
-                let v = self.read_blob(&rec.value)?;
-                rows.push((cke_key.to_vec(), Some(v)));
-            } else {
-                rows.push((cke_key.to_vec(), Some(rec.value.clone())));
-            }
-        }
-        self.drain_readahead(&mut pending, &mut rows)?;
-        for (k, v) in rows {
-            out.push((k, v.unwrap_or_default()));
-        }
-        Ok(out)
+        Ok(ScanCursor {
+            tree,
+            upper_uk,
+            ceiling: at.map(|s| s.seq).unwrap_or(u64::MAX),
+            rds: self.range_deletes_for(tree)?,
+            values,
+            window: self.sb.readahead_window.max(1) as usize,
+            sources,
+            last_uk: None,
+            ready: Default::default(),
+        })
     }
 
     /// §8.1 — sort the window by `(vlog_segment_id, offset)` and **coalesce
@@ -3978,4 +3878,167 @@ fn free_entries(extents: &[FreeExtent]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     // because the build requires it and the sort is the proof.
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(entries)
+}
+
+/// One merge input of a [`ScanCursor`]: a segment it re-seeks into per batch
+/// (a held `SegmentCursor` would borrow the segment across `&mut Engine`
+/// calls), or the memtable's copied range (`seg: None`, filled up front).
+struct ScanSource {
+    seg: Option<ScanSeg>,
+    batches: u32,
+    buf: std::collections::VecDeque<SegRecord>,
+    /// Seek target of the next batch: just past the last internal key taken.
+    resume: Vec<u8>,
+    done: bool,
+}
+
+/// Records a source takes per re-seek.
+const SCAN_BATCH: usize = 64;
+
+/// Batches a source reads through the shared page cache before it streams.
+const SCAN_CACHED_BATCHES: u32 = 4;
+
+/// A scan source's segment. A cached lazy segment keeps every page it reads
+/// until the whole segment is evicted, and never while a scan holds it: a long
+/// scan pinned every page it passed (F-170, +60 MB for 100k rows at 10^8). So a
+/// source starts on the cache (short scans and index lookups hit it) and moves
+/// to its own copy, emptied after each batch, as compaction streams (F-157).
+enum ScanSeg {
+    Cached(Arc<Segment>, SegmentRef),
+    Owned(Segment),
+}
+
+/// `04-segments.md` §8's cursor, from [`Engine::scan_cursor`]. It borrows no
+/// engine state, so each step takes the engine: values are read through it.
+///
+/// ponytail: the merge picks the least head by a linear pass over sources;
+/// §8's bound keeps them few (`l0_trigger + overlap_bound x (levels - 2) + 1`
+/// plus memtable shards). A heap if that bound ever grows.
+pub struct ScanCursor {
+    tree: u32,
+    upper_uk: Option<Vec<u8>>,
+    ceiling: u64,
+    rds: Vec<RangeDelete>,
+    values: bool,
+    window: usize,
+    sources: Vec<ScanSource>,
+    /// The user key last decided: older versions of it are skipped.
+    last_uk: Option<Vec<u8>>,
+    ready: std::collections::VecDeque<(Vec<u8>, Vec<u8>)>,
+}
+
+impl ScanCursor {
+    fn in_tree(tree: u32, upper_uk: Option<&[u8]>, uk: &[u8]) -> bool {
+        uk.len() >= 4 && uk[..4] == tree.to_be_bytes() && upper_uk.is_none_or(|u| uk < u)
+    }
+
+    /// Records and rows the cursor holds right now: F-170's bound is one
+    /// readahead window plus one batch per source, whatever the range.
+    pub fn held(&self) -> usize {
+        self.ready.len() + self.sources.iter().map(|s| s.buf.len()).sum::<usize>()
+    }
+
+    /// The next live row `(cke_key, value)`, or `None` at the end. `value` is
+    /// empty when the cursor was opened without values.
+    pub fn next(&mut self, e: &mut Engine) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        if self.ready.is_empty() {
+            self.fill(e)?;
+        }
+        Ok(self.ready.pop_front())
+    }
+
+    fn refill(&mut self, i: usize, e: &mut Engine) -> Result<()> {
+        let s = &mut self.sources[i];
+        if s.done || !s.buf.is_empty() {
+            return Ok(());
+        }
+        if let Some(ScanSeg::Cached(_, r)) = &s.seg {
+            if s.batches >= SCAN_CACHED_BATCHES {
+                let r = r.clone();
+                s.seg = Some(ScanSeg::Owned(e.segment_uncached(&r)?));
+            }
+        }
+        s.batches += 1;
+        let seg: &Segment = match &s.seg {
+            None => return Ok(()),
+            Some(ScanSeg::Cached(seg, _)) => seg,
+            Some(ScanSeg::Owned(seg)) => seg,
+        };
+        let mut cur = seg.seek(&s.resume)?;
+        let mut examined = 0u64;
+        while s.buf.len() < SCAN_BATCH {
+            let Some(rec) = cur.record()? else {
+                s.done = true;
+                break;
+            };
+            examined += 1;
+            if !Self::in_tree(self.tree, self.upper_uk.as_deref(), rec.user_key()) {
+                s.done = true;
+                break;
+            }
+            s.resume.clear();
+            s.resume.extend_from_slice(&rec.internal_key);
+            s.resume.push(0); // the least key after it
+            s.buf.push_back(rec);
+            cur.next()?;
+        }
+        drop(cur);
+        if let Some(ScanSeg::Owned(seg)) = &mut s.seg {
+            seg.release_pages();
+        }
+        e.scan_examined += examined;
+        Ok(())
+    }
+
+    /// The least internal key across sources, newest version first (§1's
+    /// inverted seq), popped.
+    fn pop_least(&mut self, e: &mut Engine) -> Result<Option<SegRecord>> {
+        let mut best: Option<usize> = None;
+        for i in 0..self.sources.len() {
+            self.refill(i, e)?;
+            let Some(head) = self.sources[i].buf.front() else { continue };
+            if best.is_none_or(|b| head.internal_key < self.sources[b].buf[0].internal_key) {
+                best = Some(i);
+            }
+        }
+        Ok(best.and_then(|b| self.sources[b].buf.pop_front()))
+    }
+
+    /// Up to one §8.1 window of live rows into `ready`, value-log reads sorted
+    /// and coalesced by [`Engine::drain_readahead`].
+    fn fill(&mut self, e: &mut Engine) -> Result<()> {
+        let mut pending: Vec<(usize, VlogPointer)> = Vec::new();
+        let mut rows: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        while rows.len() < self.window {
+            let Some(rec) = self.pop_least(e)? else { break };
+            if rec.op() == op::RANGE_DELETE || rec.seq() > self.ceiling {
+                continue;
+            }
+            let uk = rec.user_key();
+            if self.last_uk.as_deref() == Some(uk) {
+                continue; // an older version of a key already decided
+            }
+            self.last_uk = Some(uk.to_vec());
+            let rd = self.rds.iter().filter(|d| d.covers(uk) && d.seq <= self.ceiling).map(|d| d.seq).max().unwrap_or(0);
+            if rd > rec.seq() || rec.op() == op::DELETE || e.expired(&rec) {
+                continue;
+            }
+            e.counters.scanned_rows += 1;
+            let cke_key = uk[4..].to_vec();
+            if !self.values {
+                rows.push((cke_key, None));
+            } else if rec.value_kind == value_kind::VLOG {
+                pending.push((rows.len(), VlogPointer::parse(&rec.value)?));
+                rows.push((cke_key, None));
+            } else if rec.value_kind == value_kind::BLOB {
+                let v = e.read_blob(&rec.value)?;
+                rows.push((cke_key, Some(v)));
+            } else {
+                rows.push((cke_key, Some(rec.value)));
+            }
+        }
+        e.drain_readahead(&mut pending, &mut rows)?;
+        self.ready.extend(rows.into_iter().map(|(k, v)| (k, v.unwrap_or_default())));
+        Ok(())
+    }
 }

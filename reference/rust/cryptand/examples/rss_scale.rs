@@ -50,8 +50,14 @@ fn main() -> cryptand::Result<()> {
             s >> 11
         };
         let mut line = format!("open_ms={open_ms}");
-        // Step marks on stderr, to line up with an external `ps` RSS sampler.
-        let mark = |step: &str| eprintln!("step {step} {:?}", std::time::SystemTime::now());
+        // Current RSS after each step, from `ps` (std has no getrusage).
+        let mark = |step: &str| {
+            let pid = std::process::id().to_string();
+            let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &pid]).output();
+            let kb = out.ok().and_then(|o| String::from_utf8(o.stdout).ok()?.trim().parse::<u64>().ok()).unwrap_or(0);
+            eprintln!("rss_{step}_mb={}", kb >> 10);
+        };
+        mark("open");
         // Same picks as Dart `tool/scale.dart`: uniform, then zipf by inverse
         // power (ponytail: s~1.2 skew, not an exact Zipf(0.99)).
         for name in ["uniform", "zipf"] {
@@ -70,12 +76,17 @@ fn main() -> cryptand::Result<()> {
         let lo = (rnd() % (n.max(100_001) - 100_000) as u64) as i64;
         let enc = |k| cryptand::cke::encode(&Value::NitriteId(id(k)));
         let t = std::time::Instant::now();
-        let rows = db.engine.scan_tree(c.tree, Some(&enc(lo)?), Some(&enc(lo + 100_000)?), None, true)?.len();
+        let mut cur = db.engine.scan_cursor(c.tree, Some(&enc(lo)?), Some(&enc(lo + 100_000)?), None, true)?;
+        let mut rows = 0;
+        while cur.next(&mut db.engine)?.is_some() {
+            rows += 1;
+        }
         line += &format!(" scan_rows={rows} scan_rows_per_s={:.0}", rows as f64 / t.elapsed().as_secs_f64());
         mark("scan");
         use cryptand::verify::EngineVerify;
         let t = std::time::Instant::now();
         let report = db.engine.verify()?;
+        mark("verify");
         println!("{line} verify_ms={} verify_sound={}", t.elapsed().as_millis(), report.ok());
         return Ok(());
     }

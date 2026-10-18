@@ -104,11 +104,10 @@
 
 ## Next action
 
-Read rungs now match in R+J+D (uniform + zipf gets, 100k scan, verify). 10^8 10-18: Java read 189 MB
-PASS (verify 119 s), Dart 246 MB PASS (verify 510 s), **Rust 382 MB FAIL: F-170** (no streaming
-cursor, 04 §8 MUST; scan +84 MB). Waiting on the human: fix F-170 for 1.0 (Rust cursor) or not.
-Rung db is rebuilt per run (`runs/rj-read.sh`, `r-steps.sh`); remote `~/j1e8/r1e8.db` kept for the
-F-170 rerun. Side question: Dart segments ~40% larger than Rust's.
+10^8 read rungs all PASS with zipf, scan, verify (10-18): Rust 305 MB (F-170 streaming cursor),
+Java 189 MB, Dart 246 MB. Verify: R 32 s, J 119 s, D 510 s. Next: why Rust `open` at 10^8 is
+230 MB RSS (Dart 19) -- only 15 MB margin under 320; then tick M6 rows in PLAN. Side question: Dart
+segments ~40% larger than Rust's. Remote `~/j1e8/r1e8.db` (44 GB) kept for the open investigation.
 
 ## Log
 
@@ -169,3 +168,4 @@ F-170 rerun. Side question: Dart segments ~40% larger than Rust's.
 - 2026-10-17 — F-167 fixed R+J+D; Java 10^8 all PASS; F-168 (D verify filter per entry, F-166 regression) fixed.
 - 2026-10-18 — Dart 10^8 read 466 MB: per-step RSS put it on scan; F-169 (D scan opened every segment) fixed, read 246 MB PASS, verify 510 s; 10^8 PASS R+J+D.
 - 2026-10-18 — R/J read rungs gain zipf, scan, verify; 10^8 Java PASS, Rust read 382 MB FAIL: F-170 (Rust scan materializes, no cursor) to the human.
+- 2026-10-18 — F-170 fixed (human: for 1.0): Rust `scan_cursor` (04 §8), pages released on long scans; Rust 10^8 read 305 MB PASS; gate quick green.

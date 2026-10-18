@@ -85,3 +85,37 @@ fn f160_reading_many_segments_holds_one_descriptor() {
     let grew = fds() - before;
     assert!(grew <= 1, "{grew} descriptors opened by reads");
 }
+
+#[test]
+fn f170_a_scan_streams_in_bounded_memory() {
+    // `scan_tree` collected every version in range before returning: O(range).
+    // The cursor holds one readahead window plus one batch per segment, and
+    // the memtable's part of the range (bounded by `memtable_entry_limit`).
+    let (_t, mut e) = engine("f170", Profile::Desktop);
+    for i in 0..20_000i64 {
+        e.put(16, &Value::NitriteId(i), &vec![(i % 251) as u8; 100]).unwrap();
+        if i % 5_000 == 4_999 {
+            e.flush().unwrap();
+        }
+    }
+    for i in (0..20_000i64).step_by(7) {
+        e.put(16, &Value::NitriteId(i), b"new").unwrap(); // newer versions over older segments
+    }
+    e.flush().unwrap();
+    for i in 0..7i64 {
+        e.put(16, &Value::NitriteId(i * 1_000 + 7), b"new").unwrap(); // the memtable, copied whole
+    }
+    e.remove_range(16, &Value::NitriteId(100), &Value::NitriteId(200)).unwrap();
+    let all = e.scan_tree(16, None, None, None, true).unwrap();
+    assert_eq!(all.len(), 20_000 - 100);
+    assert_eq!(all.iter().filter(|(_, v)| v == b"new").count(), 2_858 - 14 + 6); // newest wins (key 7 was already new)
+    let mut c = e.scan_cursor(16, None, None, None, true).unwrap();
+    let (mut n, mut most) = (0, 0);
+    while let Some((k, v)) = c.next(&mut e).unwrap() {
+        assert_eq!((&k, &v), (&all[n].0, &all[n].1));
+        most = most.max(c.held());
+        n += 1;
+    }
+    assert_eq!(n, all.len());
+    assert!(most < 1_000, "the cursor held {most} rows of {n}");
+}

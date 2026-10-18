@@ -1475,6 +1475,19 @@ impl Segment {
         Ok(slot.get().unwrap())
     }
 
+    /// F-170: drops every loaded page of a lazy segment this caller owns, so a
+    /// long walk re-reads its path instead of pinning every page it passed.
+    pub fn release_pages(&mut self) {
+        if self.loader.is_none() {
+            return;
+        }
+        for slot in &mut self.pages {
+            if slot.take().is_some() {
+                *self.resident.get_mut() -= self.page_size as u64;
+            }
+        }
+    }
+
     /// Bytes of this segment held in memory: what the page cache budgets.
     pub fn resident_bytes(&self) -> u64 {
         self.resident.load(std::sync::atomic::Ordering::Relaxed)
