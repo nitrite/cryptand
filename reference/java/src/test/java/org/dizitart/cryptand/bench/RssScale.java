@@ -12,7 +12,7 @@ import java.nio.file.Path;
  * F-147: writer memory while building an N-document file, the Java twin of
  * Rust {@code examples/rss_scale.rs} and Dart {@code tool/rss_scale.dart
  * build} (same document, commit per 100k). Run under {@code /usr/bin/time -l}.
- * {@code PATH N read}: open + 10k uniform gets; {@code PATH N settle}:
+ * {@code PATH N read}: open, 10k uniform + 10k zipf gets, a 100k-row scan, verify; {@code PATH N settle}:
  * compact + commit + shrink, as Rust's.
  */
 public final class RssScale {
@@ -24,16 +24,36 @@ public final class RssScale {
             long t = System.nanoTime();
             try (Engine e = Engine.open(path, new Engine.Options())) {
                 long openMs = (System.nanoTime() - t) / 1_000_000;
-                long s = 0x51EDC0DEL;
-                long[] us = new long[10_000];
-                for (int k = 0; k < us.length; k++) {
-                    s = s * 6364136223846793005L + 1442695040888963407L;
-                    long g = System.nanoTime();
-                    if (e.get(16, XlangCrudBench.keyOf((s >>> 33) % n)) == null) throw new AssertionError("missing");
-                    us[k] = (System.nanoTime() - g) / 1000;
+                long[] seed = {0x51EDC0DEL};
+                java.util.function.DoubleSupplier rnd = () -> {
+                    seed[0] = seed[0] * 6364136223846793005L + 1442695040888963407L;
+                    return (seed[0] >>> 11) / (double) (1L << 53);
+                };
+                StringBuilder line = new StringBuilder("open_ms=" + openMs);
+                // Same picks as Dart `tool/scale.dart`: uniform, then zipf by
+                // inverse power (ponytail: s~1.2 skew, not an exact Zipf(0.99)).
+                for (String name : new String[] {"uniform", "zipf"}) {
+                    long[] us = new long[10_000];
+                    for (int k = 0; k < us.length; k++) {
+                        double u = rnd.getAsDouble();
+                        long i = name.equals("zipf") ? (long) (n * Math.pow(u, 6)) % n : (long) (u * n);
+                        long g = System.nanoTime();
+                        if (e.get(16, XlangCrudBench.keyOf(i)) == null) throw new AssertionError("missing");
+                        us[k] = (System.nanoTime() - g) / 1000;
+                    }
+                    java.util.Arrays.sort(us);
+                    line.append(" get_" + name + "_us p50=" + us[5000] + " p99=" + us[9900] + " p999=" + us[9990]);
                 }
-                java.util.Arrays.sort(us);
-                System.out.println("open_ms=" + openMs + " get_uniform_us p50=" + us[5000] + " p99=" + us[9900] + " p999=" + us[9990]);
+                long lo = (long) (rnd.getAsDouble() * Math.max(1, n - 100_000));
+                long g = System.nanoTime();
+                long rows = 0;
+                Engine.Cursor c = e.scan(16, XlangCrudBench.keyOf(lo), XlangCrudBench.keyOf(lo + 100_000), false);
+                while (c.next()) rows++;
+                line.append(String.format(" scan_rows=%d scan_rows_per_s=%.0f", rows, rows * 1e9 / (System.nanoTime() - g)));
+                g = System.nanoTime();
+                boolean sound = org.dizitart.cryptand.ops.Verify.run(e).findings().isEmpty();
+                line.append(" verify_ms=" + (System.nanoTime() - g) / 1_000_000 + " verify_sound=" + sound);
+                System.out.println(line);
             }
             return;
         }
