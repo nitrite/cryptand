@@ -104,10 +104,10 @@
 
 ## Next action
 
-10^8 read rungs all PASS with zipf, scan, verify (10-18): Rust 305 MB (F-170 streaming cursor),
-Java 189 MB, Dart 246 MB. Verify: R 32 s, J 119 s, D 510 s. Next: why Rust `open` at 10^8 is
-230 MB RSS (Dart 19) -- only 15 MB margin under 320; then tick M6 rows in PLAN. Side question: Dart
-segments ~40% larger than Rust's. Remote `~/j1e8/r1e8.db` (44 GB) kept for the open investigation.
+10^8 read rungs all PASS with zipf, scan, verify (10-18): Rust 180 MB (F-170 cursor, F-171
+unbounded scan opened every segment), Java 189 MB, Dart 246 MB. Verify: R 32 s, J 119 s, D 510 s.
+Next: tick M6 rows in PLAN (check each Verify line). Side question: Dart segments ~40% larger than
+Rust's. Remote `~/j1e8/r1e8.db` (44 GB) can go.
 
 ## Log
 
@@ -169,3 +169,4 @@ segments ~40% larger than Rust's. Remote `~/j1e8/r1e8.db` (44 GB) kept for the o
 - 2026-10-18 — Dart 10^8 read 466 MB: per-step RSS put it on scan; F-169 (D scan opened every segment) fixed, read 246 MB PASS, verify 510 s; 10^8 PASS R+J+D.
 - 2026-10-18 — R/J read rungs gain zipf, scan, verify; 10^8 Java PASS, Rust read 382 MB FAIL: F-170 (Rust scan materializes, no cursor) to the human.
 - 2026-10-18 — F-170 fixed (human: for 1.0): Rust `scan_cursor` (04 §8), pages released on long scans; Rust 10^8 read 305 MB PASS; gate quick green.
+- 2026-10-18 — F-171 (R+D: unbounded scan unpruned; Rust `collection` opened every segment): Rust 10^8 open 230 -> 3 MB, read 180 MB.

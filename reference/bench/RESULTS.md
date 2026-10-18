@@ -221,6 +221,7 @@ Remote M1, 16 GB, internal SSD, desktop profile, plaintext, `benchDoc`
 | 10^8 | Dart AOT (10-18, F-168+F-169) | 9 665 | 70.3 GB | 1.36 | 221 MB footprint | 650 / 1397 us (zipf p50 223) | 246 MB footprint | 510 s sound | PASS: build, read (scan 436k rows/s), settle 113 MB |
 | 10^8 | Rust (10-18, full read rung) | 136 000 | 43.7 GB | — | 145 MB footprint | 211 / 994 us (zipf p50 125); scan 1.30M rows/s | 382 MB footprint | 33 s sound | FAIL: read (F-170, scan materializes the range) |
 | 10^8 | Rust (10-18, F-170 cursor) | — | 43.7 GB | — | — | 205 / 1025 us (zipf p50 122); scan 3.16M rows/s | 305 MB footprint | 32 s sound | PASS: read (open alone 230 MB) |
+| 10^8 | Rust (10-18, F-171) | — | 43.7 GB | — | — | 224 / 1038 us (zipf p50 125); scan 3.08M rows/s | 180 MB footprint | 32 s sound | PASS: read (open 3 MB) |
 | 10^8 | Java (10-18, full read rung) | 88 600 | 69.1 GB | — | 223 MB footprint at -Xmx128m | 241 / 1055 us (zipf p50 142); scan 623k rows/s | 189 MB footprint | 119 s sound | PASS: build, read |
 
 ## Running it

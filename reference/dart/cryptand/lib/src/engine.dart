@@ -2502,6 +2502,9 @@ final class Engine {
     // restore (`13-operations.md` §1) the manifest points at an older root
     // while every later segment's bytes are still present, so an extent-driven
     // scan would return data the restore was supposed to abandon.
+    // F-171: unbounded still means this tree only, as Java's `treeCeiling`.
+    final treeEnd = upper ??
+        (treeId < 0xFFFFFFFF ? userKeyPrefix(treeId + 1, Uint8List(0)) : null);
     // A segment whose [min_key, max_key] misses the range is never opened
     // (F-169): without this, every scan loaded and seeked every live segment
     // of the database, +165 MB for a 100k-row range at 10^8. As Rust and Java.
@@ -2510,9 +2513,9 @@ final class Engine {
         for (final r in refsAt(l))
           if (!quarantined.containsKey(r.segmentId) &&
               (r.maxKey.isEmpty || compareKeys(r.maxKey, lower) >= 0) &&
-              (upper == null ||
+              (treeEnd == null ||
                   r.minKey.isEmpty ||
-                  compareKeys(_userLow(r.minKey), upper) < 0))
+                  compareKeys(_userLow(r.minKey), treeEnd) < 0))
             segment(r).cursor()..seekCeiling(lower),
     ];
 

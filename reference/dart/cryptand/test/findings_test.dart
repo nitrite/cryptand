@@ -14,6 +14,23 @@ Uint8List b(List<int> v) => Uint8List.fromList(v);
 Uint8List big(int fill, [int n = 6000]) => Uint8List(n)..fillRange(0, n, fill);
 
 void main() {
+  test('F-171: an unbounded scan opens only its own tree\'s segments', () {
+    final e = Engine(segmentTargetBytes: 4096);
+    for (var i = 0; i < 5; i++) {
+      e.put(16, CNitriteId(i), b([1]));
+    }
+    e.flush();
+    for (var s = 0; s < 10; s++) {
+      for (var i = 0; i < 200; i++) {
+        e.put(17, CNitriteId(s * 1000 + i), big(s, 100));
+      }
+      e.flush();
+    }
+    final before = e.cacheHits + e.cacheMisses;
+    expect(e.scanTree(16).length, 5);
+    expect(e.cacheHits + e.cacheMisses - before, lessThan(3));
+  });
+
   test('F-169: a bounded scan opens only segments that overlap its range', () {
     final e = Engine(segmentTargetBytes: 4096);
     for (var s = 0; s < 20; s++) {

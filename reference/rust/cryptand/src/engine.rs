@@ -2330,6 +2330,7 @@ impl Engine {
         let lower_uk = lower.map(with_tree);
         let upper_uk = upper.map(with_tree);
         let start = lower_uk.clone().unwrap_or_else(|| tree.to_be_bytes().to_vec());
+        let tree_end = tree.checked_add(1).map(|t| t.to_be_bytes().to_vec());
         let mut sources = Vec::new();
         // The memtable is bounded (`memtable_entry_limit`), so its part of the
         // range is copied once: the cursor then sees one point in time.
@@ -2357,15 +2358,15 @@ impl Engine {
             if self.quarantined.contains_key(&r.segment_id) {
                 continue;
             }
-            if let Some(u) = &upper_uk {
-                if !r.min_key.is_empty() && r.min_key.as_slice() >= u.as_slice() {
+            // F-171: unbounded still means this tree only. Opening a dozen-row
+            // name dictionary opened every segment of the file (228 MB at 10^8).
+            if let Some(u) = upper_uk.as_deref().or(tree_end.as_deref()) {
+                if !r.min_key.is_empty() && r.min_key.as_slice() >= u {
                     continue;
                 }
             }
-            if let Some(l) = &lower_uk {
-                if !r.max_key.is_empty() && r.max_key.as_slice() < l.as_slice() {
-                    continue;
-                }
+            if !r.max_key.is_empty() && r.max_key.as_slice() < start.as_slice() {
+                continue;
             }
             let seg = self.segment(&r)?;
             sources.push(ScanSource {

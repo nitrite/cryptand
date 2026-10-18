@@ -119,3 +119,25 @@ fn f170_a_scan_streams_in_bounded_memory() {
     assert_eq!(n, all.len());
     assert!(most < 1_000, "the cursor held {most} rows of {n}");
 }
+
+#[test]
+fn f171_an_unbounded_scan_opens_only_its_own_trees_segments() {
+    // `Database::collection` scans its name dictionary unbounded; that opened
+    // every segment of the file (228 MB at 10^8), the data tree's included.
+    let (_t, mut e) = engine("f171", Profile::Desktop);
+    for i in 0..5i64 {
+        e.put(16, &Value::NitriteId(i), b"name").unwrap();
+    }
+    e.flush().unwrap();
+    for s in 0..10i64 {
+        for i in 0..500i64 {
+            e.put(17, &Value::NitriteId(s * 1_000 + i), &[1u8; 100]).unwrap();
+        }
+        e.flush().unwrap();
+    }
+    let opens = |e: &cryptand::engine::Engine| e.counters.page_cache_hits + e.counters.page_cache_misses;
+    let before = opens(&e);
+    assert_eq!(e.scan_tree(16, None, None, None, true).unwrap().len(), 5);
+    let n = opens(&e) - before;
+    assert!(n <= 2, "an unbounded scan of tree 16 opened {n} segments");
+}
