@@ -14,6 +14,26 @@ Uint8List b(List<int> v) => Uint8List.fromList(v);
 Uint8List big(int fill, [int n = 6000]) => Uint8List(n)..fillRange(0, n, fill);
 
 void main() {
+  test('F-169: a bounded scan opens only segments that overlap its range', () {
+    final e = Engine(segmentTargetBytes: 4096);
+    for (var s = 0; s < 20; s++) {
+      for (var i = 0; i < 200; i++) {
+        e.put(t, CNitriteId(s * 1000 + i), big(s, 100));
+      }
+      e.flush();
+    }
+    final live = e.liveSegments.length;
+    final before = e.cacheHits + e.cacheMisses;
+    final rows = e
+        .scanTree(t,
+            range: KeyRange(encodeKey(const CNitriteId(5000)),
+                encodeKey(const CNitriteId(5010))))
+        .length;
+    expect(rows, 10);
+    expect(live, greaterThan(3));
+    expect(e.cacheHits + e.cacheMisses - before, lessThan(3));
+  });
+
   test('F-018: compaction does not resurrect rows hidden by a range delete', () {
     final e = Engine();
     for (var i = 0; i < 100; i++) {

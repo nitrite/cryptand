@@ -72,6 +72,9 @@ void main(List<String> args) {
 
   final db = DatabaseFile.open(path);
   out['open_ms'] = sw.elapsedMilliseconds;
+  // Max RSS after each step: shows which step sets the rung's peak.
+  void mark(String step) => out['rss_${step}_mb'] = ProcessInfo.maxRss >> 20;
+  mark('open');
   final c = db.collection('c')!;
   final rnd = math.Random(0x51EDC0DE);
   var missing = 0;
@@ -94,6 +97,7 @@ void main(List<String> args) {
     for (final (q, p) in [('p50', 0.5), ('p99', 0.99), ('p999', 0.999)]) {
       out['get_${name}_${q}_us'] = us[(us.length * p).floor()];
     }
+    mark(name);
   }
   sw.reset();
   var rows = 0;
@@ -103,6 +107,7 @@ void main(List<String> args) {
     rows++;
   }
   out['scan_rows_per_s'] = (rows * 1e6 / sw.elapsedMicroseconds).round();
+  mark('scan');
   sw.reset();
   final sound = db.engine.verifyStructure(claims: db.indexClaims()).isSound;
   out
