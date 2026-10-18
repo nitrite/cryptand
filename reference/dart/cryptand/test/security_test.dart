@@ -183,17 +183,16 @@ void main() {
       expect(everUsed.length, kNonceGap * 3);
     });
 
-    test('allocation stops at the watermark until a publish happens', () {
+    test('F-172: allocation publishes the next watermark before crossing it', () {
       var persisted = 0;
       final a = NonceAllocator.open(persisted, (w) => persisted = w);
       for (var i = 0; i < kNonceGap; i++) {
         a.allocate();
       }
       expect(a.mustPublish, isTrue);
-      expect(a.allocate, throwsA(isA<StateError>()));
-      a.published(a.toPublish);
-      expect(a.mustPublish, isFalse);
+      expect(persisted, kNonceGap);
       expect(a.allocate(), kNonceGap);
+      expect(persisted, 2 * kNonceGap, reason: 'published before handing it out');
     });
 
     test('M4.4: exhaustion near 2^64 is an error, never a wrap to 0', () {

@@ -308,6 +308,10 @@ pub struct Engine {
     memtable: Vec<BTreeMap<crate::compare::MemKey, MemEntry>>,
     memtable_bytes: usize,
     pub memtable_entry_limit: usize,
+    /// Nonces `arm` reserves per unit of work ([`Engine::NONCE_HEADROOM`]);
+    /// tests lower it to make one unit outrun it (F-172).
+    #[doc(hidden)]
+    pub nonce_headroom: u64,
 
     pub policy: LevelPolicy,
     pub profile: ProfileConstants,
@@ -522,6 +526,7 @@ impl Engine {
             memtable: (0..shards).map(|_| BTreeMap::new()).collect(),
             memtable_bytes: 0,
             memtable_entry_limit: pc.memtable_entries,
+            nonce_headroom: Engine::NONCE_HEADROOM,
             policy: LevelPolicy {
                 l0_trigger: sb.l0_trigger,
                 tier_width: sb.tier_width,
@@ -742,6 +747,7 @@ impl Engine {
             memtable: (0..shards).map(|_| BTreeMap::new()).collect(),
             memtable_bytes: 0,
             memtable_entry_limit: pc.memtable_entries,
+            nonce_headroom: Engine::NONCE_HEADROOM,
             policy: LevelPolicy {
                 l0_trigger: sb.l0_trigger,
                 tier_width: sb.tier_width,
@@ -1018,6 +1024,12 @@ impl Engine {
             self.nonce_next = 0;
             self.nonce_limit = 0;
         }
+        // F-172: pages advance the pager's cursor, not this one; only value-log
+        // records went through `allocate_nonce`, so inline-only writes never
+        // re-published and the pager ran out at the first gap.
+        if let Some(c) = &self.pager.crypto {
+            self.nonce_next = c.next;
+        }
         let fits = |e: &Engine| e.nonce_next.checked_add(n).is_some_and(|end| end <= e.nonce_limit);
         if !fits(self) {
             self.publish_nonce_floor()?;
@@ -1052,7 +1064,7 @@ impl Engine {
                 "this handle was opened read-only and may not write".into(),
             ));
         }
-        self.ensure_nonces(Engine::NONCE_HEADROOM)
+        self.ensure_nonces(self.nonce_headroom)
     }
 
     pub fn close(&mut self, flush_memtable: bool) -> Result<()> {

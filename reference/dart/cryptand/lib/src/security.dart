@@ -258,7 +258,7 @@ int _addSaturating(int a, int b) {
 }
 
 final class NonceAllocator {
-  NonceAllocator._(this._next, this._published);
+  NonceAllocator._(this._next, this._published, [this._publish]);
 
   /// Opens at a persisted watermark. [publish] is called with the value that
   /// MUST be durable before the first allocation; a caller that cannot make it
@@ -267,7 +267,7 @@ final class NonceAllocator {
       int persistedNextNonce, void Function(int nextNonce) publish) {
     final floor = _addSaturating(persistedNextNonce, kNonceGap);
     publish(floor); // rule 1: durable before anything is allocated
-    return NonceAllocator._(persistedNextNonce, floor);
+    return NonceAllocator._(persistedNextNonce, floor, publish);
   }
 
   /// An allocator for a handle that will never write, and so needs no floor.
@@ -282,6 +282,7 @@ final class NonceAllocator {
 
   int _next;
   int _published;
+  final void Function(int nextNonce)? _publish;
 
   int get next => _next;
 
@@ -295,6 +296,16 @@ final class NonceAllocator {
   int get toPublish => _addSaturating(_published, kNonceGap);
 
   int allocate() {
+    // F-172: rule 3, publish before crossing. Nothing called [published]
+    // mid-session, so one session died at its first gap (2^20 page writes).
+    // At saturation `toPublish` does not advance: no publish, and the throw
+    // below is the exhaustion error.
+    final publish = _publish;
+    if (mustPublish && publish != null && toPublish != _published) {
+      final w = toPublish;
+      publish(w);
+      published(w);
+    }
     if (mustPublish) {
       throw StateError(
           'nonce watermark reached at $_next: publish next_nonce = $toPublish '

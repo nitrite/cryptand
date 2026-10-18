@@ -141,3 +141,24 @@ fn f171_an_unbounded_scan_opens_only_its_own_trees_segments() {
     let n = opens(&e) - before;
     assert!(n <= 2, "an unbounded scan of tree 16 opened {n} segments");
 }
+
+#[test]
+fn f172_page_writes_alone_widen_the_nonce_window() {
+    // 10^8 encrypted rung died at 5x10^6 docs: `ensure_nonces` read the
+    // engine's cursor, which only value-log records advance, so inline-only
+    // writes never re-published and the pager ran out at 2^20 pages. Headroom
+    // = the whole gap: any page written since the open publish must make the
+    // next `arm` publish a new floor.
+    use cryptand::engine::Engine;
+    let t = TempDb::new("f172");
+    let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &[7u8; 32], 0, 0, 0, 0).unwrap();
+    e.nonce_headroom = cryptand::security::NONCE_GAP;
+    let floor = e.sb.next_nonce;
+    for i in 0..2_000i64 {
+        e.put(1, &Value::NitriteId(i), &[b'v'; 100]).unwrap();
+    }
+    e.flush().unwrap();
+    e.flush().unwrap(); // arms again, after the first flush wrote pages
+    assert!(e.sb.next_nonce > floor, "floor never re-published: {floor}");
+    e.close(true).unwrap();
+}
