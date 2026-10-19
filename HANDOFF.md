@@ -104,11 +104,11 @@
 
 ## Next action
 
-Encrypted 10^8 Rust rung rerunning on remote since 10-19 after F-172 (first run died at 5x10^6) (clone `cryptand-enc1e8`,
-`~/e1e8/run.sh`: build, read, settle under `time -l`, `CRYPTAND_ENC=1`; outputs
-`~/e1e8/{build,read,settle}.out`). Next: record it in RESULTS Scale table against the bars,
-then `mobile` profile, then 6.4 suspects. 10^9 deferred past 1.0 (human). Side question: Dart
-segments ~40% larger than Rust's.
+Encrypted 10^8 Rust rung (clone `cryptand-enc1e8`, `~/e1e8`, `CRYPTAND_ENC=1`): build PASS
+(1524 s, footprint 268 MB), read PASS (max 169 MB, uniform p50 498 us, zipf 166 us, verify
+137 s sound). Settle died on F-173 (fixed eec6447); settle-only rerun launched 10-19 on the
+same db -> `~/e1e8/settle.out`. Next: when done, record the rung in RESULTS Scale table, then
+`mobile` profile, then 6.4 suspects. Side question: Dart segments ~40% larger than Rust's.
 
 ## Log
 
@@ -174,3 +174,4 @@ segments ~40% larger than Rust's.
 - 2026-10-18 — 10^9 deferred past 1.0 (human, disk); PLAN M6 row updated; remote r1e8.db freed (108 GB free).
 - 2026-10-18 — rss_scale `CRYPTAND_ENC=1`; encrypted 10^8 Rust rung launched on remote.
 - 2026-10-19 — F-172 (S1, R+D: encrypted writes never re-published the nonce floor, died after 2^20 pages) fixed; gate quick green; encrypted 10^8 Rust rung relaunched.
+- 2026-10-19 — enc 10^8 Rust build+read PASS; settle hit F-173 (R: compact/shrink never re-armed the nonce window; J+D unaffected), fixed, gate quick green; settle rerun launched.
