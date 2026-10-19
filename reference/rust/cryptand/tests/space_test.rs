@@ -162,3 +162,36 @@ fn f172_page_writes_alone_widen_the_nonce_window() {
     assert!(e.sb.next_nonce > floor, "floor never re-published: {floor}");
     e.close(true).unwrap();
 }
+
+#[test]
+fn f173_compact_and_shrink_rearm_per_extent() {
+    // 10^8 encrypted settle died: `compact()` ran its whole merge as one
+    // unbounded step and `relocate_down` never armed, so one window had to
+    // cover every page of the file. Scaled down: 64 KiB segments, a 64-page
+    // headroom, and the window drained to exactly that before each pass.
+    use cryptand::engine::Engine;
+    use cryptand::spaceapi::SpaceApi;
+    let t = TempDb::new("f173");
+    let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &[7u8; 32], 0, 0, 0, 0).unwrap();
+    e.profile.segment_target_bytes = 64 << 10;
+    e.nonce_headroom = 64;
+    let drain = |e: &mut Engine| {
+        e.allocate_nonce().unwrap();
+        while e.pager.crypto.as_ref().map(|c| c.limit - c.next).unwrap() > 64 {
+            e.allocate_nonce().unwrap();
+        }
+    };
+    for i in 0..20_000i64 {
+        e.put(1, &Value::NitriteId(i), &[b'v'; 100]).unwrap();
+        if i % 2_000 == 1_999 {
+            e.flush().unwrap();
+        }
+    }
+    drain(&mut e);
+    e.compact().unwrap();
+    drain(&mut e);
+    e.shrink().unwrap();
+    e.close(true).unwrap();
+    let mut e = Engine::open(&t.path, Some(&[7u8; 32])).unwrap();
+    assert_eq!(e.scan_tree(1, None, None, None, true).unwrap().len(), 20_000);
+}

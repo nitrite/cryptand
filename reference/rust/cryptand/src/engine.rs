@@ -2755,6 +2755,9 @@ impl Engine {
                 self.rotate_output(job)?;
             }
             if job.builder.is_none() {
+                // F-173: per output segment (byte-capped, well under the
+                // headroom); an unbounded step writes the whole merge.
+                self.arm()?;
                 let b = SegmentBuilder::with_reserve(
                     self.pager.page_size,
                     self.pager.tag_reserve(),
@@ -3052,6 +3055,7 @@ impl Engine {
     }
 
     pub(crate) fn relocate_trees(&mut self) -> Result<()> {
+        self.arm()?;
         let commit_id = self.sb.commit_id;
         for t in [
             &mut self.catalog.tree,
@@ -3094,6 +3098,8 @@ impl Engine {
             };
             match what {
                 Extent::Segment(r) => {
+                    // F-173: per extent; a shrink moves the whole file.
+                    self.arm()?;
                     self.pager.move_segment(start, to, pages, r.nonce)?;
                     let mut m = std::mem::replace(&mut self.manifest, Manifest::new((0, 0)));
                     m.tree.commit_id = self.sb.commit_id;
