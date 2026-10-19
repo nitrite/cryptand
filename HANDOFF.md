@@ -104,11 +104,15 @@
 
 ## Next action
 
-Encrypted 10^8 Rust rung (clone `cryptand-enc1e8`, `~/e1e8`, `CRYPTAND_ENC=1`): build PASS
-(1524 s, footprint 268 MB), read PASS (max 169 MB, uniform p50 498 us, zipf 166 us, verify
-137 s sound). Settle died on F-173 (fixed eec6447); settle-only rerun launched 10-19 on the
-same db -> `~/e1e8/settle.out`. Next: when done, record the rung in RESULTS Scale table, then
-`mobile` profile, then 6.4 suspects. Side question: Dart segments ~40% larger than Rust's.
+Encrypted 10^8 rungs queued on remote 10-19 (`CRYPTAND_ENC=1`, fixed raw key, kdf 0):
+1. Rust: `~/e1e8/run.sh` full rerun at b563988 (F-173 + F-174) -> `~/e1e8/{build,read,settle}.out`
+   (old outputs in `~/e1e8/old/`: build 268 MB, read 169 MB PASS; settle 354 MB FAIL -> F-174).
+2. Then Java, then Dart, chained in `~/encjd/run.sh` (clone `cryptand-1e8` at c492e26,
+   Java -Xmx128m, Dart AOT `~/encjd/scale`) -> `~/encjd/{j,d}{build,read,settle}.out`, `~/encjd/done`.
+   One 10^8 file on disk at a time (66 GB free).
+Then: record all in `reference/bench/RESULTS.md` section 5 against 6.3 bars; any miss is a
+finding. Then `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 doubles the file
+(amp 1.34 -> 2.67, plaintext too; 10^8 settles at 1.36), unexplained, small-n.
 
 ## Log
 
@@ -175,3 +179,4 @@ same db -> `~/e1e8/settle.out`. Next: when done, record the rung in RESULTS Scal
 - 2026-10-18 — rss_scale `CRYPTAND_ENC=1`; encrypted 10^8 Rust rung launched on remote.
 - 2026-10-19 — F-172 (S1, R+D: encrypted writes never re-published the nonce floor, died after 2^20 pages) fixed; gate quick green; encrypted 10^8 Rust rung relaunched.
 - 2026-10-19 — enc 10^8 Rust build+read PASS; settle hit F-173 (R: compact/shrink never re-armed the nonce window; J+D unaffected), fixed, gate quick green; settle rerun launched.
+- 2026-10-19 — F-174 (R: encrypted `write_extent` sealed a whole 32 MiB extent into a 2nd buffer; 10^7 compact 161 -> 131 MB) fixed, gate quick green; J/D harnesses take CRYPTAND_ENC; enc 10^8 R/J/D chain launched.
