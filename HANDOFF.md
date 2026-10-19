@@ -108,7 +108,7 @@ Encrypted 10^8 (`CRYPTAND_ENC=1`, raw key, kdf 0) on remote:
 1. Rust PASS at b563988: build 188 MB, read 177 MB, settle 288 MB footprint (`~/e1e8/*.out`).
 2. Dart build stopped 10-20 00:10 at 61 GiB after 11h (disk 32 GiB free; Rust final 41 GiB).
    Local 10^6: Dart enc = plain size (1.29 GB, amp 2.5; Rust enc 0.64 GB), so encryption is not
-   the size cause (pre-settle amp, cf. F-154); but enc load is 4.8x slower (2660 vs 12658 docs/s).
+   the size cause (pre-settle amp, cf. F-154); but enc load is 4.8x slower (F-175; R 2.3x, J 1.5x).
    Rerun needs ~130 GB free at amp 2.5, or settle-as-you-go; decide before relaunching.
 3. Java's first run was void: harness never set `encrypt` (plaintext file, opens refused
    the key), fixed 3831966. `~/encjd/jrerun.sh` (running since 10-20 00:10) rebuilt `cryptand-1e8`
