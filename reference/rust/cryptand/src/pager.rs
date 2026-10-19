@@ -857,19 +857,29 @@ impl Pager {
         if !self.seals() {
             return self.write_at(start_page * self.page_size as u64, bytes);
         }
-        let mut out = Vec::with_capacity(bytes.len());
+        // F-174: sealed and written 256 pages at a time; a whole sealed copy
+        // doubled a 32 MiB compaction output (settle footprint 354 MB at 10^8).
+        let mut out = Vec::with_capacity(256 * self.page_size);
         let mut head = 0;
-        for i in 0..(bytes.len() / self.page_size) as u64 {
-            let at = i as usize * self.page_size;
-            let sealed = self.seal_page(start_page + i, &bytes[at..at + self.page_size])?;
-            if i == 0 {
-                head = self.written_nonce;
+        let pages = (bytes.len() / self.page_size) as u64;
+        let mut first = 0u64;
+        while first < pages {
+            let n = (pages - first).min(256);
+            out.clear();
+            for i in first..first + n {
+                let at = i as usize * self.page_size;
+                let sealed = self.seal_page(start_page + i, &bytes[at..at + self.page_size])?;
+                if i == 0 {
+                    head = self.written_nonce;
+                }
+                out.extend_from_slice(&sealed);
             }
-            out.extend_from_slice(&sealed);
+            self.write_at((start_page + first) * self.page_size as u64, &out)?;
+            first += n;
         }
         // F-128: what the manifest records is the head's nonce.
         self.written_nonce = head;
-        self.write_at(start_page * self.page_size as u64, &out)
+        Ok(())
     }
 
     /// F-157: [`Pager::read_segment`] then [`Pager::write_extent`], 256 pages

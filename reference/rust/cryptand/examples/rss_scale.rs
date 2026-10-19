@@ -5,6 +5,7 @@
 //!     cargo run --release --example rss_scale PATH N read   # 10k uniform + 10k zipf gets, 100k scan, verify
 //!
 //!     cargo run --release --example rss_scale PATH N settle # compact+commit+shrink (F-154)
+//!     cargo run --release --example rss_scale PATH N settle compact|shrink  # one phase (F-174)
 //!
 //! Run under `/usr/bin/time -l` for max RSS. `CRYPTAND_ENC=1` makes every
 //! mode use an encrypted file (fixed raw key, kdf 0: Argon2id excluded).
@@ -96,10 +97,16 @@ fn main() -> cryptand::Result<()> {
     }
     if a.get(3).map(String::as_str) == Some("settle") {
         use cryptand::spaceapi::SpaceApi;
+        // `settle compact` / `settle shrink`: one phase, so `time -l` peaks per phase.
+        let only = a.get(4).map(String::as_str);
         let mut db = Database { engine: Engine::open(path, key)? };
-        db.engine.compact()?;
-        db.commit(Durability::Sync)?;
-        db.engine.shrink()?;
+        if only != Some("shrink") {
+            db.engine.compact()?;
+            db.commit(Durability::Sync)?;
+        }
+        if only != Some("compact") {
+            db.engine.shrink()?;
+        }
         db.close()?;
         let b = std::fs::metadata(path)?.len();
         println!("settled bytes={b} space_amp={:.2}", b as f64 / (n as f64 * 516.0));
