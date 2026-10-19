@@ -16,13 +16,24 @@ import java.nio.file.Path;
  * compact + commit + shrink, as Rust's.
  */
 public final class RssScale {
+    /** {@code CRYPTAND_ENC=1}: encrypted file, fixed raw key (kdf 0), as Rust {@code rss_scale}. */
+    private static Engine.Options opts() {
+        Engine.Options o = new Engine.Options();
+        // ponytail: fixed bench key, never a real secret.
+        if (System.getenv("CRYPTAND_ENC") != null) {
+            o.rawKey = new byte[32];
+            java.util.Arrays.fill(o.rawKey, (byte) 7);
+        }
+        return o;
+    }
+
     public static void main(String[] args) throws Exception {
         Path path = Path.of(args[0]);
         long n = Long.parseLong(args[1]);
         String mode = args.length > 2 ? args[2] : "build";
         if (mode.equals("read")) {
             long t = System.nanoTime();
-            try (Engine e = Engine.open(path, new Engine.Options())) {
+            try (Engine e = Engine.open(path, opts())) {
                 long openMs = (System.nanoTime() - t) / 1_000_000;
                 long[] seed = {0x51EDC0DEL};
                 java.util.function.DoubleSupplier rnd = () -> {
@@ -58,7 +69,7 @@ public final class RssScale {
             return;
         }
         if (mode.equals("settle")) {
-            try (Engine e = Engine.open(path, new Engine.Options())) {
+            try (Engine e = Engine.open(path, opts())) {
                 e.compact();
                 e.commitNow();
                 e.shrink();
@@ -68,7 +79,7 @@ public final class RssScale {
             return;
         }
         Files.deleteIfExists(path);
-        Engine.Options o = new Engine.Options();
+        Engine.Options o = opts();
         o.profile = Profile.DESKTOP;
         o.durability = Superblock.Durability.OS;
         try (Engine e = Engine.create(path, o)) {

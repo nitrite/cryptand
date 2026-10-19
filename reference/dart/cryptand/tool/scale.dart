@@ -22,17 +22,28 @@ import '../bench/harness.dart';
 
 CValue id(int i) => CNitriteId(snowflakeId(i));
 
+/// `CRYPTAND_ENC=1`: encrypted file, fixed raw key (kdf 0), as Rust `rss_scale`.
+/// ponytail: fixed bench key, never a real secret.
+final List<int>? key =
+    Platform.environment.containsKey('CRYPTAND_ENC') ? List.filled(32, 7) : null;
+
 void main(List<String> args) {
   final path = args[1];
   final n = int.parse(args[2]);
   final out = <String, Object>{'impl': 'dart', 'phase': args[0], 'n': n};
   final sw = Stopwatch()..start();
   if (args[0] == 'build') {
-    DatabaseFile.save(
-        Database(engine: Engine(pageSize: Profile.desktop.pageSize))
-          ..createCollection('c'),
-        path);
-    final db = DatabaseFile.open(path);
+    if (key == null) {
+      DatabaseFile.save(
+          Database(engine: Engine(pageSize: Profile.desktop.pageSize))
+            ..createCollection('c'),
+          path);
+    } else {
+      DatabaseFile.create(path, credential: key!, kdf: Keyslot.kdfRaw)
+        ..createCollection('c')
+        ..engine.close();
+    }
+    final db = DatabaseFile.open(path, key: key);
     final c = db.collection('c')!;
     var peak = 0;
     for (var i = 0; i < n; i++) {
@@ -55,7 +66,7 @@ void main(List<String> args) {
   }
 
   if (args[0] == 'settle') {
-    final db = DatabaseFile.open(path);
+    final db = DatabaseFile.open(path, key: key);
     db.engine
       ..compact()
       ..commit()
@@ -70,7 +81,7 @@ void main(List<String> args) {
     return;
   }
 
-  final db = DatabaseFile.open(path);
+  final db = DatabaseFile.open(path, key: key);
   out['open_ms'] = sw.elapsedMilliseconds;
   // Max RSS after each step: shows which step sets the rung's peak.
   void mark(String step) => out['rss_${step}_mb'] = ProcessInfo.maxRss >> 20;
