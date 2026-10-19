@@ -21,6 +21,7 @@ public final class RssScale {
         Engine.Options o = new Engine.Options();
         // ponytail: fixed bench key, never a real secret.
         if (System.getenv("CRYPTAND_ENC") != null) {
+            o.encrypt = true;
             o.rawKey = new byte[32];
             java.util.Arrays.fill(o.rawKey, (byte) 7);
         }
