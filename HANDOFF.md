@@ -106,13 +106,11 @@
 
 Encrypted 10^8 (`CRYPTAND_ENC=1`, raw key, kdf 0) on remote:
 1. Rust PASS at b563988: build 188 MB, read 177 MB, settle 288 MB footprint (`~/e1e8/*.out`).
-2. Dart: first run stopped 10-20 at 61 GiB (disk). Local 10^6: enc = plain size (amp 2.5), enc load
-   4.8x slower (F-175). Rerun as-is queued (`~/encjd/drerun.sh`, human 10-20): after `jdone2` it deletes
-   old bench dbs (f174, rss-run, m6-run) + idle clones' Rust target/, writes `dfree.txt`; starts only
-   if >= 125 GB free (else `dshort`); outputs `d2*.out`, `ddisk.log`, then `ddone`.
-3. Java at 3831966: build PASS (2539 s, footprint 218 MB, file 69 GB), read PASS (footprint 194 MB,
-   get p50 344 us, verify 536 s). Settle output empty (likely ENOSPC, unconfirmed): rerunning build+settle
-   via `~/encjd/jsettle.sh` (10-20 10:40) -> `j2*.out`, `jdisk.log` (df/min), then `jdone2`.
+2. Dart rerun did not start: after cleanup only 118 GB free (< 125 gate, `dshort`).
+3. Java at 3831966: build PASS twice (2541 s, footprint 232 MB, file 69 GB), read PASS (194 MB,
+   p50 344 us, verify 536 s). Settle void twice: build leaves 9 GB free, settle fills the disk in
+   4 min and dies with an empty output (ENOSPC; `jdisk.log`). Enc 10^8 settle (J) and all of Dart
+   need more disk than the remote has (118 GB free with no db): decision for the human.
 Then: record all in `reference/bench/RESULTS.md` section 5 against 6.3 bars; any miss is a
 finding. Then `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 doubles the file
 (amp 1.34 -> 2.67, plaintext too; 10^8 settles at 1.36), unexplained, small-n.
@@ -187,3 +185,4 @@ finding. Then `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 d
 - 2026-10-20 — Dart enc 10^8 stopped (61 GiB, disk near full); 10^6: size not from encryption, enc load 4.8x slower; Java enc 10^8 running.
 - 2026-10-20 — Java enc 10^8 build+read PASS; settle void (empty output, disk suspected), rerun with disk log.
 - 2026-10-20 — Dart enc 10^8 rerun queued after Java (frees ~26 GB dbs + Rust targets, gated on 125 GB).
+- 2026-10-20 — Java enc 10^8 settle died on full disk again; cleanup gives 118 GB, Dart rerun gated out.
