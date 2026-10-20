@@ -110,9 +110,9 @@ Encrypted 10^8 (`CRYPTAND_ENC=1`, raw key, kdf 0) on remote:
    Local 10^6: Dart enc = plain size (1.29 GB, amp 2.5; Rust enc 0.64 GB), so encryption is not
    the size cause (pre-settle amp, cf. F-154); but enc load is 4.8x slower (F-175; R 2.3x, J 1.5x).
    Rerun needs ~130 GB free at amp 2.5, or settle-as-you-go; decide before relaunching.
-3. Java's first run was void: harness never set `encrypt` (plaintext file, opens refused
-   the key), fixed 3831966. `~/encjd/jrerun.sh` (running since 10-20 00:10) rebuilt `cryptand-1e8`
-   at 3831966, runs `j*.out`, then `jdone`. Void outputs in `~/encjd/jold/`.
+3. Java at 3831966: build PASS (2539 s, footprint 218 MB, file 69 GB), read PASS (footprint 194 MB,
+   get p50 344 us, verify 536 s). Settle output empty (likely ENOSPC, unconfirmed): rerunning build+settle
+   via `~/encjd/jsettle.sh` (10-20 10:40) -> `j2*.out`, `jdisk.log` (df/min), then `jdone2`.
 Then: record all in `reference/bench/RESULTS.md` section 5 against 6.3 bars; any miss is a
 finding. Then `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 doubles the file
 (amp 1.34 -> 2.67, plaintext too; 10^8 settles at 1.36), unexplained, small-n.
@@ -185,3 +185,4 @@ finding. Then `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 d
 - 2026-10-19 — F-174 (R: encrypted `write_extent` sealed a whole 32 MiB extent into a 2nd buffer; 10^7 compact 161 -> 131 MB) fixed, gate quick green; J/D harnesses take CRYPTAND_ENC; enc 10^8 R/J/D chain launched.
 - 2026-10-19 — enc 10^8 Rust PASS (settle 288 MB); Java run void (RssScale never set `encrypt`), fixed and requeued after Dart.
 - 2026-10-20 — Dart enc 10^8 stopped (61 GiB, disk near full); 10^6: size not from encryption, enc load 4.8x slower; Java enc 10^8 running.
+- 2026-10-20 — Java enc 10^8 build+read PASS; settle void (empty output, disk suspected), rerun with disk log.
