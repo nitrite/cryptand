@@ -106,10 +106,10 @@
 
 Encrypted 10^8 (`CRYPTAND_ENC=1`, raw key, kdf 0) on remote:
 1. Rust PASS at b563988: build 188 MB, read 177 MB, settle 288 MB footprint (`~/e1e8/*.out`).
-2. Dart build stopped 10-20 00:10 at 61 GiB after 11h (disk 32 GiB free; Rust final 41 GiB).
-   Local 10^6: Dart enc = plain size (1.29 GB, amp 2.5; Rust enc 0.64 GB), so encryption is not
-   the size cause (pre-settle amp, cf. F-154); but enc load is 4.8x slower (F-175; R 2.3x, J 1.5x).
-   Rerun needs ~130 GB free at amp 2.5, or settle-as-you-go; decide before relaunching.
+2. Dart: first run stopped 10-20 at 61 GiB (disk). Local 10^6: enc = plain size (amp 2.5), enc load
+   4.8x slower (F-175). Rerun as-is queued (`~/encjd/drerun.sh`, human 10-20): after `jdone2` it deletes
+   old bench dbs (f174, rss-run, m6-run) + idle clones' Rust target/, writes `dfree.txt`; starts only
+   if >= 125 GB free (else `dshort`); outputs `d2*.out`, `ddisk.log`, then `ddone`.
 3. Java at 3831966: build PASS (2539 s, footprint 218 MB, file 69 GB), read PASS (footprint 194 MB,
    get p50 344 us, verify 536 s). Settle output empty (likely ENOSPC, unconfirmed): rerunning build+settle
    via `~/encjd/jsettle.sh` (10-20 10:40) -> `j2*.out`, `jdisk.log` (df/min), then `jdone2`.
@@ -186,3 +186,4 @@ finding. Then `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 d
 - 2026-10-19 — enc 10^8 Rust PASS (settle 288 MB); Java run void (RssScale never set `encrypt`), fixed and requeued after Dart.
 - 2026-10-20 — Dart enc 10^8 stopped (61 GiB, disk near full); 10^6: size not from encryption, enc load 4.8x slower; Java enc 10^8 running.
 - 2026-10-20 — Java enc 10^8 build+read PASS; settle void (empty output, disk suspected), rerun with disk log.
+- 2026-10-20 — Dart enc 10^8 rerun queued after Java (frees ~26 GB dbs + Rust targets, gated on 125 GB).
