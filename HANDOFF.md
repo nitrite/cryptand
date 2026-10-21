@@ -108,7 +108,8 @@ Encrypted 10^8 done R+J+D, all memory bars PASS, recorded in `reference/bench/RE
 Dart enc is slow across load and reads (F-175: get p50 3.5x, scan 6x, verify 5.5x vs plain). F-175 fixed 10-21
 (D: catalog cached by `CowTree.version`; 10^6 enc load 3.8x faster, plain 2.4x). Rest is the
 pure-Dart AEAD (129 MB/s). Remote enc 10^8 rerun at b4f74f1: build
-7347 docs/s (11.9 h -> 3.8 h), all memory PASS; reads unchanged, F-176 opened (enc reads 3.5-6x).
+7347 docs/s (11.9 h -> 3.8 h), all memory PASS; reads unchanged, F-176 opened (enc reads 3.5-6x):
+profiled 10-21, every read decrypts one page in the pure-Dart AEAD (~63 us), verify 168k pages; fix not chosen.
 Next: `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 doubles the file
 (amp 1.34 -> 2.67, plaintext too; 10^8 settles at 1.36), unexplained, small-n.
 
@@ -188,3 +189,4 @@ Next: `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 doubles t
 - 2026-10-21 — F-175 profiled: Dart put walks the catalog twice per doc (2M decrypts at 10^6); Java caches, Rust never reads it.
 - 2026-10-21 — F-175 fixed (D): catalog cache; 10^6 enc load 2660 -> 10136 docs/s, plain 12658 -> 30913.
 - 2026-10-21 — Dart enc 10^8 after F-175: build 3.8 h (was 11.9), PASS; enc reads unchanged, F-176 opened.
+- 2026-10-21 — F-176 profiled: each Dart enc read decrypts its page in pure-Dart AEAD (no decrypted cache); fix options to the human.
