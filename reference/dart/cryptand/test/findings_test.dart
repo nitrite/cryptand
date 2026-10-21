@@ -129,6 +129,29 @@ void main() {
     expect(e.get(t, const CNitriteId(1)), [2]);
   });
 
+  test('F-175: an encrypted put does not re-read the catalog, and a new index is seen', () {
+    final dir = Directory.systemTemp.createTempSync('f175');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final path = '${dir.path}/e.cryptand';
+    final key = List.filled(32, 7);
+    DatabaseFile.create(path, credential: key, kdf: Keyslot.kdfRaw)
+      ..createCollection('c')
+      ..engine.close();
+    final db = DatabaseFile.open(path, key: key);
+    final c = db.collection('c')!;
+    c.put(CInt.of(NumType.i64, 0), CDoc({'a': CInt.of(NumType.i64, 0)}));
+    final before = db.engine.store.encryptedPages;
+    for (var i = 1; i <= 200; i++) {
+      c.put(CInt.of(NumType.i64, i), CDoc({'a': CInt.of(NumType.i64, i)}));
+    }
+    // Was two catalog walks per put: >= 400 page opens.
+    expect(db.engine.store.encryptedPages - before, lessThan(20));
+    expect(c.indexes, isEmpty);
+    c.createIndex(['a']);
+    expect(c.indexes, hasLength(1));
+    db.engine.close();
+  });
+
   test('F-084: collected values survive commits without flush and a reopen', () {
     final path =
         '${Directory.systemTemp.createTempSync('cryptand-f084-').path}/db.cryptand';

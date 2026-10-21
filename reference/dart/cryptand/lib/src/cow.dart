@@ -963,14 +963,31 @@ final class _Node {
 /// what an unset superblock root field says.
 final class CowTree {
   CowTree(this.store,
-      {required this.treeId, this.root = 0, this.rootNonce = 0});
+      {required this.treeId, int root = 0, int rootNonce = 0})
+      : _root = root,
+        _rootNonce = rootNonce;
 
   final PageStore store;
   final int treeId;
-  int root;
+  int _root;
+  int _rootNonce;
+
+  /// Bumped on every root change, so a reader can cache what it derived from
+  /// the tree (F-175: the catalog, as Java's `PageTree.version()`).
+  int version = 0;
+
+  int get root => _root;
+  set root(int v) {
+    _root = v;
+    version++;
+  }
 
   /// F-128: the root page's header nonce, recorded by whoever holds [root].
-  int rootNonce;
+  int get rootNonce => _rootNonce;
+  set rootNonce(int v) {
+    _rootNonce = v;
+    version++;
+  }
 
   (int, int) get _rootLink => (root, rootNonce);
 

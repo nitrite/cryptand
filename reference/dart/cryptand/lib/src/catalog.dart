@@ -311,13 +311,24 @@ final class Catalog {
     byId.remove(_idKey(d.treeId));
   }
 
-  Iterable<(String, TreeDescriptor)> get all sync* {
-    for (final (k, v) in tree.scan()) {
-      yield (
-        expectValue<CStr>(decodeKey(k), 'tree index key').value,
-        TreeDescriptor.decode(v)
-      );
+  /// Cached against [CowTree.version] (F-175: `Collection.put` reads the
+  /// catalog twice per document, and each walk decrypted every node).
+  List<(String, TreeDescriptor)>? _all;
+  int _allVersion = -1;
+
+  Iterable<(String, TreeDescriptor)> get all {
+    if (_all == null || _allVersion != tree.version) {
+      final v = tree.version;
+      _all = List.unmodifiable([
+        for (final (k, v) in tree.scan())
+          (
+            expectValue<CStr>(decodeKey(k), 'tree index key').value,
+            TreeDescriptor.decode(v)
+          )
+      ]);
+      _allVersion = v;
     }
+    return _all!;
   }
 
   /// The catalog entry that carries tree 3's own root, §2: "every other tree's
