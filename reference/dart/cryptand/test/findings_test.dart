@@ -129,6 +129,36 @@ void main() {
     expect(e.get(t, const CNitriteId(1)), [2]);
   });
 
+  test('F-176: an encrypted page read verifies its checksum once', () {
+    final dir = Directory.systemTemp.createTempSync('f176');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final path = '${dir.path}/e.cryptand';
+    final key = List.filled(32, 7);
+    DatabaseFile.create(path, credential: key, kdf: Keyslot.kdfRaw)
+      ..createCollection('c')
+      ..engine.close();
+    var db = DatabaseFile.open(path, key: key);
+    for (var i = 0; i < 2000; i++) {
+      db.collection('c')!.put(CInt.of(NumType.i64, i), CDoc({'a': CStr('v' * 40)}));
+    }
+    db.engine.commit();
+    db.engine.flush();
+    db.engine.close();
+    db = DatabaseFile.open(path, key: key);
+    final c = db.collection('c')!;
+    final pages0 = db.engine.store.encryptedPages;
+    final v0 = PageHeader.verifications;
+    for (var i = 0; i < 2000; i += 7) {
+      expect(c.get(CInt.of(NumType.i64, i)), isNotNull);
+    }
+    final pages = db.engine.store.encryptedPages - pages0;
+    final perPage = (PageHeader.verifications - v0) / pages;
+    print('F-176: $pages pages, ${perPage.toStringAsFixed(2)} verifications each');
+    expect(pages, greaterThan(0));
+    expect(perPage, lessThan(1.5));
+    db.engine.close();
+  });
+
   test('F-175: an encrypted put does not re-read the catalog, and a new index is seen', () {
     final dir = Directory.systemTemp.createTempSync('f175');
     addTearDown(() => dir.deleteSync(recursive: true));

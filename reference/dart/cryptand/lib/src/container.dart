@@ -710,9 +710,14 @@ final class PageHeader {
     return page.length;
   }
 
+  /// Checksums [read] has verified, process-wide: F-176's regression test
+  /// counts them per page opened.
+  static int verifications = 0;
+
   /// Reads and verifies a page header. Throws [CorruptionException] on a
   /// checksum mismatch, naming the page.
   static PageHeader read(Uint8List page, {int? pageId}) {
+    verifications++;
     if (page.length < size) {
       throw const CorruptionException('page shorter than its header');
     }

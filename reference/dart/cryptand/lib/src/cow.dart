@@ -499,11 +499,14 @@ final class PageStore {
       int startPage, int pages, int nonce) {
     _checkExtent(startPage, pages);
     final rawHead = readClear(startPage);
-    final head = _open(startPage, rawHead);
     if (crypto == null) {
-      return (head: head, page: (i) => read(startPage + i));
+      return (
+        head: _open(startPage, rawHead),
+        page: (i) => read(startPage + i)
+      );
     }
     final h = PageHeader.read(rawHead, pageId: startPage);
+    final head = _open(startPage, rawHead, h);
     if (h.nonce != nonce) {
       throw TamperException(
           'segment at page $startPage has nonce ${h.nonce}, the manifest '
@@ -525,7 +528,7 @@ final class PageStore {
             '${p.commitId}, its head ${h.commitId}: an older write replayed',
             pageId: id);
       }
-      return _open(id, raw);
+      return _open(id, raw, p);
     }
 
     return (head: head, page: page);
@@ -613,11 +616,21 @@ final class PageStore {
 
   Uint8List read(int pageId) => _open(pageId, readClear(pageId));
 
-  Uint8List _open(int pageId, Uint8List raw) {
+  /// [h] is [raw]'s header when the caller has already verified it: F-176,
+  /// the checksum is computed once per page read, not once per stage.
+  Uint8List _open(int pageId, Uint8List raw, [PageHeader? h]) {
     readNonce = ByteData.sublistView(raw).getUint64(32, Endian.little);
+    if (h == null) {
+      try {
+        h = PageHeader.read(raw, pageId: pageId);
+      } on CorruptionException {
+        // Left to whoever reads the page next, as both stages always did.
+        return raw;
+      }
+    }
     // §5.2's read order: verify checksum, decrypt, then decompress.
-    final plain = crypto == null ? raw : _openPage(pageId, raw);
-    return _inflatePage(pageId, plain);
+    final (plain, ph) = crypto == null ? (raw, h) : _openPage(pageId, raw, h);
+    return _inflatePage(pageId, plain, ph);
   }
 
   /// The page exactly as it is stored. `spec/01-container.md` §9 step 8 —
@@ -728,13 +741,7 @@ final class PageStore {
 
   /// The read half of §7. The header a caller sees describes the plaintext it
   /// was handed, exactly as [_openPage] does for the cipher.
-  Uint8List _inflatePage(int pageId, Uint8List page) {
-    final PageHeader h;
-    try {
-      h = PageHeader.read(page, pageId: pageId);
-    } on CorruptionException {
-      return page;
-    }
+  Uint8List _inflatePage(int pageId, Uint8List page, PageHeader h) {
     if (!h.isCompressed) return page;
     // §5.2's read order is decrypt *then* decompress, so a page still holding
     // ciphertext is not a codec's business. Reachable without a bug: §5.1
@@ -827,13 +834,8 @@ final class PageStore {
 
   /// The read half of §5.2. §8.3's mixture: an unencrypted page in an
   /// encrypted file is returned as it is and counted, never guessed at.
-  Uint8List _openPage(int pageId, Uint8List page) {
-    final PageHeader h;
-    try {
-      h = PageHeader.read(page, pageId: pageId);
-    } on CorruptionException {
-      return page;
-    }
+  /// Returns the plaintext page and the header written into it.
+  (Uint8List, PageHeader) _openPage(int pageId, Uint8List page, PageHeader h) {
     if (!h.isEncrypted) {
       if (strict && h.pageType != PageType.vlogSegment) {
         throw TamperException(
@@ -841,7 +843,7 @@ final class PageStore {
             pageId: pageId);
       }
       unencryptedPages++;
-      return page;
+      return (page, h);
     }
     encryptedPages++;
     final stored = h.stored;
@@ -864,7 +866,7 @@ final class PageStore {
     // `_inflatePage` needs its block length: leaving `storedLen` at 0 -- which
     // is what "same as payload_len" means -- would hand the decompressor the
     // uncompressed length as the block length.
-    PageHeader(
+    final ph = PageHeader(
       pageType: h.pageType,
       flags: h.flags & ~PageFlags.encrypted,
       codecOrReserved: h.codecOrReserved,
@@ -873,8 +875,8 @@ final class PageStore {
       extentPages: h.extentPages,
       payloadLen: h.payloadLen,
       storedLen: h.isCompressed ? pt.length : 0,
-    ).writeInto(out);
-    return out;
+    )..writeInto(out);
+    return (out, ph);
   }
 
   /// `spec/10-transactions.md` §7 — the strongest primitive the platform
