@@ -112,7 +112,8 @@ pure-Dart AEAD (129 MB/s). Remote enc 10^8 rerun at b4f74f1: build
 profiled 10-21, every read decrypts one page in the pure-Dart AEAD (~63 us), verify 168k pages. AEAD 2.05x faster
 (10-21): enc get p50 259 -> 214 us, verify 26.5 -> 18.1 s; rest located by CPU profile:
 the enc path CRCs each page ~4 times (plain once); fixed 10-21 (verify once): warm 10^6
-enc get p50 74 us vs plain 26, verify 13.0 vs 4.8 s; remote 10^8 not rerun.
+enc get p50 74 us vs plain 26, verify 13.0 vs 4.8 s; remote enc 10^8 at 5625cf6:
+get p50 1263 us (was 2262), scan 154k, verify 1336 s, build 2.6 h; all PASS.
 Next: `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 doubles the file
 (amp 1.34 -> 2.67, plaintext too; 10^8 settles at 1.36), unexplained, small-n.
 
@@ -196,3 +197,4 @@ Next: `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 doubles t
 - 2026-10-21 — F-176 partial (D): AEAD 129 -> 265 MB/s, KATs green; enc get 259 -> 214 us; rest of the gap unlocated.
 - 2026-10-21 — F-176 profiled via VM service: enc page read runs crc32c ~4x (35% of a get) besides decrypt (40%).
 - 2026-10-21 — F-176 CRC: Dart verifies each page checksum once (2.92 -> 1.08 per read); warm 10^6 enc get p50 74 us (plain 26).
+- 2026-10-22 — Dart enc 10^8 after F-176: get p50 2262 -> 1263 us, verify 2826 -> 1336 s, build 3.8 -> 2.6 h; PASS.
