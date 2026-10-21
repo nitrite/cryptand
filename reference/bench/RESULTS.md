@@ -226,6 +226,7 @@ Remote M1, 16 GB, internal SSD, desktop profile, plaintext, `benchDoc`
 | 10^8 enc | Rust (10-19, b563988) | 65 300 | 43.7 GB | 0.84 settled | 188 MB footprint | 504 / 1322 us (zipf p50 164); scan 362k rows/s | 177 MB footprint | 137 s sound | PASS: build, read, settle 288 MB (F-172..F-174) |
 | 10^8 enc | Java (10-20, 3831966) | 40 200 | 69.0 GB | 1.34 settled | 237 MB footprint at -Xmx128m | 344 / 1784 us (zipf p50 204); scan 224k rows/s | 194 MB footprint | 536 s sound | PASS: build, read, settle 200 MB |
 | 10^8 enc | Dart AOT (10-21) | 2 327 | 70.2 GB | 1.36 | 219 MB footprint | 2261 / 4040 us (zipf p50 538); scan 71k rows/s | 246 MB footprint | 2832 s sound | PASS on memory: build, read, settle 113 MB; speed: F-175 |
+| 10^8 enc | Dart AOT (10-21, F-175 b4f74f1) | 7 347 | 70.2 GB | 1.36 | 213 MB footprint | 2262 / 3567 us (zipf p50 540); scan 72k rows/s | 250 MB footprint | 2826 s sound | PASS: build (3.8 h, was 11.9), read, settle 113 MB; reads unchanged: F-176 |
 
 ## Running it
 
