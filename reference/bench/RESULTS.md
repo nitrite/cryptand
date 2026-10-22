@@ -229,6 +229,20 @@ Remote M1, 16 GB, internal SSD, desktop profile, plaintext, `benchDoc`
 | 10^8 enc | Dart AOT (10-21, F-175 b4f74f1) | 7 347 | 70.2 GB | 1.36 | 213 MB footprint | 2262 / 3567 us (zipf p50 540); scan 72k rows/s | 250 MB footprint | 2826 s sound | PASS: build (3.8 h, was 11.9), read, settle 113 MB; reads unchanged: F-176 |
 | 10^8 enc | Dart AOT (10-22, F-176 5625cf6) | 10 499 | 70.2 GB | 1.36 | 221 MB footprint | 1263 / 2444 us (zipf p50 329); scan 154k rows/s | 244 MB footprint | 1336 s sound | PASS: build (2.6 h), read, settle 114 MB; vs plain 10^8: get 1.9x, scan 2.8x, verify 2.6x |
 
+### Mobile profile (PLAN 6.2), plaintext
+
+Remote M1, `CRYPTAND_PROFILE=mobile` (4 KB pages, 4 MB page cache), ebf2224, 10-22. Bar (6.3): peak
+footprint <= 4 MB cache + memtables + 256 MB. Java at -Xmx128m.
+
+| rung | impl | load docs/s | file built / settled | space amp settled | build footprint | get p50 / p99 uniform (zipf p50) | scan rows/s | read footprint | verify | bars |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 10^6 | Rust | 125 000 | 0.61 / 0.47 GB | 0.90 | 14 MB | 6 / 13 us (4) | 2.02M | 14 MB | 0.3 s | PASS |
+| 10^6 | Java | 138 000 | 0.79 / 0.78 GB | 1.51 | 223 MB | 16 / 94 us (9) | 1.21M | 165 MB | 0.7 s | PASS |
+| 10^6 | Dart AOT | 26 371 | 1.32 / 0.71 GB | 1.37 | 112 MB | 84 / 107 us (26) | — | 120 MB | — | PASS |
+| 10^7 | Rust | 120 000 | 4.77 / 4.69 GB | 0.91 | 15 MB | 21 / 26 us (20) | 2.02M | 18 MB | 2.9 s | PASS |
+| 10^7 | Java | 86 000 | 7.92 / 7.81 GB | 1.51 | 228 MB | 62 / 384 us (40) | 1.32M | 170 MB | 7.1 s | PASS (p99 4.1x the 10^6 p99, ahead of the 10^8 check) |
+| 10^7 | Dart AOT | 15 317 | 7.58 / 7.06 GB | 1.37 | 121 MB | 145 / 165 us (143) | — | 123 MB | — | PASS |
+
 ## Running it
 
 ```bash
