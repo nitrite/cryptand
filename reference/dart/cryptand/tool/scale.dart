@@ -27,19 +27,34 @@ CValue id(int i) => CNitriteId(snowflakeId(i));
 final List<int>? key =
     Platform.environment.containsKey('CRYPTAND_ENC') ? List.filled(32, 7) : null;
 
+/// `CRYPTAND_PROFILE=mobile` (any `Profile` name): the profile `build` creates
+/// the file with; `read` takes it from the file, and the bar from this.
+final Profile profile =
+    Profile.values.byName(Platform.environment['CRYPTAND_PROFILE'] ?? 'desktop');
+
 void main(List<String> args) {
   final path = args[1];
   final n = int.parse(args[2]);
-  final out = <String, Object>{'impl': 'dart', 'phase': args[0], 'n': n};
+  final out = <String, Object>{
+    'impl': 'dart',
+    'phase': args[0],
+    'n': n,
+    'profile': profile.name
+  };
   final sw = Stopwatch()..start();
   if (args[0] == 'build') {
     if (key == null) {
       DatabaseFile.save(
-          Database(engine: Engine(pageSize: Profile.desktop.pageSize))
+          Database(
+              engine: Engine(
+                  pageSize: profile.pageSize,
+                  vlogSegmentBytes: profile.vlogSegmentBytes)
+                ..setProfile(profile))
             ..createCollection('c'),
           path);
     } else {
-      DatabaseFile.create(path, credential: key!, kdf: Keyslot.kdfRaw)
+      DatabaseFile.create(path,
+          credential: key!, kdf: Keyslot.kdfRaw, profile: profile)
         ..createCollection('c')
         ..engine.close();
     }
@@ -129,7 +144,7 @@ void main(List<String> args) {
   final rss = ProcessInfo.maxRss >> 20;
   // PLAN 6.3: profile budget + memtables + 256 MB; a read rung's memtable is
   // empty. (+64 MB is M5.5's bar for a bare open, not for a rung.)
-  final budget = (Profile.desktop.pageCacheBytes >> 20) + 256;
+  final budget = (profile.pageCacheBytes >> 20) + 256;
   out
     ..['max_rss_mb'] = rss
     ..['budget_mb'] = budget

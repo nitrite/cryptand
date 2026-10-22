@@ -113,9 +113,15 @@ fn main() -> cryptand::Result<()> {
         return Ok(());
     }
     let _ = std::fs::remove_file(path);
+    // CRYPTAND_PROFILE=mobile: the profile the file is created with; reads
+    // take it from the file.
+    let profile = match std::env::var("CRYPTAND_PROFILE").as_deref() {
+        Ok("mobile") => Profile::Mobile,
+        _ => Profile::Desktop,
+    };
     let mut db = Database { engine: match key {
-        Some(k) => Engine::create_encrypted(path, Profile::Desktop, k, 0, 0, 0, 0)?,
-        None => Engine::create(path, Profile::Desktop)?,
+        Some(k) => Engine::create_encrypted(path, profile, k, 0, 0, 0, 0)?,
+        None => Engine::create(path, profile)?,
     } };
     let mut c = db.collection("c")?;
     for i in 0..n {

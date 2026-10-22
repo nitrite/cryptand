@@ -19,6 +19,9 @@ public final class RssScale {
     /** {@code CRYPTAND_ENC=1}: encrypted file, fixed raw key (kdf 0), as Rust {@code rss_scale}. */
     private static Engine.Options opts() {
         Engine.Options o = new Engine.Options();
+        // CRYPTAND_PROFILE=mobile: Java takes the profile (and its cache budget)
+        // from the options on every open, not from the file.
+        o.profile = "mobile".equals(System.getenv("CRYPTAND_PROFILE")) ? Profile.MOBILE : Profile.DESKTOP;
         // ponytail: fixed bench key, never a real secret.
         if (System.getenv("CRYPTAND_ENC") != null) {
             o.encrypt = true;
@@ -81,7 +84,6 @@ public final class RssScale {
         }
         Files.deleteIfExists(path);
         Engine.Options o = opts();
-        o.profile = Profile.DESKTOP;
         o.durability = Superblock.Durability.OS;
         try (Engine e = Engine.create(path, o)) {
             for (long i = 0; i < n; i++) {
