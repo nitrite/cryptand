@@ -114,7 +114,9 @@ profiled 10-21, every read decrypts one page in the pure-Dart AEAD (~63 us), ver
 the enc path CRCs each page ~4 times (plain once); fixed 10-21 (verify once): warm 10^6
 enc get p50 74 us vs plain 26, verify 13.0 vs 4.8 s; remote enc 10^8 at 5625cf6:
 get p50 1263 us (was 2262), scan 154k, verify 1336 s, build 2.6 h; all PASS.
-Next: `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 doubles the file
+Next: `mobile` ladder running on remote since 10-22 (`~/mob/run.sh`, ebf2224, plaintext,
+10^6 -> 10^7 -> 10^8, R then J then D; `{r,j,d}_N_{build,read,settle}.out`, `done_N`, `alldone`).
+Java takes the profile from options on open (Rust/Dart from the file). Then 6.4 suspects. Side: Dart settle at 2x10^4 doubles the file
 (amp 1.34 -> 2.67, plaintext too; 10^8 settles at 1.36), unexplained, small-n.
 
 ## Log
@@ -198,3 +200,4 @@ Next: `mobile` profile, then 6.4 suspects. Side: Dart settle at 2x10^4 doubles t
 - 2026-10-21 — F-176 profiled via VM service: enc page read runs crc32c ~4x (35% of a get) besides decrypt (40%).
 - 2026-10-21 — F-176 CRC: Dart verifies each page checksum once (2.92 -> 1.08 per read); warm 10^6 enc get p50 74 us (plain 26).
 - 2026-10-22 — Dart enc 10^8 after F-176: get p50 2262 -> 1263 us, verify 2826 -> 1336 s, build 3.8 -> 2.6 h; PASS.
+- 2026-10-22 — harnesses take CRYPTAND_PROFILE (R+J+D); mobile plaintext ladder 10^6..10^8 launched on remote.
