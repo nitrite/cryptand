@@ -287,11 +287,31 @@ public final class PageTree {
         // Leaves, filled and emitted in order.
         List<BtreePage.Internal> level = new ArrayList<>();
         List<BtreePage.Leaf> batch = new ArrayList<>();
+        // F-177: the fit test is arithmetic, not an encode of the whole batch
+        // per cell (quadratic per leaf; tree 1 is rebuilt up to three times a
+        // commit). Keys are sorted, so the batch's prefix is first vs last,
+        // and `body` is re-summed only when that prefix shrinks.
+        int prefix = 0;
+        int body = 0;
         for (Map.Entry<byte[], byte[]> e : entries.entrySet()) {
             BtreePage.Leaf cell = BtreePage.Leaf.inline(e.getKey(), e.getValue());
+            int p = cell.key().length;
+            if (!batch.isEmpty()) {
+                byte[] first = batch.get(0).key();
+                int max = Math.min(first.length, p);
+                int i = Arrays.mismatch(first, 0, max, cell.key(), 0, max);
+                p = i < 0 ? max : i;
+            }
+            if (batch.isEmpty() || p != prefix) {
+                prefix = p;
+                body = 0;
+                for (BtreePage.Leaf c : batch) {
+                    body += BtreePage.leafCellBytes(c, p) - 2;
+                }
+            }
+            body += BtreePage.leafCellBytes(cell, p) - 2;
             batch.add(cell);
-            byte[] packed = BtreePage.encodeLeaves(batch, payloadSize, batch.size());
-            if (packed == null) {
+            if (BtreePage.HEADER + p + 2 * batch.size() + body > payloadSize) {
                 batch.remove(batch.size() - 1);
                 if (batch.isEmpty()) {
                     throw new LimitException("internal tree " + treeId + ": a single entry of "
@@ -301,6 +321,8 @@ public final class PageTree {
                 level.add(emitLeaf(batch, fresh));
                 batch.clear();
                 batch.add(cell);
+                prefix = cell.key().length;
+                body = BtreePage.leafCellBytes(cell, prefix) - 2;
             }
         }
         if (!batch.isEmpty()) {
