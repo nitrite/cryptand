@@ -1447,7 +1447,13 @@ public final class Engine implements AutoCloseable {
             throw x;
         }
         pager.publishFrees();
-        visibleSeq = published;
+        // F-178: `published` was read at the start; under `os` the writer may
+        // have moved the watermark past it since. Storing it put that back.
+        if (allowRegression) {
+            visibleSeq = published;
+        } else {
+            makeVisible(published);
+        }
     }
 
     /** {@code {seq, commit_id}} per live snapshot. Both watermarks are computed from it. */
