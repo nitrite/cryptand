@@ -104,26 +104,12 @@
 
 ## Next action
 
-Encrypted 10^8 done R+J+D, all memory bars PASS, recorded in `reference/bench/RESULTS.md` section 5.
-Dart enc is slow across load and reads (F-175: get p50 3.5x, scan 6x, verify 5.5x vs plain). F-175 fixed 10-21
-(D: catalog cached by `CowTree.version`; 10^6 enc load 3.8x faster, plain 2.4x). Rest is the
-pure-Dart AEAD (129 MB/s). Remote enc 10^8 rerun at b4f74f1: build
-7347 docs/s (11.9 h -> 3.8 h), all memory PASS; reads unchanged, F-176 opened (enc reads 3.5-6x):
-profiled 10-21, every read decrypts one page in the pure-Dart AEAD (~63 us), verify 168k pages. AEAD 2.05x faster
-(10-21): enc get p50 259 -> 214 us, verify 26.5 -> 18.1 s; rest located by CPU profile:
-the enc path CRCs each page ~4 times (plain once); fixed 10-21 (verify once): warm 10^6
-enc get p50 74 us vs plain 26, verify 13.0 vs 4.8 s; remote enc 10^8 at 5625cf6:
-get p50 1263 us (was 2262), scan 154k, verify 1336 s, build 2.6 h; all PASS.
-Mobile ladder (remote `~/mob`, plaintext): 10^6, 10^7 done R+J+D; Rust 10^8 done 10-22 (footprints
-216/55/127 MB, not yet in RESULTS). Java 10^8 was crawling: F-177 (tree 1 leaf fit quadratic) and F-178 (S1:
-publish moved `visible_seq` back under `os`, committer published back to back) fixed in J. Java 10^8 rerun at
-ed6893d since 10-25 00:30 IST via `~/mob/resume.sh` (J build/read/settle, then Dart 10^8, then `alldone`).
-Next: when `alldone` appears, record the 10^8 mobile rows in RESULTS, then 6.4 suspects. Open: Java
+Mobile ladder 10^6..10^8 done R+J+D, all memory bars PASS, rows in RESULTS (mobile section).
+Open: F-179 (Rust mobile 10^8 settle 46.5 -> 93.2 GB, amp 1.81; J/D flat). Next: reproduce F-179
+on the remote at 10^7 mobile with settle traced (shrink, compaction reclaim at 4 KB pages), then 6.4
+suspects. Remote `~/mob` dbs can be freed once F-179 has what it needs. Open: Java
 `compactionStep()` is a no-op though its doc says it yields `structure` (noted in F-178).
-Was: `mobile` ladder running on remote since 10-22 (`~/mob/run.sh`, ebf2224, plaintext,
-10^6 -> 10^7 -> 10^8, R then J then D; `{r,j,d}_N_{build,read,settle}.out`, `done_N`, `alldone`).
-Java takes the profile from options on open (Rust/Dart from the file). Then 6.4 suspects. Side: Dart settle at 2x10^4 doubles the file
-(amp 1.34 -> 2.67, plaintext too; 10^8 settles at 1.36), unexplained, small-n.
+Side: Dart settle at 2x10^4 doubles the file (amp 1.34 -> 2.67), unexplained, small-n.
 
 ## Log
 
@@ -209,3 +195,4 @@ Java takes the profile from options on open (Rust/Dart from the file). Then 6.4 
 - 2026-10-22 — harnesses take CRYPTAND_PROFILE (R+J+D); mobile plaintext ladder 10^6..10^8 launched on remote.
 - 2026-10-24 — mobile 10^8: Rust done; Java build 69% (~17 h left), Dart queued.
 - 2026-10-25 — Java mobile 10^8 root-caused: F-177 (J perf) and F-178 (J S1 visible_seq regression) fixed; rerun launched.
+- 2026-10-26 — mobile 10^8 done R+J+D, memory PASS, rows in RESULTS; F-179 (Rust settle doubles file) opened.
