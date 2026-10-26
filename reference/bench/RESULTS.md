@@ -243,6 +243,7 @@ footprint <= 4 MB cache + memtables + 256 MB. Java at -Xmx128m.
 | 10^7 | Java | 86 000 | 7.92 / 7.81 GB | 1.51 | 228 MB | 62 / 384 us (40) | 1.32M | 170 MB | 7.1 s | PASS (p99 4.1x the 10^6 p99, ahead of the 10^8 check) |
 | 10^7 | Dart AOT | 15 317 | 7.58 / 7.06 GB | 1.37 | 121 MB | 145 / 165 us (143) | — | 123 MB | — | PASS |
 | 10^8 | Rust | 65 600 | 46.5 / 93.2 GB | 1.81 | 216 MB | 484 / 938 us (313) | 1.10M | 55 MB | 53 s sound | PASS on memory (settle 127 MB); settle doubled the file: F-179 |
+| 10^8 | Rust (F-179 fixed, 10-26) | 65 600 | 46.5 / 46.8 GB | 0.91 | 216 MB | — | — | — | — | PASS (settle 120 MB) |
 | 10^8 | Java (ed6893d, F-177/F-178) | 16 800 | 73.0 / 72.8 GB | 1.41 | 227 MB | 1710 / 2580 us (1398) | 606k | 186 MB | 177 s sound | PASS (settle 191 MB) |
 | 10^8 | Dart AOT (ed6893d) | 3 195 | 71.1 / 70.6 GB | 1.37 | 135 MB | 1268 / 1590 us (1121) | 246k | 141 MB | 536 s sound | PASS (settle 88 MB) |
 

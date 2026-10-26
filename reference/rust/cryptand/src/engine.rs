@@ -3185,6 +3185,12 @@ impl Engine {
             high = high.max(top);
         }
         let room = old.len() as u64 + 8;
+        // F-179: the low-first commit after a relocation writes the free tree
+        // at the first free page, which is `high` itself; cut above it, and
+        // its pages become a hole below the new end.
+        if old.iter().any(|&p| p >= high && p < high + room) {
+            high = high.max(old.iter().max().unwrap() + 1);
+        }
         if high + room >= self.pager.page_count || old.iter().any(|&p| p >= high && p < high + room) {
             return Ok(());
         }

@@ -105,9 +105,8 @@
 ## Next action
 
 Mobile ladder 10^6..10^8 done R+J+D, all memory bars PASS, rows in RESULTS (mobile section).
-F-179: 10^7 split repro (`~/f179`) shows compact doubles the file (expected) and shrink
-returns it to 0.91; at 10^8 shrink reclaimed nothing. Next: rerun 10^8 mobile Rust with
-`settle compact` and `settle shrink` split, then read `shrink()` for the 10^8-only stop; then 6.4 suspects. Remote `~/mob` dbs can be freed once F-179 has what it needs. Open: Java
+F-179 fixed 10-26 (R: `cut_tail` cut above free-tree pages standing at `high`); Rust mobile 10^8 settle
+46.8 GB (0.91). Next: 6.4 suspects. Remote `~/f179` holds only logs and a source copy (dbs deleted). Remote `~/mob` dbs can be freed once F-179 has what it needs. Open: Java
 `compactionStep()` is a no-op though its doc says it yields `structure` (noted in F-178).
 Side: Dart settle at 2x10^4 doubles the file (amp 1.34 -> 2.67), unexplained, small-n.
 
@@ -197,3 +196,4 @@ Side: Dart settle at 2x10^4 doubles the file (amp 1.34 -> 2.67), unexplained, sm
 - 2026-10-25 — Java mobile 10^8 root-caused: F-177 (J perf) and F-178 (J S1 visible_seq regression) fixed; rerun launched.
 - 2026-10-26 — mobile 10^8 done R+J+D, memory PASS, rows in RESULTS; F-179 (Rust settle doubles file) opened.
 - 2026-10-26 — F-179 10^7 split repro: compact 4.8 -> 9.4 GB, shrink -> 4.7; 10^8 failure is in shrink.
+- 2026-10-26 — F-179 fixed (R): free tree written at the cut point blocked `cut_tail`; mobile 10^8 settle 93.2 -> 46.8 GB; gate quick green (remote).
