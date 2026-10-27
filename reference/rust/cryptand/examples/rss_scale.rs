@@ -7,6 +7,8 @@
 //!     cargo run --release --example rss_scale PATH N settle # compact+commit+shrink (F-154)
 //!     cargo run --release --example rss_scale PATH N settle compact|shrink  # one phase (F-174)
 //!
+//!     cargo run --release --example rss_scale PATH N index  # 6.5: unique + compound index build, probes, analyze, verify
+//!
 //! Run under `/usr/bin/time -l` for max RSS. `CRYPTAND_ENC=1` makes every
 //! mode use an encrypted file (fixed raw key, kdf 0: Argon2id excluded).
 
@@ -112,6 +114,9 @@ fn main() -> cryptand::Result<()> {
         println!("settled bytes={b} space_amp={:.2}", b as f64 / (n as f64 * 516.0));
         return Ok(());
     }
+    if a.get(3).map(String::as_str) == Some("index") {
+        return index_rung(path, n);
+    }
     let _ = std::fs::remove_file(path);
     // CRYPTAND_PROFILE=mobile: the profile the file is created with; reads
     // take it from the file.
@@ -134,4 +139,65 @@ fn main() -> cryptand::Result<()> {
     db.close()?;
     println!("built {n} bytes={}", std::fs::metadata(path)?.len());
     Ok(())
+}
+
+/// PLAN 6.5: a unique index on `ordReference` and a compound one on
+/// (`custCityName`, `ordTotMinorU`) with 1000 cities, maintained per insert.
+fn index_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
+    use cryptand::catalog::index_type;
+    use cryptand::database::Indexing;
+    use cryptand::index;
+    let rss = || {
+        let pid = std::process::id().to_string();
+        let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &pid]).output();
+        out.ok().and_then(|o| String::from_utf8(o.stdout).ok()?.trim().parse::<u64>().ok()).unwrap_or(0) >> 10
+    };
+    let city = |i: i64| Value::Str(format!("city-{:03}", i % 1000));
+    let _ = std::fs::remove_file(path);
+    let mut db = Database { engine: Engine::create(path, Profile::Desktop)? };
+    let mut c = db.collection("c")?;
+    let uq = db.create_index(&c, &["ordReference"], index_type::UNIQUE, false)?;
+    let cx = db.create_index(&c, &["custCityName", "ordTotMinorU"], index_type::NON_UNIQUE, false)?;
+    let t = std::time::Instant::now();
+    for i in 0..n {
+        let Value::Doc(mut f) = doc(i) else { unreachable!() };
+        f.iter_mut().find(|(k, _)| k == "custCityName").unwrap().1 = city(i);
+        let d = Value::Doc(f);
+        c.insert(&mut db.engine, &d)?;
+        db.index_document(&uq, &d)?;
+        db.index_document(&cx, &d)?;
+        if (i + 1) % 100_000 == 0 {
+            db.commit(Durability::Sync)?;
+            eprintln!("{} rss_mb={}", i + 1, rss());
+        }
+    }
+    db.commit(Durability::Sync)?;
+    let mut line = format!("built={n} build_s={} bytes={} rss_build_mb={}", t.elapsed().as_secs(), std::fs::metadata(path)?.len(), rss());
+    let mut s = 0x51ED_C0DEu64;
+    let mut us = Vec::with_capacity(10_000);
+    for _ in 0..10_000 {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let k = ((s >> 11) % n as u64) as i64;
+        let Some(v) = doc(k).field("ordReference").cloned() else { unreachable!() };
+        let t = std::time::Instant::now();
+        assert_eq!(db.index_scan(&uq, &index::scan_prefix(&[v])?)?.len(), 1);
+        us.push(t.elapsed().as_micros());
+    }
+    us.sort_unstable();
+    line += &format!(" unique_us p50={} p99={}", us[5000], us[9900]);
+    let t = std::time::Instant::now();
+    let hits = db.index_scan(&cx, &index::scan_prefix(&[city(7)])?)?.len();
+    line += &format!(" compound_rows={hits} compound_ms={} rss_probe_mb={}", t.elapsed().as_millis(), rss());
+    let t = std::time::Instant::now();
+    let st = db.analyze(&cx)?;
+    line += &format!(" analyze_ms={} rss_analyze_mb={} entries={} distinct={} nulls={} buckets={}", t.elapsed().as_millis(), rss(), st.entries, st.distinct_estimate, st.null_count, st.histogram.len());
+    use cryptand::verify::EngineVerify;
+    let t = std::time::Instant::now();
+    let rep = db.engine.verify()?;
+    let ok = rep.ok();
+    for f in rep.findings.iter().take(5) {
+        eprintln!("verify {:?}: {}", f.class, f.what);
+    }
+    println!("{line} verify_ms={} verify_sound={ok} rss_verify_mb={}", t.elapsed().as_millis(), rss());
+    db.close()
 }
