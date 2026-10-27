@@ -88,8 +88,9 @@
 ## Decisions in force (human)
 
 - Scope = the three engine packages. Dart storage rewrite (M5) on
-  `dart-storage`; go/no-go Fri 10-23, else Dart ships `1.0.0-rc.1`. Freeze
-  Tue 10-27, tags Fri 10-30.
+  `dart-storage`: **go (human 10-27), Dart ships 1.0.0.** Freeze Tue 10-27,
+  tags Fri 10-30. Human 10-27: keep doing M6.5 as written; schedule
+  (6.6-6.8, M7 unstarted) decided later.
 - Java `--release 11`, built on JDK 17, as nitrite-java.
 - F-072: all of 13 §5 in all three for 1.0 (Dart's in M5). Rotation is
   copy-and-swap; no format change.
@@ -104,10 +105,19 @@
 
 ## Next action
 
-6.5 indexes at scale. F-181 closed as a harness bug (after-kill checker rewound the clock; fixed R+J+D).
-Java now runs a single writer by default (steps 4-6 locked; spec 10 §2.2 "serialized publish", 10-27).
-Remote: Dart is `~/dart-sdk/bin` (not on PATH). Side: Java `compactionStep()` no-op (F-178); Dart settle
-2x10^4 doubles the file, unexplained.
+M6.5 in progress (session 10-27). Harness: `rss_scale PATH N index` (Rust example):
+unique idx `ordReference` + compound (`custCityName` 1000 cities, `ordTotMinorU`),
+probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/runs/ix-r-N.{out,err}`.
+- 10^7 (pre-fix): build 460 s, file 6.16 GB, unique p50 31 us, compound 10k rows 6 ms,
+  analyze RSS 303 -> 1502 MB (F-183), peak footprint 1.95 GB, verify unsound (F-182).
+- F-182 committed 79a63a1 (R+D; J not affected), gate quick green on remote.
+- F-183 (R+J+D `analyze` streams two passes) **uncommitted in the tree**; gate quick
+  running on remote: `ssh ... tail ~/gate-f183.log`. If green: commit with FINDINGS
+  (set F-183 fixed), push.
+1. Rerun `rss_scale` index at 10^6 and 10^7 on `cryptand-m6` (rsync tree first), check
+   verify_sound=true and analyze RSS flat; then 10^8 (~62 GB, remote has ~106 GB).
+2. Java/Dart index rungs (RssScale.java, tool/scale.dart have none yet).
+3. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
 
 ## Log
 
@@ -199,3 +209,4 @@ Remote: Dart is `~/dart-sdk/bin` (not on PATH). Side: Java `compactionStep()` no
 - 2026-10-27 — 6.4: F-007 point index charged to the cache (R+D) / capped at the budget (J); F-008 closed.
 - 2026-10-27 — F-180 fixed (J: clustering liveness scan due-gated); Java single writer default, spec serialized publish; torture 5000 kills 1 failure = F-181 (pre-existing); gate quick green; merged into dart-storage.
 - 2026-10-27 — F-181 bisected to ee3a58b (exposer only): after-kill checker read states at a rewound clock; checker fixed R+J+D; torture J 500 / R 300 / D 300 clean, gate quick green (remote); merged into dart-storage.
+- 2026-10-27 — Dart go (human). 6.5 index rung: F-182 (R+D commit mid-job leaked placed outputs) fixed, gate green; F-183 (R+J+D analyze held every key, +1.2 GB at 10^7) fixed, gate pending.
