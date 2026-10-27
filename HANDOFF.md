@@ -114,10 +114,13 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - F-183 (R+J+D `analyze` streams two passes) committed, gate quick green.
 - 10^6 post-fix (ix2-r-1000000): verify sound, analyze RSS flat (398 -> 398 MB), unique p50 7 us;
   peak footprint 375 MB: PASS against the indexed bar 416 (64 cache + 3 trees x 32 memtable + 256; PLAN 6.3 now says one memtable per tree).
-  10^7 post-fix running on remote (`~/ix.sh`, ix2-r-10000000.*).
-1. Check the 10^7 rerun at 10^6 and 10^7 on `cryptand-m6` (rsync tree first), check
-   verify_sound=true and analyze RSS flat; then 10^8 (~62 GB, remote has ~106 GB).
-2. Java/Dart index rungs (RssScale.java, tool/scale.dart have none yet).
+- 10^7 post-fix: verify sound, analyze flat, unique p50 30 us; peak footprint 499 then 368 MB on a rerun
+  (bar 416): F-184 open, the peak varies by run. F-185 (J: short scans merged the rest of the tree,
+  index probe 1.3 ms -> 3 us) fixed, gate quick green. J (`RssScale PATH N index`) + D (`scale index`) rungs exist.
+1. Read `~/ix4.sh` results on remote (`runs/ix4-*`, `ix4.done` when finished): Rust 10^7 x2 more (F-184 spread),
+   J 10^6/10^7 at -Xmx128m, D AOT 10^6/10^7. Each against bar 416 and verify_sound.
+2. If F-184 holds, profile the spike (`footprint` sampled every 10 s missed it; try 1 s or MallocStackLogging).
+   Then 10^8 Rust index (~62 GB; remote ~100 GB free).
 3. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
 
 ## Log
@@ -212,4 +215,5 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 2026-10-27 — F-181 bisected to ee3a58b (exposer only): after-kill checker read states at a rewound clock; checker fixed R+J+D; torture J 500 / R 300 / D 300 clean, gate quick green (remote); merged into dart-storage.
 - 2026-10-27 — Dart go (human). 6.5 index rung: F-182 (R+D commit mid-job leaked placed outputs) fixed, gate green; F-183 (R+J+D analyze held every key, +1.2 GB at 10^7) fixed, gate green.
 - 2026-10-27 — F-183 committed (gate green); 10^6 index rung post-fix: verify sound, analyze flat, footprint 375 MB; 10^7 running.
+- 2026-10-28 — 10^7 index footprint 499/368 MB (F-184 open); F-185 Java scan bound fixed; J+D index rungs; ix4 chain running.
 - 2026-10-27 — 6.3 bar for indexed builds counts one memtable per tree (desktop 3 trees: 416 MB); 10^6 index 375 MB PASS; 10^7 at 6.7M rows, RSS ~200-290 MB.
