@@ -183,6 +183,18 @@ An implementation claiming Level 0 MUST:
 An implementation MUST NOT make a `put` wait for a compaction except through
 explicit backpressure (§6).
 
+**Serialized publish.** An implementation MAY serialize steps 4–6 of §2 — the
+`next_seq` fetch, the memtable publish and the enqueue — under one lock, so
+that batches publish and complete in `seq` order, provided step 3 (value-log
+reserve-then-`pwrite`) and step 7 (the durability wait) stay outside that lock.
+The lock covers no I/O, so it is not a database-wide lock on the write path in
+the sense of the first requirement, and group commit is unchanged. The Java
+reference implementation does this; measured on macOS/APFS (M1) against its
+fully concurrent path, 1–16 writer threads, `os` and `sync`, 100 B and 4 KiB
+values, the two stayed within about 10 % of each other in either direction
+(worst cell −16 %). An implementation that serializes step 3 or step 7 as well
+is a serialized writer under `11-conformance.md` §1.1.
+
 ### 2.3 Atomicity
 
 A batch is atomic because `visible_seq` advances past its seq range only after

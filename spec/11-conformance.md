@@ -46,6 +46,9 @@ segment per writer — open segments are bounded by heat class), an off-thread
 committer, and concurrent compaction on disjoint key ranges. An implementation that serializes
 writers is **not** Level 0, because the format's write-throughput properties are
 what it exists for and a serialized writer silently forfeits them.
+Serialized publish (`10-transactions.md` §2.2: steps 4–6 under one lock,
+value-log appends and the durability wait concurrent) is not a serialized
+writer and is Level 0.
 
 The one exception is a runtime without shared-memory threads. Such an
 implementation MAY declare `Level 0 (single-writer)`, MUST still produce

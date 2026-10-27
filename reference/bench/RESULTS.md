@@ -247,6 +247,51 @@ footprint <= 4 MB cache + memtables + 256 MB. Java at -Xmx128m.
 | 10^8 | Java (ed6893d, F-177/F-178) | 16 800 | 73.0 / 72.8 GB | 1.41 | 227 MB | 1710 / 2580 us (1398) | 606k | 186 MB | 177 s sound | PASS (settle 191 MB) |
 | 10^8 | Dart AOT (ed6893d) | 3 195 | 71.1 / 70.6 GB | 1.37 | 135 MB | 1268 / 1590 us (1121) | 246k | 141 MB | 536 s sound | PASS (settle 88 MB) |
 
+## 6. Java writer scaling: concurrent vs single-writer prototype (10-27)
+
+Branch `java-single-writer`, remote M1 / APFS, desktop profile, puts/s,
+`WriterScaleBench` (one put per commit). *single* = `-Dcryptand.singleWriter=true`:
+steps 3-6 of 10 §2 under one lock, the durability wait outside it. Not Level 0
+(11 §1.1); a prototype to measure what concurrent writers buy.
+
+| durability | value | mode | 1 thr | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|---|---|
+| os | 100 B | multi | 456k | 506k | 455k | 512k | 544k |
+| os | 100 B | single | 478k | 413k | 321k | 749k | 573k |
+| os | 4 KiB | multi | 26.9k | 34.1k | 20.8k | 8.1k | 4.3k |
+| os | 4 KiB | single | 29.3k | 22.8k | 12.9k | 6.7k | 2.9k |
+| sync | 100 B | multi | 61 | 83 | 142 | 266 | 477 |
+| sync | 100 B | single | 61 | 73 | 139 | 266 | 474 |
+| sync | 4 KiB | multi | 42 | | 123 | | 361 |
+| sync | 4 KiB | single | 42 | | 111 | | 355 |
+
+- Group commit (`sync`, ~8x at 16 threads) is the same in both modes.
+- `os` scales in neither mode on this host; 10 §2's 14.8x is not reproduced here.
+- Single loses 20-35 % at 4 KiB: value-log encode/write no longer runs in parallel.
+- Both modes lose throughput with threads at 4 KiB: F-180.
+
+### 6.1 After F-180, optimized single writer (10-27)
+
+F-180 fixed (`clusterIfNeeded` liveness scan due-gated). Single writer now
+serializes steps 4-6 only; value-log appends (step 3) and the durability wait
+(step 7) stay concurrent. Fixed total ops split across threads: `os` 160 000,
+`sync` 4 000. puts/s; *multi* = `-Dcryptand.singleWriter=false`.
+
+| durability | value | mode | 1 thr | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|---|---|
+| os | 100 B | multi | 401k | 550k | 632k | 940k | 790k |
+| os | 100 B | single | 447k | 529k | 706k | 792k | 901k |
+| os | 4 KiB | multi | 52.8k | 41.7k | 46.8k | 36.9k | 39.3k |
+| os | 4 KiB | single | 50.9k | 37.9k | 43.0k | 38.9k | 35.5k |
+| sync | 100 B | multi | 64 | 87 | 178 | 317 | 629 |
+| sync | 100 B | single | 64 | 81 | 149 | 295 | 576 |
+| sync | 4 KiB | multi | 48 | 86 | 133 | 257 | 454 |
+| sync | 4 KiB | single | 47 | 83 | 133 | 253 | 485 |
+
+- Single vs multi within ~10 % either way (worst: 100 B `sync` 4 thr, -16 %);
+  the prototype's 20-35 % loss at 4 KiB is gone.
+- 4 KiB `os` at 1 thread: 52.8k (was 26.9k with 20k ops, 3.5k at 1.3 GB).
+
 ## Running it
 
 ```bash
