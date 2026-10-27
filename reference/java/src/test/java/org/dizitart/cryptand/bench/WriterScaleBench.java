@@ -12,10 +12,12 @@ import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 
 /**
- * 10 §2 writer scaling, for the java-single-writer prototype: puts/s at N
- * threads. Run once plain and once with {@code -Dcryptand.singleWriter=true}.
+ * 10 §2 writer scaling: puts/s at N threads, single writer (default) or
+ * concurrent ({@code -Dcryptand.singleWriter=false}).
  *
- * <p>Args: dir durability(0..3) valueBytes opsPerThread threads...
+ * <p>Args: dir durability(0..3) valueBytes totalOps threads...
+ * totalOps is split across the threads (F-180: per-thread ops grew the data
+ * with the thread count, and the slowdown was the data, not the threads).
  * Prints one JSON line per thread count.
  */
 public final class WriterScaleBench {
@@ -23,9 +25,10 @@ public final class WriterScaleBench {
         Path dir = Path.of(a[0]);
         int durability = Integer.parseInt(a[1]);
         int valueBytes = Integer.parseInt(a[2]);
-        int ops = Integer.parseInt(a[3]);
+        int total = Integer.parseInt(a[3]);
         for (int k = 4; k < a.length; k++) {
             int threads = Integer.parseInt(a[k]);
+            int ops = total / threads;
             Path db = dir.resolve("ws-" + threads + ".cryptand");
             Files.deleteIfExists(db);
             Engine.Options o = new Engine.Options();
@@ -67,7 +70,7 @@ public final class WriterScaleBench {
             double secs = (t1 - t0) / 1e9;
             System.out.printf("{\"single\":%b,\"durability\":%d,\"value\":%d,\"threads\":%d,"
                             + "\"ops_s\":%.0f,\"p50_us\":%.1f,\"p99_us\":%.1f}%n",
-                    Boolean.getBoolean("cryptand.singleWriter"), durability, valueBytes, threads,
+                    !"false".equals(System.getProperty("cryptand.singleWriter")), durability, valueBytes, threads,
                     lat.length / secs, lat[lat.length / 2] / 1e3, lat[lat.length * 99 / 100] / 1e3);
         }
     }

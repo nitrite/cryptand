@@ -2906,7 +2906,10 @@ public final class Engine implements AutoCloseable {
             if (!liveSnapshots.isEmpty()) {
                 return;
             }
-            refreshLiveness();
+            // F-180: due-gated as collection is. Unconditional, every 5 ms
+            // tick walked the whole value log under writeGate's write side,
+            // parking every writer: 4 KiB puts fell 28k/s -> 3.5k/s at 1.3 GB.
+            refreshLivenessIfDue();
             if (vlog.localityDebt() * 100 <= sb.localityDebtPct) {
                 return;
             }
