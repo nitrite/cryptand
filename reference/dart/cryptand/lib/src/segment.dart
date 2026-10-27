@@ -1281,7 +1281,7 @@ final class Segment {
   }
 
   /// Bytes of this segment held in memory: what the page cache budgets.
-  int get residentBytes => _extent?.length ?? _resident;
+  int get residentBytes => (_extent?.length ?? _resident) + (_pointIndex?.lengthInBytes ?? 0); // F-007: index too
 
   /// Every page fetch, cached or not: the algorithmic work of the descent.
   int nodeAccesses = 0;

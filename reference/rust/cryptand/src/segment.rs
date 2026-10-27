@@ -1910,6 +1910,8 @@ impl Segment {
             }
             slots[i] = s;
         }
+        // F-007: the page cache budgets the index with the pages.
+        self.resident.fetch_add(cap as u64 * 8, std::sync::atomic::Ordering::Relaxed);
         Ok(Some(PointIndex { slots, mask }))
     }
 

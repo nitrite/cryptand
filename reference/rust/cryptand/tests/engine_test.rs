@@ -789,3 +789,26 @@ fn f165_verify_sweep_finds_leaks_and_counts_reachable_pages() {
     );
     assert_eq!(r.pages_reachable, before.pages_reachable);
 }
+
+#[test]
+fn f007_the_point_index_is_charged_to_the_page_cache() {
+    // F-007: the index (16 B per key) lived outside `resident_bytes`, so the
+    // page-cache budget never saw it.
+    let (_t, mut e) = engine("f007", Profile::Desktop);
+    let key = |i: i64| Value::NitriteId(i);
+    for i in 0..1000 {
+        e.put(T, &key(i), b"v").unwrap();
+    }
+    e.flush().unwrap();
+    let r = e.all_refs().unwrap().remove(0);
+    let seg = e.segment(&r).unwrap();
+    for _ in 0..2 {
+        for i in 0..1000 {
+            e.get(T, &key(i)).unwrap();
+        }
+    }
+    assert!(seg.point_indexed());
+    // The index build walks every page, so all of them are resident.
+    let pages = r.pages as u64 * e.page_size() as u64;
+    assert!(seg.resident_bytes() >= pages + 1000 * 16, "resident {} for {pages} B of pages", seg.resident_bytes());
+}

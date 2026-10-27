@@ -14,6 +14,23 @@ Uint8List b(List<int> v) => Uint8List.fromList(v);
 Uint8List big(int fill, [int n = 6000]) => Uint8List(n)..fillRange(0, n, fill);
 
 void main() {
+  test('F-007: the point index is charged to the page cache', () {
+    final e = Engine();
+    for (var i = 0; i < 1000; i++) {
+      e.put(t, CNitriteId(i), b([1]));
+    }
+    e.flush();
+    final s = e.extents.values.single;
+    final before = s.residentBytes;
+    for (var pass = 0; pass < 2; pass++) {
+      for (var i = 0; i < 1000; i++) {
+        e.get(t, CNitriteId(i));
+      }
+    }
+    expect(s.pointIndexed, isTrue);
+    expect(s.residentBytes - before, greaterThanOrEqualTo(1000 * 16));
+  });
+
   test('F-171: an unbounded scan opens only its own tree\'s segments', () {
     final e = Engine(segmentTargetBytes: 4096);
     for (var i = 0; i < 5; i++) {
