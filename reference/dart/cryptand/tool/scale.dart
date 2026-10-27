@@ -6,6 +6,7 @@
 /// ./scale build PATH N   # load, commit per 100k
 /// ./scale settle PATH N  # compact + commit + shrink, file size (F-154)
 /// ./scale read PATH N    # fresh process: cold open, gets, scan, verify
+/// ./scale index PATH N   # PLAN 6.5: unique + compound index build, probes, analyze, verify
 /// ```
 ///
 /// `read` ends with PASS/FAIL against PLAN 6.3's RSS bar (cache + 256 MB). Run
@@ -80,6 +81,11 @@ void main(List<String> args) {
     return;
   }
 
+  if (args[0] == 'index') {
+    indexRung(path, n, out, sw);
+    return;
+  }
+
   if (args[0] == 'settle') {
     final db = DatabaseFile.open(path, key: key);
     db.engine
@@ -149,5 +155,75 @@ void main(List<String> args) {
     ..['max_rss_mb'] = rss
     ..['budget_mb'] = budget
     ..['pass'] = rss <= budget && missing == 0 && sound;
+  stdout.writeln(jsonEncode(out));
+}
+
+/// PLAN 6.5, Rust `rss_scale PATH N index`: a unique index on `ordReference`
+/// and a compound one on (`custCityName` over 1000 cities, `ordTotMinorU`).
+/// ponytail: plaintext only; CRYPTAND_ENC is ignored here.
+void indexRung(String path, int n, Map<String, Object> out, Stopwatch sw) {
+  CStr city(int i) => CStr('city-${(i % 1000).toString().padLeft(3, '0')}');
+  int rss() => ProcessInfo.currentRss >> 20;
+  if (File(path).existsSync()) File(path).deleteSync();
+  DatabaseFile.save(
+      Database(
+          engine: Engine(
+              pageSize: profile.pageSize,
+              vlogSegmentBytes: profile.vlogSegmentBytes)
+            ..setProfile(profile))
+        ..createCollection('c'),
+      path);
+  final db = DatabaseFile.open(path);
+  final c = db.collection('c')!;
+  final uq = c.createIndex(['ordReference'], indexType: IndexType.unique);
+  final cx = c.createIndex(['custCityName', 'ordTotMinorU']);
+  var peak = 0;
+  for (var i = 0; i < n; i++) {
+    c.put(id(i), CDoc({...benchDoc(i).fields, 'custCityName': city(i)}));
+    if ((i + 1) % 100000 == 0 || i + 1 == n) {
+      db.engine.commit();
+      peak = math.max(peak, rss());
+    }
+  }
+  out
+    ..['build_s'] = sw.elapsed.inSeconds
+    ..['file_bytes'] = File(path).lengthSync()
+    ..['rss_build_mb'] = peak;
+  var s = 0x51EDC0DE;
+  final us = <int>[];
+  for (var k = 0; k < 10000; k++) {
+    s = s * 6364136223846793005 + 1442695040888963407;
+    final i = (s >>> 11) % n;
+    final v = benchDoc(i)['ordReference']!;
+    final t = Stopwatch()..start();
+    if (c.lookup(uq, IndexScan.eqPrefix([v])).length != 1) {
+      throw StateError('unique probe $i');
+    }
+    us.add(t.elapsedMicroseconds);
+  }
+  us.sort();
+  var t = Stopwatch()..start();
+  out
+    ..['unique_us_p50'] = us[5000]
+    ..['unique_us_p99'] = us[9900]
+    ..['compound_rows'] = c.lookup(cx, IndexScan.eqPrefix([city(7)])).length
+    ..['compound_ms'] = t.elapsedMilliseconds
+    ..['rss_probe_mb'] = rss();
+  t = Stopwatch()..start();
+  final st = c.analyze(cx);
+  out
+    ..['analyze_ms'] = t.elapsedMilliseconds
+    ..['rss_analyze_mb'] = rss()
+    ..['entries'] = st.entries
+    ..['distinct'] = st.distinctEstimate
+    ..['nulls'] = st.nullCount
+    ..['buckets'] = st.histogram.length;
+  t = Stopwatch()..start();
+  out
+    ..['verify_sound'] =
+        db.engine.verifyStructure(claims: db.indexClaims()).isSound
+    ..['verify_ms'] = t.elapsedMilliseconds
+    ..['rss_verify_mb'] = rss();
+  db.engine.close();
   stdout.writeln(jsonEncode(out));
 }

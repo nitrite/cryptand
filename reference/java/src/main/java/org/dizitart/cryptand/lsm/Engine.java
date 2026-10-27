@@ -2269,7 +2269,10 @@ public final class Engine implements AutoCloseable {
                     merge.next();
                 }
                 if (Ikey.treeIdOfUserKey(uk) != treeId || outOfRange(uk)) {
-                    continue;
+                    // F-185: the merge runs in scan order from the seek, so the
+                    // first key past the range ends it; `continue` merged the
+                    // rest of the tree on every short scan.
+                    break;
                 }
                 BtreePage.Leaf best = null;
                 long bestSeq = -1;

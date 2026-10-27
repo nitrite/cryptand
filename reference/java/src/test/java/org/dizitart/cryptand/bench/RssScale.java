@@ -1,12 +1,19 @@
 package org.dizitart.cryptand.bench;
 
+import org.dizitart.cryptand.Collection;
+import org.dizitart.cryptand.Database;
 import org.dizitart.cryptand.container.Profile;
 import org.dizitart.cryptand.container.Superblock;
 import org.dizitart.cryptand.lsm.Engine;
+import org.dizitart.cryptand.ops.IndexStats;
 import org.dizitart.cryptand.value.Cve;
+import org.dizitart.cryptand.value.Value;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * F-147: writer memory while building an N-document file, the Java twin of
@@ -29,6 +36,62 @@ public final class RssScale {
             java.util.Arrays.fill(o.rawKey, (byte) 7);
         }
         return o;
+    }
+
+    private static long rssMb() throws Exception {
+        Process p = new ProcessBuilder("ps", "-o", "rss=", "-p", Long.toString(ProcessHandle.current().pid())).start();
+        return Long.parseLong(new String(p.getInputStream().readAllBytes()).trim()) >> 10;
+    }
+
+    private static Value city(long i) {
+        return new Value.Str(String.format("city-%03d", i % 1000));
+    }
+
+    /** PLAN 6.5, Rust {@code rss_scale PATH N index}: same docs, indexes, probes and output line. */
+    private static void indexRung(Path path, long n) throws Exception {
+        Files.deleteIfExists(path);
+        Engine.Options o = opts();
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.create(path, o)) {
+            Collection c = db.collection("c");
+            Collection.IndexBinding uq = c.createIndex(List.of("ordReference"), true, false);
+            Collection.IndexBinding cx = c.createIndex(List.of("custCityName", "ordTotMinorU"), false, false);
+            long t = System.nanoTime();
+            for (long i = 0; i < n; i++) {
+                Map<String, Value> f = new LinkedHashMap<>(XlangCrudBench.doc(i, 0).fields());
+                f.put("custCityName", city(i));
+                c.insert(new Value.Doc(f));
+                if ((i + 1) % 100_000 == 0) {
+                    db.commit();
+                    System.err.println((i + 1) + " rss_mb=" + rssMb());
+                }
+            }
+            db.commit();
+            StringBuilder line = new StringBuilder("built=" + n + " build_s=" + (System.nanoTime() - t) / 1_000_000_000
+                    + " bytes=" + Files.size(path) + " rss_build_mb=" + rssMb());
+            long s = 0x51EDC0DEL;
+            long[] us = new long[10_000];
+            for (int k = 0; k < us.length; k++) {
+                s = s * 6364136223846793005L + 1442695040888963407L;
+                long i = Long.remainderUnsigned(s >>> 11, n);
+                Value v = XlangCrudBench.doc(i, 0).fields().get("ordReference");
+                long g = System.nanoTime();
+                if (uq.find(List.of(v)).size() != 1) throw new AssertionError("unique probe");
+                us[k] = (System.nanoTime() - g) / 1000;
+            }
+            java.util.Arrays.sort(us);
+            line.append(" unique_us p50=" + us[5000] + " p99=" + us[9900]);
+            long g = System.nanoTime();
+            int hits = cx.find(List.of(city(7))).size();
+            line.append(" compound_rows=" + hits + " compound_ms=" + (System.nanoTime() - g) / 1_000_000 + " rss_probe_mb=" + rssMb());
+            g = System.nanoTime();
+            IndexStats st = cx.analyze();
+            line.append(" analyze_ms=" + (System.nanoTime() - g) / 1_000_000 + " rss_analyze_mb=" + rssMb() + " entries=" + st.entries
+                    + " distinct=" + st.distinctEstimate + " nulls=" + st.nullCount + " buckets=" + st.histogram.size());
+            g = System.nanoTime();
+            boolean sound = org.dizitart.cryptand.ops.Verify.run(db.engine()).findings().isEmpty();
+            System.out.println(line + " verify_ms=" + (System.nanoTime() - g) / 1_000_000 + " verify_sound=" + sound + " rss_verify_mb=" + rssMb());
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -70,6 +133,10 @@ public final class RssScale {
                 line.append(" verify_ms=" + (System.nanoTime() - g) / 1_000_000 + " verify_sound=" + sound);
                 System.out.println(line);
             }
+            return;
+        }
+        if (mode.equals("index")) {
+            indexRung(path, n);
             return;
         }
         if (mode.equals("settle")) {
