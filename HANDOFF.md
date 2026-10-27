@@ -113,7 +113,7 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - F-182 committed 79a63a1 (R+D; J not affected), gate quick green on remote.
 - F-183 (R+J+D `analyze` streams two passes) committed, gate quick green.
 - 10^6 post-fix (ix2-r-1000000): verify sound, analyze RSS flat (398 -> 398 MB), unique p50 7 us;
-  peak footprint 375 MB vs 6.3 bar 352 (3 trees' memtables; decide if the bar applies to indexed builds).
+  peak footprint 375 MB: PASS against the indexed bar 416 (64 cache + 3 trees x 32 memtable + 256; PLAN 6.3 now says one memtable per tree).
   10^7 post-fix running on remote (`~/ix.sh`, ix2-r-10000000.*).
 1. Check the 10^7 rerun at 10^6 and 10^7 on `cryptand-m6` (rsync tree first), check
    verify_sound=true and analyze RSS flat; then 10^8 (~62 GB, remote has ~106 GB).
@@ -212,3 +212,4 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 2026-10-27 — F-181 bisected to ee3a58b (exposer only): after-kill checker read states at a rewound clock; checker fixed R+J+D; torture J 500 / R 300 / D 300 clean, gate quick green (remote); merged into dart-storage.
 - 2026-10-27 — Dart go (human). 6.5 index rung: F-182 (R+D commit mid-job leaked placed outputs) fixed, gate green; F-183 (R+J+D analyze held every key, +1.2 GB at 10^7) fixed, gate green.
 - 2026-10-27 — F-183 committed (gate green); 10^6 index rung post-fix: verify sound, analyze flat, footprint 375 MB; 10^7 running.
+- 2026-10-27 — 6.3 bar for indexed builds counts one memtable per tree (desktop 3 trees: 416 MB); 10^6 index 375 MB PASS; 10^7 at 6.7M rows, RSS ~200-290 MB.

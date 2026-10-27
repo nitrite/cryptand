@@ -312,7 +312,7 @@ Nothing has run above 10⁶ documents. The target is 10⁹ for Rust and Java (hu
   times; compaction debt.
 - [ ] **6.3** Pass bars per rung (a miss is a finding): peak footprint (`/usr/bin/time -l`, what
   jetsam counts; max RSS also counts shared and freed-dirty pages, F-155) ≤ profile
-  budget + memtables + 256 MB, so nothing O(n) in memory; cold open ≤ 2 s at 10⁹,
+  budget + memtables (one per tree: an indexed build counts each index tree's) + 256 MB, so nothing O(n) in memory; cold open ≤ 2 s at 10⁹,
   excluding Argon2id; point-read p99 at 10⁹ ≤ 3× p99 at 10⁶; load rate at 10⁹ ≥
   0.4× the rate at 10⁶; space amplification ≤ 1.6 on `desktop` once compaction
   settles; `verify` completes; no 32-bit overflow anywhere.
