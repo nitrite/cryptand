@@ -472,12 +472,25 @@ fn torture_check(log: &str, db: &Path, ack: usize) -> Result<usize, String> {
         if p < ack {
             continue;
         }
+        // F-181: the child may have run past line p, advancing its clock and
+        // compacting expired entries away, before the kill; time never goes
+        // back, so any clock it reached at or after p is a valid now.
         r.model = model.clone();
-        r.clock = clock;
-        r.e.now_ms = clock;
-        match r.digest_check() {
-            Ok(_) => return Ok(p),
-            Err(e) => last_err = e,
+        let mut now = clock;
+        for q in p..=lines.len() {
+            if q > p {
+                let j: J = serde_json::from_str(lines[q - 1]).map_err(|e| e.to_string())?;
+                if j["op"] != "ttl_advance" {
+                    continue;
+                }
+                now += j["ms"].as_u64().unwrap();
+            }
+            r.clock = now;
+            r.e.now_ms = now;
+            match r.digest_check() {
+                Ok(_) => return Ok(p),
+                Err(e) => last_err = e,
+            }
         }
     }
     Err(format!("matches no state at or after line {ack}; last: {last_err}"))

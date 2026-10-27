@@ -432,15 +432,26 @@ int _tortureCheck(List<String> lines, String db, int ack) {
         _modelApply(m, jsonDecode(lines[p - 1]) as Map<String, dynamic>);
       }
       if (p < ack) continue;
-      r
-        ..model = _copy(m.model)
-        ..clock = m.clock;
-      r.e.nowMs = m.clock;
-      try {
-        r.digestCheck();
-        return p;
-      } on Diverged catch (x) {
-        last = x.message;
+      // F-181: the child may have run past line p, advancing its clock and
+      // compacting expired entries away, before the kill; time never goes
+      // back, so any clock it reached at or after p is a valid now.
+      r.model = _copy(m.model);
+      var now = m.clock;
+      for (var q = p; q <= lines.length; q++) {
+        if (q > p) {
+          if (lines[q - 1].trim().isEmpty) continue;
+          final j = jsonDecode(lines[q - 1]) as Map<String, dynamic>;
+          if (j['op'] != 'ttl_advance') continue;
+          now += (j['ms'] as num).toInt();
+        }
+        r.clock = now;
+        r.e.nowMs = now;
+        try {
+          r.digestCheck();
+          return p;
+        } on Diverged catch (x) {
+          last = x.message;
+        }
       }
     }
     throw Diverged('matches no state at or after line $ack; last: $last');
