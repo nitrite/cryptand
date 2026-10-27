@@ -195,3 +195,28 @@ fn f173_compact_and_shrink_rearm_per_extent() {
     let mut e = Engine::open(&t.path, Some(&[7u8; 32])).unwrap();
     assert_eq!(e.scan_tree(1, None, None, None, true).unwrap().len(), 20_000);
 }
+
+#[test]
+fn f182_a_commit_inside_a_compaction_job_leaks_no_pages() {
+    // A paced job places each output as it fills (F-147) but the manifest
+    // names them only when it publishes. A commit between the two persisted a
+    // free list without them: unreachable and not free, for good on a crash.
+    use cryptand::verify::{Class, EngineVerify};
+    let (t, mut e) = engine("f182", Profile::Desktop);
+    e.profile.segment_target_bytes = 64 << 10;
+    e.memtable_entry_limit = 2_000;
+    let (mut mid_job, mut leaks) = (0, 0);
+    for i in 0..100_000i64 {
+        e.put(16, &Value::NitriteId(i), &[7u8; 256]).unwrap();
+        if e.unpublished_outputs() && mid_job < 20 && i % 500 == 0 {
+            mid_job += 1;
+            e.commit(Durability::Sync).unwrap();
+            leaks += e.verify().unwrap().of(Class::Leak).len();
+        }
+    }
+    e.close(true).unwrap();
+    let mut d = Database::open(&t.path, None).unwrap();
+    leaks += d.engine.verify().unwrap().of(Class::Leak).len();
+    assert!(mid_job > 0, "no commit landed inside a job");
+    assert_eq!(leaks, 0, "pages neither reachable nor free");
+}

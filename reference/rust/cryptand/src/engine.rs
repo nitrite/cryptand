@@ -2924,6 +2924,12 @@ impl Engine {
         Ok(())
     }
 
+    /// Whether a paced compaction job has placed outputs the manifest does
+    /// not name yet.
+    pub fn unpublished_outputs(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| !j.outputs.is_empty())
+    }
+
     /// One bounded unit of compaction work, for the foreground path.
     pub fn maybe_compact(&mut self, budget_bytes: Option<u64>) -> Result<()> {
         if self.job.is_none() {
@@ -3539,6 +3545,24 @@ impl Engine {
 
     pub fn commit(&mut self, durability: Durability) -> Result<u64> {
         self.arm()?;
+        // F-182: placed outputs are off the free list and not in the manifest
+        // until the job publishes; a commit between the two made them durable
+        // leaks. ponytail: finishing the job here can stall a commit for the
+        // rest of one job; persist them as free instead if the stall bar bites.
+        if self.unpublished_outputs() {
+            let mut job = self.job.take().unwrap();
+            loop {
+                match self.step_compaction(&mut job, Some(u64::MAX)) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => {
+                        self.abandon_compaction(job);
+                        return Err(e);
+                    }
+                }
+            }
+            self.finish_compaction(job)?;
+        }
         self.publish_tree_index_root()?;
         // §2.3 invariant 2 — the value-log watermark is published here, through
         // the ordinary commit path, because tree 7 is the authority for it and

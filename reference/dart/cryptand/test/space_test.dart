@@ -149,4 +149,31 @@ void main() {
           reason: '$before -> $after');
     });
   }
+
+  test('F-182: a commit inside a compaction job leaks no pages', () {
+    // As Rust's space_test: a job places each output as it fills, the
+    // manifest names them only when it publishes, and a commit between the
+    // two persisted a free list without them.
+    final path =
+        '${Directory.systemTemp.createTempSync('cryptand-f182-').path}/db.cryptand';
+    final db = Database(
+        engine: Engine(memtableEntries: 2000, segmentTargetBytes: 64 << 10));
+    DatabaseFile.save(db, path);
+    final e = db.engine;
+    var midJob = 0, leaks = 0;
+    for (var i = 0; i < 100000; i++) {
+      e.put(16, CNitriteId(i), Uint8List(256)..fillRange(0, 256, 7));
+      if (e.hasUnpublishedOutputs && midJob < 20 && i % 500 == 0) {
+        midJob++;
+        e.commit();
+        leaks += e.verifyStructure().of(FindingClass.leak).length;
+      }
+    }
+    e.close();
+    final back = DatabaseFile.open(path).engine;
+    leaks += back.verifyStructure().of(FindingClass.leak).length;
+    back.close();
+    expect(midJob, greaterThan(0), reason: 'no commit landed inside a job');
+    expect(leaks, 0, reason: 'pages neither reachable nor free');
+  });
 }

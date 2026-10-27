@@ -632,6 +632,9 @@ final class Engine {
   /// maintenance needs to know there is work outstanding.
   bool get hasPendingCompaction => _job != null;
 
+  /// F-182: a job has placed outputs the manifest does not name yet.
+  bool get hasUnpublishedOutputs => _job?.outputs.isNotEmpty ?? false;
+
   int get lastLevel => levels.levelCount - 1;
 
   /// The oldest live snapshot's seq, or [visibleSeq] when none is live.
@@ -1165,6 +1168,22 @@ final class Engine {
     // D: memtable -> L0, and the manifest edit that names it.
     final sequenced = _nextSeq - 1;
     flush();
+    // F-182: placed outputs are off the free list and not in the manifest
+    // until the job publishes; a commit between the two made them durable
+    // leaks. Checked after the flush, which can start a job. ponytail:
+    // finishing the job here can stall a commit for the rest of one job;
+    // persist them as free instead if the stall bar bites.
+    final pending = _job;
+    if (pending != null && pending.outputs.isNotEmpty) {
+      try {
+        while (!stepCompaction(pending)) {}
+      } catch (_) {
+        abandonCompaction();
+        rethrow;
+      }
+      finishCompaction(pending);
+      _job = null;
+    }
 
     // E: barrier over the segment and manifest writes.
     _barrier(durability);
