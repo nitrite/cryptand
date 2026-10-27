@@ -945,10 +945,10 @@ public final class Engine implements AutoCloseable {
         }
     }
 
-    // ponytail: prototype only (branch java-single-writer). Serializes steps 3-6;
-    // step 7 (the durability wait) stays outside so fsyncs still group. Not Level 0
-    // per 11 §1.1; exists to benchmark against the concurrent path.
-    private static final boolean SINGLE_WRITER = Boolean.getBoolean("cryptand.singleWriter");
+    // Java's single writer (10 §2.3): steps 4-6 serialized, see publishBatch.
+    // -Dcryptand.singleWriter=false restores the concurrent path, for A/B benches.
+    private static final boolean SINGLE_WRITER =
+            !"false".equals(System.getProperty("cryptand.singleWriter"));
     private final ReentrantLock singleWriter = new ReentrantLock();
 
     private long commitBatch(List<Staged> staged) {
@@ -957,17 +957,7 @@ public final class Engine implements AutoCloseable {
             return visibleSeq;
         }
         applyBackpressure();
-        if (SINGLE_WRITER) {
-            singleWriter.lock();
-        }
-        long end;
-        try {
-            end = publishBatch(staged);
-        } finally {
-            if (SINGLE_WRITER) {
-                singleWriter.unlock();
-            }
-        }
+        long end = publishBatch(staged);
         if (options.durability > Superblock.Durability.OS) {
             awaitVisible(end);
         }
@@ -991,48 +981,61 @@ public final class Engine implements AutoCloseable {
             hook.run();
         }
 
-        // Step 4: one fetch_add on next_seq. The only serialization point on
-        // the write path.
-        long base = nextSeq.getAndAdd(staged.size());
+        // Single writer: steps 4-6 under one lock, so batches publish and
+        // complete in seq order. Step 3 (value-log appends) and step 7 stay
+        // concurrent: appends reserve disjoint ranges, fsyncs still group.
+        if (SINGLE_WRITER) {
+            singleWriter.lock();
+        }
+        long base;
+        long end;
         boolean filled = false;
-
-        // Step 5: publish into the memtable shards.
-        long seq = base;
-        for (Staged e : staged) {
-            byte[] ik = Ikey.of(e.treeId, e.cke, seq, e.op);
-            BtreePage.Leaf cell;
-            if (e.op == BtreePage.Op.RANGE_DELETE) {
-                RangeDelete rd = new RangeDelete(e.treeId, e.cke, e.value, seq);
-                cell = BtreePage.Leaf.inline(ik, rd.encodePayload());
-                pendingRangeDeletes.add(rd);
-            } else {
-                cell = new BtreePage.Leaf(ik, e.kind == KIND_UNSET ? BtreePage.Kind.EMPTY : e.kind,
-                        e.expiryMs, e.hasExpiry, e.value, 0);
-            }
-            int sh = shardIndex(e.treeId, e.cke);
-            if (shards[sh].put(ik, cell) == null) {
-                // The shard this write landed in is the only one whose
-                // occupancy this batch changed, so it is the only one worth
-                // testing. `flushDue()` scans every shard, and doing that per
-                // commit is the same shape of mistake as counting the memtable
-                // per commit was.
-                filled |= shardEntries[sh].incrementAndGet() >= options.memtableEntries;
-                residentEntries.incrementAndGet();
-            }
-            seq++;
-        }
-        writeGate.readLock().unlock();
-        Runnable entries = afterEntriesHook;
-        if (entries != null) {
-            entries.run();
-        }
-        long end = seq - 1;
-
-        // Steps 6 and 7 under one acquisition of `seqLock`. They were two, and
-        // for a single-document commit — which is what an application does —
-        // the lock was more of the cost than the work inside it.
         boolean acknowledgeHere = options.durability <= Superblock.Durability.OS;
-        completeRange(base, end, acknowledgeHere);
+        try {
+            // Step 4: one fetch_add on next_seq.
+            base = nextSeq.getAndAdd(staged.size());
+
+            // Step 5: publish into the memtable shards.
+            long seq = base;
+            for (Staged e : staged) {
+                byte[] ik = Ikey.of(e.treeId, e.cke, seq, e.op);
+                BtreePage.Leaf cell;
+                if (e.op == BtreePage.Op.RANGE_DELETE) {
+                    RangeDelete rd = new RangeDelete(e.treeId, e.cke, e.value, seq);
+                    cell = BtreePage.Leaf.inline(ik, rd.encodePayload());
+                    pendingRangeDeletes.add(rd);
+                } else {
+                    cell = new BtreePage.Leaf(ik, e.kind == KIND_UNSET ? BtreePage.Kind.EMPTY : e.kind,
+                            e.expiryMs, e.hasExpiry, e.value, 0);
+                }
+                int sh = shardIndex(e.treeId, e.cke);
+                if (shards[sh].put(ik, cell) == null) {
+                    // The shard this write landed in is the only one whose
+                    // occupancy this batch changed, so it is the only one worth
+                    // testing. `flushDue()` scans every shard, and doing that per
+                    // commit is the same shape of mistake as counting the memtable
+                    // per commit was.
+                    filled |= shardEntries[sh].incrementAndGet() >= options.memtableEntries;
+                    residentEntries.incrementAndGet();
+                }
+                seq++;
+            }
+            writeGate.readLock().unlock();
+            Runnable entries = afterEntriesHook;
+            if (entries != null) {
+                entries.run();
+            }
+            end = seq - 1;
+
+            // Steps 6 and 7 under one acquisition of `seqLock`. They were two, and
+            // for a single-document commit — which is what an application does —
+            // the lock was more of the cost than the work inside it.
+            completeRange(base, end, acknowledgeHere);
+        } finally {
+            if (SINGLE_WRITER) {
+                singleWriter.unlock();
+            }
+        }
         // Waking it is only worth a syscall when it has something to do.
         // `none` and `os` acknowledge below without waiting for it, and the
         // committer polls on a 2 ms period, so unparking it on every

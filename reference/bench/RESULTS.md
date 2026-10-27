@@ -270,6 +270,28 @@ steps 3-6 of 10 §2 under one lock, the durability wait outside it. Not Level 0
 - Single loses 20-35 % at 4 KiB: value-log encode/write no longer runs in parallel.
 - Both modes lose throughput with threads at 4 KiB: F-180.
 
+### 6.1 After F-180, optimized single writer (10-27)
+
+F-180 fixed (`clusterIfNeeded` liveness scan due-gated). Single writer now
+serializes steps 4-6 only; value-log appends (step 3) and the durability wait
+(step 7) stay concurrent. Fixed total ops split across threads: `os` 160 000,
+`sync` 4 000. puts/s; *multi* = `-Dcryptand.singleWriter=false`.
+
+| durability | value | mode | 1 thr | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|---|---|
+| os | 100 B | multi | 401k | 550k | 632k | 940k | 790k |
+| os | 100 B | single | 447k | 529k | 706k | 792k | 901k |
+| os | 4 KiB | multi | 52.8k | 41.7k | 46.8k | 36.9k | 39.3k |
+| os | 4 KiB | single | 50.9k | 37.9k | 43.0k | 38.9k | 35.5k |
+| sync | 100 B | multi | 64 | 87 | 178 | 317 | 629 |
+| sync | 100 B | single | 64 | 81 | 149 | 295 | 576 |
+| sync | 4 KiB | multi | 48 | 86 | 133 | 257 | 454 |
+| sync | 4 KiB | single | 47 | 83 | 133 | 253 | 485 |
+
+- Single vs multi within ~10 % either way (worst: 100 B `sync` 4 thr, -16 %);
+  the prototype's 20-35 % loss at 4 KiB is gone.
+- 4 KiB `os` at 1 thread: 52.8k (was 26.9k with 20k ops, 3.5k at 1.3 GB).
+
 ## Running it
 
 ```bash
