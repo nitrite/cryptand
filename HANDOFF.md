@@ -104,10 +104,12 @@
 
 ## Next action
 
-6.4 suspects done: F-007 fixed R+J+D (Java: shared index cap = page-cache budget, human 10-27), F-008 closed
-(lazy segments since F-151). Next: 6.5 indexes at scale. Remote `~/mob` dbs can be freed. Open: Java
-`compactionStep()` is a no-op though its doc says it yields `structure` (noted in F-178).
-Side: Dart settle at 2x10^4 doubles the file (amp 1.34 -> 2.67), unexplained, small-n.
+F-181 (S0, Java): torture seed 103424 loses acked deletes/overwrites after kill -9, 20/20 at head and
+4/5 at f4d5d99; 10-09 run was clean, so bisect Java commits since then (`tools/torture.py java 103424
+103425`, remote `cryptand-sw`, kept `/tmp/keep103424.cff`). Then 6.5 indexes at scale.
+Java now runs a single writer by default (steps 4-6 locked; spec 10 §2.2 "serialized publish", 10-27).
+Remote: Dart is `~/dart-sdk/bin` (not on PATH). Side: Java `compactionStep()` no-op (F-178); Dart settle
+2x10^4 doubles the file, unexplained.
 
 ## Log
 
@@ -197,3 +199,4 @@ Side: Dart settle at 2x10^4 doubles the file (amp 1.34 -> 2.67), unexplained, sm
 - 2026-10-26 — F-179 10^7 split repro: compact 4.8 -> 9.4 GB, shrink -> 4.7; 10^8 failure is in shrink.
 - 2026-10-26 — F-179 fixed (R): free tree written at the cut point blocked `cut_tail`; mobile 10^8 settle 93.2 -> 46.8 GB; gate quick green (remote).
 - 2026-10-27 — 6.4: F-007 point index charged to the cache (R+D) / capped at the budget (J); F-008 closed.
+- 2026-10-27 — F-180 fixed (J: clustering liveness scan due-gated); Java single writer default, spec serialized publish; torture 5000 kills 1 failure = F-181 (pre-existing); gate quick green; merged into dart-storage.
