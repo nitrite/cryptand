@@ -945,12 +945,36 @@ public final class Engine implements AutoCloseable {
         }
     }
 
+    // ponytail: prototype only (branch java-single-writer). Serializes steps 3-6;
+    // step 7 (the durability wait) stays outside so fsyncs still group. Not Level 0
+    // per 11 §1.1; exists to benchmark against the concurrent path.
+    private static final boolean SINGLE_WRITER = Boolean.getBoolean("cryptand.singleWriter");
+    private final ReentrantLock singleWriter = new ReentrantLock();
+
     private long commitBatch(List<Staged> staged) {
         checkCommitter();
         if (staged.isEmpty()) {
             return visibleSeq;
         }
         applyBackpressure();
+        if (SINGLE_WRITER) {
+            singleWriter.lock();
+        }
+        long end;
+        try {
+            end = publishBatch(staged);
+        } finally {
+            if (SINGLE_WRITER) {
+                singleWriter.unlock();
+            }
+        }
+        if (options.durability > Superblock.Durability.OS) {
+            awaitVisible(end);
+        }
+        return end;
+    }
+
+    private long publishBatch(List<Staged> staged) {
 
         // F-093: held from the first value-log append to the memtable publish.
         // A collection walks under the exclusive side, so it never sees a
@@ -1018,9 +1042,6 @@ public final class Engine implements AutoCloseable {
         // stalled behind that flush.
         if (!acknowledgeHere || filled) {
             wake(committer);
-        }
-        if (!acknowledgeHere) {
-            awaitVisible(end);
         }
         return end;
     }
