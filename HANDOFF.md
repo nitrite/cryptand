@@ -104,9 +104,7 @@
 
 ## Next action
 
-F-181 (S0, Java): torture seed 103424 loses acked deletes/overwrites after kill -9, 20/20 at head and
-4/5 at f4d5d99; 10-09 run was clean, so bisect Java commits since then (`tools/torture.py java 103424
-103425`, remote `cryptand-sw`, kept `/tmp/keep103424.cff`). Then 6.5 indexes at scale.
+6.5 indexes at scale. F-181 closed as a harness bug (after-kill checker rewound the clock; fixed R+J+D).
 Java now runs a single writer by default (steps 4-6 locked; spec 10 §2.2 "serialized publish", 10-27).
 Remote: Dart is `~/dart-sdk/bin` (not on PATH). Side: Java `compactionStep()` no-op (F-178); Dart settle
 2x10^4 doubles the file, unexplained.
@@ -200,3 +198,4 @@ Remote: Dart is `~/dart-sdk/bin` (not on PATH). Side: Java `compactionStep()` no
 - 2026-10-26 — F-179 fixed (R): free tree written at the cut point blocked `cut_tail`; mobile 10^8 settle 93.2 -> 46.8 GB; gate quick green (remote).
 - 2026-10-27 — 6.4: F-007 point index charged to the cache (R+D) / capped at the budget (J); F-008 closed.
 - 2026-10-27 — F-180 fixed (J: clustering liveness scan due-gated); Java single writer default, spec serialized publish; torture 5000 kills 1 failure = F-181 (pre-existing); gate quick green; merged into dart-storage.
+- 2026-10-27 — F-181 bisected to ee3a58b (exposer only): after-kill checker read states at a rewound clock; checker fixed R+J+D; torture J 500 / R 300 / D 300 clean, gate quick green (remote); merged into dart-storage.

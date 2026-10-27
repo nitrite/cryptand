@@ -660,13 +660,26 @@ class OplogCheckTest {
                 if (p < ack) {
                     continue;
                 }
+                // F-181: the child may have run past line p, advancing its clock
+                // and compacting expired entries away, before the kill; time never
+                // goes back, so any clock it reached at or after p is a valid now.
                 r.model = m.copy();
-                r.clock = clock;
-                try {
-                    r.digestCheck();
-                    return p;
-                } catch (RuntimeException x) {
-                    last = x.getMessage();
+                long now = clock;
+                for (int q = p; q <= lines.size(); q++) {
+                    if (q > p) {
+                        JsonNode j = JSON.readTree(lines.get(q - 1));
+                        if (!j.path("op").asText().equals("ttl_advance")) {
+                            continue;
+                        }
+                        now += j.get("ms").asLong();
+                    }
+                    r.clock = now;
+                    try {
+                        r.digestCheck();
+                        return p;
+                    } catch (RuntimeException x) {
+                        last = x.getMessage();
+                    }
                 }
             }
             throw new Diverged("matches no state at or after line " + ack + "; last: " + last);
