@@ -112,7 +112,10 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
   analyze RSS 303 -> 1502 MB (F-183), peak footprint 1.95 GB, verify unsound (F-182).
 - F-182 committed 79a63a1 (R+D; J not affected), gate quick green on remote.
 - F-183 (R+J+D `analyze` streams two passes) committed, gate quick green.
-1. Rerun `rss_scale` index at 10^6 and 10^7 on `cryptand-m6` (rsync tree first), check
+- 10^6 post-fix (ix2-r-1000000): verify sound, analyze RSS flat (398 -> 398 MB), unique p50 7 us;
+  peak footprint 375 MB vs 6.3 bar 352 (3 trees' memtables; decide if the bar applies to indexed builds).
+  10^7 post-fix running on remote (`~/ix.sh`, ix2-r-10000000.*).
+1. Check the 10^7 rerun at 10^6 and 10^7 on `cryptand-m6` (rsync tree first), check
    verify_sound=true and analyze RSS flat; then 10^8 (~62 GB, remote has ~106 GB).
 2. Java/Dart index rungs (RssScale.java, tool/scale.dart have none yet).
 3. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
@@ -208,3 +211,4 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 2026-10-27 — F-180 fixed (J: clustering liveness scan due-gated); Java single writer default, spec serialized publish; torture 5000 kills 1 failure = F-181 (pre-existing); gate quick green; merged into dart-storage.
 - 2026-10-27 — F-181 bisected to ee3a58b (exposer only): after-kill checker read states at a rewound clock; checker fixed R+J+D; torture J 500 / R 300 / D 300 clean, gate quick green (remote); merged into dart-storage.
 - 2026-10-27 — Dart go (human). 6.5 index rung: F-182 (R+D commit mid-job leaked placed outputs) fixed, gate green; F-183 (R+J+D analyze held every key, +1.2 GB at 10^7) fixed, gate green.
+- 2026-10-27 — F-183 committed (gate green); 10^6 index rung post-fix: verify sound, analyze flat, footprint 375 MB; 10^7 running.
