@@ -777,11 +777,20 @@ public final class Engine implements AutoCloseable {
             // them the safe half of the key.
             if (cached == null || cached.meta().segmentId != m.segmentId) {
                 cached = Segment.open(pager, m.startPage, m.nonce);
-                segmentCache.put(m.startPage, cached);
+                Segment stale = segmentCache.put(m.startPage, cached);
+                if (stale != null) {
+                    stale.releasePointIndex(); // F-007
+                }
             }
             open.add(cached);
         }
-        segmentCache.keySet().retainAll(live);
+        segmentCache.entrySet().removeIf(en -> {
+            boolean dead = !live.contains(en.getKey());
+            if (dead) {
+                en.getValue().releasePointIndex(); // F-007
+            }
+            return dead;
+        });
         // L0 newest first, then strictly increasing level - the level discipline
         // that §4's early exit is proved by.
         open.sort(Comparator.<Segment>comparingInt(s -> s.meta().level)
@@ -3963,6 +3972,7 @@ public final class Engine implements AutoCloseable {
 
     /** Re-reads every internal tree from the superblock's roots. */
     private void reloadTrees() {
+        segmentCache.values().forEach(Segment::releasePointIndex); // F-007
         segmentCache.clear();
         loadTrees();
     }

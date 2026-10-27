@@ -262,8 +262,7 @@ public final class Segment {
             if (++pointLookups < Math.max(8, meta.entryCount / 32)) {
                 return UNINDEXED;
             }
-            ix = buildPointIndex();
-            pointIndex = ix;
+            ix = chargedPointIndex();
         }
         if (ix.length == 0) {
             return UNINDEXED;
@@ -290,6 +289,31 @@ public final class Segment {
                 return seq <= snapshotSeq ? b.leaf(cell) : UNINDEXED;
             }
         }
+    }
+
+    /** F-007: builds the index if it fits {@link Pager#pointIndexBytes}' cap; never retried once it does not. */
+    private synchronized long[] chargedPointIndex() {
+        long[] ix = pointIndex;
+        if (ix != null) {
+            return ix;
+        }
+        ix = buildPointIndex();
+        long bytes = ix.length * 8L;
+        if (pager.pointIndexBytes.addAndGet(bytes) > pager.pageCacheBudgetBytes()) {
+            pager.pointIndexBytes.addAndGet(-bytes);
+            ix = NO_INDEX;
+        }
+        pointIndex = ix;
+        return ix;
+    }
+
+    /** F-007: returns this segment's index bytes to the cap; called once it leaves the cache. */
+    synchronized void releasePointIndex() {
+        long[] ix = pointIndex;
+        if (ix != null) {
+            pager.pointIndexBytes.addAndGet(-ix.length * 8L);
+        }
+        pointIndex = NO_INDEX;
     }
 
     private long[] buildPointIndex() {

@@ -818,4 +818,26 @@ class EngineTest {
             assertTrue(e.containsKey(other, key("idx"), e.visibleSeq(), Long.MAX_VALUE));
         }
     }
+
+    @Test
+    void f007PointIndexesStayUnderThePageCacheBudget(@TempDir Path dir) {
+        // F-007: every live segment stays open, so an uncapped index per
+        // segment grew with the database (16 B/key).
+        try (Engine e = Engine.create(dir.resolve("f007.cryptand"), options())) {
+            e.pager().pageCacheBytes(0); // the floor, 4 pages
+            int n = 20_000;
+            for (int i = 0; i < n; i++) {
+                e.batch().put(TREE, key(i), val("v")).commit();
+            }
+            e.commitNow();
+            e.compact();
+            for (int pass = 0; pass < 2; pass++) {
+                for (int i = 0; i < n; i++) {
+                    assertNotNull(e.get(TREE, key(i)));
+                }
+            }
+            assertTrue(e.pager().pointIndexBytes.get() <= e.pager().pageCacheBudgetBytes());
+            assertTrue(e.segments().stream().noneMatch(Segment::pointIndexed));
+        }
+    }
 }

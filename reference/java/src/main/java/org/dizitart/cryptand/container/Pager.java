@@ -246,6 +246,13 @@ public final class Pager {
     private final java.util.concurrent.atomic.AtomicInteger treeResident =
             new java.util.concurrent.atomic.AtomicInteger();
     private long pageCacheBytes = 64L * 1024 * 1024;
+
+    /**
+     * F-007: bytes of segment point indexes built through this pager. Every
+     * live segment stays open, so the indexes are capped here at the page
+     * cache budget; a segment over the cap reads by its descent.
+     */
+    public final java.util.concurrent.atomic.AtomicLong pointIndexBytes = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong cacheHits =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong cacheMisses =

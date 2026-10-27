@@ -316,7 +316,7 @@ Nothing has run above 10⁶ documents. The target is 10⁹ for Rust and Java (hu
   excluding Argon2id; point-read p99 at 10⁹ ≤ 3× p99 at 10⁶; load rate at 10⁹ ≥
   0.4× the rate at 10⁶; space amplification ≤ 1.6 on `desktop` once compaction
   settles; `verify` completes; no 32-bit overflow anywhere.
-- [ ] **6.4** Suspects to probe first. They are in FINDINGS as `suspect`;
+- [x] **6.4** Suspects to probe first. They are in FINDINGS as `suspect`;
   promote each to a finding or close it with the number.
 - [ ] **6.5** Indexes at scale: unique and compound indexes at 10⁸; full text
   at 10⁷ documents; spatial at 10⁷; HNSW at 10⁶ × 128-d, recall@10 against
