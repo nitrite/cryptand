@@ -106,7 +106,7 @@ class StatsTest {
     @Test
     @DisplayName("stats round-trip through their value encoding")
     void statsRoundTrip() {
-        IndexStats.Builder b = new IndexStats.Builder();
+        IndexStats.Builder b = new IndexStats.Builder(200);
         for (int i = 0; i < 200; i++) {
             b.add(key(i), i % 10 == 0);
         }
@@ -148,7 +148,7 @@ class StatsTest {
         // Long string keys: 64 buckets of these is several kilobytes, which is
         // the measurement that produced defect 37 -- 4734 B against a 4096 B
         // page, so the descriptor could not be written at all.
-        IndexStats.Builder b = new IndexStats.Builder();
+        IndexStats.Builder b = new IndexStats.Builder(500);
         for (int i = 0; i < 500; i++) {
             b.add(String.format("%0200d", i).getBytes(StandardCharsets.US_ASCII), false);
         }
@@ -171,7 +171,7 @@ class StatsTest {
     void aGenerousBudgetKeepsTheBuckets() {
         // The control for the test above: if the reduction fired regardless of
         // the budget, that test would pass for the wrong reason.
-        IndexStats.Builder b = new IndexStats.Builder();
+        IndexStats.Builder b = new IndexStats.Builder(500);
         for (int i = 0; i < 500; i++) {
             b.add(key(i), false);
         }
@@ -185,7 +185,7 @@ class StatsTest {
     @Test
     @DisplayName("the histogram is equi-depth and monotone")
     void theHistogramIsEquiDepth() {
-        IndexStats.Builder b = new IndexStats.Builder();
+        IndexStats.Builder b = new IndexStats.Builder(1000);
         for (int i = 0; i < 1000; i++) {
             b.add(key(i), false);
         }

@@ -185,24 +185,26 @@ pub struct StatsBuilder {
     pub null_count: u64,
     pub min_key: Option<Vec<u8>>,
     pub max_key: Option<Vec<u8>>,
-    samples: Vec<Vec<u8>>,
-}
-
-impl Default for StatsBuilder {
-    fn default() -> Self {
-        StatsBuilder::new()
-    }
+    total: u64,
+    step: u64,
+    hist: Vec<HistogramBucket>,
 }
 
 impl StatsBuilder {
-    pub fn new() -> StatsBuilder {
+    /// For `total` keys, counted first. F-183: equi-depth bounds then fall
+    /// out of one stream; holding every key to place them afterwards was
+    /// O(entries) memory (1.2 GB more at 10^7).
+    pub fn new(total: u64) -> StatsBuilder {
+        let buckets = (MAX_BUCKETS as u64).min(total).max(1);
         StatsBuilder {
             hll: HyperLogLog::new(10),
             entries: 0,
             null_count: 0,
             min_key: None,
             max_key: None,
-            samples: Vec::new(),
+            total,
+            step: total.div_ceil(buckets).max(1),
+            hist: Vec::new(),
         }
     }
 
@@ -216,24 +218,12 @@ impl StatsBuilder {
             self.min_key = Some(key.to_vec());
         }
         self.max_key = Some(key.to_vec());
-        self.samples.push(key.to_vec());
+        if self.entries % self.step == 0 || self.entries == self.total {
+            self.hist.push(HistogramBucket { bound: key.to_vec(), cumulative: self.entries });
+        }
     }
 
     pub fn build(&self, updated_seq: u64, budget_bytes: usize) -> IndexStats {
-        let mut hist = Vec::new();
-        if !self.samples.is_empty() {
-            let n = self.samples.len();
-            let buckets = MAX_BUCKETS.min(n);
-            let step = n.div_ceil(buckets);
-            let mut cumulative = 0u64;
-            let mut i = 0usize;
-            while i < n {
-                let end = (i + step).min(n);
-                cumulative += (end - i) as u64;
-                hist.push(HistogramBucket { bound: self.samples[end - 1].clone(), cumulative });
-                i = end;
-            }
-        }
         let mut s = IndexStats {
             updated_seq,
             entries: self.entries,
@@ -241,7 +231,7 @@ impl StatsBuilder {
             null_count: self.null_count,
             min_key: self.min_key.clone().unwrap_or_default(),
             max_key: self.max_key.clone().unwrap_or_default(),
-            histogram: hist,
+            histogram: self.hist.clone(),
         };
         s.fit_to(budget_bytes);
         s

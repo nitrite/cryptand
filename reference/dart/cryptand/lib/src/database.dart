@@ -249,19 +249,19 @@ final class Collection {
     final b = StatsBuilder();
     // Equi-depth: with the stream already in key order, a bucket boundary is
     // a counter reaching its quota. The quota needs the count, so the entries
-    // are walked once to count and once to bound -- the second pass is over
-    // keys only and touches no values.
-    final keys = <Uint8List>[];
-    for (final e in _e.scanTree(indexTree.treeId)) {
-      keys.add(Uint8List.fromList(e.cke));
+    // are walked once to count and once to bound. F-183: both passes stream;
+    // the first used to keep every key (O(entries) memory).
+    var total = 0;
+    for (final _ in _e.scanTree(indexTree.treeId)) {
+      total++;
     }
-    final quota = keys.length <= 64 ? 1 : (keys.length / 64).ceil();
-    for (var i = 0; i < keys.length; i++) {
-      final values = indexEntryValues(keys[i], idx.fields.length);
+    final quota = total <= 64 ? 1 : (total / 64).ceil();
+    var i = 0;
+    for (final e in _e.scanTree(indexTree.treeId)) {
+      final values = indexEntryValues(e.cke, idx.fields.length);
       final prefix = Keys.prefixOfArray(values);
-      b.add(prefix, keys[i],
-          seq: 0, isNull: values.any((v) => v is CNull));
-      if ((i + 1) % quota == 0) b.boundary(keys[i]);
+      b.add(prefix, e.cke, seq: 0, isNull: values.any((v) => v is CNull));
+      if (++i % quota == 0) b.boundary(e.cke);
     }
     final stats = b.build();
 

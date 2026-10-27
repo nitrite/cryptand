@@ -92,7 +92,7 @@ fn an_empty_sketch_estimates_zero() {
 
 #[test]
 fn stats_round_trip_through_their_value_encoding() {
-    let mut b = stats::StatsBuilder::new();
+    let mut b = stats::StatsBuilder::new(200);
     for i in 0..200u32 {
         b.add(&i.to_be_bytes(), i % 10 == 0);
     }
@@ -131,7 +131,7 @@ fn an_absent_or_partial_value_decodes_to_zeroes_rather_than_failing() {
 fn the_histogram_is_bounded_in_bytes_not_only_in_buckets() {
     // Long string keys: 64 buckets of these is several kilobytes, which is the
     // measurement that produced defect 37 (4734 B against a 4096 B page).
-    let mut b = stats::StatsBuilder::new();
+    let mut b = stats::StatsBuilder::new(500);
     for i in 0..500u32 {
         let key = format!("{:0>200}", i);
         b.add(key.as_bytes(), false);
@@ -161,7 +161,7 @@ fn the_histogram_is_bounded_in_bytes_not_only_in_buckets() {
 fn a_generous_budget_keeps_the_full_bucket_count() {
     // The control for the test above: if the reduction fired regardless of the
     // budget, that test would pass for the wrong reason.
-    let mut b = stats::StatsBuilder::new();
+    let mut b = stats::StatsBuilder::new(500);
     for i in 0..500u32 {
         b.add(&i.to_be_bytes(), false);
     }
@@ -178,7 +178,7 @@ fn a_generous_budget_keeps_the_full_bucket_count() {
 
 #[test]
 fn the_histogram_is_equi_depth_and_monotone() {
-    let mut b = stats::StatsBuilder::new();
+    let mut b = stats::StatsBuilder::new(1000);
     for i in 0..1000u32 {
         b.add(&i.to_be_bytes(), false);
     }

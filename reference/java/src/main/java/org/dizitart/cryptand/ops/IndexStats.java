@@ -291,11 +291,24 @@ public final class IndexStats {
      */
     public static final class Builder {
         private final HyperLogLog hll = new HyperLogLog(10);
-        private final List<byte[]> samples = new ArrayList<>();
+        private final List<Bucket> hist = new ArrayList<>();
+        private final long total;
+        private final long step;
         private long entries;
         private long nullCount;
         private byte[] minKey;
         private byte[] maxKey;
+
+        /**
+         * For {@code total} keys, counted first. F-183: equi-depth bounds then
+         * fall out of one stream; holding every key to place them afterwards
+         * was O(entries) memory.
+         */
+        public Builder(long total) {
+            this.total = total;
+            long buckets = Math.max(1, Math.min(MAX_BUCKETS, total));
+            this.step = Math.max(1, (total + buckets - 1) / buckets);
+        }
 
         /** Keys MUST arrive in key order; the histogram's equi-depth property depends on it. */
         public void add(byte[] key, boolean isNull) {
@@ -308,7 +321,9 @@ public final class IndexStats {
                 minKey = key.clone();
             }
             maxKey = key.clone();
-            samples.add(key.clone());
+            if (entries % step == 0 || entries == total) {
+                hist.add(new Bucket(maxKey, entries));
+            }
         }
 
         public IndexStats build(long updatedSeq, int budgetBytes) {
@@ -319,17 +334,11 @@ public final class IndexStats {
             s.distinctEstimate = entries == 0 ? 0 : hll.estimate();
             s.minKey = minKey == null ? new byte[0] : minKey;
             s.maxKey = maxKey == null ? new byte[0] : maxKey;
-            if (!samples.isEmpty()) {
-                int n = samples.size();
-                int buckets = Math.min(MAX_BUCKETS, n);
-                int step = (n + buckets - 1) / buckets;
-                long cumulative = 0;
-                for (int i = 0; i < n; ) {
-                    int end = Math.min(i + step, n);
-                    cumulative += end - i;
-                    s.histogram.add(new Bucket(samples.get(end - 1), cumulative));
-                    i = end;
-                }
+            s.histogram.addAll(hist);
+            // A writer between the count and this pass can leave the last
+            // bound short of the stream's end; the bounds stay monotone.
+            if (entries > 0 && (hist.isEmpty() || hist.get(hist.size() - 1).cumulative != entries)) {
+                s.histogram.add(new Bucket(maxKey, entries));
             }
             s.fitTo(budgetBytes);
             return s;

@@ -382,7 +382,14 @@ public final class Collection {
          * {@code params.stats}; a planner must work without it.
          */
         public IndexStats analyze() {
-            IndexStats.Builder b = new IndexStats.Builder();
+            // F-183: two streamed passes, a count and then the bounds.
+            long total = 0;
+            try (Engine.Cursor c = engine.scan(treeId, null, null, false)) {
+                while (c.next()) {
+                    total++;
+                }
+            }
+            IndexStats.Builder b = new IndexStats.Builder(total);
             try (Engine.Cursor c = engine.scan(treeId, null, null, false)) {
                 while (c.next()) {
                     byte[] key = c.row().key();

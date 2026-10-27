@@ -452,9 +452,17 @@ impl Indexing for Database {
     }
 
     fn analyze(&mut self, idx: &IndexDescriptor) -> Result<crate::stats::IndexStats> {
-        let rows = self.engine.scan_tree(idx.tree, None, None, None, false)?;
-        let mut b = crate::stats::StatsBuilder::new();
-        for (k, _) in &rows {
+        // F-183: two streamed passes, a count and then the bounds, so no key
+        // is held past its own step.
+        let mut total = 0u64;
+        let mut c = self.engine.scan_cursor(idx.tree, None, None, None, false)?;
+        while c.next(&mut self.engine)?.is_some() {
+            total += 1;
+        }
+        let mut b = crate::stats::StatsBuilder::new(total);
+        let mut c = self.engine.scan_cursor(idx.tree, None, None, None, false)?;
+        while let Some((k, _)) = c.next(&mut self.engine)? {
+            let k = &k;
             // §9's `null_count`: an entry is null when any indexed value is.
             // `sparse` indexes never hold one, which is the whole difference
             // between a sparse index and a dense one.
