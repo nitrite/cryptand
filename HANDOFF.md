@@ -128,8 +128,8 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    `CRYPTAND_DRAIN=1` in Rust rung. Its replay test exposed F-188 (S1, R+D: segment pages stamped commit 0, replay
    binding vacuous), fixed with human approval, corpus regenerated. Rust 10^7 footprint 516 MB after F-187: recheck (F-184).
    ix5 done: Dart 10^7 peak footprint 484 MB, spike in analyze/verify (samples ~169k of 171k lines).
-3. Profile the Dart spike from the samples (`footprint` sampled every 10 s missed it; try 1 s or MallocStackLogging).
-   Then 10^8 Rust index (~62 GB; remote ~100 GB free).
+3. Dart spike located (ix5, 1 s samples): Dart heap garbage during `analyze`'s two scan passes (145 -> 501 MB in ~12 s, then GC).
+   Not live data. Human: cut per-entry allocation in the Dart scan, or cap the VM heap in the rung? Then 10^8 Rust index (~62 GB; remote 110 GB free).
 4. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
 
 ## Log
@@ -230,3 +230,4 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 2026-10-28 — F-186 profiled: per-hit budget sum moved to once per cursor, probe 10 us; gate quick green (remote).
 - 2026-10-27 — 6.3 bar for indexed builds counts one memtable per tree (desktop 3 trees: 416 MB); 10^6 index 375 MB PASS; 10^7 at 6.7M rows, RSS ~200-290 MB.
 - 2026-10-28 — F-187 (R+D L0 backlog, probe 16 -> 4 segs) and F-188 (S1 R+D segment commit_id 0) fixed, corpus regenerated; gate quick green (remote).
+- 2026-10-28 — ix5 samples: Dart 10^7 index spike is VM heap garbage in analyze's two passes (F-184); remote idle.
