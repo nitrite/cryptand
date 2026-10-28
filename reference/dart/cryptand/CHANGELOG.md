@@ -83,4 +83,4 @@ regenerated, format still CFF v1.0:
 Also: crash, fault and kill campaigns; fuzzing; nonce-floor overflow (F-133);
 key material zeroed on close and failed open (F-135, F-136); files created 0600
 (F-139); bounded index `analyze` memory (F-183); commit drains the L0 compaction
-backlog (F-187); storage layer rewritten (write-through, commit in place, session lock); index `analyze` allocates per pass, not per entry (F-184); scale rungs to 10⁸ documents.
+backlog (F-187); storage layer rewritten (write-through, commit in place, session lock); scale rungs to 10⁸ documents.

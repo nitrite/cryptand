@@ -306,7 +306,7 @@ footprint ≤ 416 MB: 64 MB of cache, 32 MB of memtable for each of 3 trees, plu
 | 10⁷ | Rust (F-186, F-187) | 5 us, 4 segments/probe | 356–516 MB across runs | spread open (F-184) |
 | 10⁶ / 10⁷ | Java, -Xmx128m (F-185) | 7 us | 233 / 220 MB | PASS |
 | 10⁶ | Dart AOT | 5 us | 312 MB | PASS |
-| 10⁷ | Dart AOT | 32 us | 484–509 MB | FAIL: GC garbage from `analyze` scans (F-184); fix 23ffb57, rerun pending |
+| 10⁷ | Dart AOT | 32 us | 484–509 MB | FAIL: GC garbage in the analyze + verify scans (F-184); 486 MB after 23ffb57, which did not move it |
 
 Still to run: 10⁸ Rust index, 10⁷ full text, 10⁷ spatial, HNSW recall@10 at 10⁶ × 128-d.
 
