@@ -343,7 +343,7 @@ pub struct Engine {
     memtable_range_deletes: u64,
     manifest_cache: HashMap<u8, Vec<SegmentRef>>,
     /// The whole of tree 6, for `all_refs`, on the same epoch.
-    manifest_all_cache: Option<Vec<SegmentRef>>,
+    manifest_all_cache: Option<Arc<Vec<SegmentRef>>>,
     /// §4's candidate order, flattened across levels and already sorted, on the
     /// same epoch. A point read used to rebuild and re-sort this per level per
     /// lookup: `last_level() + 1` vector clones and sorts to answer one `get`.
@@ -1856,6 +1856,13 @@ impl Engine {
     }
 
     pub fn all_refs(&mut self) -> Result<Vec<SegmentRef>> {
+        Ok(self.all_refs_shared()?.as_ref().clone())
+    }
+
+    /// [`Engine::all_refs`] without the copy: a scan and `range_deletes_for`
+    /// run per index probe, and cloning every ref's key bounds twice per
+    /// probe made a 10^7 unique-index probe 30 us (Java 7).
+    fn all_refs_shared(&mut self) -> Result<Arc<Vec<SegmentRef>>> {
         // Cached for the same reason and on the same epoch as `refs_at`:
         // `range_deletes_for` calls this on **every point read**, so an
         // uncached whole-manifest scan is a per-lookup cost that grows with the
@@ -1871,6 +1878,7 @@ impl Engine {
         let r = m.all(&mut self.pager);
         self.manifest = m;
         let refs = r?;
+        let refs = Arc::new(refs);
         self.manifest_all_cache = Some(refs.clone());
         Ok(refs)
     }
@@ -2224,12 +2232,12 @@ impl Engine {
                 }
             }
         }
-        let refs = self.all_refs()?;
-        for r in refs {
+        let refs = self.all_refs_shared()?;
+        for r in refs.iter() {
             if !r.has_range_deletes {
                 continue;
             }
-            let seg = self.segment(&r)?;
+            let seg = self.segment(r)?;
             for rd in seg.range_deletes()? {
                 if rd.tree_id == tree {
                     out.push(rd);
@@ -2366,7 +2374,7 @@ impl Engine {
             }
             sources.push(ScanSource { seg: None, batches: 0, buf, resume: Vec::new(), done: true });
         }
-        for r in self.all_refs()? {
+        for r in self.all_refs_shared()?.iter() {
             if self.quarantined.contains_key(&r.segment_id) {
                 continue;
             }
@@ -2382,7 +2390,7 @@ impl Engine {
             }
             let seg = self.segment(&r)?;
             sources.push(ScanSource {
-                seg: Some(ScanSeg::Cached(seg, r)),
+                seg: Some(ScanSeg::Cached(seg, r.clone())),
                 batches: 0,
                 buf: Default::default(),
                 resume: start.clone(),

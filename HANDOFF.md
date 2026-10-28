@@ -121,9 +121,11 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    Dart 10^6 312 PASS, Dart 10^7 509 MB FAIL (bar 416). F-184 now mostly Dart. `~/ix5.sh` running:
    Dart 10^7 with 1 s RSS/footprint samples in `runs/ix5-d-1e7.samples` (`ix5.done` when finished,
    ~1.7 h); build_s ~5000 locates build vs analyze/verify phases.
-2. Profile the Dart spike from the samples (`footprint` sampled every 10 s missed it; try 1 s or MallocStackLogging).
+2. F-186 (10-28): Rust unique probe 30 -> 11 us (manifest clone per probe); Java 7, Dart 32 still unexplained.
+   Rust 10^7 footprints 641 / 411 MB after it (F-184 spread persists in Rust too).
+3. Profile the Dart spike from the samples (`footprint` sampled every 10 s missed it; try 1 s or MallocStackLogging).
    Then 10^8 Rust index (~62 GB; remote ~100 GB free).
-3. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
+4. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
 
 ## Log
 
@@ -219,4 +221,5 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 2026-10-27 — F-183 committed (gate green); 10^6 index rung post-fix: verify sound, analyze flat, footprint 375 MB; 10^7 running.
 - 2026-10-28 — 10^7 index footprint 499/368 MB (F-184 open); F-185 Java scan bound fixed; J+D index rungs; ix4 chain running.
 - 2026-10-28 — ix4: R/J index rungs PASS (Rust 10^7 356 x2), Dart 10^7 509 MB FAIL; ix5 sampling run launched.
+- 2026-10-28 — F-186 (R: manifest cloned per scan) fixed, probe 30 -> 11 us; gate quick green (remote); 10 stale remote clones listed for deletion (denied by auto mode).
 - 2026-10-27 — 6.3 bar for indexed builds counts one memtable per tree (desktop 3 trees: 416 MB); 10^6 index 375 MB PASS; 10^7 at 6.7M rows, RSS ~200-290 MB.
