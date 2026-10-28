@@ -71,6 +71,7 @@ public final class RssScale {
                     + " bytes=" + Files.size(path) + " rss_build_mb=" + rssMb());
             long s = 0x51EDC0DEL;
             long[] us = new long[10_000];
+            long segs0 = org.dizitart.cryptand.lsm.Engine.SCAN_SEGMENTS.get();
             for (int k = 0; k < us.length; k++) {
                 s = s * 6364136223846793005L + 1442695040888963407L;
                 long i = Long.remainderUnsigned(s >>> 11, n);
@@ -80,7 +81,8 @@ public final class RssScale {
                 us[k] = (System.nanoTime() - g) / 1000;
             }
             java.util.Arrays.sort(us);
-            line.append(" unique_us p50=" + us[5000] + " p99=" + us[9900]);
+            line.append(" unique_us p50=" + us[5000] + " p99=" + us[9900]
+                    + " segs_per_probe=" + (org.dizitart.cryptand.lsm.Engine.SCAN_SEGMENTS.get() - segs0) / (double) us.length);
             long g = System.nanoTime();
             int hits = cx.find(List.of(city(7))).size();
             line.append(" compound_rows=" + hits + " compound_ms=" + (System.nanoTime() - g) / 1_000_000 + " rss_probe_mb=" + rssMb());

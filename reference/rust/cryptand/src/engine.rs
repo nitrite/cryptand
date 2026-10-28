@@ -428,6 +428,9 @@ pub struct Engine {
     nonce_limit: u64,
 }
 
+/// Bench counter (F-186): segments opened by scan cursors.
+pub static SCAN_SEGMENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl Engine {
     // ---------------------------------------------------------------
     // Creation, open, close
@@ -1670,6 +1673,7 @@ impl Engine {
             0,
             self.filter_bits_at(0),
         )?;
+        b.commit_id = self.sb.commit_id;
         self.sb.next_segment_id += 1;
         for (ik, e) in all {
             b.add(SegEntry { internal_key: ik, value_kind: e.value_kind, value: e.value, expiry_ms: e.expiry_ms })?;
@@ -2407,6 +2411,7 @@ impl Engine {
                 Some(s) => s,
                 None => self.segment_miss(r)?,
             };
+            SCAN_SEGMENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             sources.push(ScanSource {
                 seg: Some(ScanSeg::Cached(seg, r.clone())),
                 batches: 0,
@@ -2785,7 +2790,7 @@ impl Engine {
                 // F-173: per output segment (byte-capped, well under the
                 // headroom); an unbounded step writes the whole merge.
                 self.arm()?;
-                let b = SegmentBuilder::with_reserve(
+                let mut b = SegmentBuilder::with_reserve(
                     self.pager.page_size,
                     self.pager.tag_reserve(),
                     self.sb.next_segment_id,
@@ -2793,6 +2798,7 @@ impl Engine {
                     job.target_group,
                     self.filter_bits_at(job.target_level),
                 )?;
+                b.commit_id = self.sb.commit_id;
                 self.sb.next_segment_id += 1;
                 job.builder = Some(b);
             }
@@ -3578,6 +3584,33 @@ impl Engine {
         // rest of one job; persist them as free instead if the stall bar bites.
         if self.unpublished_outputs() {
             let mut job = self.job.take().unwrap();
+            loop {
+                match self.step_compaction(&mut job, Some(u64::MAX)) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => {
+                        self.abandon_compaction(job);
+                        return Err(e);
+                    }
+                }
+            }
+            self.finish_compaction(job)?;
+        }
+        // F-187: compaction only steps per put, so the backlog left at the last
+        // commit was never worked off (L0 14 segments at 10^7, trigger 4; 16
+        // segments per probe against §8's bound of 9). Java's background thread
+        // clears it. ponytail: whole jobs in the commit, like F-182's; bound the
+        // work per commit if the stall bar bites.
+        let bound = self.policy.l0_trigger.max(1) as usize;
+        for _ in 0..64 {
+            if self.healthy_refs_at(0)?.len() <= bound {
+                break;
+            }
+            let job = match self.job.take() {
+                Some(j) => Some(j),
+                None => self.pick_compaction()?,
+            };
+            let Some(mut job) = job else { break };
             loop {
                 match self.step_compaction(&mut job, Some(u64::MAX)) {
                     Ok(true) => {}

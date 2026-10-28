@@ -14,6 +14,7 @@ Uint8List seq(int n, [int from = 0]) =>
 
 void main() {
   _f076();
+  _f188();
 
   final master = seq(32);
   final uuid = seq(16, 0xA0);
@@ -388,5 +389,36 @@ void _f076() {
       e.close();
       dir.deleteSync(recursive: true);
     }
+  });
+}
+
+/// F-188: every page of an encrypted segment carries its head's `commit_id`
+/// (04 §2.1, 14 §5.5); Dart wrote 0 on all of them, so the replay check
+/// compared 0 with 0.
+void _f188() {
+  test('every page of an encrypted segment carries its head commit', () {
+    final dir = Directory.systemTemp.createTempSync('f188-');
+    final path = '${dir.path}/db.cryptand';
+    final key = Uint8List(32)..fillRange(0, 32, 7);
+    DatabaseFile.create(path, credential: Uint8List.fromList(key), kdf: Keyslot.kdfRaw).engine.close();
+    final e = DatabaseFile.open(path, key: key).engine;
+    for (var i = 0; i < 2000; i++) {
+      e.put(TreeId.firstUserTree, CInt.of(NumType.i64, i), Uint8List.fromList('v-$i'.codeUnits));
+    }
+    e.commit();
+    final refs = [for (var l = 0; l <= e.lastLevel; l++) ...e.refsAt(l)];
+    e.close();
+    final f = File(path).readAsBytesSync();
+    final ps = 1 << f[14];
+    int commit(int p) => ByteData.sublistView(f, p * ps + 16, p * ps + 24).getUint64(0, Endian.little);
+    expect(refs, isNotEmpty);
+    for (final r in refs) {
+      final head = commit(r.startPage);
+      expect(head, isNot(0), reason: 'segment ${r.segmentId} head');
+      for (var p = r.startPage + 1; p < r.startPage + r.pages; p++) {
+        expect(commit(p), head, reason: 'page $p of segment ${r.segmentId}');
+      }
+    }
+    dir.deleteSync(recursive: true);
   });
 }

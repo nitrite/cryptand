@@ -152,7 +152,8 @@ fn an_expired_checkpoint_is_dropped_automatically() {
 fn an_incremental_backup_copies_only_what_changed() {
     let (_t, mut e) = engine("incr", Profile::Desktop);
     e.memtable_entry_limit = 100;
-    for i in 0..600i64 {
+    // Four L0 segments, at `l0_trigger`: one more and the commit compacts them (F-187).
+    for i in 0..400i64 {
         e.put(T, &Value::NitriteId(i), b"v").unwrap();
         if e.memtable_pressure().0 >= 100 {
             e.flush().unwrap();

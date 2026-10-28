@@ -617,6 +617,8 @@ void main(List<String> args) {
   final encDigest = digest(encRows);
   enc.save(encPath);
   final encImage = File(encPath).readAsBytesSync();
+  // M5 holds the writer lock for the session: release it before LivePages reopens.
+  enc.db.engine.close();
   emit('v1.0-encrypted.cryptand', encImage, broken: false, key: corpusKey);
   entries.add(Entry('v1.0-encrypted.cryptand', 'read',
       documents: encRows.length,

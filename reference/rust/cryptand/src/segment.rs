@@ -929,6 +929,9 @@ pub struct SegmentBuilder {
     pub group: u8,
     pub single_tree: Option<u32>,
     pub filter_bits_per_key: u16,
+    /// F-188 (14 §5.5, 04 §2.1): one `commit_id` on every page of the extent,
+    /// the head's, so a reader can refuse an older page replayed into it.
+    pub commit_id: u64,
     payload_size: usize,
     pages: Vec<Vec<u8>>,
     leaf: Option<PendingPage>,
@@ -1000,6 +1003,7 @@ impl SegmentBuilder {
             flags: 0,
             tree_span: Default::default(),
             user_key_hashes: Vec::new(),
+            commit_id: 0,
         })
     }
 
@@ -1125,7 +1129,7 @@ impl SegmentBuilder {
             &p.payloads,
             p.subtree_entries,
             crate::container::NO_TREE,
-            0,
+            self.commit_id,
         )?;
         self.pages.push(page);
         Ok(self.pages.len() as u64) // page 0 is the segment header
@@ -1249,6 +1253,7 @@ impl SegmentBuilder {
             PageHeader {
                 page_type: page_type::SEGMENT_FILTER,
                 tree_id: crate::container::NO_TREE,
+                commit_id: self.commit_id,
                 payload_len: n as u32,
                 ..Default::default()
             }
@@ -1318,6 +1323,7 @@ impl SegmentBuilder {
             flags: page_flags::EXTENT_HEAD,
             tree_id: crate::container::NO_TREE,
             extent_pages: self.pages.len() as u32 + 1,
+            commit_id: self.commit_id,
             payload_len: w.len() as u32,
             ..Default::default()
         }

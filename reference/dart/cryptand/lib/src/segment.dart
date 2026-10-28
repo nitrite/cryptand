@@ -326,6 +326,7 @@ final class SegmentBuilder {
     this.treeId,
     this.filterBitsPerKey = 0,
     this.tagReserve = 0,
+    this.commitId = 0,
   }) {
     checkPageSize(pageSize);
     _payloadSize = pageSize - PageHeader.size - tagReserve;
@@ -336,6 +337,10 @@ final class SegmentBuilder {
   /// `spec/14-security.md` section 5.2's AEAD tag: 16 on an encrypted
   /// database, 0 otherwise. Subtracted from every page's usable payload.
   final int tagReserve;
+
+  /// F-188 (14 §5.5, 04 §2.1): one `commit_id` on every page of the extent,
+  /// the head's, so a reader can refuse an older page replayed into it.
+  final int commitId;
 
   final int segmentId;
   final int level;
@@ -555,6 +560,7 @@ final class SegmentBuilder {
       keys: p.keys,
       payloads: p.payloads,
       subtreeEntries: p.subtreeEntries,
+      commitId: commitId,
     ));
     return _pages.length; // page 0 is the segment header
   }
@@ -631,6 +637,7 @@ final class SegmentBuilder {
       PageHeader(
         pageType: PageType.segmentFilter,
         treeId: TreeId.noTree,
+        commitId: commitId,
         payloadLen: n,
       ).writeInto(page);
       _pages.add(page);
@@ -694,6 +701,7 @@ final class SegmentBuilder {
       flags: PageFlags.extentHead,
       treeId: TreeId.noTree,
       extentPages: _pages.length + 1,
+      commitId: commitId,
       payloadLen: w.length,
     ).writeInto(page);
     return page;

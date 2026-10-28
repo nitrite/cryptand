@@ -173,8 +173,14 @@ fn index_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
     }
     db.commit(Durability::Sync)?;
     let mut line = format!("built={n} build_s={} bytes={} rss_build_mb={}", t.elapsed().as_secs(), std::fs::metadata(path)?.len(), rss());
+    // F-186: CRYPTAND_DRAIN=1 runs the compaction backlog out before probing (Java's background thread does).
+    if std::env::var("CRYPTAND_DRAIN").is_ok() {
+        db.engine.drain_compaction()?;
+        db.commit(Durability::Sync)?;
+    }
     let mut s = 0x51ED_C0DEu64;
     let mut us = Vec::with_capacity(10_000);
+    let segs0 = cryptand::engine::SCAN_SEGMENTS.load(std::sync::atomic::Ordering::Relaxed);
     for _ in 0..10_000 {
         s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let k = ((s >> 11) % n as u64) as i64;
@@ -193,8 +199,21 @@ fn index_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
             assert_eq!(db.index_scan(&uq, &index::scan_prefix(&[v])?)?.len(), 1);
         }
     }
+    // F-186: segments that can hold a key of the unique tree, by level / group / trees spanned.
+    {
+        let tr = |k: &[u8]| if k.len() >= 4 { u32::from_be_bytes([k[0], k[1], k[2], k[3]]) } else { 0 };
+        let mut m = std::collections::BTreeMap::new();
+        for r in db.engine.all_refs()? {
+            if tr(&r.max_key) < uq.tree || tr(&r.min_key) > uq.tree { continue; }
+            let e = m.entry((r.level, r.group, tr(&r.min_key), tr(&r.max_key))).or_insert((0u32, 0u64));
+            e.0 += 1;
+            e.1 += r.entries;
+        }
+        for ((l, g, a, b), (c, e)) in m { eprintln!("segs level={l} group={g} trees={a}..{b} count={c} entries={e}"); }
+    }
     us.sort_unstable();
-    line += &format!(" unique_us p50={} p99={}", us[5000], us[9900]);
+    let segs = cryptand::engine::SCAN_SEGMENTS.load(std::sync::atomic::Ordering::Relaxed) - segs0;
+    line += &format!(" unique_us p50={} p99={} segs_per_probe={}", us[5000], us[9900], segs as f64 / 10_000.0);
     let t = std::time::Instant::now();
     let hits = db.index_scan(&cx, &index::scan_prefix(&[city(7)])?)?.len();
     line += &format!(" compound_rows={hits} compound_ms={} rss_probe_mb={}", t.elapsed().as_millis(), rss());

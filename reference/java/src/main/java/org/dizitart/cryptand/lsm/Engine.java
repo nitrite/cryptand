@@ -64,6 +64,9 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public final class Engine implements AutoCloseable {
 
+    /** Bench counter (F-186): segments opened by scan cursors. */
+    public static final java.util.concurrent.atomic.AtomicLong SCAN_SEGMENTS = new java.util.concurrent.atomic.AtomicLong();
+
     /** Everything a caller may set that is not already a superblock field. */
     public static final class Options {
         public Profile profile = Profile.DESKTOP;
@@ -2215,6 +2218,7 @@ public final class Engine implements AutoCloseable {
                         || BtreePage.memcmp(from, seg.meta().maxKey) > 0) {
                     continue;
                 }
+                SCAN_SEGMENTS.incrementAndGet();
                 sources.add(reverse
                         ? new EntrySource.OfSegmentReverse(seg, to)
                         : new EntrySource.OfSegment(seg, from));

@@ -123,6 +123,11 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    ~1.7 h); build_s ~5000 locates build vs analyze/verify phases.
 2. F-186 (10-28): Rust unique probe 30 -> 11 -> 10 us (manifest clone, per-hit budget sum); rest is descent/pread/alloc, see FINDINGS; Java 7, Dart 32 still unexplained.
    Rust 10^7 footprints 641 / 411 MB after it (F-184 spread persists in Rust too).
+2b. F-187 fixed (R+D, 10-28): commit runs compaction while L0 > l0_trigger (backlog was 14 L0 segs at 10^7);
+   Rust 10^7 probe 16 -> 4 segs, p50 9 -> 5 us (Java 7). Counter `SCAN_SEGMENTS` (R+J), `segs_per_probe` in R/J rungs,
+   `CRYPTAND_DRAIN=1` in Rust rung. Its replay test exposed F-188 (S1, R+D: segment pages stamped commit 0, replay
+   binding vacuous), fixed with human approval, corpus regenerated. Rust 10^7 footprint 516 MB after F-187: recheck (F-184).
+   ix5 done: Dart 10^7 peak footprint 484 MB, spike in analyze/verify (samples ~169k of 171k lines).
 3. Profile the Dart spike from the samples (`footprint` sampled every 10 s missed it; try 1 s or MallocStackLogging).
    Then 10^8 Rust index (~62 GB; remote ~100 GB free).
 4. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
@@ -224,3 +229,4 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 2026-10-28 — F-186 (R: manifest cloned per scan) fixed, probe 30 -> 11 us; gate quick green (remote); 10 stale remote clones deleted (109 GB free).
 - 2026-10-28 — F-186 profiled: per-hit budget sum moved to once per cursor, probe 10 us; gate quick green (remote).
 - 2026-10-27 — 6.3 bar for indexed builds counts one memtable per tree (desktop 3 trees: 416 MB); 10^6 index 375 MB PASS; 10^7 at 6.7M rows, RSS ~200-290 MB.
+- 2026-10-28 — F-187 (R+D L0 backlog, probe 16 -> 4 segs) and F-188 (S1 R+D segment commit_id 0) fixed, corpus regenerated; gate quick green (remote).

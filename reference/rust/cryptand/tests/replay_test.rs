@@ -19,6 +19,35 @@ fn read_all(path: &std::path::Path, n: i64) -> Result<Vec<Option<Vec<u8>>>, Erro
     (0..n).map(|i| e.get(T, &Value::NitriteId(i))).collect()
 }
 
+/// F-188: the binding above is vacuous unless every page of a segment carries
+/// its head's `commit_id` (04 §2.1); Rust wrote 0 on all of them.
+#[test]
+fn every_page_of_an_encrypted_segment_carries_its_heads_commit() {
+    let t = TempDb::new("seg-commit");
+    let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
+    e.encrypt(&KEY, 0, 0, 0, 0).unwrap();
+    while e.convert_step().unwrap() == Step::More {}
+    for i in 0..2000i64 {
+        e.put(T, &Value::NitriteId(i), format!("v-{i}").as_bytes()).unwrap();
+    }
+    e.flush().unwrap();
+    e.commit(Durability::Sync).unwrap();
+    let refs = e.all_refs().unwrap();
+    e.close(true).unwrap();
+    drop(e);
+    let f = std::fs::read(&t.path).unwrap();
+    let ps = 1usize << f[14];
+    let commit = |p: u64| u64::from_le_bytes(f[p as usize * ps + 16..p as usize * ps + 24].try_into().unwrap());
+    assert!(!refs.is_empty());
+    for r in &refs {
+        let head = commit(r.start_page);
+        assert_ne!(head, 0, "segment {} head has commit 0", r.segment_id);
+        for p in r.start_page + 1..r.start_page + r.pages as u64 {
+            assert_eq!(commit(p), head, "page {p} of segment {}", r.segment_id);
+        }
+    }
+}
+
 #[test]
 fn an_older_page_replayed_at_its_own_position_is_tampering() {
     let t = TempDb::new("replay");

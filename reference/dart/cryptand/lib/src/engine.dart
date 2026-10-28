@@ -1184,6 +1184,18 @@ final class Engine {
       finishCompaction(pending);
       _job = null;
     }
+    // F-187 (as Rust): compaction steps per flush only, so the backlog left at
+    // the last commit was never worked off; Java's background thread clears
+    // it. ponytail: runs the policy to quiescence in the commit; bound the
+    // work per commit if the stall bar bites.
+    if (refsAt(0).length > levels.l0Trigger) {
+      try {
+        maybeCompact();
+      } catch (_) {
+        abandonCompaction();
+        rethrow;
+      }
+    }
 
     // E: barrier over the segment and manifest writes.
     _barrier(durability);
@@ -1339,6 +1351,7 @@ final class Engine {
         pageSize: pageSize,
         tagReserve: store.tagReserve,
         segmentId: _nextSegmentId++,
+        commitId: commitId,
         level: level,
         group: group,
         // §2.4: 16 bits above the last level, 10 at it. The upper levels hold

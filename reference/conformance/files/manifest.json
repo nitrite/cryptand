@@ -32,7 +32,7 @@
       "key": null,
       "at_open_or_read": true,
       "tolerated_clean": false,
-      "note": "one payload byte flipped on live page 33 with the checksum left stale. Section 3: the checksum \"verifies before decompression and before decryption\", so this must be refused before any decoder runs."
+      "note": "one payload byte flipped on live page 80 with the checksum left stale. Section 3: the checksum \"verifies before decompression and before decryption\", so this must be refused before any decoder runs."
     },
     {
       "name": "v1.0-corrupt-truncated.cryptand",
@@ -184,7 +184,7 @@
       "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
       "at_open_or_read": false,
       "tolerated_clean": false,
-      "note": "page 33 copied over page 34. Every byte is authentic and every checksum is valid — the file was never edited, only rearranged. Section 4.2 binds the nonce to the page, which is the only thing that separates this from a legitimate page."
+      "note": "page 80 copied over page 81. Every byte is authentic and every checksum is valid — the file was never edited, only rearranged. Section 4.2 binds the nonce to the page, which is the only thing that separates this from a legitimate page."
     },
     {
       "name": "v1.0-security-foreign-slot.cryptand",

@@ -353,10 +353,11 @@ fn the_filter_bytes_match_the_recorded_ones_not_merely_the_rate() {
 fn one_corrupt_page_does_not_make_the_database_unreadable() {
     let t = TempDb::new("containment");
     let mut e = Engine::create(&t.path, Profile::Desktop).unwrap();
-    e.memtable_entry_limit = 200;
+    e.memtable_entry_limit = 250;
+    // Four L0 segments, at `l0_trigger`: one more and the commit compacts them (F-187).
     for i in 0..1000i64 {
         e.put(T, &Value::NitriteId(i), format!("v{i}").as_bytes()).unwrap();
-        if e.memtable_pressure().0 >= 200 {
+        if e.memtable_pressure().0 >= 250 {
             e.flush().unwrap();
         }
     }
