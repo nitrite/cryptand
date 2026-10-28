@@ -117,9 +117,11 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 10^7 post-fix: verify sound, analyze flat, unique p50 30 us; peak footprint 499 then 368 MB on a rerun
   (bar 416): F-184 open, the peak varies by run. F-185 (J: short scans merged the rest of the tree,
   index probe 1.3 ms -> 3 us) fixed, gate quick green. J (`RssScale PATH N index`) + D (`scale index`) rungs exist.
-1. Read `~/ix4.sh` results on remote (`runs/ix4-*`, `ix4.done` when finished): Rust 10^7 x2 more (F-184 spread),
-   J 10^6/10^7 at -Xmx128m, D AOT 10^6/10^7. Each against bar 416 and verify_sound.
-2. If F-184 holds, profile the spike (`footprint` sampled every 10 s missed it; try 1 s or MallocStackLogging).
+1. ix4 done (10-28), all verify_sound: Rust 10^7 356/356 MB PASS, Java 10^6 233 / 10^7 220 PASS,
+   Dart 10^6 312 PASS, Dart 10^7 509 MB FAIL (bar 416). F-184 now mostly Dart. `~/ix5.sh` running:
+   Dart 10^7 with 1 s RSS/footprint samples in `runs/ix5-d-1e7.samples` (`ix5.done` when finished,
+   ~1.7 h); build_s ~5000 locates build vs analyze/verify phases.
+2. Profile the Dart spike from the samples (`footprint` sampled every 10 s missed it; try 1 s or MallocStackLogging).
    Then 10^8 Rust index (~62 GB; remote ~100 GB free).
 3. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
 
@@ -216,4 +218,5 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 2026-10-27 — Dart go (human). 6.5 index rung: F-182 (R+D commit mid-job leaked placed outputs) fixed, gate green; F-183 (R+J+D analyze held every key, +1.2 GB at 10^7) fixed, gate green.
 - 2026-10-27 — F-183 committed (gate green); 10^6 index rung post-fix: verify sound, analyze flat, footprint 375 MB; 10^7 running.
 - 2026-10-28 — 10^7 index footprint 499/368 MB (F-184 open); F-185 Java scan bound fixed; J+D index rungs; ix4 chain running.
+- 2026-10-28 — ix4: R/J index rungs PASS (Rust 10^7 356 x2), Dart 10^7 509 MB FAIL; ix5 sampling run launched.
 - 2026-10-27 — 6.3 bar for indexed builds counts one memtable per tree (desktop 3 trees: 416 MB); 10^6 index 375 MB PASS; 10^7 at 6.7M rows, RSS ~200-290 MB.
