@@ -1777,13 +1777,27 @@ impl Engine {
     }
 
     pub fn segment(&mut self, r: &SegmentRef) -> Result<Arc<Segment>> {
-        if let Some(s) = self.segments.get(&r.segment_id) {
-            let s = s.clone();
-            self.counters.page_cache_hits += 1;
-            self.touch(&s);
+        let s = self.segment_hit(r);
+        if s.is_some() {
             self.evict_over_budget(r.segment_id);
-            return Ok(s);
         }
+        match s {
+            Some(s) => Ok(s),
+            None => self.segment_miss(r),
+        }
+    }
+
+    /// A cache hit without the budget check: [`Self::evict_over_budget`] sums
+    /// every cached segment, so a scan opening S sources paid O(S x cached)
+    /// per probe. `scan_cursor` checks once after opening them all.
+    fn segment_hit(&mut self, r: &SegmentRef) -> Option<Arc<Segment>> {
+        let s = self.segments.get(&r.segment_id)?.clone();
+        self.counters.page_cache_hits += 1;
+        self.touch(&s);
+        Some(s)
+    }
+
+    fn segment_miss(&mut self, r: &SegmentRef) -> Result<Arc<Segment>> {
         self.counters.page_cache_misses += 1;
         let s = Arc::new(self.segment_uncached(r)?);
         self.admit(r.segment_id, s.clone());
@@ -2351,7 +2365,8 @@ impl Engine {
         let upper_uk = upper.map(with_tree);
         let start = lower_uk.clone().unwrap_or_else(|| tree.to_be_bytes().to_vec());
         let tree_end = tree.checked_add(1).map(|t| t.to_be_bytes().to_vec());
-        let mut sources = Vec::new();
+        let refs = self.all_refs_shared()?;
+        let mut sources = Vec::with_capacity(self.memtable.len() + refs.len());
         // The memtable is bounded (`memtable_entry_limit`), so its part of the
         // range is copied once: the cursor then sees one point in time.
         for shard in &self.memtable {
@@ -2374,7 +2389,7 @@ impl Engine {
             }
             sources.push(ScanSource { seg: None, batches: 0, buf, resume: Vec::new(), done: true });
         }
-        for r in self.all_refs_shared()?.iter() {
+        for r in refs.iter() {
             if self.quarantined.contains_key(&r.segment_id) {
                 continue;
             }
@@ -2388,7 +2403,10 @@ impl Engine {
             if !r.max_key.is_empty() && r.max_key.as_slice() < start.as_slice() {
                 continue;
             }
-            let seg = self.segment(&r)?;
+            let seg = match self.segment_hit(r) {
+                Some(s) => s,
+                None => self.segment_miss(r)?,
+            };
             sources.push(ScanSource {
                 seg: Some(ScanSeg::Cached(seg, r.clone())),
                 batches: 0,
@@ -2397,6 +2415,7 @@ impl Engine {
                 done: false,
             });
         }
+        self.evict_over_budget(u64::MAX);
         Ok(ScanCursor {
             tree,
             upper_uk,

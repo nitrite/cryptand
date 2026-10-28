@@ -183,6 +183,16 @@ fn index_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
         assert_eq!(db.index_scan(&uq, &index::scan_prefix(&[v])?)?.len(), 1);
         us.push(t.elapsed().as_micros());
     }
+    // CRYPTAND_PROBE_SECS: keep probing that long so `sample PID` can attach.
+    if let Some(secs) = std::env::var("CRYPTAND_PROBE_SECS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        eprintln!("probing pid={}", std::process::id());
+        let t = std::time::Instant::now();
+        while t.elapsed().as_secs() < secs {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let Some(v) = doc(((s >> 11) % n as u64) as i64).field("ordReference").cloned() else { unreachable!() };
+            assert_eq!(db.index_scan(&uq, &index::scan_prefix(&[v])?)?.len(), 1);
+        }
+    }
     us.sort_unstable();
     line += &format!(" unique_us p50={} p99={}", us[5000], us[9900]);
     let t = std::time::Instant::now();
