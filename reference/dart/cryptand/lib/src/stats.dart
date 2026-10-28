@@ -240,7 +240,7 @@ final class StatsBuilder {
     if (isNull) _nulls++;
     if (seq > _maxSeq) _maxSeq = seq;
     _minKey ??= Uint8List.fromList(fullKey);
-    _maxKey = Uint8List.fromList(fullKey);
+    _maxKey = fullKey; // copied in _with: one copy per build, not per entry (F-184)
     _hll.add(indexedPrefix);
   }
 
@@ -266,7 +266,7 @@ final class StatsBuilder {
         distinctEstimate: _hll.estimate,
         nullCount: _nulls,
         minKey: _minKey ?? Uint8List(0),
-        maxKey: _maxKey ?? Uint8List(0),
+        maxKey: _maxKey == null ? Uint8List(0) : Uint8List.fromList(_maxKey!),
         histogram: buckets,
       );
 

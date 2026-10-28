@@ -16,6 +16,7 @@ library;
 
 import 'dart:typed_data';
 
+import 'bytes.dart';
 import 'catalog.dart';
 import 'cke.dart';
 import 'container.dart';
@@ -258,9 +259,18 @@ final class Collection {
     final quota = total <= 64 ? 1 : (total / 64).ceil();
     var i = 0;
     for (final e in _e.scanTree(indexTree.treeId)) {
-      final values = indexEntryValues(e.cke, idx.fields.length);
-      final prefix = Keys.prefixOfArray(values);
-      b.add(prefix, e.cke, seq: 0, isNull: values.any((v) => v is CNull));
+      // F-184: walk the key in place. Decoding the whole entry, copying its
+      // values and re-encoding the prefix made ~10^7 short-lived objects per
+      // pass, which outran old-gen GC (+300 MB RSS at 10^7).
+      final r = ByteReader(e.cke)..u8(); // Group.array
+      var isNull = false;
+      for (var f = 0; f < idx.fields.length; f++) {
+        r.u8(); // 0x01 element marker
+        if (r.data[r.position] == Group.nul) isNull = true;
+        readKey(r, 1);
+      }
+      b.add(Uint8List.sublistView(e.cke, 0, r.position), e.cke,
+          seq: 0, isNull: isNull);
       if (++i % quota == 0) b.boundary(e.cke);
     }
     final stats = b.build();
