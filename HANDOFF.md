@@ -221,5 +221,5 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 2026-10-27 — F-183 committed (gate green); 10^6 index rung post-fix: verify sound, analyze flat, footprint 375 MB; 10^7 running.
 - 2026-10-28 — 10^7 index footprint 499/368 MB (F-184 open); F-185 Java scan bound fixed; J+D index rungs; ix4 chain running.
 - 2026-10-28 — ix4: R/J index rungs PASS (Rust 10^7 356 x2), Dart 10^7 509 MB FAIL; ix5 sampling run launched.
-- 2026-10-28 — F-186 (R: manifest cloned per scan) fixed, probe 30 -> 11 us; gate quick green (remote); 10 stale remote clones listed for deletion (denied by auto mode).
+- 2026-10-28 — F-186 (R: manifest cloned per scan) fixed, probe 30 -> 11 us; gate quick green (remote); 10 stale remote clones deleted (109 GB free).
 - 2026-10-27 — 6.3 bar for indexed builds counts one memtable per tree (desktop 3 trees: 416 MB); 10^6 index 375 MB PASS; 10^7 at 6.7M rows, RSS ~200-290 MB.
