@@ -68,3 +68,19 @@ chapter (`00`–`14`), **Level 4** conformance, full write profile.
 - The free tree lags its own page frees by one commit (~8 pages at close);
   `repair` reclaims them. This is a property of the format shared by every
   implementation.
+
+### Hardening before release
+
+Found and fixed during the 1.0 release work; each has a row in
+[`FINDINGS.md`](https://github.com/nitrite/cryptand/blob/main/FINDINGS.md).
+Format byte changes, all approved, all in three implementations, corpus
+regenerated, format still CFF v1.0:
+
+- `CONVERTING` superblock flag, authenticated (F-127, 14 §8.3).
+- Child pages bound to the nonce recorded in their parent (F-128, 14 §5.5).
+- Every encrypted segment page carries its head's `commit_id` (F-188, 04 §2.1).
+
+Also: crash, fault and kill campaigns; fuzzing; nonce-floor overflow (F-133);
+key material zeroed on close and failed open (F-135, F-136); files created 0600
+(F-139); bounded index `analyze` memory (F-183); commit drains the L0 compaction
+backlog (F-187); storage layer rewritten (write-through, commit in place, session lock); index `analyze` allocates per pass, not per entry (F-184); scale rungs to 10⁸ documents.

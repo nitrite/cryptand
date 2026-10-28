@@ -214,6 +214,8 @@ Read in this order.
 | [`adoption/rollout.md`](adoption/rollout.md) | How the three SDKs get there from here, and how existing files migrate |
 | [`reference/dart/cryptand/REPORT.md`](reference/dart/cryptand/REPORT.md), [`reference/rust/cryptand/REPORT.md`](reference/rust/cryptand/REPORT.md) | The implementation reports: what is built, the spec defects building it found, and every measurement against a claim in `design/` |
 | [`reference/bench/RESULTS.md`](reference/bench/RESULTS.md) | Benchmarks: each implementation against its field, and the three against each other |
+| [`PLAN.md`](PLAN.md), [`FINDINGS.md`](FINDINGS.md) | The 1.0 release plan and every defect it found, per implementation |
+| [`reference/SECURITY-REVIEW.md`](reference/SECURITY-REVIEW.md), [`reference/HARDENING.md`](reference/HARDENING.md) | Security review rows and the hardening history |
 | [`reference/rust/cryptand-conformance/`](reference/rust/cryptand-conformance/) | An independent Rust reader of the byte layer, written from `spec/` alone |
 | [`reference/rust/cryptand-write/`](reference/rust/cryptand-write/) | **The write protocol** — `10-transactions.md` §2 with real threads, where prediction **P3** is measured, and `13-operations.md` §8's multi-process readers with real processes |
 
@@ -245,9 +247,28 @@ writing the others' files:
 
 | | source | package | tests |
 |---|---|---|---|
-| Rust | [`reference/rust/cryptand`](reference/rust/cryptand/) | `cryptand` on crates.io | 319, in debug and release |
-| Java | [`reference/java`](reference/java/) | `org.dizitart:cryptand` on Maven Central | 325 |
-| Dart | [`reference/dart/cryptand`](reference/dart/cryptand/) | `cryptand` on pub.dev | 655 |
+| Rust | [`reference/rust/cryptand`](reference/rust/cryptand/) | `cryptand` on crates.io | ~660 across the workspace, in debug and release |
+| Java | [`reference/java`](reference/java/) | `org.dizitart:cryptand` on Maven Central | ~395 |
+| Dart | [`reference/dart/cryptand`](reference/dart/cryptand/) | `cryptand` on pub.dev | 744 |
+
+**1.0 release hardening** is under way ([`PLAN.md`](PLAN.md), findings in
+[`FINDINGS.md`](FINDINGS.md), one row per defect with its state in Rust, Java and Dart).
+So far it covers differential and model testing, crash and fault injection
+(thousands of kill and fault seeds per language, no failures), coverage-guided
+fuzzing (cargo-fuzz and Jazzer, with the corpora replayed in Dart), and a
+security review and attack campaign
+([`reference/SECURITY-REVIEW.md`](reference/SECURITY-REVIEW.md), [`SECURITY.md`](SECURITY.md)).
+It also includes a rewrite of Dart's storage layer, and scale rungs up to
+10⁸ documents in all three
+([`reference/bench/RESULTS.md`](reference/bench/RESULTS.md) §5, §7).
+Nothing is published yet.
+
+Every byte change the hardening made to the format was approved before it
+landed and is in all three implementations, with the conformance corpus
+regenerated: the authenticated `CONVERTING` flag (F-127, 14 §8.3), child
+pages bound to the nonce their parent records (F-128, 14 §5.5), and every
+encrypted segment page carrying its head's `commit_id` (F-188, 04 §2.1). The
+format is still **CFF v1.0**.
 
 The round-trip gate of `spec/11-conformance.md` §6,
 [`reference/conformance/interop/run.sh`](reference/conformance/interop/run.sh),

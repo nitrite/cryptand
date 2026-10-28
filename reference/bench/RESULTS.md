@@ -292,6 +292,24 @@ serializes steps 4-6 only; value-log appends (step 3) and the durability wait
   the prototype's 20-35 % loss at 4 KiB is gone.
 - 4 KiB `os` at 1 thread: 52.8k (was 26.9k with 20k ops, 3.5k at 1.3 GB).
 
+## 7. Index rung (PLAN 6.5, 10-27 to 10-29)
+
+The 10^N documents carry one unique index (`ordReference`) and one compound
+index (`custCityName` across 1000 cities, then `ordTotMinorU`), so there are
+three trees. The rung runs probes, `analyze` and `verify`. The bar is peak
+footprint ≤ 416 MB: 64 MB of cache, 32 MB of memtable for each of 3 trees, plus
+256 MB. All runs below have `verify` sound.
+
+| N | impl | unique probe p50 | peak footprint | result |
+|---|---|---|---|---|
+| 10⁶ | Rust | 7 us | 375 MB | PASS |
+| 10⁷ | Rust (F-186, F-187) | 5 us, 4 segments/probe | 356–516 MB across runs | spread open (F-184) |
+| 10⁶ / 10⁷ | Java, -Xmx128m (F-185) | 7 us | 233 / 220 MB | PASS |
+| 10⁶ | Dart AOT | 5 us | 312 MB | PASS |
+| 10⁷ | Dart AOT | 32 us | 484–509 MB | FAIL: GC garbage from `analyze` scans (F-184); fix 23ffb57, rerun pending |
+
+Still to run: 10⁸ Rust index, 10⁷ full text, 10⁷ spatial, HNSW recall@10 at 10⁶ × 128-d.
+
 ## Running it
 
 ```bash

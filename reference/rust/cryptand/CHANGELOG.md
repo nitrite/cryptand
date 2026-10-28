@@ -66,6 +66,22 @@ chapter (`00`–`14`), **Level 4** conformance, full write profile. `unsafe` onl
 
 ### Testing
 
-- 254 tests in the crate, 319 across the workspace, green in **both** the debug
+- About 660 tests across the workspace, green in **both** the debug
   and release profiles (they test different arithmetic — an overflow that
   panics in debug silently wraps in release).
+
+### Hardening before release
+
+Found and fixed during the 1.0 release work; each has a row in
+[`FINDINGS.md`](https://github.com/nitrite/cryptand/blob/main/FINDINGS.md).
+Format byte changes, all approved, all in three implementations, corpus
+regenerated, format still CFF v1.0:
+
+- `CONVERTING` superblock flag, authenticated (F-127, 14 §8.3).
+- Child pages bound to the nonce recorded in their parent (F-128, 14 §5.5).
+- Every encrypted segment page carries its head's `commit_id` (F-188, 04 §2.1).
+
+Also: scans share the cached manifest (F-186); crash, fault and kill campaigns; fuzzing; nonce-floor overflow (F-133);
+key material zeroed on close and failed open (F-135, F-136); files created 0600
+(F-139); bounded index `analyze` memory (F-183); commit drains the L0 compaction
+backlog (F-187); scale rungs to 10⁸ documents.
