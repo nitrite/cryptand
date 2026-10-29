@@ -222,6 +222,24 @@ void main() {
       expect(backward.reversed.toList(), forward);
     });
 
+    test('F-191: prev after a seek that rolled past a leaf end is no revisit', () {
+      final s = buildSegment(3000);
+      final all = <Uint8List>[];
+      final c = s.cursor()..seekFirst();
+      while (c.isValid) {
+        all.add(c.key());
+        c.next();
+      }
+      // Just above each key: at a leaf's last key the seek rolls into the next
+      // leaf, and prev() steps back into the one it rolled out of.
+      for (final k in all.take(all.length - 1)) {
+        c
+          ..seekCeiling(Uint8List.fromList([...k, 0]))
+          ..prev();
+        expect(c.key(), k);
+      }
+    });
+
     test('skipTo lands on the right ordinal at every position', () {
       final s = buildSegment(5000);
       final all = <Uint8List>[];

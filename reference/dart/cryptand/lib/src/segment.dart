@@ -1798,6 +1798,9 @@ final class SegmentCursor {
     if (i >= n.cellCount) {
       _valid = true;
       next(); // roll into the following leaf
+      // F-191: that roll walked nothing, so a prev() back into this leaf is
+      // not a revisit.
+      _leaves = null;
     } else {
       _valid = true;
     }

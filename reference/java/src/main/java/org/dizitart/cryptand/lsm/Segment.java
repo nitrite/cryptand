@@ -494,6 +494,9 @@ public final class Segment {
                         // Past the end of this leaf: step forward, which either
                         // lands on the next leaf or exhausts the cursor.
                         advance();
+                        // F-191: that step walked nothing, so a reverse source's
+                        // prev() back into this leaf is not a revisit.
+                        leaves = null;
                         return;
                     }
                     valid = true;

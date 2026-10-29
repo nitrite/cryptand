@@ -546,6 +546,26 @@ class EngineTest {
     }
 
     @Test
+    @DisplayName("F-191: a reverse scan bounded just above any key starts on that key")
+    void reverseScanFromEveryBound(@TempDir Path dir) {
+        try (Engine e = Engine.create(dir.resolve("f191.cryptand"), options())) {
+            for (int i = 0; i < 3000; i++) {
+                e.batch().put(TREE, key(2L * i), val("v" + i)).commit();
+            }
+            e.commitNow();
+            e.compact();
+            // A bound just above a leaf's last key seeks past that leaf's end,
+            // and the reverse source steps back into it.
+            for (int i = 0; i < 3000; i++) {
+                try (Engine.Cursor c = e.scan(TREE, null, key(2L * i + 1), true)) {
+                    assertTrue(c.next(), "bound above " + i);
+                    assertEquals("v" + i, new String(c.row().value(), StandardCharsets.UTF_8));
+                }
+            }
+        }
+    }
+
+    @Test
     @DisplayName("a bounded scan returns exactly the keys inside the bounds")
     void boundedScan(@TempDir Path dir) {
         try (Engine e = Engine.create(dir.resolve("j.cryptand"), options())) {
