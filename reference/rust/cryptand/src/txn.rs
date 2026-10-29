@@ -234,7 +234,8 @@ pub fn bounds_of(engine: &mut Engine) -> Result<Vec<Bound>> {
     let l0_trigger = engine.policy.l0_trigger.max(1) as f64;
     let mut worst_tier = 0.0f64;
     for level in 1..engine.policy.last_level() {
-        worst_tier = worst_tier.max(engine.refs_at(level)?.len() as f64);
+        // F-189: runs (groups used), not segments: a run is many capped segments.
+        worst_tier = worst_tier.max(engine.groups_at(level)?.len() as f64);
     }
     let (mem, mem_limit) = engine.memtable_pressure();
     let debt = engine.locality_debt() * 100.0;

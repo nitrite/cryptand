@@ -2460,8 +2460,15 @@ public final class Engine implements AutoCloseable {
             for (int l = 1; l < last; l++) {
                 // §3.1 (F-161): a tiered level counts runs (groups), not
                 // segments; outputs are capped in bytes, so a run may be many.
-                if (groupsUsed(manifest.at(l)) >= Math.max(1, sb.overlapBound)) {
-                    compactLevel(l);
+                List<SegmentMeta> here = manifest.at(l);
+                if (groupsUsed(here) >= Math.max(1, sb.overlapBound)) {
+                    // F-189: a full tiered level moves down only once it holds
+                    // 1/fanout of the next level's bytes; until then its runs
+                    // merge into one run in place. Pushing every full level down
+                    // rewrote the whole last level each time L(max-1) filled.
+                    boolean down = groupsUsed(here) <= 1
+                            || bytesOf(here) * Math.max(1, sb.fanout) >= bytesOf(manifest.at(l + 1));
+                    compactLevels(l, l, false, !down);
                     return true;
                 }
             }
@@ -2473,6 +2480,14 @@ public final class Engine implements AutoCloseable {
 
     private int lastLevel() {
         return Math.max(1, sb.levelCount - 1);
+    }
+
+    private long bytesOf(List<SegmentMeta> level) {
+        long n = 0;
+        for (SegmentMeta m : level) {
+            n += (long) m.pages * sb.pageSize();
+        }
+        return n;
     }
 
     private static int groupsUsed(List<SegmentMeta> level) {
@@ -2499,7 +2514,12 @@ public final class Engine implements AutoCloseable {
      * values win (Rust's M2.1 sweep found it).
      */
     private void compactLevels(int from, int level, boolean everything) {
-        int target = level + 1;
+        compactLevels(from, level, everything, false);
+    }
+
+    /** {@code inPlace}: F-189, the level's runs merge into one run at the same level. */
+    private void compactLevels(int from, int level, boolean everything, boolean inPlace) {
+        int target = inPlace ? level : level + 1;
         int last = lastLevel();
         List<SegmentMeta> inputs = new ArrayList<>();
         for (int l = from; l <= (everything ? last : level); l++) {
@@ -2520,7 +2540,7 @@ public final class Engine implements AutoCloseable {
         }
 
         int group = 0;
-        if (target < last) {
+        if (target < last && !inPlace) {
             // The group with the least data; its overlapping segments join the
             // inputs so that the group stays mutually disjoint afterwards,
             // which is what bounds the read tail at `overlap_bound` per level.
@@ -2536,7 +2556,7 @@ public final class Engine implements AutoCloseable {
                 }
             }
         }
-        for (SegmentMeta m : everything ? List.<SegmentMeta>of() : manifest.at(target, group)) {
+        for (SegmentMeta m : everything || inPlace ? List.<SegmentMeta>of() : manifest.at(target, group)) {
             if (overlapsUserKeys(m, lo, hi)) {
                 inputs.add(m);
             }

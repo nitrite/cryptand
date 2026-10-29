@@ -187,6 +187,7 @@ final class LevelPolicy {
     this.tierWidth = 4,
     this.overlapBound = 2,
     this.levelCount = 4,
+    this.fanout = 8,
   });
 
   /// L0 segments before compaction.
@@ -202,13 +203,16 @@ final class LevelPolicy {
   /// L0 … L(levelCount-1); the last is levelled and disjoint.
   final int levelCount;
 
+  /// F-189: size ratio between adjacent levels (superblock `fanout`).
+  final int fanout;
+
   /// `desktop`, `spec/12-profiles.md` §1.
   static const LevelPolicy desktop = LevelPolicy();
 
   /// `mobile`: `overlap_bound = 1` makes tiered levels fully range-partitioned,
   /// so a lookup consults one segment per level (`spec/12-profiles.md` §4).
   static const LevelPolicy mobile =
-      LevelPolicy(l0Trigger: 2, tierWidth: 2, overlapBound: 1);
+      LevelPolicy(l0Trigger: 2, tierWidth: 2, overlapBound: 1, fanout: 4);
 
   /// **Plain tiering**, which is this policy with `overlap_bound = tier_width`
   /// and nothing else changed.
@@ -227,6 +231,7 @@ final class LevelPolicy {
         tierWidth: tierWidth,
         overlapBound: tierWidth,
         levelCount: levelCount,
+        fanout: fanout,
       );
 
   /// The candidate bound of §4.1:
@@ -1534,8 +1539,17 @@ final class Engine {
       final refs = refsAt(l);
       // §3.1 (F-161): a tiered level counts runs (groups), not segments;
       // outputs are capped in bytes, so a run may be many segments.
-      if (groupsAt(l).length >= levels.overlapBound) {
-        return (refs, l + 1 >= lastLevel ? lastLevel : l + 1);
+      final runs = groupsAt(l).length;
+      if (runs >= levels.overlapBound) {
+        final next = l + 1 >= lastLevel ? lastLevel : l + 1;
+        // F-189: a full tiered level moves down only once it holds 1/fanout
+        // of the next level's bytes; until then its runs merge into one run
+        // in place. Pushing every full level down rewrote the whole last
+        // level each time L(max-1) filled.
+        final down = runs <= 1 ||
+            _bytesOf(refs) * (levels.fanout < 1 ? 1 : levels.fanout) >=
+                _bytesOf(refsAt(next));
+        return (refs, down ? next : l);
       }
     }
     return null;
@@ -1833,7 +1847,9 @@ final class Engine {
     // overlaps and breaks §4's early exit. The verifier of `verify.dart` is
     // what caught that, which is the rot `13-operations.md` §3 says the check
     // exists to prevent.
-    final group = levelled ? 0 : _freeGroup(target);
+    // F-189: an in-place merge takes the whole level, so group 0 is free.
+    final inPlace = inputs.every((r) => r.level == target);
+    final group = levelled || inPlace ? 0 : _freeGroup(target);
 
     // §9: an expired entry may be dropped only when its deadline is older than
     // the oldest live snapshot's wall-clock floor.
@@ -2032,6 +2048,9 @@ final class Engine {
   /// That is range partitioning (§3.1): a lookup consults at most one segment
   /// per group and there are at most `overlap_bound` groups, which converts an
   /// unbounded read tail into a bounded one.
+  int _bytesOf(List<SegmentRef> refs) =>
+      refs.fold(0, (n, r) => n + r.pages * pageSize);
+
   int _freeGroup(int level) {
     final used = groupsAt(level);
     for (var g = 0; g < 256; g++) {

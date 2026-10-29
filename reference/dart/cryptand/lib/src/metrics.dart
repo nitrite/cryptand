@@ -251,8 +251,7 @@ extension EngineMetrics on Engine {
     }
     for (var l = 1; l < lastLevel; l++) {
       final refs = refsAt(l);
-      if (refs.length > levels.tierWidth ||
-          groupsAt(l).length > levels.overlapBound) {
+      if (groupsAt(l).length > levels.overlapBound) {
         for (final r in refs) {
           backlog += r.pages * pageSize;
         }

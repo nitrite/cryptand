@@ -2508,9 +2508,29 @@ impl Engine {
             }
         }
         match best {
-            Some((_, level, refs)) => self.begin_compaction(refs, (level + 1).min(last)),
+            Some((_, 0, refs)) => self.begin_compaction(refs, 1.min(last)),
+            Some((_, level, refs)) => {
+                // F-189: a full tiered level moves down only once it holds
+                // `1 / fanout` of the next level's bytes; until then its runs
+                // merge into one run in place. Pushing every full level down
+                // rewrote the whole last level each time L(max-1) filled
+                // (32 GB compacted for a 6.2 GB file at 10^7 index rows),
+                // because uniformly spread keys overlap every Lmax segment.
+                let next = (level + 1).min(last);
+                let here = self.level_bytes(&refs);
+                let below = self.healthy_refs_at(next)?;
+                let below = self.level_bytes(&below);
+                // One run has nothing to merge with in place: it moves down.
+                let one_run = self.groups_at(level)?.len() <= 1;
+                let target = if one_run || here * self.policy.fanout.max(1) as u64 >= below { next } else { level };
+                self.begin_compaction(refs, target)
+            }
             None => Ok(None),
         }
+    }
+
+    fn level_bytes(&self, refs: &[SegmentRef]) -> u64 {
+        refs.iter().map(|r| r.pages as u64 * self.pager.page_size as u64).sum()
     }
 
     /// §5 — merges inputs by internal key, drops what is unreachable, and

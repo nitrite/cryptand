@@ -156,8 +156,7 @@ extension EngineSpaceApi on Engine {
 bool _levelsSettled(Engine e) {
   if (e.refsAt(0).length >= e.levels.l0Trigger) return false;
   for (var l = 1; l < e.lastLevel; l++) {
-    if (e.refsAt(l).length > e.levels.tierWidth ||
-        e.groupsAt(l).length > e.levels.overlapBound) {
+    if (e.groupsAt(l).length > e.levels.overlapBound) {
       return false;
     }
   }

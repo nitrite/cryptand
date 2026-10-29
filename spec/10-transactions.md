@@ -336,7 +336,7 @@ exceed them indefinitely:
 | bound | soft | hard |
 |---|---|---|
 | L0 segment count | `l0_trigger` | `l0_trigger` × 4 |
-| segments per tiered level | `tier_width` | `tier_width` × 2 |
+| runs per tiered level (`04-segments.md` §3.1) | `tier_width` | `tier_width` × 2 |
 | total memtable bytes | profile budget | 2 × budget |
 | value-log space amplification | `vlog_space_target_pct` | 2 × target |
 | locality debt | `locality_debt_pct` | 2 × |

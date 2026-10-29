@@ -874,6 +874,7 @@ abstract final class DatabaseFile {
           tierWidth: sb.tierWidth,
           overlapBound: sb.overlapBound,
           levelCount: sb.levelCount,
+          fanout: sb.fanout,
         ),
         vlogSpaceTargetPct: sb.vlogSpaceTargetPct,
         localityDebtPct: sb.localityDebtPct,
