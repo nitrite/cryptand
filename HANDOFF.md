@@ -101,6 +101,8 @@
 
 ## Open questions for the human
 
+- F-194: Dart/Rust grow the file between user commits (compaction frees unusable until then; Java's compaction publishes a superblock). Fix (a) compaction publishes, (b) reuse never-committed extents, or (c) leave?
+
 
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
 
@@ -151,6 +153,7 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    Remote `cryptand-f184` uncommitted edits (F-184-era Dart) were discarded by a reset 10-29; they matched pushed commits.
 
 ## Log
+- 10-30: F-193 not the size cause; F-194 found (D/R compaction frees wait for a user commit; Java's compaction publishes), to the human. tx2 (D 1e6/1e7) running.
 - 10-30: F-193 fixed (R+D flush collapse, human-approved), gate quick green; Dart text 10^5 file 785 -> 721 MB only (Java 126), gap cause still open.
 - 10-29: tx1 stopped (D 1e7 ~15 h); F-192 (D memtable scan) fixed, gate quick green; F-193 filed; tx2 (D) running.
 - 10-29: Rust confirmed unaffected by F-190/F-191; tx1 J 1e6 PASS (296 MB), D 1e6 running.
