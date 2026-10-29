@@ -129,8 +129,9 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    binding vacuous), fixed with human approval, corpus regenerated. Rust 10^7 footprint 516 MB after F-187: recheck (F-184).
    ix5 done: Dart 10^7 peak footprint 484 MB, spike in analyze/verify (samples ~169k of 171k lines).
 3. F-184 Dart fixed (df8b037): whole-tree scans pinned every decoded node (cache budget checked per `segment()` only);
-   now uncached via `segmentStream`. ix9 Dart 10^7 peak 314 MB PASS. Next: check Rust for the same pattern
-   (its 10^7 spread 356..516 MB), then 10^8 Rust index (~62 GB; remote 110 GB free). Remote clone `cryptand-f184` can go.
+   now uncached via `segmentStream`. ix9 Dart 10^7 peak 314 MB PASS. Rust has no scan pin (F-170 streams after 4 batches);
+   ix10 Rust 10^7 RSS peaks 482 MB mid-build, spikes recur every ~15-30 s, analyze/verify ~210 MB. Next: attribute the
+   Rust build spikes (`sample`/allocation counts at commit-time compaction: SegmentBuilder.pages, RunCursor), then 10^8 Rust index.
 4. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
 
 ## Log
@@ -234,3 +235,4 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 2026-10-28 — ix5 samples: Dart 10^7 index spike is VM heap garbage in analyze's two passes (F-184); remote idle.
 - 10-29: F-184 analyze allocation cut (23ffb57) did not move the Dart 10^7 peak (ix8 486 MB); docs refreshed (README, changelogs, RESULTS §7).
 - 10-29: F-184 Dart cause found and fixed (df8b037), Dart 10^7 index 314 MB PASS.
+- 10-29: Rust has no F-184 scan pin; its 10^7 peak is build-phase (ix10 482 MB RSS at t=200 s).
