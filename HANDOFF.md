@@ -132,10 +132,12 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    now uncached via `segmentStream`. ix9 Dart 10^7 peak 314 MB PASS. Rust has no scan pin (F-170 streams after 4 batches);
    ix10/ix11 Rust 10^7: RSS spikes spread over inserts, commits and compactions (no single holder, left open).
    ix11 found F-189: 32 GB compacted for a 6.2 GB file, the whole last level rewritten every 200k docs.
-   Human: tune level sizing for F-189, or go on to 10^8 Rust index (~62 GB; remote 110 GB free)?
+   F-189 fixed (391b31f, R+J+D, human-approved 10 §6 bound now counts runs): ix12 Rust 10^7 compacted 33 -> 18 GB,
+   build 360 -> 261 s, peak RSS 391 MB PASS. Java/Dart 10^7 rungs not rerun after it.
 4. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
 
 ## Log
+- 10-29: F-189 size-ratio level picker (R+J+D), spec 10 §6 runs bound; ix12 measured.
 
 - 2026-10-10 — Jazzer was under JDK 24 (void); openjdk@21 installed; F-119 fixed; Java M1.2 encrypted seed 9334 diverges, not reproduced locally. Earlier sessions: git history.
 - 2026-10-11 — F-120 fixed in spec (option a); F-121 (Java verify horizon mix) found via seed 9334 and fixed; final Java M1.2 encrypted run started.
