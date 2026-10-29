@@ -134,7 +134,15 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    ix11 found F-189: 32 GB compacted for a 6.2 GB file, the whole last level rewritten every 200k docs.
    F-189 fixed (391b31f, R+J+D, human-approved 10 §6 bound now counts runs): ix12 Rust 10^7 compacted 33 -> 18 GB,
    build 360 -> 261 s, peak RSS 391 MB PASS. ix13 J 10^7 build 674 -> 260 s, RSS 284 MB; D build 5100 -> 4661 s, RSS 315 MB; all sound.
-4. Rest of 6.5: full text 10^7, spatial 10^7, HNSW 10^6 x 128-d recall@10.
+4. Full text (10-29): rung `RssScale PATH N text` (J) / `scale text` (D), ordNotesText = 8 words of 26^3,
+   1000 two-term searches, one term vs brute-force df, verify. Rust: no collection full-text writer (n/a).
+   Building it found F-190 (S1, J+D: every write rewrote the whole posting list; Java also walked every term)
+   and F-191 (S1, J+D: reverse scan false "leaf reached twice"); both fixed, gate quick green on remote.
+   `~/tx1.sh` running in `cryptand-f184` (J 1e6, D 1e6, J 1e7, D 1e7; `runs/tx1-*.{out,err,samples}`,
+   `tx1.done` at the end). Check footprint vs bar (64 cache + 4 trees x 32 + 256 = 448) and build time.
+5. Rest of 6.5: spatial 10^7, HNSW 10^6 x 128-d recall@10.
+   Noticed, not fixed: Java `Collection.clear()` does not clear text indexes.
+   Remote `cryptand-f184` uncommitted edits (F-184-era Dart) were discarded by a reset 10-29; they matched pushed commits.
 
 ## Log
 - 10-29: F-189 size-ratio level picker (R+J+D), spec 10 §6 runs bound; ix12 measured; ix13 J+D 10^7 rerun.
@@ -240,3 +248,4 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 - 10-29: F-184 Dart cause found and fixed (df8b037), Dart 10^7 index 314 MB PASS.
 - 10-29: Rust has no F-184 scan pin; its 10^7 peak is build-phase (ix10 482 MB RSS at t=200 s).
 - 10-29: Rust build RSS spikes have no single holder; F-189 opened (last level rewritten every other commit).
+- 10-29: 6.5 full-text rung built (J+D); F-190, F-191 fixed (J+D); 10 unpushed commits pushed; tx1 ladder running.
