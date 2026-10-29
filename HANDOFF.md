@@ -140,11 +140,14 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    and F-191 (S1, J+D: reverse scan false "leaf reached twice"); both fixed, gate quick green on remote.
    `~/tx1.sh` running in `cryptand-f184` (J 1e6, D 1e6, J 1e7, D 1e7; `runs/tx1-*.{out,err,samples}`,
    `tx1.done` at the end). Check footprint vs bar (64 cache + 4 trees x 32 + 256 = 448) and build time.
+   J 1e6 done: build 224 s, RSS 296 MB PASS, and2 p50 152 us, df matches brute force, verify sound.
+   Rust checked 10-29 for F-190/F-191: not affected (fulltext.rs is codec only; leaf guard is forward-only).
 5. Rest of 6.5: spatial 10^7, HNSW 10^6 x 128-d recall@10.
    Noticed, not fixed: Java `Collection.clear()` does not clear text indexes.
    Remote `cryptand-f184` uncommitted edits (F-184-era Dart) were discarded by a reset 10-29; they matched pushed commits.
 
 ## Log
+- 10-29: Rust confirmed unaffected by F-190/F-191; tx1 J 1e6 PASS (296 MB), D 1e6 running.
 - 10-29: F-189 size-ratio level picker (R+J+D), spec 10 §6 runs bound; ix12 measured; ix13 J+D 10^7 rerun.
 
 - 2026-10-10 — Jazzer was under JDK 24 (void); openjdk@21 installed; F-119 fixed; Java M1.2 encrypted seed 9334 diverges, not reproduced locally. Earlier sessions: git history.
