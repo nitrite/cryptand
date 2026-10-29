@@ -101,7 +101,7 @@
 
 ## Open questions for the human
 
-- F-194: Dart/Rust grow the file between user commits (compaction frees unusable until then; Java's compaction publishes a superblock). Fix (a) compaction publishes, (b) reuse never-committed extents, or (c) leave?
+- F-194: Dart/Rust grow the file between user commits (compaction frees unusable until then; Java's compaction publishes a superblock). Human chose (a) 10-30, but a compaction publish in R/D can land mid collection write (torn doc durable). Pick: defer the publish to the end of the write (Collection op boundary), (b), or (c)?
 
 
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
