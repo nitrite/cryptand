@@ -167,8 +167,26 @@ fn index_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
         db.index_document(&uq, &d)?;
         db.index_document(&cx, &d)?;
         if (i + 1) % 100_000 == 0 {
+            // F-184: timestamps and events per commit, to line up with 1 s RSS samples.
+            let (t0, r0) = (t.elapsed().as_secs_f64(), rss());
+            db.engine.events.clear();
             db.commit(Durability::Sync)?;
-            eprintln!("{} rss_mb={}", i + 1, rss());
+            let (mut fl, mut cp, mut cb) = (0, 0, 0u64);
+            for e in &db.engine.events {
+                match e {
+                    cryptand::engine::StoreEvent::Flushed { .. } => fl += 1,
+                    cryptand::engine::StoreEvent::Compacted { bytes, .. } => (cp, cb) = (cp + 1, cb + bytes),
+                    _ => {}
+                }
+            }
+            eprintln!(
+                "{} t={t0:.1} commit_ms={} rss_before={r0} rss_mb={} cache_mb={} flushes={fl} compactions={cp} compacted_mb={}",
+                i + 1,
+                ((t.elapsed().as_secs_f64() - t0) * 1000.0) as u64,
+                rss(),
+                db.engine.page_cache_resident_bytes() >> 20,
+                cb >> 20
+            );
         }
     }
     db.commit(Durability::Sync)?;
