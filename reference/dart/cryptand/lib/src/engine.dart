@@ -2548,7 +2548,12 @@ final class Engine {
               (treeEnd == null ||
                   r.minKey.isEmpty ||
                   compareKeys(_userLow(r.minKey), treeEnd) < 0))
-            segment(r).cursor()..seekCeiling(lower),
+            // F-184: a whole-tree scan reads every page once, uncached, as
+            // `verify` (F-158). Through the cache it decoded every node into
+            // the segment's node cache, pinned until the scan ended (the budget
+            // is only checked per `segment()` call): +300 MB at 10^7.
+            (range == null ? segmentStream(r) : segment(r)).cursor()
+              ..seekCeiling(lower),
     ];
 
     Uint8List? lastUserKey;
