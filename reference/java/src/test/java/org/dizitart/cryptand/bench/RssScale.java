@@ -20,7 +20,7 @@ import java.util.Map;
  * Rust {@code examples/rss_scale.rs} and Dart {@code tool/rss_scale.dart
  * build} (same document, commit per 100k). Run under {@code /usr/bin/time -l}.
  * {@code PATH N read}: open, 10k uniform + 10k zipf gets, a 100k-row scan, verify; {@code PATH N settle}:
- * compact + commit + shrink, as Rust's.
+ * compact + commit + shrink, as Rust's. {@code PATH N text}: PLAN 6.5 full-text rung.
  */
 public final class RssScale {
     /** {@code CRYPTAND_ENC=1}: encrypted file, fixed raw key (kdf 0), as Rust {@code rss_scale}. */
@@ -96,6 +96,71 @@ public final class RssScale {
         }
     }
 
+    /** PLAN 6.5 full text: word k of document i, from 26^3 three-letter words; same as Dart {@code scale text}. */
+    public static String word(long i, int k) {
+        long z = i * 8 + k + 0x9E3779B97F4A7C15L;
+        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+        int w = (int) Long.remainderUnsigned(z ^ (z >>> 31), 17_576);
+        return new String(new char[] {(char) ('a' + w / 676), (char) ('a' + w / 26 % 26), (char) ('a' + w % 26)});
+    }
+
+    /** PLAN 6.5: a full-text index on {@code ordNotesText}, 8 words per document. */
+    private static void textRung(Path path, long n) throws Exception {
+        Files.deleteIfExists(path);
+        Engine.Options o = opts();
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.create(path, o)) {
+            Collection c = db.collection("c");
+            org.dizitart.cryptand.index.FullTextIndex ft = c.createTextIndex(List.of("ordNotesText"), List.of(), "none", true);
+            long t = System.nanoTime();
+            for (long i = 0; i < n; i++) {
+                Map<String, Value> f = new LinkedHashMap<>(XlangCrudBench.doc(i, 0).fields());
+                StringBuilder w = new StringBuilder();
+                for (int k = 0; k < 8; k++) w.append(k == 0 ? "" : " ").append(word(i, k));
+                f.put("ordNotesText", new Value.Str(w.toString()));
+                c.insert(new Value.Doc(f));
+                if ((i + 1) % 100_000 == 0) {
+                    db.commit();
+                    System.err.println((i + 1) + " t=" + (System.nanoTime() - t) / 1_000_000_000 + " rss_mb=" + rssMb());
+                }
+            }
+            db.commit();
+            StringBuilder line = new StringBuilder("built=" + n + " build_s=" + (System.nanoTime() - t) / 1_000_000_000
+                    + " bytes=" + Files.size(path) + " rss_build_mb=" + rssMb());
+            long s = 0x51EDC0DEL;
+            long[] us = new long[1000];
+            long rows = 0;
+            for (int k = 0; k < us.length; k++) {
+                s = s * 6364136223846793005L + 1442695040888963407L;
+                long i = Long.remainderUnsigned(s >>> 11, n);
+                long g = System.nanoTime();
+                int hits = ft.search(word(i, 0) + " " + word(i, 1)).size();
+                us[k] = (System.nanoTime() - g) / 1000;
+                if (hits < 1) throw new AssertionError("text probe " + i);
+                rows += hits;
+            }
+            java.util.Arrays.sort(us);
+            line.append(" and2_us p50=" + us[500] + " p99=" + us[990] + " and2_rows=" + rows);
+            // One term against brute force: df, and the search's set size.
+            String q = word(n / 2, 3);
+            long df = 0;
+            for (long i = 0; i < n; i++) {
+                for (int k = 0; k < 8; k++) {
+                    if (word(i, k).equals(q)) { df++; break; }
+                }
+            }
+            long g = System.nanoTime();
+            int got = ft.search(q).size();
+            line.append(" term_ms=" + (System.nanoTime() - g) / 1_000_000 + " term_rows=" + got + " brute_df=" + df
+                    + " dict_df=" + ft.term(q).df() + " rss_probe_mb=" + rssMb());
+            if (got != df || ft.term(q).df() != df) throw new AssertionError("df " + q);
+            g = System.nanoTime();
+            boolean sound = org.dizitart.cryptand.ops.Verify.run(db.engine()).findings().isEmpty();
+            System.out.println(line + " verify_ms=" + (System.nanoTime() - g) / 1_000_000 + " verify_sound=" + sound + " rss_verify_mb=" + rssMb());
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         Path path = Path.of(args[0]);
         long n = Long.parseLong(args[1]);
@@ -139,6 +204,10 @@ public final class RssScale {
         }
         if (mode.equals("index")) {
             indexRung(path, n);
+            return;
+        }
+        if (mode.equals("text")) {
+            textRung(path, n);
             return;
         }
         if (mode.equals("settle")) {

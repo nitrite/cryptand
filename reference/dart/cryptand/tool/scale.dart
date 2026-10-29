@@ -7,6 +7,7 @@
 /// ./scale settle PATH N  # compact + commit + shrink, file size (F-154)
 /// ./scale read PATH N    # fresh process: cold open, gets, scan, verify
 /// ./scale index PATH N   # PLAN 6.5: unique + compound index build, probes, analyze, verify
+/// ./scale text PATH N    # PLAN 6.5: full-text index build, searches, verify
 /// ```
 ///
 /// `read` ends with PASS/FAIL against PLAN 6.3's RSS bar (cache + 256 MB). Run
@@ -83,6 +84,10 @@ void main(List<String> args) {
 
   if (args[0] == 'index') {
     indexRung(path, n, out, sw);
+    return;
+  }
+  if (args[0] == 'text') {
+    textRung(path, n, out, sw);
     return;
   }
 
@@ -223,6 +228,96 @@ void indexRung(String path, int n, Map<String, Object> out, Stopwatch sw) {
     ..['verify_sound'] =
         db.engine.verifyStructure(claims: db.indexClaims()).isSound
     ..['verify_ms'] = t.elapsedMilliseconds
+    ..['rss_verify_mb'] = rss();
+  db.engine.close();
+  stdout.writeln(jsonEncode(out));
+}
+
+/// PLAN 6.5 full text: word [k] of document [i], from 26^3 three-letter
+/// words; same as Java `RssScale.word`.
+String word(int i, int k) {
+  var z = i * 8 + k + 0x9E3779B97F4A7C15;
+  z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9;
+  z = (z ^ (z >>> 27)) * 0x94D049BB133111EB;
+  z ^= z >>> 31;
+  // Unsigned remainder of a 64-bit value.
+  final w = ((z >>> 1) % 17576 * 2 + (z & 1)) % 17576;
+  return String.fromCharCodes(
+      [97 + w ~/ 676, 97 + w ~/ 26 % 26, 97 + w % 26]);
+}
+
+/// PLAN 6.5, Java `RssScale PATH N text`: a full-text index on
+/// `ordNotesText`, 8 words per document. ponytail: plaintext only.
+void textRung(String path, int n, Map<String, Object> out, Stopwatch sw) {
+  int rss() => ProcessInfo.currentRss >> 20;
+  if (File(path).existsSync()) File(path).deleteSync();
+  DatabaseFile.save(
+      Database(
+          engine: Engine(
+              pageSize: profile.pageSize,
+              vlogSegmentBytes: profile.vlogSegmentBytes)
+            ..setProfile(profile))
+        ..createCollection('c'),
+      path);
+  final db = DatabaseFile.open(path);
+  final c = db.collection('c')!;
+  final ft = c.createFullTextIndex(['ordNotesText'],
+      analyzer: Analyzer(stopwords: const []));
+  var peak = 0;
+  for (var i = 0; i < n; i++) {
+    final notes = [for (var k = 0; k < 8; k++) word(i, k)].join(' ');
+    c.put(id(i), CDoc({...benchDoc(i).fields, 'ordNotesText': CStr(notes)}));
+    if ((i + 1) % 100000 == 0 || i + 1 == n) {
+      db.engine.commit();
+      peak = math.max(peak, rss());
+      stderr.writeln('${i + 1} t=${sw.elapsed.inSeconds} rss_mb=${rss()}');
+    }
+  }
+  out
+    ..['build_s'] = sw.elapsed.inSeconds
+    ..['file_bytes'] = File(path).lengthSync()
+    ..['rss_build_mb'] = peak;
+  var s = 0x51EDC0DE;
+  final us = <int>[];
+  var rows = 0;
+  for (var k = 0; k < 1000; k++) {
+    s = s * 6364136223846793005 + 1442695040888963407;
+    final i = (s >>> 11) % n;
+    final t = Stopwatch()..start();
+    final hits = c.fullTextSearch(ft, '${word(i, 0)} ${word(i, 1)}').length;
+    us.add(t.elapsedMicroseconds);
+    if (hits < 1) throw StateError('text probe $i');
+    rows += hits;
+  }
+  us.sort();
+  // One term against brute force: df, and the search's set size.
+  final q = word(n ~/ 2, 3);
+  var df = 0;
+  for (var i = 0; i < n; i++) {
+    for (var k = 0; k < 8; k++) {
+      if (word(i, k) == q) {
+        df++;
+        break;
+      }
+    }
+  }
+  final t = Stopwatch()..start();
+  final got = c.fullTextSearch(ft, q).length;
+  out
+    ..['and2_us_p50'] = us[500]
+    ..['and2_us_p99'] = us[990]
+    ..['and2_rows'] = rows
+    ..['term_ms'] = t.elapsedMilliseconds
+    ..['term_rows'] = got
+    ..['brute_df'] = df
+    ..['dict_df'] = c.termEntry(ft, q)!.df
+    ..['rss_probe_mb'] = rss();
+  if (got != df || c.termEntry(ft, q)!.df != df) throw StateError('df $q');
+  final v = Stopwatch()..start();
+  out
+    ..['verify_sound'] =
+        db.engine.verifyStructure(claims: db.indexClaims()).isSound
+    ..['verify_ms'] = v.elapsedMilliseconds
     ..['rss_verify_mb'] = rss();
   db.engine.close();
   stdout.writeln(jsonEncode(out));
