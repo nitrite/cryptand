@@ -1675,7 +1675,31 @@ impl Engine {
         )?;
         b.commit_id = self.sb.commit_id;
         self.sb.next_segment_id += 1;
+        // F-193, §5 at flush: a version with a newer one of its key here and a
+        // seq above `visible_seq` is unreadable (every snapshot and checkpoint
+        // took its seq from `visible_seq`), so it is not written. RANGE_DELETE
+        // is never dropped nor counts as newer (F-033).
+        let mut last_user: Option<Vec<u8>> = None;
+        let mut newer = false;
         for (ik, e) in all {
+            let k = crate::segment::parse_internal_key(&ik)?;
+            let (seq, op) = (k.seq, k.op);
+            let user = crate::segment::user_part(&ik);
+            if last_user.as_deref() != Some(user) {
+                last_user = Some(user.to_vec());
+                newer = false;
+            }
+            if op != op::RANGE_DELETE {
+                if newer && seq > self.visible_seq {
+                    if e.value_kind == value_kind::VLOG {
+                        if let Ok(p) = VlogPointer::parse(&e.value) {
+                            self.release_vlog(&p);
+                        }
+                    }
+                    continue;
+                }
+                newer = true;
+            }
             b.add(SegEntry { internal_key: ik, value_kind: e.value_kind, value: e.value, expiry_ms: e.expiry_ms })?;
         }
         let entries = b.entry_count();

@@ -1319,11 +1319,35 @@ final class Engine {
     // Measured on the cross-language CRUD matrix, the flushes inside a 20 000
     // document create cost 52 ms of its 64 ms.
     final b = _builder(level: 0);
+    // F-193, §5 at flush: a version with a newer one of its key here and a seq
+    // above `visibleSeq` is unreadable (every snapshot and checkpoint took its
+    // seq from `visibleSeq`), so it is not written. Without this a full-text
+    // build flushed every rewrite of each postings block: Dart 10^5 file 6x
+    // Java's. RANGE_DELETE is never dropped nor counts as newer (F-033).
+    final dead = <VlogPointer>[];
+    Uint8List? lastUser;
+    var newer = false;
     for (final p in _memtable.values) {
+      final k = parseInternalKey(p.internalKey);
+      final user = Uint8List.sublistView(p.internalKey, 0, p.internalKey.length - 9);
+      if (lastUser == null || compareKeys(user, lastUser) != 0) {
+        lastUser = user;
+        newer = false;
+      }
+      if (k.op != Op.rangeDelete) {
+        if (newer && k.seq > visibleSeq) {
+          if (p.valueKind == ValueKind.vlog) dead.add(VlogPointer.decode(p.value));
+          continue;
+        }
+        newer = true;
+      }
       b.add(
           SegEntry(p.internalKey, p.valueKind, p.value, expiryMs: p.expiryMs));
     }
     _publish(b, level: 0, group: 0);
+    for (final p in dead) {
+      vlog.markDead(p);
+    }
     _memtable.clear();
     _memtableRangeDeletes = 0;
     // §2 steps D and F: once a memtable's records are in a segment the

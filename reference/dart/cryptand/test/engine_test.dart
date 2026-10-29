@@ -64,6 +64,22 @@ void main() {
     expect(e.get(1, k), [2]);
   });
 
+  test('F-193: flush writes one version per key above visibleSeq', () {
+    final e = Engine();
+    final k = CBytes(Uint8List.fromList([1]));
+    e.put(1, k, Uint8List.fromList([1]));
+    e.flush();
+    final s = e.snapshot(); // sees v1 only
+    for (var v = 2; v <= 5; v++) {
+      e.put(1, k, Uint8List.fromList([v]));
+    }
+    e.flush();
+    expect(e.refsAt(0).map((r) => r.entries), [1, 1]);
+    expect(e.get(1, k), [5]);
+    expect(e.get(1, k, at: s), [1]);
+    e.release(s);
+  });
+
   group('value log', () {
     test('a record round-trips through its pointer', () {
       final vlog = ValueLog(pageSize: 4096, segmentBytes: 1 << 20);

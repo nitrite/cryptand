@@ -812,3 +812,23 @@ fn f007_the_point_index_is_charged_to_the_page_cache() {
     let pages = r.pages as u64 * e.page_size() as u64;
     assert!(seg.resident_bytes() >= pages + 1000 * 16, "resident {} for {pages} B of pages", seg.resident_bytes());
 }
+
+/// F-193. Flush wrote every memtable version of a key, so a full-text build
+/// (one postings-block rewrite per write) landed each rewrite on disk.
+#[test]
+fn flush_writes_one_version_per_key_above_visible_seq() {
+    let (_t, mut e) = engine("flush-collapse", Profile::Desktop);
+    let k = Value::NitriteId(1);
+    e.put(T, &k, b"v1").unwrap();
+    e.flush().unwrap();
+    let s = e.snapshot(); // sees v1 only
+    for v in 2..=5u8 {
+        e.put(T, &k, &[v]).unwrap();
+    }
+    e.flush().unwrap();
+    let entries: Vec<u64> = e.refs_at(0).unwrap().iter().map(|r| r.entries).collect();
+    assert_eq!(entries, vec![1, 1]);
+    assert_eq!(e.get(T, &k).unwrap().unwrap(), vec![5]);
+    assert_eq!(e.get_at(T, &k, Some(&s)).unwrap().unwrap(), b"v1".to_vec());
+    e.release(&s);
+}
