@@ -101,6 +101,8 @@
 
 ## Open questions for the human
 
+- F-193: may flush drop memtable versions superseded with no snapshot between them (R+D; as 04 §5 compaction)?
+
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
 
 ## Next action
@@ -142,11 +144,15 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    `tx1.done` at the end). Check footprint vs bar (64 cache + 4 trees x 32 + 256 = 448) and build time.
    J 1e6 done: build 224 s, RSS 296 MB PASS, and2 p50 152 us, df matches brute force, verify sound.
    Rust checked 10-29 for F-190/F-191: not affected (fulltext.rs is codec only; leaf guard is forward-only).
+   tx1 (pre-F-192): D 1e6 build 5290 s, 3.8 GB, 216 MB PASS; J 1e7 build 4619 s, 226 MB PASS, and2 p50 9.9 ms (check vs 152 us at 1e6).
+   F-192 fixed (D: bounded scans filtered the whole memtable): D 10^5 text build 36 s (J 14). F-193 open to the human:
+   R+D flush every memtable version, D text file 6x Java's. `~/tx2.sh` reruns D 1e6 + D 1e7 (`runs/tx2-*`, `tx2.done`).
 5. Rest of 6.5: spatial 10^7, HNSW 10^6 x 128-d recall@10.
    Noticed, not fixed: Java `Collection.clear()` does not clear text indexes.
    Remote `cryptand-f184` uncommitted edits (F-184-era Dart) were discarded by a reset 10-29; they matched pushed commits.
 
 ## Log
+- 10-29: tx1 stopped (D 1e7 ~15 h); F-192 (D memtable scan) fixed, gate quick green; F-193 filed; tx2 (D) running.
 - 10-29: Rust confirmed unaffected by F-190/F-191; tx1 J 1e6 PASS (296 MB), D 1e6 running.
 - 10-29: F-189 size-ratio level picker (R+J+D), spec 10 §6 runs bound; ix12 measured; ix13 J+D 10^7 rerun.
 

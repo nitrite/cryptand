@@ -2539,10 +2539,15 @@ final class Engine {
 
     // The memtable is ordered, so filtering preserves the order and no sort
     // is needed here any more.
-    final pending = <Uint8List>[
-      for (final k in _memtable.keys)
-        if (_inRange(k, treeId, lower, upper)) k
-    ];
+    // F-192: seek to `lower` and stop at the first key out of range (the merge
+    // below stops there too). Filtering every memtable key made each bounded
+    // scan O(memtable): 0.5 ms per full-text write lookup, 24x Java's build.
+    final pending = <Uint8List>[];
+    for (var k = _memtable.containsKey(lower) ? lower : _memtable.firstKeyAfter(lower);
+        k != null && _inRange(k, treeId, lower, upper);
+        k = _memtable.firstKeyAfter(k)) {
+      pending.add(k);
+    }
     var pi = 0;
 
     // **Sourced from the manifest, not from the extent map.** The manifest is
