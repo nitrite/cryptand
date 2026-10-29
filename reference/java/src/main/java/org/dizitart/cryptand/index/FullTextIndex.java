@@ -183,8 +183,43 @@ public final class FullTextIndex {
     // ==================================================================
 
     /** Indexes a document, replacing whatever it contributed before. */
-    public void put(long nitriteId, Value.Doc document) {
-        remove(nitriteId);
+    /** {@code previous}: the document's old version, null on insert (F-190). */
+    public void put(long nitriteId, Value.Doc document, Value.Doc previous) {
+        remove(nitriteId, previous);
+        Map<String, List<Integer>> byTerm = termsOf(document);
+        for (Map.Entry<String, List<Integer>> e : byTerm.entrySet()) {
+            int termId = internTerm(e.getKey());
+            int[] pos = new int[e.getValue().size()];
+            for (int i = 0; i < pos.length; i++) {
+                pos[i] = e.getValue().get(i);
+            }
+            java.util.Arrays.sort(pos);
+            addPosting(termId, new Postings.Posting(nitriteId, pos.length, pos));
+            adjustTerm(e.getKey(), 1, pos.length);
+        }
+    }
+
+    /**
+     * F-190: only the terms of {@code previous} are visited; walking the whole
+     * dictionary made every write O(postings in the index).
+     */
+    public void remove(long nitriteId, Value.Doc previous) {
+        if (previous == null) {
+            return;
+        }
+        for (String text : termsOf(previous).keySet()) {
+            Term t = term(text);
+            if (t == null) {
+                continue;
+            }
+            int removed = removePosting(t.id(), nitriteId);
+            if (removed > 0) {
+                adjustTerm(text, -1, -removed);
+            }
+        }
+    }
+
+    private Map<String, List<Integer>> termsOf(Value.Doc document) {
         Map<String, List<Integer>> byTerm = new LinkedHashMap<>();
         for (String field : fields) {
             List<Value> values = IndexKeys.resolve(document, IndexKeys.splitFieldPath(field));
@@ -202,25 +237,7 @@ public final class FullTextIndex {
                 }
             }
         }
-        for (Map.Entry<String, List<Integer>> e : byTerm.entrySet()) {
-            int termId = internTerm(e.getKey());
-            int[] pos = new int[e.getValue().size()];
-            for (int i = 0; i < pos.length; i++) {
-                pos[i] = e.getValue().get(i);
-            }
-            java.util.Arrays.sort(pos);
-            addPosting(termId, new Postings.Posting(nitriteId, pos.length, pos));
-            adjustTerm(e.getKey(), 1, pos.length);
-        }
-    }
-
-    public void remove(long nitriteId) {
-        for (Map.Entry<String, Term> e : terms().entrySet()) {
-            int removed = removePosting(e.getValue().id(), nitriteId);
-            if (removed > 0) {
-                adjustTerm(e.getKey(), -1, -removed);
-            }
-        }
+        return byTerm;
     }
 
     private int internTerm(String text) {
@@ -286,18 +303,52 @@ public final class FullTextIndex {
         return out;
     }
 
+    /**
+     * F-190, 07 §4.4: the one block that holds or would hold {@code id}, the
+     * last starting at or before it, else the term's first; null when the term
+     * has none.
+     */
+    private Map.Entry<Long, List<Postings.Posting>> blockFor(int termId, long id) {
+        byte[] high = id == Long.MAX_VALUE ? Postings.key(termId + 1, Long.MIN_VALUE) : Postings.key(termId, id + 1);
+        try (Engine.Cursor c = engine.scan(postingsTree, Postings.key(termId, Long.MIN_VALUE), high, true)) {
+            Map.Entry<Long, List<Postings.Posting>> e = firstOf(termId, c);
+            if (e != null) {
+                return e;
+            }
+        }
+        try (Engine.Cursor c = engine.scan(postingsTree, Postings.key(termId, id), Postings.key(termId + 1, Long.MIN_VALUE), false)) {
+            return firstOf(termId, c);
+        }
+    }
+
+    private static Map.Entry<Long, List<Postings.Posting>> firstOf(int termId, Engine.Cursor c) {
+        while (c.next()) {
+            List<Value> k = ((Value.Array) Cke.decode(c.row().key())).items();
+            if (SegmentMeta.longOf(k.get(0)) == termId) {
+                return Map.entry(((Value.NitriteId) k.get(1)).id(),
+                        Postings.decode(((Value.Bytes) Cve.decode(c.row().value())).value()));
+            }
+        }
+        return null;
+    }
+
     private void addPosting(int termId, Postings.Posting posting) {
-        List<Postings.Posting> all = postings(termId);
-        all.removeIf(p -> p.nitriteId() == posting.nitriteId());
-        all.add(posting);
-        all.sort(java.util.Comparator.comparingLong(Postings.Posting::nitriteId));
-        rewrite(termId, all);
+        Map.Entry<Long, List<Postings.Posting>> e = blockFor(termId, posting.nitriteId());
+        List<Postings.Posting> block = e == null ? new ArrayList<>() : new ArrayList<>(e.getValue());
+        block.removeIf(p -> p.nitriteId() == posting.nitriteId());
+        block.add(posting);
+        block.sort(java.util.Comparator.comparingLong(Postings.Posting::nitriteId));
+        rewrite(termId, e == null ? null : e.getKey(), block);
     }
 
     private int removePosting(int termId, long nitriteId) {
-        List<Postings.Posting> all = postings(termId);
+        Map.Entry<Long, List<Postings.Posting>> e = blockFor(termId, nitriteId);
+        if (e == null) {
+            return 0;
+        }
+        List<Postings.Posting> block = new ArrayList<>(e.getValue());
         int frequency = 0;
-        for (Postings.Posting p : all) {
+        for (Postings.Posting p : block) {
             if (p.nitriteId() == nitriteId) {
                 frequency = p.frequency();
             }
@@ -305,21 +356,22 @@ public final class FullTextIndex {
         if (frequency == 0) {
             return 0;
         }
-        all.removeIf(p -> p.nitriteId() == nitriteId);
-        rewrite(termId, all);
+        block.removeIf(p -> p.nitriteId() == nitriteId);
+        rewrite(termId, e.getKey(), block);
         return frequency;
     }
 
-    private void rewrite(int termId, List<Postings.Posting> all) {
+    /** Replaces one block; an overflow past 128 splits it, an empty one is dropped (§4.4). */
+    private void rewrite(int termId, Long oldFirst, List<Postings.Posting> block) {
         Engine.Batch b = engine.batch();
-        for (long first : blocksOf(termId).keySet()) {
-            b.remove(postingsTree, Postings.key(termId, first));
+        if (oldFirst != null) {
+            b.remove(postingsTree, Postings.key(termId, oldFirst));
         }
-        for (int i = 0; i < all.size(); i += Postings.MAX_PER_BLOCK) {
-            List<Postings.Posting> block =
-                    all.subList(i, Math.min(all.size(), i + Postings.MAX_PER_BLOCK));
-            b.put(postingsTree, Postings.key(termId, block.get(0).nitriteId()),
-                    Cve.encode(new Value.Bytes(Postings.encode(block, positions))));
+        for (int i = 0; i < block.size(); i += Postings.MAX_PER_BLOCK) {
+            List<Postings.Posting> part =
+                    block.subList(i, Math.min(block.size(), i + Postings.MAX_PER_BLOCK));
+            b.put(postingsTree, Postings.key(termId, part.get(0).nitriteId()),
+                    Cve.encode(new Value.Bytes(Postings.encode(part, positions))));
         }
         b.commit();
     }

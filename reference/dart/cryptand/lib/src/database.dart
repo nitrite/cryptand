@@ -407,24 +407,18 @@ final class Collection {
       final termId = _internTerm(dictId, revId, term);
 
       // Read the block this document belongs in, add the posting, write back.
-      // §4.4: an update rewrites the block it touches, not the posting list.
-      final existing = _blocksOf(postings, termId);
+      // §4.4: an update rewrites the block it touches, not the posting list
+      // (F-190: it used to rewrite the whole list, O(df) per write).
+      final hit = _blockFor(postings, termId, docId);
+      final kept = hit?.$2.postings ?? const <Posting>[];
+      final old = kept.where((q) => q.docId == docId).firstOrNull?.freq ?? 0;
       final merged = <Posting>[
-        for (final b in existing)
-          for (final q in b.postings)
-            if (q.docId != docId) q,
+        for (final q in kept)
+          if (q.docId != docId) q,
         Posting(docId, pos.length, positions ? pos : const []),
       ]..sort((x, y) => x.docId.compareTo(y.docId));
-
-      for (final b in existing) {
-        _e.remove(postings.treeId,
-            decodeKey(PostingsBlock.keyFor(termId, b.firstDoc)));
-      }
-      for (final b in PostingsBlock.split(merged, hasPositions: positions)) {
-        _e.put(postings.treeId,
-            decodeKey(PostingsBlock.keyFor(termId, b.firstDoc)), b.encode());
-      }
-      _updateTermStats(dictId, term, termId, merged);
+      _rewriteBlock(postings, termId, hit?.$1, merged, positions);
+      _adjustTermStats(dictId, term, old == 0 ? 1 : 0, pos.length - old);
     }
   }
 
@@ -456,23 +450,51 @@ final class Collection {
       final entry = _e.get(dictId, CStr(term));
       if (entry == null) continue;
       final termId = TermEntry.decode(entry).id;
-      final existing = _blocksOf(postings, termId);
-      final kept = <Posting>[
-        for (final b in existing)
-          for (final q in b.postings)
-            if (q.docId != docId) q,
-      ]..sort((x, y) => x.docId.compareTo(y.docId));
-      for (final b in existing) {
-        _e.remove(postings.treeId,
-            decodeKey(PostingsBlock.keyFor(termId, b.firstDoc)));
-      }
-      for (final b in PostingsBlock.split(kept, hasPositions: positions)) {
-        _e.put(postings.treeId,
-            decodeKey(PostingsBlock.keyFor(termId, b.firstDoc)), b.encode());
-      }
+      final hit = _blockFor(postings, termId, docId);
+      if (hit == null) continue;
+      final gone = hit.$2.postings.where((q) => q.docId == docId).toList();
+      if (gone.isEmpty) continue;
+      _rewriteBlock(postings, termId, hit.$1,
+          [for (final q in hit.$2.postings) if (q.docId != docId) q], positions);
       // `term_id` is never reused even when the last posting goes, so the
       // dictionary entry stays and only the statistics move.
-      _updateTermStats(dictId, term, termId, kept);
+      _adjustTermStats(dictId, term, -1, -gone.first.freq);
+    }
+  }
+
+  /// F-190, §4.4: the one block that holds or would hold [docId], the last
+  /// starting at or before it, else the term's first, as (key's first doc,
+  /// block); null when the term has none.
+  /// ponytail: the engine has no reverse scan, so the floor is a forward walk
+  /// over the term's block keys, O(df / 128) keys and one decode per write;
+  /// a reverse cursor if a very common term makes that slow.
+  (int, PostingsBlock)? _blockFor(
+      TreeDescriptor postings, int termId, int docId) {
+    final lower = PostingsBlock.keyFor(termId, -0x8000000000000000);
+    final upper = PostingsBlock.keyFor(termId + 1, -0x8000000000000000);
+    (int, Uint8List)? hit;
+    for (final e in _e.scanTree(postings.treeId, range: KeyRange(lower, upper))) {
+      final first = expectValue<CNitriteId>(
+              expectValue<CArray>(decodeKey(e.cke), 'postings key').items[1],
+              'postings key first doc')
+          .id;
+      if (hit != null && first > docId) break;
+      hit = (first, e.value);
+      if (first > docId) break;
+    }
+    return hit == null ? null : (hit.$1, PostingsBlock.decode(hit.$2));
+  }
+
+  /// Replaces one block: an overflow past 128 splits it, an empty one goes.
+  void _rewriteBlock(TreeDescriptor postings, int termId, int? oldFirst,
+      List<Posting> block, bool positions) {
+    if (oldFirst != null) {
+      _e.remove(postings.treeId,
+          decodeKey(PostingsBlock.keyFor(termId, oldFirst)));
+    }
+    for (final b in PostingsBlock.split(block, hasPositions: positions)) {
+      _e.put(postings.treeId,
+          decodeKey(PostingsBlock.keyFor(termId, b.firstDoc)), b.encode());
     }
   }
 
@@ -512,13 +534,10 @@ final class Collection {
     return next;
   }
 
-  void _updateTermStats(
-      int dictId, String term, int termId, List<Posting> all) {
-    var ttf = 0;
-    for (final p in all) {
-      ttf += p.freq;
-    }
-    _e.put(dictId, CStr(term), TermEntry(termId, all.length, ttf).encode());
+  void _adjustTermStats(int dictId, String term, int dDf, int dTtf) {
+    final e = TermEntry.decode(_e.get(dictId, CStr(term))!);
+    _e.put(dictId, CStr(term),
+        TermEntry(e.id, e.df + dDf, e.ttf + dTtf).encode());
   }
 
   List<PostingsBlock> _blocksOf(TreeDescriptor postings, int termId) {

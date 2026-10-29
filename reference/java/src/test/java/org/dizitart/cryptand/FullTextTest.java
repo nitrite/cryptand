@@ -215,6 +215,25 @@ class FullTextTest {
         }
     }
 
+    @Test
+    @DisplayName("F-190: a write rewrites one block: re-keys a block, splits a full one")
+    void oneBlockPerWrite(@TempDir Path dir) {
+        try (Database db = Database.create(dir.resolve("f190.cryptand"), options())) {
+            Collection c = db.collection("posts");
+            FullTextIndex index = c.createTextIndex(List.of("body"), List.of(), "none", true);
+            List<Long> ids = new ArrayList<>();
+            for (int i = 0; i < 300; i++) {
+                ids.add(c.insert(doc("word")));
+            }
+            c.remove(ids.get(128));
+            c.update(ids.get(128), doc("word"));
+            c.remove(ids.get(0));
+            assertEquals(299, index.search("word").size());
+            assertEquals(299, index.term("word").df());
+            assertEquals(List.of(), index.verify());
+        }
+    }
+
     /**
      * §4.3: a phrase query against an index without positions is rejected, not
      * approximated with a conjunction.

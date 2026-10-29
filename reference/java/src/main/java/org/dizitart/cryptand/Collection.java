@@ -178,7 +178,7 @@ public final class Collection {
             index.remove(id);
         }
         for (FullTextIndex index : textIndexes()) {
-            index.remove(id);
+            index.remove(id, previous);
         }
         for (IndexBinding index : indexes()) {
             for (byte[] key : index.entriesFor(previous, id)) {
@@ -246,7 +246,7 @@ public final class Collection {
             index.put(id, doc);
         }
         for (FullTextIndex index : textIndexes()) {
-            index.put(id, doc);
+            index.put(id, doc, previous);
         }
         Long ttl = ttlMs();
         byte[] value = Cve.encode(doc, names);
@@ -697,7 +697,7 @@ public final class Collection {
         FullTextIndex index = new FullTextIndex(db, this, indexName, d);
         try (Engine.Cursor c = scan(false)) {
             while (c.next()) {
-                index.put(((Value.NitriteId) Cke.decode(c.row().key())).id(), decode(c.row().value()));
+                index.put(((Value.NitriteId) Cke.decode(c.row().key())).id(), decode(c.row().value()), null);
             }
         }
         textIndexes.add(index);

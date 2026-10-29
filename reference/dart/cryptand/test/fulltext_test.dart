@@ -434,4 +434,22 @@ void _maintenance() {
       expect(c.fullTextSearch(idx, 'pangolin'), isEmpty);
     });
   });
+
+  test('F-190: a write rewrites one block: splits a full one, re-keys a head', () {
+    final db = Database();
+    final c = db.createCollection('docs');
+    final idx = c.createFullTextIndex(['body']);
+    CDoc word() => CDoc({'body': const CStr('word')});
+    for (var i = 1; i <= 300; i++) {
+      c.put(CNitriteId(i * 10), word());
+    }
+    c.put(const CNitriteId(15), word()); // into the full first block
+    c.remove(const CNitriteId(1290)); // the second block's head
+    c.remove(const CNitriteId(10));
+    final ids = [for (final p in c.postingsFor(idx, 'word')) p.docId];
+    final want = [15, for (var i = 2; i <= 300; i++) if (i != 129) i * 10]..sort();
+    expect(ids, want);
+    expect(c.termEntry(idx, 'word')!.df, want.length);
+    expect(c.termEntry(idx, 'word')!.ttf, want.length);
+  });
 }
