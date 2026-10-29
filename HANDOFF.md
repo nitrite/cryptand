@@ -101,7 +101,6 @@
 
 ## Open questions for the human
 
-- F-194: Dart/Rust grow the file between user commits (compaction frees unusable until then; Java's compaction publishes a superblock). Human chose (a) 10-30, but a compaction publish in R/D can land mid collection write (torn doc durable). Pick: defer the publish to the end of the write (Collection op boundary), (b), or (c)?
 
 
 - Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
@@ -153,6 +152,7 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    Remote `cryptand-f184` uncommitted edits (F-184-era Dart) were discarded by a reset 10-29; they matched pushed commits.
 
 ## Log
+- 10-30: F-194 fixed (R+D publish after the collection write), Dart text 10^5 721 -> 172 MB; gate quick green (remote).
 - 10-30: F-193 not the size cause; F-194 found (D/R compaction frees wait for a user commit; Java's compaction publishes), to the human. tx2 (D 1e6/1e7) running.
 - 10-30: F-193 fixed (R+D flush collapse, human-approved), gate quick green; Dart text 10^5 file 785 -> 721 MB only (Java 126), gap cause still open.
 - 10-29: tx1 stopped (D 1e7 ~15 h); F-192 (D memtable scan) fixed, gate quick green; F-193 filed; tx2 (D) running.

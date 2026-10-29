@@ -423,3 +423,31 @@ fn an_empty_array_has_no_entries_and_an_unresolved_traversal_is_null() {
     assert_eq!(keys.len(), 1);
     assert_eq!(index::entry_values(&keys[0]).unwrap().0, vec![Value::Null]);
 }
+
+/// F-194. Between a host's commits a compaction's frees were never reusable,
+/// so every output grew the file. A finished compaction is now published by
+/// the next whole collection write.
+#[test]
+fn a_compaction_is_published_after_the_write_it_ended_in() {
+    let (_t, mut db) = db("f194", Profile::Desktop);
+    let mut c = db.collection("c").unwrap();
+    let start = db.engine.sb.commit_id;
+    let mut n = 0i64;
+    for _ in 0..12 {
+        if db.engine.sb.commit_id != start {
+            break;
+        }
+        for _ in 0..50 {
+            n += 1;
+            c.insert(&mut db.engine, &doc(n, vec![("v", i32v(n as i32))])).unwrap();
+        }
+        db.engine.flush().unwrap();
+        db.engine.maybe_compact(None).unwrap(); // nothing here commits
+    }
+    n += 1;
+    c.insert(&mut db.engine, &doc(n, vec![])).unwrap();
+    assert!(db.engine.sb.commit_id > start, "no host commit, yet a superblock names the compaction");
+    for i in 1..=n {
+        assert!(c.get(&mut db.engine, i).unwrap().is_some());
+    }
+}

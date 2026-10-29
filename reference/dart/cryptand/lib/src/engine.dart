@@ -1158,6 +1158,31 @@ final class Engine {
   /// the commit".
   int commit({Durability durability = Durability.sync}) {
     if (_closed) throw const InvalidArgumentException('engine is closed');
+    _publishDue = false;
+    _committing = true;
+    try {
+      return _commit(durability);
+    } finally {
+      _committing = false;
+    }
+  }
+
+  // F-194: a compaction's frees are reusable only once a superblock names
+  // its result (01 §6), and only a commit wrote one: between a host's commits
+  // every output grew the file (Dart text 10^5: 721 MB for 86 MB live). Java
+  // publishes at the end of each compaction; here a compaction can end inside
+  // a multi-key write, so it only marks a publish due and the write's caller
+  // ([Collection]) runs [publishIfDue] once the write is whole.
+  bool _publishDue = false;
+  bool _committing = false;
+
+  /// Commits if a compaction finished since the last commit (F-194). Call
+  /// only between whole writes.
+  void publishIfDue() {
+    if (_publishDue && !_closed) commit();
+  }
+
+  int _commit(Durability durability) {
     // B/C: barrier over the open value-log segments' tails BEFORE anything
     // names them (§2.3 invariant 1).
     //
@@ -2007,6 +2032,7 @@ final class Engine {
 
   /// Publishes a finished job: retire the inputs, add the outputs, §5 and §5.2.
   void finishCompaction(CompactionJob job) {
+    if (!_committing && publisher != null) _publishDue = true;
     _rotate(job);
     for (final r in job.inputs) {
       _retire(r);

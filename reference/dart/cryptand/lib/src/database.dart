@@ -189,6 +189,7 @@ final class Collection {
       _indexDocumentText(post, a, fields, doc, id, positions);
     }
     _e.put(treeId, id, encodeValue(doc));
+    _e.publishIfDue();
   }
 
   void remove(CValue id) {
@@ -201,6 +202,7 @@ final class Collection {
       _unindexDocumentText(post, _analyzerOf(post), fields, existing, id);
     }
     _e.remove(treeId, id);
+    _e.publishIfDue();
   }
 
   CDoc? get(CValue id) {

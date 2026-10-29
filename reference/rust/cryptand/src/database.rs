@@ -243,6 +243,7 @@ impl Collection {
         let dict = &self.dict.by_name;
         let bytes = cve::encode_with_dict(doc, &|n| dict.get(n).copied());
         e.put(self.tree, &Value::NitriteId(id), &bytes)?;
+        e.publish_if_due()?;
         Ok(id)
     }
 
@@ -264,13 +265,13 @@ impl Collection {
 
     pub fn remove(&self, e: &mut Engine, id: i64) -> Result<()> {
         e.remove(self.tree, &Value::NitriteId(id))?;
-        Ok(())
+        e.publish_if_due()
     }
 
     /// §2.5's `clear()` — one range delete rather than O(n) tombstones.
     pub fn clear(&self, e: &mut Engine) -> Result<()> {
         e.remove_range(self.tree, &Value::NitriteId(i64::MIN), &Value::NitriteId(i64::MAX))?;
-        Ok(())
+        e.publish_if_due()
     }
 
     pub fn scan(&self, e: &mut Engine) -> Result<Vec<Value>> {

@@ -400,6 +400,9 @@ pub struct Engine {
     /// the same counter, where the saving is larger because its map key is a
     /// hex string.
     live_transactions: usize,
+    /// F-194: a compaction finished outside a commit; see [`Self::publish_if_due`].
+    publish_due: bool,
+    committing: bool,
     pub events: Vec<StoreEvent>,
     pub durability_achieved: Durability,
     pub counters: Counters,
@@ -566,6 +569,8 @@ impl Engine {
             live_snapshots: Vec::new(),
             written_at: HashMap::new(),
             live_transactions: 0,
+            publish_due: false,
+            committing: false,
             events: Vec::new(),
             durability_achieved: Durability::None,
             counters: Counters::default(),
@@ -787,6 +792,8 @@ impl Engine {
             live_snapshots: Vec::new(),
             written_at: HashMap::new(),
             live_transactions: 0,
+            publish_due: false,
+            committing: false,
             events: Vec::new(),
             durability_achieved: Durability::from_code(sb.durability_achieved),
             counters: Counters::default(),
@@ -2916,6 +2923,9 @@ impl Engine {
     /// place concurrent compactions serialize, and it is microseconds.
     pub fn finish_compaction(&mut self, mut job: CompactionJob) -> Result<()> {
         self.arm()?;
+        if !self.committing {
+            self.publish_due = true;
+        }
         if let Err(e) = self.rotate_output(&mut job) {
             self.abandon_compaction(job);
             return Err(e);
@@ -3621,6 +3631,31 @@ impl Engine {
     // ---------------------------------------------------------------
 
     pub fn commit(&mut self, durability: Durability) -> Result<u64> {
+        self.publish_due = false;
+        self.committing = true;
+        let r = self.commit_inner(durability);
+        self.committing = false;
+        r
+    }
+
+    /// F-194: commits if a compaction finished since the last commit. A
+    /// compaction's frees are reusable only once a superblock names its result
+    /// (01 §6), and only a commit writes one, so between a host's commits every
+    /// output grew the file. Java publishes at the end of each compaction; here
+    /// one can end inside a multi-key write, so callers ([`crate::database`]'s
+    /// collection ops) run this once the write is whole. Engine-level callers
+    /// keep committing themselves.
+    pub fn publish_if_due(&mut self) -> Result<()> {
+        if self.publish_due {
+            // The whole memtable goes: a flush on a full memtable may have cut
+            // the write, and its rest is still here.
+            self.flush()?;
+            self.commit(Durability::Sync)?;
+        }
+        Ok(())
+    }
+
+    fn commit_inner(&mut self, durability: Durability) -> Result<u64> {
         self.arm()?;
         // F-182: placed outputs are off the free list and not in the manifest
         // until the job publishes; a commit between the two made them durable

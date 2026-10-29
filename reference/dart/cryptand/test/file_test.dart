@@ -494,6 +494,28 @@ void main() {
     expect(back.engine.store.pageCount - before, lessThan(freeBefore + 40),
         reason: 'the file grew by less than the writes, because it reused');
   });
+
+  test('F-194: a compaction is published after the write it ended in', () {
+    final path = tmp('f194');
+    DatabaseFile.save(fresh()..createCollection('c'), path);
+    final db = DatabaseFile.open(path);
+    final c = db.collection('c')!;
+    final start = db.engine.commitId;
+    var n = 0;
+    for (var round = 0; round < 12 && db.engine.commitId == start; round++) {
+      for (var i = 0; i < 50; i++) {
+        c.put(CNitriteId(++n), CDoc({'v': CInt.of(NumType.i64, n)}));
+      }
+      db.engine.flush(); // compacts once L0 is due; nothing here commits
+    }
+    c.put(CNitriteId(++n), CDoc(const {}));
+    expect(db.engine.commitId, greaterThan(start),
+        reason: 'no commit by the host, yet a superblock names the compaction');
+    db.engine.close();
+    final back = DatabaseFile.open(path);
+    expect(back.collection('c')!.all.length, n);
+    back.engine.close();
+  });
 }
 
 // ---------------------------------------------------------------------------
