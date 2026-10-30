@@ -166,9 +166,13 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    Dart still refuses encrypt/decrypt/rotate on files with vector regions (pre-existing).
 6. sv3 partial (10-30, gate quick green at 588c935): R sp 1e6 PASS 366 MB; D sp 1e6 PASS 218 MB; all knn/brute match, sound;
    R/J/D vector 1e5 recall 0.970 sound (J 407 MB, R 206, D 85). Opened F-202 (R sp 1e7 488/1232 MB FAIL),
-   F-203 (R vx 1e6 RSS 474 MB at 370k, slow), F-204 (D vector build 6x). Still running: r-vx-1e6, then j-vx-1e6, d-sp-1e7, d-vx-1e6.
+   F-203 (R vx 1e6 RSS 474 MB at 370k, slow), F-204 (D vector build 6x). Still running: r-vx-1e6, then j-vx-1e6, d-sp-1e7; d-vx-1e6 dropped (human 10-30, watcher kills it) until F-204.
+7. 10-30 (human): spec 05 §3 / 09 §3 amended, vector_graph is a CoW B+tree, levelled_kinds vector drops it (R+J+D);
+   gate `~/gvg.log`. F-202 verify half fixed (561ab7e), gate `~/g202.log`. Next, one by one: F-202 build half
+   (heap-profile R sp 1e7 build, 410-500 MB flat), F-203 (R vx 1e6), F-204 (D vector 6x), once sv3 ends.
 
 ## Log
+- 10-30: vector_graph CoW spec amendment (R+J+D); F-202 verify half fixed; D vx 1e6 dropped from sv3.
 - 10-30: sv3 partial read; F-202..F-204 opened (6.5 spatial/vector RSS and build time).
 - 10-30: F-195/F-196 R+D disk-based, as J (989b141); F-197..F-200 found and fixed; local R/J/D + interop green; vx1/g197 queued.
 - 10-30: F-195 (J CoW R-tree) and F-196 (J incremental Vamana + CoW adjacency tree) fixed, full J suite green locally; gates + sp2/v1 rungs queued on remote.
