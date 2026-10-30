@@ -8,6 +8,8 @@
 //!     cargo run --release --example rss_scale PATH N settle compact|shrink  # one phase (F-174)
 //!
 //!     cargo run --release --example rss_scale PATH N index  # 6.5: unique + compound index build, probes, analyze, verify
+//!     cargo run --release --example rss_scale PATH N spatial  # 6.5: R-tree build, near/nearestK vs brute force, verify
+//!     cargo run --release --example rss_scale PATH N vector   # 6.5: 128-d Vamana build, recall@10 vs brute force, verify
 //!
 //! Run under `/usr/bin/time -l` for max RSS. `CRYPTAND_ENC=1` makes every
 //! mode use an encrypted file (fixed raw key, kdf 0: Argon2id excluded).
@@ -116,6 +118,12 @@ fn main() -> cryptand::Result<()> {
     }
     if a.get(3).map(String::as_str) == Some("index") {
         return index_rung(path, n);
+    }
+    if a.get(3).map(String::as_str) == Some("spatial") {
+        return spatial_rung(path, n);
+    }
+    if a.get(3).map(String::as_str) == Some("vector") {
+        return vector_rung(path, n);
     }
     let _ = std::fs::remove_file(path);
     // CRYPTAND_PROFILE=mobile: the profile the file is created with; reads
@@ -246,5 +254,169 @@ fn index_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
         eprintln!("verify {:?}: {}", f.class, f.what);
     }
     println!("{line} verify_ms={} verify_sound={ok} rss_verify_mb={}", t.elapsed().as_millis(), rss());
+    db.close()
+}
+
+fn rss_mb() -> u64 {
+    let pid = std::process::id().to_string();
+    let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &pid]).output();
+    out.ok().and_then(|o| String::from_utf8(o.stdout).ok()?.trim().parse::<u64>().ok()).unwrap_or(0) >> 10
+}
+
+/// PLAN 6.5 spatial, as Java `RssScale.xy`: point of document i in [0, 1000)^2.
+fn xy(i: i64) -> (f64, f64) {
+    let mut z = (i as u64).wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(0x51EDC0DE);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^= z >> 31;
+    ((z >> 40) as f64 * 1000.0 / (1u64 << 24) as f64, (z & 0xFFFFFF) as f64 * 1000.0 / (1u64 << 24) as f64)
+}
+
+fn point(x: f64, y: f64) -> Vec<u8> {
+    cryptand::wkb::encode(&cryptand::wkb::Geometry::Point(Some(cryptand::wkb::Coord::xy(x, y)))).unwrap()
+}
+
+/// PLAN 6.5, as Java `spatialRung`: a spatial index on point field `loc`;
+/// near and nearestK checked against brute force.
+fn spatial_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
+    let _ = std::fs::remove_file(path);
+    let mut db = Database::create(path, Profile::Desktop)?;
+    let mut c = db.collection("c")?;
+    let sp = db.create_spatial_index(&c, "loc", 2, None)?;
+    let t = std::time::Instant::now();
+    for i in 0..n {
+        let Value::Doc(mut f) = doc(i) else { unreachable!() };
+        let (x, y) = xy(i);
+        f.push(("loc".into(), Value::Geometry(point(x, y))));
+        c.insert(&mut db.engine, &Value::Doc(f))?;
+        if (i + 1) % 100_000 == 0 {
+            db.commit(Durability::Os)?;
+            eprintln!("{} t={} rss_mb={}", i + 1, t.elapsed().as_secs(), rss_mb());
+        }
+    }
+    db.commit(Durability::Os)?;
+    let mut line = format!("built={n} build_s={} bytes={} rss_build_mb={}", t.elapsed().as_secs(), std::fs::metadata(path)?.len(), rss_mb());
+    let mut s = 0x51ED_C0DEu64;
+    let (mut us, mut kus, mut rows) = (Vec::new(), Vec::new(), 0usize);
+    for k in 0..1000 {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let (x, y) = xy(((s >> 11) % n as u64) as i64);
+        let g = std::time::Instant::now();
+        let hits = db.with_spatial(&sp, |ix, e| ix.near(e, &c, x, y, 1.0))?.len();
+        us.push(g.elapsed().as_micros());
+        assert!(hits >= 1, "near probe {k}");
+        rows += hits;
+        let g = std::time::Instant::now();
+        assert_eq!(db.with_spatial(&sp, |ix, e| ix.nearest_k(e, &c, x, y, 10))?.len(), 10.min(n as usize), "knn probe {k}");
+        kus.push(g.elapsed().as_micros());
+    }
+    us.sort_unstable();
+    kus.sort_unstable();
+    line += &format!(" near_us p50={} p99={} near_rows={rows} knn10_us p50={} p99={}", us[500], us[990], kus[500], kus[990]);
+    let (qx, qy) = (500.5, 499.5);
+    let mut brute = 0;
+    let mut best = vec![f64::MAX; 10];
+    for i in 0..n {
+        let (x, y) = xy(i);
+        let d = (x - qx).hypot(y - qy);
+        if d <= 1.0 {
+            brute += 1;
+        }
+        if d < best[9] {
+            best[9] = d;
+            best.sort_by(f64::total_cmp);
+        }
+    }
+    let got = db.with_spatial(&sp, |ix, e| ix.near(e, &c, qx, qy, 1.0))?.len();
+    let knn = db.with_spatial(&sp, |ix, e| ix.nearest_k(e, &c, qx, qy, 10))?;
+    let kth = best[(10.min(n as usize)) - 1];
+    let ring = db.with_spatial(&sp, |ix, e| ix.near(e, &c, qx, qy, kth))?;
+    let knn_ok = knn.len() == 10.min(n as usize) && knn.iter().all(|id| ring.contains(id));
+    line += &format!(" near_rows_q={got} brute_near={brute} knn_ok={knn_ok} rss_probe_mb={}", rss_mb());
+    assert!(got == brute && knn_ok, "brute force");
+    let g = std::time::Instant::now();
+    use cryptand::verify::EngineVerify;
+    let sound = db.engine.verify()?.findings.is_empty();
+    println!("{line} verify_ms={} verify_sound={sound} rss_verify_mb={}", g.elapsed().as_millis(), rss_mb());
+    db.close()
+}
+
+fn unit(x: u64) -> f64 {
+    let mut z = x.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// PLAN 6.5 vectors, as Java `RssScale.vec`: 128-d around one of 1000 centres.
+fn vec128(i: i64) -> Vec<f32> {
+    let c = (i % 1000) as u64;
+    (0..128u64)
+        .map(|k| (unit(c * 128 + k) + 0.15 * (unit(((i + 1) as u64).wrapping_mul(0x2545F4914F6CDD1D).wrapping_add(k)) - 0.5)) as f32)
+        .collect()
+}
+
+/// PLAN 6.5, as Java `vectorRung`: a 128-d l2 vector index; 100 searches,
+/// recall@10 against brute force.
+fn vector_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
+    let _ = std::fs::remove_file(path);
+    let mut db = Database::create(path, Profile::Desktop)?;
+    let mut c = db.collection("c")?;
+    let vx = db.create_vector_index(&c, "emb", 128, "l2", 1024)?;
+    let t = std::time::Instant::now();
+    let mut ids = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let Value::Doc(mut f) = doc(i) else { unreachable!() };
+        if let Some(Value::NitriteId(id)) = f.iter().find(|(k, _)| k == "_id").map(|(_, v)| v) {
+            ids.push(*id);
+        }
+        f.push(("emb".into(), Value::VectorF32(vec128(i))));
+        c.insert(&mut db.engine, &Value::Doc(f))?;
+        if (i + 1) % 100_000 == 0 {
+            db.commit(Durability::Os)?;
+            eprintln!("{} t={} rss_mb={}", i + 1, t.elapsed().as_secs(), rss_mb());
+        } else if (i + 1) % 10_000 == 0 {
+            eprintln!("{} t={}", i + 1, t.elapsed().as_secs());
+        }
+    }
+    db.commit(Durability::Os)?;
+    let mut line = format!("built={n} build_s={} bytes={} rss_build_mb={}", t.elapsed().as_secs(), std::fs::metadata(path)?.len(), rss_mb());
+    let queries = 100usize;
+    let q: Vec<Vec<f32>> = (0..queries).map(|k| vec128(n + 7919 * k as i64)).collect();
+    let mut us = Vec::new();
+    let mut got = Vec::new();
+    for qk in &q {
+        let g = std::time::Instant::now();
+        let hits = db.with_vector(&vx, |ix, e| ix.search(e, qk, 10, None))?;
+        us.push(g.elapsed().as_micros());
+        got.push(hits.into_iter().map(|h| h.0).collect::<std::collections::HashSet<i64>>());
+    }
+    us.sort_unstable();
+    let mut best: Vec<Vec<(f64, i64)>> = vec![Vec::new(); queries];
+    for i in 0..n {
+        let v = vec128(i);
+        for k in 0..queries {
+            let d = cryptand::vector::distance_f64(cryptand::vector::Metric::L2, &q[k], &v);
+            let b = &mut best[k];
+            if b.len() < 10 || d < b[9].0 {
+                b.push((d, ids[i as usize]));
+                b.sort_by(|x, y| x.0.total_cmp(&y.0));
+                b.truncate(10);
+            }
+        }
+    }
+    let hit: usize = (0..queries).map(|k| best[k].iter().filter(|(_, id)| got[k].contains(id)).count()).sum();
+    let fallbacks = db.with_vector(&vx, |ix, _| Ok(ix.fallbacks))?;
+    line += &format!(
+        " search_us p50={} p99={} recall10={:.3} fallbacks={fallbacks} rss_probe_mb={}",
+        us[queries / 2],
+        us[queries * 99 / 100],
+        hit as f64 / (queries * 10) as f64,
+        rss_mb()
+    );
+    let g = std::time::Instant::now();
+    use cryptand::verify::EngineVerify;
+    let sound = db.engine.verify()?.findings.is_empty();
+    println!("{line} verify_ms={} verify_sound={sound} rss_verify_mb={}", g.elapsed().as_millis(), rss_mb());
     db.close()
 }

@@ -190,17 +190,21 @@ void main() {
   });
 
   group('queries, section 4 — the two-phase rule', () {
-    late RTree t;
+    late Collection c;
+    late SpatialIndex t;
+
+    CDoc at(Geometry g) => CDoc({'loc': CGeometry(encodeWkb(g))});
 
     setUp(() {
-      t = RTree(PageStore(), dimensions: 2);
+      c = Database().createCollection('c');
+      t = c.createSpatialIndex('loc');
       // A diagonal line of points.
       for (var i = 0; i < 50; i++) {
-        t.insert(i, point(i.toDouble(), i.toDouble()));
+        c.put(CNitriteId(i), at(point(i.toDouble(), i.toDouble())));
       }
       // A triangle whose BOX covers the origin but whose AREA does not — this
       // is the shape that separates a box result from an exact one.
-      t.insert(100, Geometry(
+      c.put(CNitriteId(100), at(Geometry(
         type: GeometryType.polygon,
         hasZ: false,
         hasM: false,
@@ -208,18 +212,23 @@ void main() {
           [const Coord(0, 10), const Coord(10, 10), const Coord(10, 0),
            const Coord(0, 10)]
         ],
-      ));
+      )));
     });
 
     test('the R-tree stays structurally valid as it splits', () {
       // Section 2.2: all leaves at one depth, and every internal box the
       // EXACT union of its children.
-      expect(t.verify(), isEmpty);
-      final many = RTree(PageStore(), dimensions: 2);
+      c.db.engine.commit();
+      expect(t.tree.verify(), isEmpty);
+      final many = Database().createCollection('m');
+      final ix = many.createSpatialIndex('loc');
       for (var i = 0; i < 500; i++) {
-        many.insert(i, point((i * 37 % 500).toDouble(), (i * 91 % 500).toDouble()));
+        many.put(CNitriteId(i),
+            at(point((i * 37 % 500).toDouble(), (i * 91 % 500).toDouble())));
       }
-      expect(many.verify(), isEmpty);
+      many.db.engine.commit();
+      expect(ix.tree.verify(), isEmpty);
+      expect(ix.size, 500);
     });
 
     test('a box candidate that fails the exact predicate is NOT returned', () {
@@ -227,7 +236,7 @@ void main() {
       // they were exact." The triangle's bounding box contains (1,1); the
       // triangle itself does not.
       final probe = point(1, 1);
-      expect(t.candidates(probe.envelope()), contains(100),
+      expect(t.tree.candidates(probe.envelope()), contains(100),
           reason: 'phase one: the box does match');
       expect(t.intersects(probe), isNot(contains(100)),
           reason: 'phase two: the geometry does not');
@@ -242,7 +251,7 @@ void main() {
       expect(hits, isNot(contains(0)));
 
       // within: the document's geometry lies inside the query.
-      expect(t.within(box(-1, -1, 3.5, 3.5)), [0, 1, 2, 3]);
+      expect(t.within(box(-1, -1, 3.5, 3.5))..sort(), [0, 1, 2, 3]);
 
       // contains: the document's geometry contains the query point.
       expect(t.contains(point(6, 8)), [100],
@@ -267,11 +276,20 @@ void main() {
       expect(k.first.$2, 0.0);
     });
 
+    test('an update moves the entry and a remove retracts it', () {
+      c.put(CNitriteId(0), at(point(200, 200)));
+      expect(t.intersects(point(0, 0)), isNot(contains(0)));
+      expect(t.intersects(point(200, 200)), [0]);
+      c.remove(CNitriteId(0));
+      expect(t.intersects(point(200, 200)), isEmpty);
+      expect(t.size, 50);
+    });
+
     test('an empty tree answers every query without failing', () {
-      final e = RTree(PageStore());
+      final e = Database().createCollection('e').createSpatialIndex('loc');
       expect(e.intersects(point(0, 0)), isEmpty);
       expect(e.nearestK(const Coord(0, 0), 5), isEmpty);
-      expect(e.verify(), isEmpty);
+      expect(e.tree.verify(), isEmpty);
     });
   });
 

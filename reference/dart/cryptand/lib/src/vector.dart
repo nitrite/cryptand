@@ -21,9 +21,16 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'bytes.dart';
+import 'catalog.dart';
+import 'cke.dart';
 import 'container.dart';
+import 'cow.dart';
+import 'cve.dart';
+import 'database.dart';
 import 'errors.dart';
-import 'limits.dart';
+import 'index.dart';
+import 'rtree.dart' show MinHeap;
+import 'value.dart';
 
 /// §2's region `dtype`.
 ///
@@ -84,7 +91,7 @@ final class VectorRegionHeader {
 
   final int nextRegion;
 
-  Uint8List encode(int pageSize) {
+  Uint8List encode(int pageSize, {int extentPages = 1}) {
     final natural = dim * RegionDType.naturalSize(dtype);
     // §2: "`stride` is a `u16`, so a region's `dim × sizeof(dtype)` MUST be
     // ≤ 65535 — 16383 dimensions at f32... A model beyond that is served by
@@ -121,6 +128,7 @@ final class VectorRegionHeader {
       pageType: PageType.vectorRegion,
       flags: PageFlags.extentHead,
       treeId: TreeId.noTree,
+      extentPages: extentPages,
       payloadLen: w.length,
     ).writeInto(page);
     return page;
@@ -157,35 +165,27 @@ final class VectorRegionHeader {
   }
 }
 
-/// A vector region: the flat, page-aligned extent of §2.
+/// A vector region: the flat, page-aligned extent of §2, on the store's pages.
 ///
 /// §2's second property is why this class has no `mmap` and does not need one:
-/// "**An implementation that cannot `mmap` reads positionally.** Dart does
-/// exactly this... The layout is identical; only the access method differs. No
-/// part of this format requires mmap."
+/// "**An implementation that cannot `mmap` reads positionally.**" The data
+/// area is encrypted per chunk when the file seals (`14-security.md` §5.4).
 final class VectorRegion {
-  VectorRegion({
-    required this.dim,
-    required this.dtype,
-    required this.slotCount,
-    int? stride,
-    this.pageSize = 4096,
-  }) : stride = stride ?? _align64(dim * RegionDType.naturalSize(dtype)) {
-    checkPageSize(pageSize);
-    dataOffset = pageSize; // one head page, then the slots
-    _bytes = Uint8List(dataOffset + slotCount * this.stride);
-  }
+  VectorRegion._(this.store, this.startPage, this.pages, this.header, this.encrypted);
 
-  final int dim;
-  final int dtype;
-  final int slotCount;
-  final int stride;
-  final int pageSize;
+  final PageStore store;
+  final int startPage;
+  final int pages;
+  final VectorRegionHeader header;
 
-  late final int dataOffset;
-  late final Uint8List _bytes;
+  /// The head page's `flags.ENCRYPTED`: how this region's data is chunked,
+  /// whatever the file's `cipher` says now (F-073).
+  final bool encrypted;
 
-  int liveCount = 0;
+  int get dim => header.dim;
+  int get dtype => header.dtype;
+  int get slotCount => header.slotCount;
+  int get stride => header.stride;
 
   static int _align64(int n) => (n + 63) ~/ 64 * 64;
 
@@ -193,53 +193,88 @@ final class VectorRegion {
   /// `slot_id = 0` is a null pointer."
   static const int nullSlot = 0;
 
-  int _offsetOf(int slot) {
+  /// Allocates and writes a region of [slots] slots (slot 0 included).
+  factory VectorRegion.create(PageStore store,
+      {required int dim, int dtype = RegionDType.f32, required int slots}) {
+    final natural = dim * RegionDType.naturalSize(dtype);
+    // Rounded to 64 bytes so slots land on a SIMD boundary, inside the u16.
+    final aligned = _align64(natural);
+    final stride = aligned <= 0xFFFF ? aligned : natural;
+    final encrypted = store.crypto != null && !store.writePlain;
+    final chunk = store.chunkBytes(encrypted);
+    final pages = 1 + (slots * stride + chunk - 1) ~/ chunk;
+    final start = store.allocExtent(pages);
+    final header = VectorRegionHeader(
+        dim: dim,
+        dtype: dtype,
+        stride: stride,
+        slotCount: slots,
+        liveCount: 0,
+        dataOffset: store.pageSize,
+        nextRegion: 0);
+    store.writeInExtent(start, header.encode(store.pageSize, extentPages: pages));
+    // A reused extent holds whatever was there; a sealed chunk is read before
+    // it is rewritten, so a never-written one must read as blank (as Java).
+    for (var p = 1; p < pages; p++) {
+      store.writeAt((start + p) * store.pageSize, Uint8List(store.pageSize));
+    }
+    return VectorRegion._(store, start, pages, header, encrypted);
+  }
+
+  factory VectorRegion.open(PageStore store, int startPage) {
+    final clear = store.readClear(startPage);
+    final h = PageHeader.read(clear, pageId: startPage);
+    final header = VectorRegionHeader.decode(store.read(startPage));
+    return VectorRegion._(
+        store, startPage, math.max(1, h.extentPages), header, h.isEncrypted);
+  }
+
+  void _check(int slot) {
     if (slot <= 0 || slot >= slotCount) {
       throw InvalidArgumentException(
           'slot $slot is outside 1..${slotCount - 1} (slot 0 is the null '
           'pointer, spec/09-vector.md section 2)');
     }
-    return dataOffset + slot * stride;
   }
 
   void writeVector(int slot, List<double> v) {
+    _check(slot);
     if (v.length != dim) {
       throw InvalidArgumentException('vector has ${v.length} dimensions, '
           'the region declares $dim');
     }
-    final off = _offsetOf(slot);
-    final bd = ByteData.view(_bytes.buffer, off, stride);
-    switch (dtype) {
-      case RegionDType.f32:
-        for (var i = 0; i < dim; i++) {
-          bd.setFloat32(i * 4, v[i], Endian.little);
-        }
-      default:
-        throw UnsupportedFeatureException(
-            'this build stores f32 regions; dtype $dtype is specified but not '
-            'implemented here');
+    if (dtype != RegionDType.f32) {
+      throw UnsupportedFeatureException(
+          'this build writes f32 regions; dtype $dtype is specified but not '
+          'implemented here');
     }
-    if (slot >= liveCount) liveCount = slot + 1;
+    final buf = Uint8List(stride); // padding bytes are zero
+    final bd = ByteData.sublistView(buf);
+    for (var i = 0; i < dim; i++) {
+      bd.setFloat32(i * 4, v[i], Endian.little);
+    }
+    store.writeExtentData(
+        startPage, header.dataOffset, slot * stride, buf, encrypted);
   }
 
   List<double> readVector(int slot) {
-    final off = _offsetOf(slot);
-    final bd = ByteData.view(_bytes.buffer, off, stride);
-    return [for (var i = 0; i < dim; i++) bd.getFloat32(i * 4, Endian.little)];
+    if (slot <= 0) _check(slot);
+    if (slot >= slotCount) {
+      throw CorruptionException('slot $slot is past the region\'s $slotCount slots',
+          pageId: startPage);
+    }
+    final raw = store.readExtentData(
+        startPage, header.dataOffset, slot * stride, stride, encrypted);
+    final bd = ByteData.sublistView(raw);
+    switch (dtype) {
+      case RegionDType.f32:
+        return [for (var i = 0; i < dim; i++) bd.getFloat32(i * 4, Endian.little)];
+      default:
+        throw UnsupportedFeatureException(
+            'this build reads f32 regions; dtype $dtype is specified but not '
+            'implemented here');
+    }
   }
-
-  /// The head page, so the region can be written into a container.
-  Uint8List headPage({int nextRegion = 0}) => VectorRegionHeader(
-        dim: dim,
-        dtype: dtype,
-        stride: stride,
-        slotCount: slotCount,
-        liveCount: liveCount,
-        dataOffset: dataOffset,
-        nextRegion: nextRegion,
-      ).encode(pageSize);
-
-  int get byteLength => _bytes.length;
 }
 
 /// An adjacency record, §3.
@@ -383,110 +418,331 @@ double vectorDistance(List<double> a, List<double> b, String metric) {
   }
 }
 
-/// A vector index: the region, the graph, and the two maps of §6.
+/// Robust-prune slack: a candidate is dropped if a kept neighbour is ALPHA
+/// times nearer to it.
+const double vectorAlpha = 1.2;
+
+/// Beam width of an unfiltered search (at least k).
+const int vectorEfSearch = 100;
+
+/// A vector index, `09-vector.md` — F-196, as Java's `VectorIndex` and Rust's.
 ///
-/// §8's search contract is the whole public surface:
-/// `search(query_vector, k, filter?) → [(NitriteId, distance)]`, "with
-/// distances in the declared metric, ordered nearest first, and MUST exclude
-/// slots with no live document".
+/// A Vamana graph built as documents arrive: a put runs a beam search
+/// (`ef_construction` wide) from the entry point, keeps the robust-pruned
+/// ([vectorAlpha]) nearest `m` as the new slot's neighbours and adds the
+/// reverse edges, pruning a list that overflows. A search is the same beam,
+/// [vectorEfSearch] wide, re-ranked by true distance; a filtered search, and
+/// an index small enough that the beam would visit it all, use §8's brute
+/// force. Vectors live in the [VectorRegion], adjacency in an
+/// [AdjacencyTree], both on pages; the slot maps are KV trees, cached here as
+/// plain lists. The [Database] holds it, so the engine's commit republishes it.
+/// ponytail: deleted slots stay in the graph and are walked through (§6);
+/// consolidation (§7) is not implemented, so a delete-heavy index degrades
+/// toward the brute-force fallback.
 final class VectorIndex {
-  VectorIndex({
-    required this.region,
-    required this.metric,
-    this.algorithm = 'hnsw',
-    this.neighboursSorted = false,
-  });
-
-  final VectorRegion region;
-  final String metric;
-  final String algorithm;
-  final bool neighboursSorted;
-
-  /// §3: adjacency by `(level, slot_id)`. Keying this way "puts a layer's
-  /// adjacency contiguously and makes a layer scan sequential, which is what
-  /// index construction and repair need".
-  final Map<(int, int), Adjacency> graph = {};
-
-  /// §5: "The entry point(s) for a search are in the descriptor, not in the
-  /// tree, so a search starts with zero tree lookups."
-  final List<int> entryPoints = [];
-
-  /// §6: `params.slot_to_doc` and `params.doc_to_slot`. **Two trees**, because
-  /// "search returns slots, filtering needs documents, and deletion needs to
-  /// find a document's slot."
-  final Map<int, int> slotToDoc = {};
-  final Map<int, int> docToSlot = {};
-
-  int _nextSlot = 1; // slot 0 is the null pointer
-
-  int add(int docId, List<double> vector) {
-    final slot = _nextSlot++;
-    region.writeVector(slot, vector);
-    slotToDoc[slot] = docId;
-    docToSlot[docId] = slot;
-    if (entryPoints.isEmpty) entryPoints.add(slot);
-    return slot;
+  VectorIndex(this.db, this.name, TreeDescriptor d) : descriptor = d {
+    Never shape(String what) =>
+        throw CorruptionException('vector index "$name" has no valid params.$what');
+    int u(String k) => (d.param(k) as CInt?)?.magnitude.lo ?? shape(k);
+    owner = d.owner ?? '';
+    field = d.paramStr('field') ?? shape('field');
+    dim = u('dim');
+    metric = d.paramStr('metric') ?? shape('metric');
+    vectorDistance(const [0.0], const [0.0], metric); // refuses an unknown one
+    slotToDocTree = u('slot_to_doc');
+    docToSlotTree = u('doc_to_slot');
+    m = (d.param('m') as CInt?)?.magnitude.lo ?? 32;
+    efConstruction = (d.param('ef_construction') as CInt?)?.magnitude.lo ?? 200;
+    final store = db.engine.store;
+    region = VectorRegion.open(store, u('vector_region'));
+    adjacency = AdjacencyTree(store,
+        treeId: d.treeId, root: d.root ?? 0, rootNonce: d.rootNonce);
+    final eps = d.param('entry_points');
+    if (eps is CArray && eps.items.isNotEmpty) {
+      _entry = (eps.items.first as CInt).magnitude.lo;
+    }
+    for (final e in db.engine.scanTree(slotToDocTree)) {
+      final k = decodeKey(e.cke), v = decodeValue(e.value);
+      if (k is! CInt || v is! CNitriteId) {
+        throw CorruptionException('vector index "$name": a slot_to_doc row has the wrong shape');
+      }
+      final slot = k.magnitude.lo;
+      if (slot <= 0 || slot >= region.slotCount) {
+        throw CorruptionException('vector index "$name": slot $slot is outside the region');
+      }
+      _map(slot, v.id);
+      if (slot >= _nextSlot) _nextSlot = slot + 1;
+    }
   }
 
-  /// §6: "A deleted document's slot is marked by removing both mappings; the
-  /// slot itself stays in the graph until consolidation repairs the
-  /// neighbourhoods. A search MUST skip a slot with no document mapping — this
-  /// is what makes deletes correct immediately even though the graph is
-  /// repaired later."
-  bool remove(int docId) {
-    final slot = docToSlot.remove(docId);
-    if (slot == null) return false;
-    slotToDoc.remove(slot);
-    return true;
+  final Database db;
+  final String name;
+  late final String owner;
+  late final String field;
+  late final int dim;
+  late final String metric;
+  late final int slotToDocTree;
+  late final int docToSlotTree;
+  late final int m;
+  late final int efConstruction;
+  TreeDescriptor descriptor;
+  late VectorRegion region;
+  late final AdjacencyTree adjacency;
+
+  final List<int> _slotDoc = [];
+  final List<bool> _live = [];
+  final Map<int, int> _docSlot = {};
+  int _nextSlot = 1; // slot 0 is the null pointer
+  int _entry = 0;
+  int size = 0;
+  bool _regionDirty = false;
+
+  /// Unfiltered searches the beam could not answer (a broken graph hides
+  /// behind the scan).
+  int fallbacks = 0;
+
+  bool _isLive(int slot) => slot < _live.length && _live[slot];
+
+  void _map(int slot, int doc) {
+    while (_slotDoc.length <= slot) {
+      _slotDoc.add(0);
+      _live.add(false);
+    }
+    _slotDoc[slot] = doc;
+    if (!_live[slot]) {
+      _live[slot] = true;
+      size++;
+    }
+    _docSlot[doc] = slot;
+  }
+
+  List<double>? _vectorOf(CDoc doc) {
+    for (final v in resolvePath(doc, field) ?? const <CValue>[]) {
+      if (v is CVector) {
+        final f = v.f32Values;
+        if (f != null) return f;
+        final i8 = v.i8Values!;
+        return [for (final c in i8) c * v.scale + v.zeroPoint];
+      }
+    }
+    return null;
+  }
+
+  /// Indexes [doc]'s vector field, replacing any slot it already owns.
+  void put(int docId, CDoc doc) {
+    final v = _vectorOf(doc);
+    if (v == null) {
+      remove(docId);
+      return;
+    }
+    if (v.length != dim) {
+      throw InvalidArgumentException(
+          'vector has ${v.length} dimensions, index $name declares $dim');
+    }
+    var slot = _docSlot[docId];
+    if (slot == null) {
+      slot = _nextSlot++;
+      _growTo(slot);
+    }
+    region.writeVector(slot, v);
+    _map(slot, docId);
+    _link(slot, v);
+    db.engine
+      ..put(slotToDocTree, CInt.of(NumType.u64, slot), encodeValue(CNitriteId(docId)))
+      ..put(docToSlotTree, CNitriteId(docId), encodeValue(CInt.of(NumType.u64, slot)));
+  }
+
+  /// §6: both mappings go; the slot stays in the graph and a search skips
+  /// it, which is what makes a delete correct immediately.
+  void remove(int docId) {
+    final slot = _docSlot.remove(docId);
+    if (slot == null) return;
+    if (_isLive(slot)) {
+      _live[slot] = false;
+      size--;
+    }
+    db.engine
+      ..remove(slotToDocTree, CInt.of(NumType.u64, slot))
+      ..remove(docToSlotTree, CNitriteId(docId));
+  }
+
+  void _growTo(int slot) {
+    if (slot < region.slotCount) return;
+    final store = db.engine.store;
+    final bigger = VectorRegion.create(store,
+        dim: dim,
+        dtype: region.dtype,
+        slots: math.max(slot + 1, region.slotCount * 2));
+    for (var s = 1; s < _live.length; s++) {
+      if (_live[s]) bigger.writeVector(s, region.readVector(s));
+    }
+    store.freeExtent(region.startPage, region.pages);
+    region = bigger;
+    descriptor = descriptor.with_({
+      'params': CDoc({
+        ...descriptor.params.fields,
+        'vector_region': CInt.of(NumType.u64, region.startPage)
+      })
+    });
+    _regionDirty = true;
+  }
+
+  /// Writes the graph's copied pages back and republishes the descriptor.
+  void commit() {
+    final (root, nonce) = adjacency.commit();
+    final d = descriptor;
+    final eps = CArray([if (_entry != 0) CInt.of(NumType.u64, _entry)]);
+    final entries = (d.doc.fields['entries'] as CInt?)?.magnitude.lo ?? 0;
+    final changed = d.root != root ||
+        d.rootNonce != nonce ||
+        entries != size ||
+        d.param('entry_points') != eps;
+    if (changed || _regionDirty) {
+      _regionDirty = false;
+      descriptor = d.withRoot(root, nonce).with_({
+        'entries': CInt.of(NumType.u64, size),
+        'params': CDoc({...d.params.fields, 'entry_points': eps}),
+      });
+      db.catalog.put(name, descriptor);
+    }
+  }
+
+  List<int> neighbours(int slot) {
+    final raw = adjacency.get(_adjKey(slot));
+    return raw == null
+        ? const []
+        : Adjacency.decodeRaw(expectValue<CBytes>(decodeValue(raw), 'adjacency').value)
+            .neighbours;
+  }
+
+  static Uint8List _adjKey(int slot) =>
+      encodeKey(CArray([CInt.of(NumType.u8, 0), CInt.of(NumType.u64, slot)]));
+
+  void _setAdjacency(int slot, List<int> n) =>
+      adjacency.put(_adjKey(slot), encodeValue(CBytes(Adjacency(n).encodeRaw())));
+
+  List<double> _vector(int slot, Map<int, List<double>>? cache) {
+    if (slot <= 0 || slot >= region.slotCount) {
+      throw CorruptionException(
+          'vector index "$name": neighbour slot $slot is outside the region');
+    }
+    if (cache == null) return region.readVector(slot);
+    return cache[slot] ??= region.readVector(slot);
+  }
+
+  double _d(List<double> a, List<double> b) => vectorDistance(a, b, metric);
+
+  /// Beam search from the entry point: the [ef] nearest slots seen, nearest
+  /// first, as `(distance, slot)`.
+  List<(double, int)> _beam(List<double> q, int ef, Map<int, List<double>>? cache) {
+    if (_entry == 0) return [];
+    int byD((double, int) a, (double, int) b) =>
+        a.$1 != b.$1 ? a.$1.compareTo(b.$1) : a.$2.compareTo(b.$2);
+    final open = MinHeap<(double, int)>(byD);
+    final best = MinHeap<(double, int)>((a, b) => byD(b, a)); // max-heap
+    final seen = <int>{_entry};
+    final first = (_d(q, _vector(_entry, cache)), _entry);
+    open.add(first);
+    best.add(first);
+    while (open.isNotEmpty) {
+      final c = open.removeFirst();
+      if (best.length >= ef && c.$1 > best.first.$1) break;
+      for (final n in neighbours(c.$2)) {
+        if (!seen.add(n)) continue;
+        final d = _d(q, _vector(n, cache));
+        if (best.length < ef || d < best.first.$1) {
+          open.add((d, n));
+          best.add((d, n));
+          if (best.length > ef) best.removeFirst();
+        }
+      }
+    }
+    return best.toList()..sort(byD);
+  }
+
+  /// Vamana's robust prune: nearest first, dropping a candidate a kept one covers.
+  List<int> _prune(int me, List<(double, int)> nearestFirst, Map<int, List<double>> cache) {
+    final kept = <int>[];
+    final keptV = <List<double>>[];
+    for (final c in nearestFirst) {
+      if (kept.length >= m) break;
+      if (c.$2 == me || kept.contains(c.$2)) continue;
+      final v = _vector(c.$2, cache);
+      if (!keptV.any((k) => vectorAlpha * _d(k, v) <= c.$1)) {
+        kept.add(c.$2);
+        keptV.add(v);
+      }
+    }
+    return kept;
+  }
+
+  /// Links [slot] into the graph, reverse edges included.
+  void _link(int slot, List<double> v) {
+    if (_entry == 0 || _entry == slot) {
+      _entry = slot;
+      if (adjacency.get(_adjKey(slot)) == null) _setAdjacency(slot, const []);
+      return;
+    }
+    final cache = <int, List<double>>{slot: v};
+    final mine = _prune(slot, _beam(v, efConstruction, cache), cache);
+    _setAdjacency(slot, mine);
+    for (final n in mine) {
+      var theirs = [...neighbours(n)];
+      if (theirs.contains(slot)) continue;
+      theirs.add(slot);
+      if (theirs.length > m) {
+        final nv = _vector(n, cache);
+        final scored = [for (final t in theirs) (_d(nv, _vector(t, cache)), t)]
+          ..sort((a, b) => a.$1 != b.$1 ? a.$1.compareTo(b.$1) : a.$2.compareTo(b.$2));
+        theirs = _prune(n, scored, cache);
+      }
+      _setAdjacency(n, theirs);
+    }
+  }
+
+  /// §8's `search(query, k, filter?)`, nearest first, with **true** distances
+  /// and never a slot with no live document.
+  List<(int, double)> search(List<double> query, int k,
+      {bool Function(int docId)? filter}) {
+    if (query.length != dim) {
+      throw InvalidArgumentException(
+          'query has ${query.length} dimensions, index $name declares $dim');
+    }
+    final ef = math.max(k, vectorEfSearch);
+    if (filter == null && size > ef) {
+      final hits = <(int, double)>[];
+      for (final c in _beam(query, ef, null)) {
+        if (_isLive(c.$2)) hits.add((_slotDoc[c.$2], c.$1));
+        if (hits.length == k) return hits;
+      }
+      // Fewer than k live slots in the beam (deletes): the scan answers.
+      fallbacks++;
+    }
+    final hits = <(int, double)>[];
+    for (var s = 1; s < _live.length; s++) {
+      if (!_live[s]) continue;
+      final doc = _slotDoc[s];
+      if (filter != null && !filter(doc)) continue;
+      hits.add((doc, _d(query, region.readVector(s))));
+    }
+    hits.sort((a, b) => a.$2.compareTo(b.$2));
+    return hits.take(k).toList();
   }
 
   /// §6: "a verifier checks that they are exact inverses."
   List<String> verifyMaps() {
     final problems = <String>[];
-    for (final e in slotToDoc.entries) {
-      if (docToSlot[e.value] != e.key) {
-        problems.add('slot ${e.key} maps to doc ${e.value}, which maps back to '
-            '${docToSlot[e.value]}');
+    for (var s = 1; s < _live.length; s++) {
+      if (_live[s] && _docSlot[_slotDoc[s]] != s) {
+        problems.add('slot $s maps to doc ${_slotDoc[s]}, which maps back to '
+            '${_docSlot[_slotDoc[s]]}');
       }
     }
-    for (final e in docToSlot.entries) {
-      if (slotToDoc[e.value] != e.key) {
-        problems.add('doc ${e.key} maps to slot ${e.value}, which maps back to '
-            '${slotToDoc[e.value]}');
+    for (final e in _docSlot.entries) {
+      if (!_isLive(e.value) || _slotDoc[e.value] != e.key) {
+        problems.add('doc ${e.key} maps to slot ${e.value}, which does not map back');
       }
     }
     return problems;
   }
-
-  /// §8's search.
-  ///
-  /// [bruteForce] forces the fallback §8 requires of an implementation that
-  /// will not traverse a graph another SDK built: "it MUST then fall back to a
-  /// brute-force scan of the vector region, which is always possible and always
-  /// correct, rather than returning nothing. Brute force over a flat region is
-  /// exactly the operation the region layout is designed to make fast."
-  List<(int, double)> search(
-    List<double> query,
-    int k, {
-    bool Function(int docId)? filter,
-    bool bruteForce = false,
-  }) {
-    final scored = <(int, double)>[];
-    for (final entry in slotToDoc.entries) {
-      final docId = entry.value;
-      if (filter != null && !filter(docId)) continue;
-      // §8: "the distances returned are the true distances to the documents
-      // returned (an implementation using PQ codes for traversal MUST re-rank
-      // against the full vectors before returning)".
-      scored.add((docId, vectorDistance(region.readVector(entry.key), query, metric)));
-    }
-    scored.sort((a, b) => a.$2.compareTo(b.$2));
-    return scored.take(k).toList();
-  }
-
-  /// Whether this implementation will traverse a graph built by [algorithm].
-  ///
-  /// §8: "An implementation MAY refuse to serve a graph built by a different
-  /// algorithm — but it MUST then fall back to a brute-force scan."
-  bool willTraverse(String graphAlgorithm) => graphAlgorithm == algorithm;
 }

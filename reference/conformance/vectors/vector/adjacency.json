@@ -1,0 +1,59 @@
+{
+ "format": "cryptand-vectors",
+ "format_version": "3",
+ "generator": "hand (python, see spec)",
+ "note": "The spec is normative. Where a vector and spec/ disagree, the spec wins and the vector is wrong (spec/11-conformance.md section 7).",
+ "chapter": "spec/09-vector.md section 3",
+ "invariant": "An adjacency record is u16le degree, then one zigzag uvar per neighbour: the first is the slot id itself (a delta from 0), each later one the signed delta from the previous slot id. F-197: Java once wrote the first as a plain uvar; a reader of the other encoding halves or doubles it.",
+ "cases": [
+  {
+   "name": "empty",
+   "neighbours": [],
+   "record_hex": "0000"
+  },
+  {
+   "name": "one",
+   "neighbours": [
+    5
+   ],
+   "record_hex": "01000a"
+  },
+  {
+   "name": "one_large",
+   "neighbours": [
+    300
+   ],
+   "record_hex": "0100d804"
+  },
+  {
+   "name": "mixed",
+   "neighbours": [
+    5,
+    3,
+    300,
+    4
+   ],
+   "record_hex": "04000a03d204cf04"
+  },
+  {
+   "name": "descending",
+   "neighbours": [
+    1000,
+    999,
+    10,
+    1
+   ],
+   "record_hex": "0400d00f01b90f11"
+  },
+  {
+   "name": "wide",
+   "neighbours": [
+    1000000,
+    1,
+    1099511627776,
+    7
+   ],
+   "record_hex": "040080897afd887afeffffffff3ff1ffffffff3f"
+  }
+ ]
+}

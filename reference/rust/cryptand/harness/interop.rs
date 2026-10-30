@@ -380,6 +380,98 @@ fn cmd_rotate(path: &str, new_hex: &str) -> cryptand::Result<()> {
     Ok(())
 }
 
+/// F-195/F-196 leg: documents with a point `at = (n, -n)` and a vector
+/// `embedding = [n, -n, n/2, 1]`, under a spatial and a vector index.
+fn indexed_doc(id: i64, n: i64) -> Value {
+    let p = cryptand::wkb::Geometry::Point(Some(cryptand::wkb::Coord::xy(n as f64, -n as f64)));
+    Value::Doc(vec![
+        ("_id".into(), Value::NitriteId(id)),
+        ("n".into(), Value::int(NumType::I64, n as i128)),
+        ("at".into(), Value::Geometry(cryptand::wkb::encode(&p).expect("a point encodes"))),
+        ("embedding".into(), Value::VectorF32(vec![n as f32, -n as f32, n as f32 * 0.5, 1.0])),
+    ])
+}
+
+const INDEXED: i64 = 400;
+
+fn cmd_write_indexed(path: &str) -> cryptand::Result<()> {
+    let mut db = cryptand::database::Database::create(&PathBuf::from(path), Profile::Desktop)?;
+    let mut c = db.collection("places")?;
+    db.create_spatial_index(&c, "at", 2, None)?;
+    db.create_vector_index(&c, "embedding", 4, "l2", 16)?;
+    for n in 0..INDEXED {
+        c.insert(&mut db.engine, &indexed_doc(n + 1, n))?;
+    }
+    db.commit(Durability::Sync)?;
+    db.close()?;
+    println!("wrote {INDEXED} indexed documents to {path}");
+    Ok(())
+}
+
+/// `(nitrite id, n)` of every document, through the collection.
+fn indexed_live(db: &mut cryptand::database::Database, c: &cryptand::database::Collection) -> cryptand::Result<Vec<(i64, i64)>> {
+    let mut out = Vec::new();
+    for d in c.scan(&mut db.engine)? {
+        if let (Some(Value::NitriteId(id)), Some(Value::Int { neg, mag, .. })) = (d.field("_id"), d.field("n")) {
+            out.push((*id, if *neg { -(*mag as i64) } else { *mag as i64 }));
+        }
+    }
+    Ok(out)
+}
+
+/// Every 7th document found again through both indexes, and both indexes
+/// holding exactly the live documents.
+fn cmd_check_indexed(path: &str) -> cryptand::Result<ExitCode> {
+    let mut db = cryptand::database::Database::open(&PathBuf::from(path), key_arg().as_deref())?;
+    let c = db.collection("places")?;
+    let live = indexed_live(&mut db, &c)?;
+    let sp = db.engine.spatial_indexes.first().map(|i| i.name.clone()).ok_or(cryptand::Error::Invalid("no spatial index".into()))?;
+    let vx = db.engine.vector_indexes.first().map(|i| i.name.clone()).ok_or(cryptand::Error::Invalid("no vector index".into()))?;
+    let mut bad = 0;
+    for &(id, n) in live.iter().filter(|(_, n)| n % 7 == 0) {
+        let q = [n as f32, -n as f32, n as f32 * 0.5, 1.0];
+        let via_vector = db.with_vector(&vx, |v, e| v.search(e, &q, 1, None))?;
+        let via_spatial = db.with_spatial(&sp, |s, e| s.nearest_k(e, &c, n as f64, -(n as f64), 1))?;
+        if via_vector.first().map(|h| h.0) != Some(id) || via_spatial.first() != Some(&id) {
+            bad += 1;
+        }
+    }
+    let ring = [(-1e9, -1e9), (1e9, -1e9), (1e9, 1e9), (-1e9, 1e9), (-1e9, -1e9)];
+    let all = cryptand::wkb::encode(&cryptand::wkb::Geometry::Polygon(vec![ring
+        .iter()
+        .map(|(x, y)| cryptand::wkb::Coord::xy(*x, *y))
+        .collect()]))?;
+    let in_tree = db.with_spatial(&sp, |s, e| s.intersects(e, &c, &all))?.len();
+    let vsize = db.with_vector(&vx, |v, _| Ok(v.len()))? as usize;
+    if in_tree != live.len() || vsize != live.len() {
+        bad += 1;
+    }
+    println!("documents {}, spatial {in_tree}, vector {vsize}", live.len());
+    println!("indexed: {}", if bad == 0 { "ok".to_string() } else { format!("{bad} wrong answers") });
+    Ok(if bad == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+/// Removes every document with `n % 10 == 3` and adds 50 more, through this
+/// implementation's own index maintenance.
+fn cmd_mutate_indexed(path: &str) -> cryptand::Result<()> {
+    let mut db = cryptand::database::Database::open(&PathBuf::from(path), key_arg().as_deref())?;
+    let mut c = db.collection("places")?;
+    let live = indexed_live(&mut db, &c)?;
+    let (max_id, max_n) = live.iter().fold((0, 0), |a, &(id, n)| (a.0.max(id), a.1.max(n)));
+    for &(id, n) in &live {
+        if n % 10 == 3 {
+            c.remove(&mut db.engine, id)?;
+        }
+    }
+    for k in 1..=50 {
+        c.insert(&mut db.engine, &indexed_doc(max_id + k, max_n + k))?;
+    }
+    db.commit(Durability::Sync)?;
+    db.close()?;
+    println!("mutated {path}");
+    Ok(())
+}
+
 fn cmd_verify(path: &str) -> cryptand::Result<ExitCode> {
     let mut e = Engine::open(&PathBuf::from(path), key_arg().as_deref())?;
     let r = e.verify()?;
@@ -571,6 +663,9 @@ fn main() -> ExitCode {
         Some("decrypt") if args.len() >= 2 => cmd_decrypt(&args[1]).map(|_| ExitCode::SUCCESS),
         Some("rotate") if args.len() >= 3 => cmd_rotate(&args[1], &args[2]).map(|_| ExitCode::SUCCESS),
         Some("corpus") if args.len() >= 2 => cmd_corpus(&args[1]),
+        Some("write-indexed") if args.len() >= 2 => cmd_write_indexed(&args[1]).map(|_| ExitCode::SUCCESS),
+        Some("check-indexed") if args.len() >= 2 => cmd_check_indexed(&args[1]),
+        Some("mutate-indexed") if args.len() >= 2 => cmd_mutate_indexed(&args[1]).map(|_| ExitCode::SUCCESS),
         _ => {
             eprintln!(
                 "interop write|read|mutate <tag>|verify <file>|corpus <dir> [--key <hex>]"

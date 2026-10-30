@@ -25,6 +25,8 @@ import 'engine.dart';
 import 'errors.dart';
 import 'analyzer.dart';
 import 'fulltext.dart';
+import 'rtree.dart';
+import 'vector.dart';
 import 'index.dart';
 import 'stats.dart';
 import 'value.dart';
@@ -79,9 +81,16 @@ final class Database {
     final d = catalog.create(name,
         kind: TreeKind.data,
         keyKind: 'nitrite_id',
+        nameDict: _createNameDict(name),
         params: {'type': const CStr(DataTreeType.collection)});
     return Collection(this, name, d);
   }
+
+  /// §5: "a collection is a `data` tree ... and a name dictionary tree beside
+  /// it" (F-200: Dart made none, so Rust and Java had nowhere to intern).
+  /// Dart writes names inline; the tree is for the other two.
+  int _createNameDict(String owner) =>
+      catalog.create('$owner\$names', kind: TreeKind.nameDict, owner: owner, keyKind: 'u32').treeId;
 
   /// Creates a repository, keyed or not, §5.
   ///
@@ -93,6 +102,7 @@ final class Database {
     final d = catalog.create(name,
         kind: TreeKind.data,
         keyKind: 'nitrite_id',
+        nameDict: _createNameDict(name),
         params: {
           'type': const CStr(DataTreeType.repository),
           'entity': CStr(entity),
@@ -105,6 +115,38 @@ final class Database {
     final d = catalog.get(name);
     if (d == null || d.kind != TreeKind.data) return null;
     return Collection(this, name, d);
+  }
+
+  /// Open spatial and vector indexes, by name. They hold copied pages, so
+  /// they live here rather than in a [Collection], which is a fresh object
+  /// per lookup; the engine's commit republishes them.
+  final Map<String, SpatialIndex> spatialIndexes = {};
+  final Map<String, VectorIndex> vectorIndexes = {};
+  final Set<String> _indexesOpened = {};
+  final Map<int, NameDict> _dicts = {};
+
+  /// Opens [owner]'s spatial and vector indexes once.
+  void _openIndexes(String owner) {
+    if (!_indexesOpened.add(owner)) return;
+    for (final (n, d) in catalog.all) {
+      if (d.owner != owner) continue;
+      if (d.kind == TreeKind.rtree && !spatialIndexes.containsKey(n)) {
+        _register(spatialIndexes[n] = SpatialIndex(this, n, d));
+      } else if (d.kind == TreeKind.vectorGraph && !vectorIndexes.containsKey(n)) {
+        _register(vectorIndexes[n] = VectorIndex(this, n, d));
+      }
+    }
+  }
+
+  void _register(Object ix) => engine.commitHooks.add(
+      ix is SpatialIndex ? ix.commit : (ix as VectorIndex).commit);
+
+  String _uniqueName(String base) {
+    var name = base;
+    for (var i = 2; catalog.get(name) != null; i++) {
+      name = '$base-$i';
+    }
+    return name;
   }
 }
 
@@ -134,6 +176,29 @@ final class Collection {
 
   Engine get _e => db.engine;
 
+  /// F-200: the field-name dictionary documents written by Java and Rust
+  /// encode against (02 §5.3), seeded with §5.4's reserved fields at 1-5 as
+  /// they hold them. Dart writes names inline, so this only ever grows from
+  /// the file. Cached per data tree on the [Database].
+  NameDict get _names => db._dicts[treeId] ??= _loadNames();
+
+  NameDict _loadNames() {
+    final d = NameDict.withReservedFields();
+    final tree = descriptor.nameDict;
+    if (tree == null) return d;
+    final rows = <int, String>{
+      for (final e in _e.scanTree(tree))
+        (decodeKey(e.cke) as CInt).magnitude.lo: (decodeValue(e.value) as CStr).value
+    };
+    for (final id in rows.keys.toList()..sort()) {
+      if (id <= d.length && d.nameOf(id) == rows[id]) continue;
+      if (d.intern(rows[id]!) != id) {
+        throw CorruptionException('name_id $id of $name does not follow the ids before it');
+      }
+    }
+    return d;
+  }
+
   /// Creates an index over [fields], §2.
   ///
   /// The tree name is a convention and nothing parses it; the binding is
@@ -154,7 +219,7 @@ final class Collection {
         kind: TreeKind.index, owner: name, params: idx.params);
     // Backfill: every document already present produces its entries now.
     for (final e in _e.scanTree(treeId)) {
-      final doc = expectValue<CDoc>(decodeValue(e.value), 'document');
+      final doc = expectValue<CDoc>(decodeValue(e.value, dict: _names), 'document');
       _writeIndexEntries(idx, d.treeId, doc, _idOf(e.cke), remove: false);
     }
     return d;
@@ -165,10 +230,114 @@ final class Collection {
           if (d.kind == TreeKind.index) (d, IndexDescriptor.fromDescriptor(d))
       ];
 
+  /// This collection's open spatial and vector indexes.
+  Iterable<SpatialIndex> get spatialIndexes {
+    db._openIndexes(name);
+    return db.spatialIndexes.values.where((i) => i.owner == name);
+  }
+
+  Iterable<VectorIndex> get vectorIndexes {
+    db._openIndexes(name);
+    return db.vectorIndexes.values.where((i) => i.owner == name);
+  }
+
+  /// Creates a spatial index over a geometry field and populates it,
+  /// `08-spatial.md` §2. `dimensions = 3` always means Z, never M.
+  SpatialIndex createSpatialIndex(String field, {int dimensions = 2, int? srid}) {
+    if (dimensions < 2 || dimensions > 4) {
+      throw InvalidArgumentException('dimensions $dimensions outside 2..4');
+    }
+    db._openIndexes(name);
+    final indexName = db._uniqueName('idx:$name:$field:spatial');
+    final d = db.catalog.create(indexName,
+        kind: TreeKind.rtree,
+        owner: name,
+        keyKind: 'opaque',
+        features: 1 << Feature.spatial,
+        params: {
+          'index_type': const CStr(IndexType.spatial),
+          'data_tree': CInt.of(NumType.u32, treeId),
+          'field': CStr(field),
+          'dimensions': CInt.of(NumType.u8, dimensions),
+          if (srid != null) 'srid': CInt.of(NumType.u32, srid),
+        }).withRoot(0, 0);
+    db.catalog.put(indexName, d);
+    final ix = SpatialIndex(db, indexName, d);
+    for (final (id, doc) in all) {
+      ix.put((id as CNitriteId).id, doc, null);
+    }
+    db._register(db.spatialIndexes[indexName] = ix);
+    _e.commit();
+    return ix;
+  }
+
+  /// Creates a vector index over a `VECTOR` field, `09-vector.md` §5, with
+  /// both slot maps named in the descriptor.
+  VectorIndex createVectorIndex(String field,
+      {required int dim, String metric = VectorMetric.l2, int initialSlots = 16}) {
+    vectorDistance(const [0.0], const [0.0], metric); // refuses an unknown one
+    db._openIndexes(name);
+    final indexName = db._uniqueName('idx:$name:$field:vector');
+    final graph = db.catalog.create(indexName,
+        kind: TreeKind.vectorGraph,
+        owner: name,
+        keyKind: 'array',
+        features: 1 << Feature.vector);
+    final slots = db.catalog.create('$indexName:slots', kind: TreeKind.kv, owner: indexName);
+    final docs = db.catalog.create('$indexName:docs', kind: TreeKind.kv, owner: indexName);
+    final region = VectorRegion.create(_e.store,
+        dim: dim, slots: initialSlots < 2 ? 2 : initialSlots);
+    CInt u(NumType t, int v) => CInt.of(t, v);
+    // As Java: the adjacency is a copy-on-write tree rooted at `root`
+    // (F-196), so `levelled` is false whatever 05 §3's kind table says.
+    final d = graph.with_({
+      'levelled': const CBool(false),
+      'params': CDoc({
+        'index_type': const CStr(IndexType.vector),
+        'data_tree': u(NumType.u32, treeId),
+        'field': CStr(field),
+        'dim': u(NumType.u32, dim),
+        'metric': CStr(metric),
+        'algorithm': const CStr('vamana'),
+        'precision': const CStr('f32'),
+        'vector_region': u(NumType.u64, region.startPage),
+        'entry_points': CArray(const []),
+        'max_level': u(NumType.u8, 0),
+        'm': u(NumType.u16, 32),
+        'ef_construction': u(NumType.u16, 200),
+        'neighbours_sorted': const CBool(false),
+        'slot_to_doc': u(NumType.u32, slots.treeId),
+        'doc_to_slot': u(NumType.u32, docs.treeId),
+        // §3: adjacency records are read randomly and hot.
+        'inline_values': const CBool(true),
+      }),
+    }).withRoot(0, 0);
+    db.catalog.put(indexName, d);
+    final ix = VectorIndex(db, indexName, d);
+    for (final (id, doc) in all) {
+      ix.put((id as CNitriteId).id, doc);
+    }
+    db._register(db.vectorIndexes[indexName] = ix);
+    _e.commit();
+    return ix;
+  }
+
+  /// The spatial and vector side of a write; [doc] null is a delete.
+  void _maintain(CValue id, CDoc? doc, CDoc? previous) {
+    final n = (id as CNitriteId).id;
+    for (final ix in spatialIndexes) {
+      doc == null ? ix.remove(n, previous) : ix.put(n, doc, previous);
+    }
+    for (final ix in vectorIndexes) {
+      doc == null ? ix.remove(n) : ix.put(n, doc);
+    }
+  }
+
   /// Inserts or replaces one document, maintaining every index in the same
   /// batch (§8).
   void put(CValue id, CDoc doc) {
     final existing = get(id);
+    if (id is CNitriteId) _maintain(id, doc, existing);
     for (final (tree, idx) in indexes) {
       if (existing != null) {
         _writeIndexEntries(idx, tree.treeId, existing, id, remove: true);
@@ -195,6 +364,7 @@ final class Collection {
   void remove(CValue id) {
     final existing = get(id);
     if (existing == null) return;
+    if (id is CNitriteId) _maintain(id, null, existing);
     for (final (tree, idx) in indexes) {
       _writeIndexEntries(idx, tree.treeId, existing, id, remove: true);
     }
@@ -207,12 +377,12 @@ final class Collection {
 
   CDoc? get(CValue id) {
     final v = _e.get(treeId, id);
-    return v == null ? null : expectValue<CDoc>(decodeValue(v), 'document');
+    return v == null ? null : expectValue<CDoc>(decodeValue(v, dict: _names), 'document');
   }
 
   Iterable<(CValue, CDoc)> get all sync* {
     for (final e in _e.scanTree(treeId)) {
-      yield (_idOf(e.cke), expectValue<CDoc>(decodeValue(e.value), 'document'));
+      yield (_idOf(e.cke), expectValue<CDoc>(decodeValue(e.value, dict: _names), 'document'));
     }
   }
 

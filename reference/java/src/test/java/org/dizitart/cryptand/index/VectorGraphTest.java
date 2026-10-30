@@ -119,4 +119,28 @@ class VectorGraphTest {
             AdjacencyTree.DIRTY_BUDGET = saved;
         }
     }
+
+    @Test
+    @DisplayName("F-198: clear() empties the spatial and vector indexes of a collection")
+    void clearRetractsIndexes(@TempDir Path dir) {
+        Engine.Options o = new Engine.Options();
+        o.profile = Profile.DESKTOP;
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.create(dir.resolve("c.cryptand"), o)) {
+            Collection c = db.collection("c");
+            SpatialIndex sp = c.createSpatialIndex("loc", 2, null);
+            VectorIndex vx = c.createVectorIndex("emb", 2, "l2", 4);
+            for (int i = 1; i <= 50; i++) {
+                Map<String, Value> f = new LinkedHashMap<>();
+                f.put("loc", new Value.Geometry(org.dizitart.cryptand.geom.Wkb.point(i, 0)));
+                f.put("emb", doc(new float[]{i, 0}).fields().get("emb"));
+                c.insert(Value.Doc.of(f));
+            }
+            c.clear();
+            assertEquals(0, sp.size());
+            assertTrue(vx.search(new float[]{1, 0}, 5).isEmpty(), "a cleared document returned");
+            db.commit();
+            assertTrue(Verify.run(db.engine()).findings().isEmpty(), Verify.run(db.engine()).findings().toString());
+        }
+    }
 }

@@ -188,3 +188,20 @@ fn the_published_metric_vectors_are_reproduced() {
         }
     }
 }
+
+#[test]
+fn the_published_adjacency_records_are_reproduced() {
+    // F-197: every neighbour zigzag, the first a delta from 0 (Java wrote a plain uvar).
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../conformance/vectors");
+    let text = std::fs::read_to_string(format!("{root}/vector/adjacency.json")).expect("vector/adjacency.json");
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for c in doc["cases"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let ns: Vec<u64> = c["neighbours"].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).collect();
+        let want = c["record_hex"].as_str().unwrap();
+        let got: String = cryptand::vector::Adjacency { neighbours: ns.clone() }.encode().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(want, got, "{name}");
+        let raw: Vec<u8> = (0..want.len() / 2).map(|i| u8::from_str_radix(&want[2 * i..2 * i + 2], 16).unwrap()).collect();
+        assert_eq!(ns, cryptand::vector::Adjacency::decode(&raw).unwrap().neighbours, "{name}");
+    }
+}

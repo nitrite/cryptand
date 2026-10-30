@@ -480,26 +480,87 @@ public final class Interop {
         System.out.println("wrote " + INDEXED + " indexed documents to " + path);
     }
 
-    /** Every 7th document found again through both indexes. */
+    /** {@code n -> nitrite id} of every document, through the collection. */
+    private static Map<Long, Long> indexedLive(org.dizitart.cryptand.Collection c) {
+        Map<Long, Long> live = new java.util.TreeMap<>();
+        try (Engine.Cursor cur = c.scan(false)) {
+            while (cur.next()) {
+                long id = ((Value.NitriteId) org.dizitart.cryptand.key.Cke.decode(cur.row().key())).id();
+                Value n = c.decode(cur.row().value()).field("n");
+                if (n != null) {
+                    live.put(SegmentMeta.longOf(n), id);
+                }
+            }
+        }
+        return live;
+    }
+
+    private static Value.Doc indexedDoc(long n) {
+        ByteWriter v = new ByteWriter(16);
+        v.f32(n).f32(-n).f32(n * 0.5f).f32(1);
+        Map<String, Value> f = new LinkedHashMap<>();
+        f.put("n", Value.i64(n));
+        f.put("at", new Value.Geometry(new ByteWriter(21).u8(1).u32(1).f64(n).f64(-n).toBytes()));
+        f.put("embedding", new Value.Vector(Value.Vector.DTYPE_F32, 4, v.toBytes()));
+        return Value.Doc.of(f);
+    }
+
+    /**
+     * Every 7th document found again through both indexes, and both indexes
+     * holding exactly the live documents (F-195/F-196 leg: any writer, any
+     * mutator).
+     */
     private static int checkIndexed(String path, byte[] key) {
         Engine.Options o = options(key);
         o.durability = Superblock.Durability.OS;
         try (Database db = Database.open(Path.of(path), o)) {
             org.dizitart.cryptand.Collection c = db.collection("places");
+            Map<Long, Long> live = indexedLive(c);
+            org.dizitart.cryptand.index.VectorIndex vx = c.vectorIndexes().get(0);
+            org.dizitart.cryptand.index.SpatialIndex sp = c.spatialIndexes().get(0);
             int bad = 0;
-            for (int i = 0; i < INDEXED; i += 7) {
-                long viaVector = c.vectorIndexes().get(0).search(new float[] {i, -i, i * 0.5f, 1}, 1).get(0).nitriteId();
-                long viaSpatial = c.spatialIndexes().get(0).nearestK(i, -i, 1).get(0);
-                for (long id : new long[] {viaVector, viaSpatial}) {
-                    Value n = c.get(id).field("n");
-                    if (n == null || SegmentMeta.longOf(n) != i) {
-                        bad++;
-                    }
+            for (Map.Entry<Long, Long> e : live.entrySet()) {
+                long n = e.getKey();
+                if (n % 7 != 0) {
+                    continue;
+                }
+                long viaVector = vx.search(new float[] {n, -n, n * 0.5f, 1}, 1).get(0).nitriteId();
+                long viaSpatial = sp.nearestK(n, -n, 1).get(0);
+                if (viaVector != e.getValue() || viaSpatial != e.getValue()) {
+                    bad++;
                 }
             }
+            int inTree = sp.intersects(new ByteWriter(93).u8(1).u32(3).u32(1).u32(5)
+                    .f64(-1e9).f64(-1e9).f64(1e9).f64(-1e9).f64(1e9).f64(1e9)
+                    .f64(-1e9).f64(1e9).f64(-1e9).f64(-1e9).toBytes()).size();
+            if (inTree != live.size() || vx.size() != live.size()) {
+                bad++;
+            }
+            System.out.println("documents " + live.size() + ", spatial " + inTree + ", vector " + vx.size());
             System.out.println("indexed: " + (bad == 0 ? "ok" : bad + " wrong answers"));
             return bad == 0 ? 0 : 1;
         }
+    }
+
+    /** Removes every document with {@code n % 10 == 3} and adds 50 more, through Java's indexes. */
+    private static void mutateIndexed(String path, byte[] key) {
+        Engine.Options o = options(key);
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.open(Path.of(path), o)) {
+            org.dizitart.cryptand.Collection c = db.collection("places");
+            Map<Long, Long> live = indexedLive(c);
+            long maxN = 0;
+            for (Map.Entry<Long, Long> e : live.entrySet()) {
+                maxN = Math.max(maxN, e.getKey());
+                if (e.getKey() % 10 == 3) {
+                    c.remove(e.getValue());
+                }
+            }
+            for (long k = 1; k <= 50; k++) {
+                c.insert(indexedDoc(maxN + k));
+            }
+        }
+        System.out.println("mutated " + path);
     }
 
     /** F-072: {@code rotate <encrypted file> <new key hex> --key K}, copy-and-swap. */
@@ -731,6 +792,8 @@ public final class Interop {
                 decrypt(args[1], key, java.util.Arrays.asList(args).contains("--half"));
             } else if (args.length >= 2 && args[0].equals("write-indexed")) {
                 writeIndexed(args[1], key);
+            } else if (args.length >= 2 && args[0].equals("mutate-indexed")) {
+                mutateIndexed(args[1], key);
             } else if (args.length >= 2 && args[0].equals("check-indexed")) {
                 System.exit(checkIndexed(args[1], key));
             } else if (args.length >= 3 && args[0].equals("rotate")) {

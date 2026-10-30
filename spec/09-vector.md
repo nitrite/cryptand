@@ -94,7 +94,7 @@ Adjacency record:
 
 ```
 u16   degree
-uvar  neighbour_delta × degree     -- zigzag deltas of slot_id, first absolute
+uvar  neighbour_delta × degree     -- zigzag deltas of slot_id, the first a delta from 0
 ```
 
 For **HNSW**, `level` is the graph layer (0 is the base layer, containing every

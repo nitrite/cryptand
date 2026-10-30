@@ -87,6 +87,11 @@ public final class Collection {
 
     /** Interns any field name the document uses that the dictionary does not hold yet. */
     private void internNames(Value value, Engine.Batch batch, List<Integer> added) {
+        if (dictTreeId < 0) {
+            // F-200: a collection with no dictionary tree (Dart created them
+            // so) gets its names inline; interning wrote rows to tree -1.
+            return;
+        }
         if (value instanceof Value.Doc) {
             Value.Doc doc = ((Value.Doc) value);
             for (Map.Entry<String, Value> e : doc.fields().entrySet()) {
@@ -206,8 +211,31 @@ public final class Collection {
     }
 
 
-    /** Removes every document with one range delete rather than O(n) tombstones. */
+    /**
+     * Removes every document with one range delete rather than O(n) tombstones.
+     * F-198: a spatial, vector or text index is retracted document by document
+     * first; a vector search returns slots, so a stale one named a document
+     * that is gone (§8). ponytail: O(n) removes then; a whole-index clear is
+     * the upgrade if a large indexed clear matters.
+     */
     public void clear() {
+        if (!spatialIndexes().isEmpty() || !vectorIndexes().isEmpty() || !textIndexes().isEmpty()) {
+            try (Engine.Cursor c = scan(false)) {
+                while (c.next()) {
+                    long id = ((Value.NitriteId) Cke.decode(c.row().key())).id();
+                    Value.Doc previous = decode(c.row().value());
+                    for (SpatialIndex index : spatialIndexes()) {
+                        index.remove(id, previous);
+                    }
+                    for (VectorIndex index : vectorIndexes()) {
+                        index.remove(id);
+                    }
+                    for (FullTextIndex index : textIndexes()) {
+                        index.remove(id, previous);
+                    }
+                }
+            }
+        }
         Engine.Batch b = engine.batch();
         b.removeRange(descriptor.treeId(), Cke.UNBOUNDED_BELOW, new byte[]{(byte) 0xFE});
         for (IndexBinding index : indexes()) {
@@ -249,7 +277,7 @@ public final class Collection {
             index.put(id, doc, previous);
         }
         Long ttl = ttlMs();
-        byte[] value = Cve.encode(doc, names);
+        byte[] value = Cve.encode(doc, dictTreeId < 0 ? null : names);
         if (ttl != null) {
             b.putWithExpiry(descriptor.treeId(), documentKey(id), value,
                     engine.options().clock.getAsLong() + ttl);

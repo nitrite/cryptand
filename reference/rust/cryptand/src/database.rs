@@ -104,6 +104,7 @@ impl Database {
         if let Some(d) = self.engine.catalog.get(&mut self.engine.pager, name)? {
             let dict_tree = d.name_dict().unwrap_or(0);
             let dict = self.load_dict(dict_tree)?;
+            self.open_indexes(name)?;
             return Ok(Collection { name: name.to_string(), tree: d.tree_id(), dict_tree, dict });
         }
         let now = crate::engine::now_millis();
@@ -155,14 +156,14 @@ impl Database {
     }
 
     fn load_dict(&mut self, dict_tree: u32) -> Result<NameDict> {
-        let mut d = NameDict {
-            by_name: BTreeMap::new(),
-            by_id: BTreeMap::new(),
-            next_id: 1,
-            persisted_upto: 0,
-        };
+        // F-200: seeded with §5.4's reserved fields at 1-5, as Java and Dart
+        // hold them. Java persists only the names after them, so a Java
+        // document's `_id` (name_id 1) read as "unknown name_id 1". A
+        // persisted entry still wins over a seeded one.
+        let mut d = NameDict::new();
+        d.persisted_upto = 0;
         if dict_tree == 0 {
-            return Ok(NameDict::new());
+            return Ok(d);
         }
         for (k, v) in self.engine.scan_tree(dict_tree, None, None, None, true)? {
             let id = match cke::decode_all(&k)? {
@@ -170,16 +171,179 @@ impl Database {
                 _ => continue,
             };
             if let Value::Str(name) = cve::decode_all(&v, &|_| None)? {
-                d.by_name.insert(name.clone(), id);
-                d.by_id.insert(id, name);
+                if let Some(old) = d.by_id.insert(id, name.clone()) {
+                    d.by_name.remove(&old);
+                }
+                d.by_name.insert(name, id);
                 d.next_id = d.next_id.max(id + 1);
                 d.persisted_upto = d.persisted_upto.max(id);
             }
         }
-        if d.by_id.is_empty() {
-            return Ok(NameDict::new());
-        }
         Ok(d)
+    }
+
+    /// Opens `owner`'s spatial and vector indexes into the engine, which
+    /// commits them with every commit and maintains them on every
+    /// [`Collection::insert`] and [`Collection::remove`].
+    fn open_indexes(&mut self, owner: &str) -> Result<()> {
+        let cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new((0, 0), 16));
+        let all = cat.all(&mut self.engine.pager);
+        self.engine.catalog = cat;
+        for (n, d) in all? {
+            if d.owner() != Some(owner) {
+                continue;
+            }
+            if d.kind() == kind::RTREE && !self.engine.spatial_indexes.iter().any(|i| i.name == n) {
+                let ix = crate::rtree::SpatialIndex::open(&mut self.engine, &n, d)?;
+                self.engine.spatial_indexes.push(ix);
+            } else if d.kind() == kind::VECTOR_GRAPH && !self.engine.vector_indexes.iter().any(|i| i.name == n) {
+                let ix = crate::vector::VectorIndex::open(&mut self.engine, &n, d)?;
+                self.engine.vector_indexes.push(ix);
+            }
+        }
+        Ok(())
+    }
+
+    fn unique_name(&mut self, base: &str) -> Result<String> {
+        let mut name = base.to_string();
+        for i in 2.. {
+            if self.engine.catalog.get(&mut self.engine.pager, &name)?.is_none() {
+                break;
+            }
+            name = format!("{base}-{i}");
+        }
+        Ok(name)
+    }
+
+    fn create_tree(
+        &mut self,
+        name: &str,
+        kind_name: &str,
+        owner: &str,
+        key_kind: Option<&str>,
+        features: u64,
+        params: Vec<(String, Value)>,
+    ) -> Result<crate::catalog::TreeDescriptor> {
+        let mut cat = std::mem::replace(&mut self.engine.catalog, crate::catalog::Catalog::new((0, 0), 16));
+        let d = cat.create(
+            &mut self.engine.pager,
+            name,
+            kind_name,
+            Some(owner),
+            None,
+            key_kind,
+            features,
+            params,
+            crate::engine::now_millis(),
+        );
+        self.engine.catalog = cat;
+        d
+    }
+
+    /// Creates a spatial index over a geometry field and populates it,
+    /// `08-spatial.md` §2. `dimensions = 3` always means Z, never M.
+    pub fn create_spatial_index(&mut self, c: &Collection, field: &str, dimensions: u8, srid: Option<u32>) -> Result<String> {
+        if !(2..=4).contains(&dimensions) {
+            return invalid(format!("dimensions {dimensions} outside 2..4"));
+        }
+        let name = self.unique_name(&format!("idx:{}:{field}:spatial", c.name))?;
+        let mut params = vec![
+            ("index_type".to_string(), Value::Str(index_type::SPATIAL.into())),
+            ("data_tree".to_string(), Value::int(NumType::U32, c.tree as i128)),
+            ("field".to_string(), Value::Str(field.into())),
+            ("dimensions".to_string(), Value::int(NumType::U8, dimensions as i128)),
+        ];
+        if let Some(s) = srid {
+            params.push(("srid".to_string(), Value::int(NumType::U32, s as i128)));
+        }
+        let d = self.create_tree(&name, kind::RTREE, &c.name, Some("opaque"), feature::bit(feature::SPATIAL), params)?;
+        let d = d.with_root((0, 0));
+        self.engine.catalog.put(&mut self.engine.pager, &name, &d)?;
+        let mut ix = crate::rtree::SpatialIndex::open(&mut self.engine, &name, d)?;
+        for doc in c.scan(&mut self.engine)? {
+            if let Some(Value::NitriteId(id)) = doc.field("_id") {
+                ix.put(&mut self.engine, *id, &doc, None, None)?;
+            }
+        }
+        self.engine.spatial_indexes.push(ix);
+        self.commit(Durability::Sync)?;
+        Ok(name)
+    }
+
+    /// Creates a vector index over a `VECTOR` field, `09-vector.md` §5, with
+    /// both slot maps named in the descriptor.
+    pub fn create_vector_index(&mut self, c: &Collection, field: &str, dim: u32, metric: &str, initial_slots: u64) -> Result<String> {
+        crate::vector::Metric::parse(metric)?;
+        let name = self.unique_name(&format!("idx:{}:{field}:vector", c.name))?;
+        let graph = self.create_tree(&name, kind::VECTOR_GRAPH, &c.name, Some("array"), feature::bit(feature::VECTOR), vec![])?;
+        let slots = self.create_tree(&format!("{name}:slots"), kind::KV, &name, None, 0, vec![])?;
+        let docs = self.create_tree(&format!("{name}:docs"), kind::KV, &name, None, 0, vec![])?;
+        let region = crate::vector::Region::create(&mut self.engine.pager, dim, crate::vector::DType::F32, initial_slots.max(2))?;
+        let u = |w: NumType, v: u64| Value::int(w, v as i128);
+        let params = vec![
+            ("index_type".to_string(), Value::Str(index_type::VECTOR.into())),
+            ("data_tree".to_string(), u(NumType::U32, c.tree as u64)),
+            ("field".to_string(), Value::Str(field.into())),
+            ("dim".to_string(), u(NumType::U32, dim as u64)),
+            ("metric".to_string(), Value::Str(metric.into())),
+            ("algorithm".to_string(), Value::Str("vamana".into())),
+            ("precision".to_string(), Value::Str("f32".into())),
+            ("vector_region".to_string(), u(NumType::U64, region.start_page)),
+            ("entry_points".to_string(), Value::Array(vec![])),
+            ("max_level".to_string(), u(NumType::U8, 0)),
+            ("m".to_string(), u(NumType::U16, 32)),
+            ("ef_construction".to_string(), u(NumType::U16, 200)),
+            ("neighbours_sorted".to_string(), Value::Bool(false)),
+            ("slot_to_doc".to_string(), u(NumType::U32, slots.tree_id() as u64)),
+            ("doc_to_slot".to_string(), u(NumType::U32, docs.tree_id() as u64)),
+            // §3: adjacency records are read randomly and hot.
+            ("inline_values".to_string(), Value::Bool(true)),
+        ];
+        // As Java: the adjacency is a copy-on-write tree rooted at `root`
+        // (F-196), so `levelled` is false whatever 05 §3's kind table says.
+        let d = graph
+            .with(vec![("levelled", Some(Value::Bool(false))), ("params", Some(Value::Doc(params)))])
+            .with_root((0, 0));
+        self.engine.catalog.put(&mut self.engine.pager, &name, &d)?;
+        let mut ix = crate::vector::VectorIndex::open(&mut self.engine, &name, d)?;
+        for doc in c.scan(&mut self.engine)? {
+            if let Some(Value::NitriteId(id)) = doc.field("_id") {
+                ix.put(&mut self.engine, *id, &doc)?;
+            }
+        }
+        self.engine.vector_indexes.push(ix);
+        self.commit(Durability::Sync)?;
+        Ok(name)
+    }
+
+    /// Runs `f` on the open spatial index `name`.
+    pub fn with_spatial<T>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut crate::rtree::SpatialIndex, &mut Engine) -> Result<T>,
+    ) -> Result<T> {
+        let mut all = std::mem::take(&mut self.engine.spatial_indexes);
+        let r = match all.iter_mut().find(|i| i.name == name) {
+            Some(ix) => f(ix, &mut self.engine),
+            None => invalid(format!("no open spatial index {name}")),
+        };
+        self.engine.spatial_indexes = all;
+        r
+    }
+
+    /// Runs `f` on the open vector index `name`.
+    pub fn with_vector<T>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut crate::vector::VectorIndex, &mut Engine) -> Result<T>,
+    ) -> Result<T> {
+        let mut all = std::mem::take(&mut self.engine.vector_indexes);
+        let r = match all.iter_mut().find(|i| i.name == name) {
+            Some(ix) => f(ix, &mut self.engine),
+            None => invalid(format!("no open vector index {name}")),
+        };
+        self.engine.vector_indexes = all;
+        r
     }
 
     /// §11 — the enumerations a reader must support, given only the catalog.
@@ -236,12 +400,22 @@ impl Collection {
         // produces a file Dart and Java both refuse to open — their readers
         // check exactly this — so writing it would be a silent interop break.
         cve::check_writable(doc)?;
-        for (name, _) in fields {
-            self.dict.intern(name);
+        if self.indexed(e) {
+            let previous = self.get(e, id)?;
+            self.maintain(e, id, Some(doc), previous.as_ref())?;
         }
-        self.persist_dict(e)?;
-        let dict = &self.dict.by_name;
-        let bytes = cve::encode_with_dict(doc, &|n| dict.get(n).copied());
+        // F-200: a collection with no dictionary tree (Dart created them so)
+        // gets its names inline; interning wrote the rows into tree 0.
+        let bytes = if self.dict_tree == 0 {
+            cve::encode_with_dict(doc, &|_| None)
+        } else {
+            for (name, _) in fields {
+                self.dict.intern(name);
+            }
+            self.persist_dict(e)?;
+            let dict = &self.dict.by_name;
+            cve::encode_with_dict(doc, &|n| dict.get(n).copied())
+        };
         e.put(self.tree, &Value::NitriteId(id), &bytes)?;
         e.publish_if_due()?;
         Ok(id)
@@ -264,12 +438,56 @@ impl Collection {
     }
 
     pub fn remove(&self, e: &mut Engine, id: i64) -> Result<()> {
+        if self.indexed(e) {
+            let Some(previous) = self.get(e, id)? else { return Ok(()) };
+            self.maintain(e, id, None, Some(&previous))?;
+        }
         e.remove(self.tree, &Value::NitriteId(id))?;
         e.publish_if_due()
     }
 
+    /// Whether the engine holds a spatial or vector index of this collection.
+    fn indexed(&self, e: &Engine) -> bool {
+        e.spatial_indexes.iter().any(|i| i.owner == self.name) || e.vector_indexes.iter().any(|i| i.owner == self.name)
+    }
+
+    /// The spatial and vector index side of a write; `doc` None is a delete.
+    fn maintain(&self, e: &mut Engine, id: i64, doc: Option<&Value>, previous: Option<&Value>) -> Result<()> {
+        let mut sp = std::mem::take(&mut e.spatial_indexes);
+        let mut vx = std::mem::take(&mut e.vector_indexes);
+        let r = (|| {
+            for ix in sp.iter_mut().filter(|i| i.owner == self.name) {
+                match doc {
+                    Some(d) => ix.put(e, id, d, previous, None)?,
+                    None => ix.remove(e, id, previous)?,
+                }
+            }
+            for ix in vx.iter_mut().filter(|i| i.owner == self.name) {
+                match doc {
+                    Some(d) => ix.put(e, id, d)?,
+                    None => ix.remove(e, id)?,
+                }
+            }
+            Ok(())
+        })();
+        e.spatial_indexes = sp;
+        e.vector_indexes = vx;
+        r
+    }
+
     /// §2.5's `clear()` — one range delete rather than O(n) tombstones.
+    /// F-198: with a spatial or vector index each document is retracted from
+    /// it first; a vector search returns slots, so a stale one would name a
+    /// document that is gone (§8). ponytail: O(n) removes then; a whole-index
+    /// clear is the upgrade if a large indexed clear matters.
     pub fn clear(&self, e: &mut Engine) -> Result<()> {
+        if self.indexed(e) {
+            for doc in self.scan(e)? {
+                if let Some(Value::NitriteId(id)) = doc.field("_id") {
+                    self.maintain(e, *id, None, Some(&doc))?;
+                }
+            }
+        }
         e.remove_range(self.tree, &Value::NitriteId(i64::MIN), &Value::NitriteId(i64::MAX))?;
         e.publish_if_due()
     }

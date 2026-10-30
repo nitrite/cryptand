@@ -1156,11 +1156,21 @@ final class Engine {
   /// `visible_seq` advancing past a batch's seq range is the commit: §2.3,
   /// "there is no commit record and no two-phase protocol; the watermark is
   /// the commit".
+  /// Run first by every [commit] (F-195/F-196): spatial and vector indexes
+  /// hold copied pages in memory and write them back and republish their
+  /// descriptors here, before the catalog is published, as Java's commit
+  /// hooks do. A commit without them would free pages the published
+  /// descriptor still names.
+  final List<void Function()> commitHooks = [];
+
   int commit({Durability durability = Durability.sync}) {
     if (_closed) throw const InvalidArgumentException('engine is closed');
     _publishDue = false;
     _committing = true;
     try {
+      for (final h in commitHooks) {
+        h();
+      }
       return _commit(durability);
     } finally {
       _committing = false;

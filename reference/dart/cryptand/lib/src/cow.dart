@@ -17,6 +17,7 @@ library;
 
 import 'dart:collection';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'bytes.dart';
@@ -171,6 +172,85 @@ final class PageStore {
     return page;
   }
 
+  /// Plaintext bytes per chunk of an extent that is (or is not) encrypted,
+  /// `spec/14-security.md` §5.4.
+  int chunkBytes(bool encrypted) => encrypted ? pageSize - 24 : pageSize;
+
+  /// Reads [len] plaintext bytes at [plainOff] within an extent's data area.
+  /// [encrypted] is the extent's own head-page flag, never the key in hand.
+  Uint8List readExtentData(
+      int headPage, int dataOffset, int plainOff, int len, bool encrypted) {
+    final base = headPage * pageSize + dataOffset;
+    if (!encrypted) return readAt(base + plainOff, len);
+    final c = crypto;
+    if (c == null) {
+      throw const CannotUnlockException();
+    }
+    final cps = chunkBytes(true);
+    final out = BytesBuilder(copy: false);
+    var off = plainOff;
+    while (out.length < len) {
+      final idx = off ~/ cps, within = off % cps;
+      final pt = decryptExtentChunk(
+          keys: c.ring,
+          headPageId: headPage,
+          chunkIndex: idx,
+          stored: readAt(base + idx * pageSize, pageSize));
+      final take = math.min(len - out.length, pt.length - within);
+      if (take <= 0) {
+        throw CorruptionException('extent chunk $idx is short of the requested bytes',
+            pageId: headPage);
+      }
+      out.add(Uint8List.sublistView(pt, within, within + take));
+      off += take;
+    }
+    return out.takeBytes();
+  }
+
+  /// Writes plaintext bytes into an extent's data area. A partial chunk is a
+  /// read-modify-write under a **fresh** counter: a chunk is one AEAD message
+  /// and patching it in place would reuse its nonce.
+  void writeExtentData(int headPage, int dataOffset, int plainOff,
+      Uint8List buf, bool encrypted) {
+    final base = headPage * pageSize + dataOffset;
+    if (!encrypted) {
+      writeAt(base + plainOff, buf);
+      return;
+    }
+    final c = crypto;
+    if (c == null) {
+      throw const CannotUnlockException();
+    }
+    final cps = chunkBytes(true);
+    var written = 0;
+    while (written < buf.length) {
+      final off = plainOff + written;
+      final idx = off ~/ cps, within = off % cps;
+      final take = math.min(buf.length - written, cps - within);
+      final at = base + idx * pageSize;
+      final chunk = Uint8List(cps);
+      if (within != 0 || take != cps) {
+        final raw = readAt(at, pageSize);
+        final old = ByteData.sublistView(raw).getUint64(0, Endian.little);
+        if (old != 0) {
+          final pt = decryptExtentChunk(
+              keys: c.ring, headPageId: headPage, chunkIndex: idx, stored: raw);
+          chunk.setRange(0, math.min(pt.length, cps), pt);
+        }
+      }
+      chunk.setRange(within, within + take, buf, written);
+      final sealed = encryptExtentChunk(
+          keys: c.ring,
+          headPageId: headPage,
+          chunkIndex: idx,
+          counter: c.nonces.allocate(),
+          plaintext: chunk);
+      final page = Uint8List(pageSize)..setRange(0, sealed.length, sealed);
+      writeAt(at, page);
+      written += take;
+    }
+  }
+
   /// `spec/01-container.md` §7's `page_codec`: the **default** for newly
   /// written pages, never a property of the file. A page's own state is in its
   /// `flags.COMPRESSED` and `codec_or_reserved`, so a file may hold a mixture
@@ -234,7 +314,12 @@ final class PageStore {
       // enforced rather than left to the caller: an extent freed by a commit
       // that is still the newest one is still named by the live superblock,
       // and "no page that a live superblock references is ever overwritten".
-      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId) continue;
+      //
+      // F-199: keyed by commit id first, so the reclaimable extents are a
+      // prefix and the first one past it ends the search. `continue` walked
+      // every unreclaimable extent on each allocation: quadratic in a
+      // session's frees (4000 vector puts with early write-backs, 206 s).
+      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId) break;
       if (e.value >= pages && e.value < bestPages) {
         bestKey = e.key;
         bestPages = e.value;
@@ -1410,5 +1495,327 @@ final class CowTree {
       n = _load(_Node.link(n.payloads[0]));
     }
     return h;
+  }
+}
+
+/// Copied adjacency nodes held before an early write-back (F-196, as Java).
+int adjacencyDirtyBudget = 2048;
+
+final class _ANode {
+  _ANode(this.leaf);
+  final bool leaf;
+
+  /// Leaf: keys. Internal: separators, each the first key under its child.
+  List<Uint8List> key = [];
+  List<Uint8List> val = [];
+  List<int> child = [];
+  List<int> cnt = [];
+  List<int> nonce = [];
+  List<_ANode?> kid = [];
+
+  int get total {
+    if (leaf) return key.length;
+    var t = 0;
+    for (final c in cnt) {
+      t += c;
+    }
+    return t;
+  }
+
+  void insertChild(int at, Uint8List sep, _ANode n) {
+    key.insert(at, sep);
+    cnt.insert(at, n.total);
+    child.insert(at, 0);
+    nonce.insert(at, 0);
+    kid.insert(at, n);
+  }
+
+  /// Leaf: the last key <= k (-1 if none). Internal: the child to descend.
+  int find(Uint8List k) {
+    var lo = 0, hi = key.length - 1, at = -1;
+    while (lo <= hi) {
+      final mid = (lo + hi) >> 1;
+      if (compareKeys(key[mid], k) <= 0) {
+        at = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return leaf ? at : (at < 0 ? 0 : at);
+  }
+}
+
+/// A vector index's adjacency tree (`09-vector.md` §3) as a copy-on-write
+/// B+tree that copies only the paths a write touches — F-196, as Java's
+/// `AdjacencyTree` and Rust's.
+///
+/// The pages are §2.2 copy-on-write pages, the bytes [CowTree] writes, so a
+/// reader cannot tell the two apart. [CowTree] writes a path per put; a graph
+/// insert touches ~m records, so this one keeps copied nodes in memory, writes
+/// them back at [commit] or past [adjacencyDirtyBudget], and frees each old
+/// page when it is copied (reusable after the next commit).
+/// ponytail: put and a whole-tree clear only; §6 keeps a deleted slot's
+/// record, so nothing removes one key.
+final class AdjacencyTree {
+  AdjacencyTree(this.store,
+      {required this.treeId, int root = 0, int rootNonce = 0})
+      : _rootPage = root,
+        _rootNonce = rootNonce {
+    if (root != 0) size = _read(root, rootNonce).total;
+  }
+
+  final PageStore store;
+  final int treeId;
+  _ANode? _root;
+  int _rootPage;
+  int _rootNonce;
+  int size = 0;
+  int _dirty = 0;
+  bool _rewriteAll = false;
+
+  int get root => _rootPage;
+  int get rootNonce => _rootNonce;
+
+  void markDirty() => _rewriteAll = true;
+
+  /// Decoded clean pages for reads. A written page never changes (it is
+  /// copied, not edited), so an entry is valid until the page is freed.
+  /// ponytail: cleared whole at the cap; an LRU if the hit rate matters.
+  final Map<int, _ANode> _clean = {};
+  static const int _cleanCap = 8192;
+
+  _ANode _view(int page, int nonce) {
+    final hit = _clean[page];
+    if (hit != null) return hit;
+    if (_clean.length >= _cleanCap) _clean.clear();
+    return _clean[page] = _read(page, nonce);
+  }
+
+  void _free(int page) {
+    _clean.remove(page);
+    store.free(page);
+  }
+
+  _ANode _read(int page, int nonce) {
+    final c = _Node.decode(store.readBound(page, nonce), page);
+    final n = _ANode(c.isLeaf);
+    for (var i = 0; i < c.count; i++) {
+      n.key.add(c.keys[i]);
+      if (n.leaf) {
+        n.val.add(_Node.valueOf(c.payloads[i]));
+      } else {
+        final (p, e, nc) = _Node.childOf(c.payloads[i]);
+        n.child.add(p);
+        n.cnt.add(e);
+        n.nonce.add(nc);
+        n.kid.add(null);
+      }
+    }
+    return n;
+  }
+
+  _ANode _child(_ANode node, int i) {
+    var k = node.kid[i];
+    if (k == null) {
+      k = node.kid[i] = _read(node.child[i], node.nonce[i]);
+      _free(node.child[i]);
+      node.child[i] = 0;
+      _dirty++;
+    }
+    return k;
+  }
+
+  Uint8List? get(Uint8List k) {
+    var node = _root ?? (_rootPage == 0 ? null : _view(_rootPage, _rootNonce));
+    for (var depth = 0; node != null; depth++) {
+      if (depth > 64) {
+        // F-113: child pointers come from the file; a cycle must not spin.
+        throw CorruptionException('adjacency tree $treeId is deeper than 64 levels');
+      }
+      final i = node.find(k);
+      if (node.leaf) {
+        return i >= 0 && compareKeys(node.key[i], k) == 0 ? node.val[i] : null;
+      }
+      node = node.kid[i] ?? _view(node.child[i], node.nonce[i]);
+    }
+    return null;
+  }
+
+  void put(Uint8List k, Uint8List v) {
+    if (_root == null && _rootPage != 0) {
+      _root = _read(_rootPage, _rootNonce);
+      _free(_rootPage);
+      _rootPage = 0;
+      _dirty++;
+    }
+    var r = _root;
+    if (r == null) {
+      r = _root = _ANode(true);
+      _dirty++;
+    }
+    final split = _put(r, k, v);
+    if (split != null) {
+      _root = _ANode(false)
+        ..insertChild(0, r.key[0], r)
+        ..insertChild(1, split.key[0], split);
+      _dirty++;
+    }
+    if (_dirty > adjacencyDirtyBudget) _writeOut();
+  }
+
+  _ANode? _put(_ANode node, Uint8List k, Uint8List v) {
+    final i = node.find(k);
+    if (node.leaf) {
+      if (i >= 0 && compareKeys(node.key[i], k) == 0) {
+        node.val[i] = v;
+      } else {
+        node.key.insert(i + 1, k);
+        node.val.insert(i + 1, v);
+        size++;
+      }
+    } else {
+      final c = _child(node, i);
+      final s = _put(c, k, v);
+      node.key[i] = c.key[0];
+      node.cnt[i] = c.total;
+      if (s != null) node.insertChild(i + 1, s.key[0], s);
+    }
+    return _fits(node) ? null : _split(node);
+  }
+
+  List<Uint8List> _payloads(_ANode n) => n.leaf
+      ? [for (final v in n.val) _Node.leafPayload(v)]
+      : [
+          for (var i = 0; i < n.key.length; i++)
+            _Node.childPayload(n.child[i], n.cnt[i], n.nonce[i])
+        ];
+
+  bool _fits(_ANode n) =>
+      nodePageBytes(n.key, _payloads(n)) <= store.payloadCap + PageHeader.size;
+
+  _ANode _split(_ANode n) {
+    if (n.key.length < 2) {
+      throw LimitException('adjacency tree $treeId: one record does not fit a '
+          '${store.pageSize}-byte page');
+    }
+    final at = n.key.length ~/ 2;
+    final right = _ANode(n.leaf)..key = n.key.sublist(at);
+    n.key = n.key.sublist(0, at);
+    if (n.leaf) {
+      right.val = n.val.sublist(at);
+      n.val = n.val.sublist(0, at);
+    } else {
+      right
+        ..child = n.child.sublist(at)
+        ..cnt = n.cnt.sublist(at)
+        ..nonce = n.nonce.sublist(at)
+        ..kid = n.kid.sublist(at);
+      n
+        ..child = n.child.sublist(0, at)
+        ..cnt = n.cnt.sublist(0, at)
+        ..nonce = n.nonce.sublist(0, at)
+        ..kid = n.kid.sublist(0, at);
+    }
+    _dirty++;
+    return right;
+  }
+
+  /// Frees every page: the tree is empty after the next commit.
+  void clear() {
+    void freeUnder(_ANode n, int depth) {
+      if (depth > 64) {
+        throw CorruptionException('adjacency tree $treeId is deeper than 64 levels');
+      }
+      for (var i = 0; i < n.child.length; i++) {
+        final k = n.kid[i];
+        if (k != null) {
+          freeUnder(k, depth + 1);
+        } else {
+          final c = _read(n.child[i], n.nonce[i]);
+          _free(n.child[i]);
+          freeUnder(c, depth + 1);
+        }
+      }
+    }
+
+    final r = _root;
+    if (r != null) {
+      freeUnder(r, 0);
+    } else if (_rootPage != 0) {
+      final n = _read(_rootPage, _rootNonce);
+      _free(_rootPage);
+      freeUnder(n, 0);
+    }
+    _root = null;
+    _rootPage = _rootNonce = size = _dirty = 0;
+  }
+
+  void _writeOut() {
+    final r = _root;
+    if (r != null) {
+      final at = _write(r);
+      _rootPage = at.$1;
+      _rootNonce = at.$2;
+      _root = null;
+    }
+    _dirty = 0;
+  }
+
+  /// Writes the copied nodes back; returns the root page and nonce.
+  (int, int) commit() {
+    _writeOut();
+    if (_rewriteAll) {
+      _rewriteAll = false;
+      if (_rootPage != 0) {
+        final at = _rewrite(_rootPage, _rootNonce, 0);
+        _rootPage = at.$1;
+        _rootNonce = at.$2;
+      }
+    }
+    if (_rootPage == 0) _rootNonce = 0;
+    return (_rootPage, _rootNonce);
+  }
+
+  (int, int) _rewrite(int page, int nonce, int depth) {
+    if (depth > 64) {
+      throw CorruptionException('adjacency tree $treeId is deeper than 64 levels');
+    }
+    final n = _read(page, nonce);
+    _free(page);
+    for (var i = 0; i < n.child.length; i++) {
+      final at = _rewrite(n.child[i], n.nonce[i], depth + 1);
+      n.child[i] = at.$1;
+      n.nonce[i] = at.$2;
+    }
+    return _writePage(n);
+  }
+
+  (int, int) _write(_ANode n) {
+    for (var i = 0; i < n.kid.length; i++) {
+      final k = n.kid[i];
+      if (k != null) {
+        final at = _write(k);
+        n.child[i] = at.$1;
+        n.nonce[i] = at.$2;
+        n.kid[i] = null;
+      }
+    }
+    return _writePage(n);
+  }
+
+  (int, int) _writePage(_ANode n) {
+    final page = encodeNodePage(
+      pageSize: store.pageSize,
+      payloadSize: store.payloadCap,
+      isLeaf: n.leaf,
+      keys: n.key,
+      payloads: _payloads(n),
+      subtreeEntries: n.total,
+      treeId: treeId,
+    );
+    final id = store.alloc();
+    store.write(id, page);
+    return (id, store.writtenNonce);
   }
 }

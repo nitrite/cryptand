@@ -128,6 +128,22 @@ pub(crate) fn index_tree_pages(pager: &mut crate::pager::Pager, d: &TreeDescript
     Ok(out)
 }
 
+/// An open index named `name` re-lays itself in this step; false if none is open.
+fn relay_open_index(e: &mut Engine, name: &str) -> Result<bool> {
+    if let Some(ix) = e.spatial_indexes.iter_mut().find(|i| i.name == name) {
+        ix.mark_dirty();
+    } else if e.vector_indexes.iter().any(|i| i.name == name) {
+        let mut vx = std::mem::take(&mut e.vector_indexes);
+        let r = vx.iter_mut().find(|i| i.name == name).unwrap().convert_in_place(e);
+        e.vector_indexes = vx;
+        r?;
+    } else {
+        return Ok(false);
+    }
+    e.commit_indexes()?;
+    Ok(true)
+}
+
 /// Every vector region in the file, found through the descriptors that name
 /// them (`09-vector.md` §5's `params.vector_region`): the engine keeps no list.
 pub(crate) fn vector_regions(e: &mut Engine) -> Result<Vec<(String, TreeDescriptor, u64)>> {
@@ -257,6 +273,10 @@ impl ConvertApi for Engine {
         if self.sb.cipher == 0 || self.keys.is_none() {
             return invalid("the file is not encrypted, or is not unlocked; call encrypt() first");
         }
+        // F-195/F-196: an open index holds copied pages and its own root; it
+        // re-lays itself (Java's registerOwner) rather than being rebuilt
+        // under it. Written back first, so the census sees what it holds.
+        self.commit_indexes()?;
         let c = census(self)?;
         if !c.plain_segments.is_empty() {
             // Every segment, every level, into the last level in one job.
@@ -275,6 +295,9 @@ impl ConvertApi for Engine {
         } else if !c.plain_regions.is_empty() {
             // Re-laid, never re-sealed in place: the chunk size differs.
             for (name, d, start) in c.plain_regions {
+                if relay_open_index(self, &name)? {
+                    continue;
+                }
                 let old = Region::open(&mut self.pager, start)?;
                 let new = old.relocate(&mut self.pager)?;
                 self.pager.free_extent(old.start_page, old.pages, self.sb.commit_id);
@@ -286,6 +309,9 @@ impl ConvertApi for Engine {
             // room for the tag.
             let commit_id = self.sb.commit_id;
             for (name, d) in c.plain_index_trees {
+                if relay_open_index(self, &name)? {
+                    continue;
+                }
                 let root = if is_spatial(&d) {
                     let (old, rows) = rtree_walk(&mut self.pager, &d)?;
                     for p in old {

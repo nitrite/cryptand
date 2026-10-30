@@ -48,7 +48,7 @@ export 'src/catalog.dart'
         TreeDescriptor,
         TreeKind;
 export 'src/checkpoint.dart' show Checkpoint, CheckpointStore;
-export 'src/cow.dart' show CowTree, PageStore;
+export 'src/cow.dart' show AdjacencyTree, CowTree, PageStore, adjacencyDirtyBudget;
 export 'src/crc32c.dart' show crc32c;
 export 'src/database.dart' show Collection, Database, kFormatVersion;
 export 'src/cve.dart'
@@ -119,8 +119,9 @@ export 'src/rtree.dart'
         RTreeEntry,
         RTreeFlags,
         RTreeNode,
-        SpatialEntry,
+        SpatialIndex,
         entryStride,
+        rtreeDirtyBudget,
         maxEntriesFor;
 export 'src/vector.dart'
     show
@@ -131,7 +132,9 @@ export 'src/vector.dart'
         VectorMetric,
         VectorRegion,
         VectorRegionHeader,
-        vectorDistance;
+        vectorAlpha,
+        vectorDistance,
+        vectorEfSearch;
 export 'src/wkb.dart'
     show
         Coord,

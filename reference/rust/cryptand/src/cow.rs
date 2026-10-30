@@ -16,10 +16,10 @@ use crate::varint::{get_uvar, put_uvar};
 
 /// One node held for editing: the decoded form of a §2.2 page.
 #[derive(Clone)]
-struct CowNode {
-    is_leaf: bool,
-    keys: Vec<Vec<u8>>,
-    payloads: Vec<Vec<u8>>,
+pub(crate) struct CowNode {
+    pub(crate) is_leaf: bool,
+    pub(crate) keys: Vec<Vec<u8>>,
+    pub(crate) payloads: Vec<Vec<u8>>,
 }
 
 impl CowNode {
@@ -34,7 +34,7 @@ impl CowNode {
         self.payloads.iter().map(|p| child_of(p).map(|c| c.1).unwrap_or(0)).sum()
     }
 
-    fn decode(page: &[u8], page_id: u64) -> Result<CowNode> {
+    pub(crate) fn decode(page: &[u8], page_id: u64) -> Result<CowNode> {
         let n = Node::parse(page, page_id)?;
         let mut keys = Vec::with_capacity(n.cell_count);
         let mut payloads = Vec::with_capacity(n.cell_count);
@@ -64,7 +64,7 @@ impl CowNode {
 }
 
 /// `u8 kind_flags = INLINE || uvar len || value`.
-fn leaf_payload(value: &[u8]) -> Vec<u8> {
+pub(crate) fn leaf_payload(value: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(value.len() + 6);
     v.push(value_kind::INLINE);
     put_uvar(&mut v, value.len() as u64);
@@ -72,7 +72,7 @@ fn leaf_payload(value: &[u8]) -> Vec<u8> {
     v
 }
 
-fn child_payload(page: u64, entries: u64, nonce: u64) -> Vec<u8> {
+pub(crate) fn child_payload(page: u64, entries: u64, nonce: u64) -> Vec<u8> {
     let mut v = Vec::with_capacity(24);
     v.extend_from_slice(&page.to_le_bytes());
     v.extend_from_slice(&entries.to_le_bytes());
@@ -80,7 +80,7 @@ fn child_payload(page: u64, entries: u64, nonce: u64) -> Vec<u8> {
     v
 }
 
-fn value_of(payload: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn value_of(payload: &[u8]) -> Result<Vec<u8>> {
     let (len, n) = get_uvar(&payload[1..])?;
     let start = 1 + n;
     let end = crate::limits::bounded(len, payload.len() - start, "cow leaf value")? + start;
@@ -96,7 +96,7 @@ fn too_deep<T>() -> Result<T> {
 }
 
 /// `(child_page, child_subtree_entries, child_nonce)`.
-fn child_of(payload: &[u8]) -> Result<(u64, u64, u64)> {
+pub(crate) fn child_of(payload: &[u8]) -> Result<(u64, u64, u64)> {
     if payload.len() < 24 {
         return corrupt("copy-on-write internal cell shorter than 24 bytes");
     }

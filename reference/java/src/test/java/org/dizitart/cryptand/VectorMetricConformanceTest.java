@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -45,6 +46,37 @@ class VectorMetricConformanceTest {
                                 + c.path("note").asText(""));
             }
         }
+    }
+
+    @Test
+    @DisplayName("F-197: adjacency records encode and decode as the shared vector says")
+    void adjacency() {
+        JsonNode doc = Vectors.load("vector/adjacency.json");
+        for (JsonNode c : doc.get("cases")) {
+            List<Long> ns = new java.util.ArrayList<>();
+            c.get("neighbours").forEach(n -> ns.add(n.asLong()));
+            String want = c.get("record_hex").asText();
+            assertEquals(want, hex(VectorIndex.encodeAdjacency(ns)),
+                    c.get("name").asText());
+            assertEquals(ns, VectorIndex.decodeAdjacency(unhex(want)),
+                    c.get("name").asText());
+        }
+    }
+
+    private static String hex(byte[] b) {
+        StringBuilder sb = new StringBuilder();
+        for (byte x : b) {
+            sb.append(String.format("%02x", x & 0xFF));
+        }
+        return sb.toString();
+    }
+
+    private static byte[] unhex(String s) {
+        byte[] out = new byte[s.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (byte) Integer.parseInt(s.substring(2 * i, 2 * i + 2), 16);
+        }
+        return out;
     }
 
     private static float[] floats(JsonNode n) {

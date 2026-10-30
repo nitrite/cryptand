@@ -332,6 +332,12 @@ void main(List<String> args) {
         cmdMutate(args[1], args[2]);
       case 'verify':
         exit(cmdVerify(args[1]));
+      case 'write-indexed':
+        cmdWriteIndexed(args[1]);
+      case 'check-indexed':
+        exit(cmdCheckIndexed(args[1]));
+      case 'mutate-indexed':
+        cmdMutateIndexed(args[1]);
       case 'encrypt':
         // F-072, gate step 7: `--key` is the new raw key; `--half` stops
         // right after the switch, nothing rewritten yet.
@@ -372,4 +378,86 @@ void main(List<String> args) {
     if (Platform.environment['INTEROP_TRACE'] != null) stderr.writeln(st);
     exit(1);
   }
+}
+
+// ---------------------------------------------------------------------------
+// F-195/F-196 leg: a point `at = (n, -n)` and a vector `[n, -n, n/2, 1]` per
+// document, under a spatial and a vector index; any writer, any mutator.
+// ---------------------------------------------------------------------------
+
+const int indexedCount = 400;
+
+CDoc indexedDoc(int id, int n) => CDoc({
+      '_id': CNitriteId(id),
+      'n': CInt.of(NumType.i64, n),
+      'at': CGeometry(encodeWkb(Geometry(
+          type: GeometryType.point,
+          hasZ: false,
+          hasM: false,
+          coords: [Coord(n.toDouble(), -n.toDouble())]))),
+      'embedding': CVector.f32([n.toDouble(), -n.toDouble(), n * 0.5, 1]),
+    });
+
+void cmdWriteIndexed(String path) {
+  DatabaseFile.save(Database(engine: Engine()), path);
+  final db = DatabaseFile.open(path);
+  final c = db.createCollection('places');
+  c.createSpatialIndex('at');
+  c.createVectorIndex('embedding', dim: 4, initialSlots: 16);
+  for (var n = 0; n < indexedCount; n++) {
+    c.put(CNitriteId(n + 1), indexedDoc(n + 1, n));
+  }
+  db.engine.close();
+  print('wrote $indexedCount indexed documents to $path');
+}
+
+/// `n -> nitrite id` of every document, through the collection.
+Map<int, int> indexedLive(Collection c) => {
+      for (final (id, doc) in c.all)
+        if (doc.fields['n'] is CInt)
+          (doc.fields['n'] as CInt).magnitude.lo *
+              ((doc.fields['n'] as CInt).negative ? -1 : 1): (id as CNitriteId).id
+    };
+
+int cmdCheckIndexed(String path) {
+  final db = DatabaseFile.open(path, key: keyArg);
+  final c = db.collection('places')!;
+  final live = indexedLive(c);
+  final sp = c.spatialIndexes.single;
+  final vx = c.vectorIndexes.single;
+  var bad = 0;
+  for (final MapEntry(key: n, value: id) in live.entries) {
+    if (n % 7 != 0) continue;
+    final viaVector = vx.search([n.toDouble(), -n.toDouble(), n * 0.5, 1], 1).first.$1;
+    final viaSpatial = sp.nearestK(Coord(n.toDouble(), -n.toDouble()), 1).first.$1;
+    if (viaVector != id || viaSpatial != id) bad++;
+  }
+  final inTree = sp
+      .intersects(Geometry(type: GeometryType.polygon, hasZ: false, hasM: false, rings: [
+        [const Coord(-1e9, -1e9), const Coord(1e9, -1e9), const Coord(1e9, 1e9),
+         const Coord(-1e9, 1e9), const Coord(-1e9, -1e9)]
+      ]))
+      .length;
+  if (inTree != live.length || vx.size != live.length) bad++;
+  db.engine.close(flushMemtable: false);
+  print('documents ${live.length}, spatial $inTree, vector ${vx.size}');
+  print('indexed: ${bad == 0 ? 'ok' : '$bad wrong answers'}');
+  return bad == 0 ? 0 : 1;
+}
+
+void cmdMutateIndexed(String path) {
+  final db = DatabaseFile.open(path, key: keyArg);
+  final c = db.collection('places')!;
+  final live = indexedLive(c);
+  var maxId = 0, maxN = 0;
+  for (final MapEntry(key: n, value: id) in live.entries) {
+    if (id > maxId) maxId = id;
+    if (n > maxN) maxN = n;
+    if (n % 10 == 3) c.remove(CNitriteId(id));
+  }
+  for (var k = 1; k <= 50; k++) {
+    c.put(CNitriteId(maxId + k), indexedDoc(maxId + k, maxN + k));
+  }
+  db.engine.close();
+  print('mutated $path');
 }

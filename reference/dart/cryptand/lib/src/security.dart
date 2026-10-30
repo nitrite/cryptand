@@ -650,6 +650,32 @@ Uint8List decryptExtentChunk({
   return pt;
 }
 
+/// Section 5.4: seals one extent chunk as `u64 counter || ciphertext || tag`,
+/// the inverse of [decryptExtentChunk].
+Uint8List encryptExtentChunk({
+  required KeyRing keys,
+  required int headPageId,
+  required int chunkIndex,
+  required int counter,
+  required Uint8List plaintext,
+}) {
+  final aad = Uint8List(16);
+  ByteData.sublistView(aad)
+    ..setUint64(0, headPageId, Endian.little)
+    ..setUint64(8, chunkIndex, Endian.little);
+  final sealed = xchacha20Poly1305Encrypt(
+    key: keys.pageKey,
+    nonce24: buildNonce(NonceDomain.page, counter, headPageId, chunkIndex),
+    plaintext: plaintext,
+    aad: aad,
+  );
+  final out = Uint8List(8 + sealed.ciphertext.length + 16);
+  ByteData.sublistView(out).setUint64(0, counter, Endian.little);
+  out.setRange(8, 8 + sealed.ciphertext.length, sealed.ciphertext);
+  out.setRange(8 + sealed.ciphertext.length, out.length, sealed.tag);
+  return out;
+}
+
 /// Encrypts one value-log record body, section 5.3.
 ///
 /// ```

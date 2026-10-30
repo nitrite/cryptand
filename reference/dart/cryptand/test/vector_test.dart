@@ -16,12 +16,19 @@ import 'dart:typed_data';
 import 'package:cryptand/cryptand.dart';
 import 'package:test/test.dart';
 
+VectorRegion region(int dim, int slots) =>
+    VectorRegion.create(PageStore(pageSize: 4096), dim: dim, slots: slots);
+
+VectorRegionHeader headOf(VectorRegion r) =>
+    VectorRegionHeader.decode(r.store.read(r.startPage));
+
 void main() {
   _metrics();
+  _adjacencyVectors();
   group('the vector region, section 2', () {
     test('the head page round-trips with its magic and page alignment', () {
-      final r = VectorRegion(dim: 8, dtype: RegionDType.f32, slotCount: 100);
-      final head = VectorRegionHeader.decode(r.headPage());
+      final r = region(8, 100);
+      final head = headOf(r);
       expect(head.dim, 8);
       expect(head.dtype, RegionDType.f32);
       expect(head.slotCount, 100);
@@ -33,17 +40,17 @@ void main() {
     test('stride pads to a 64-byte boundary for SIMD', () {
       // Section 2: "stride may exceed the natural vector size so slots land on
       // 64-byte boundaries for SIMD. stride >= dim x sizeof(dtype)."
-      final r = VectorRegion(dim: 3, dtype: RegionDType.f32, slotCount: 4);
+      final r = region(3, 4);
       expect(r.stride, 64);
       expect(r.stride, greaterThanOrEqualTo(3 * 4));
-      final wide = VectorRegion(dim: 20, dtype: RegionDType.f32, slotCount: 4);
+      final wide = region(20, 4);
       expect(wide.stride, 128);
     });
 
     test('slot 0 is the null pointer and cannot be written', () {
       // Section 2: "Slot 0 of the first region is reserved and never used, so
       // slot_id = 0 is a null pointer."
-      final r = VectorRegion(dim: 4, dtype: RegionDType.f32, slotCount: 10);
+      final r = region(4, 10);
       expect(VectorRegion.nullSlot, 0);
       expect(() => r.writeVector(0, [1, 2, 3, 4]),
           throwsA(isA<InvalidArgumentException>()));
@@ -54,7 +61,7 @@ void main() {
     test('vectors round-trip positionally, with no mmap anywhere', () {
       // Section 2: "An implementation that cannot mmap reads positionally.
       // Dart does exactly this... No part of this format requires mmap."
-      final r = VectorRegion(dim: 4, dtype: RegionDType.f32, slotCount: 50);
+      final r = region(4, 50);
       for (var i = 1; i < 20; i++) {
         r.writeVector(i, [i * 1.0, i * 2.0, i * 3.0, i * 4.0]);
       }
@@ -110,8 +117,15 @@ void main() {
     });
 
     test('a head page without EXTENT_HEAD is corruption', () {
-      final page = VectorRegion(dim: 4, dtype: RegionDType.f32, slotCount: 4)
-          .headPage();
+      final page = const VectorRegionHeader(
+              dim: 4,
+              dtype: RegionDType.f32,
+              stride: 64,
+              slotCount: 4,
+              liveCount: 0,
+              dataOffset: 4096,
+              nextRegion: 0)
+          .encode(4096);
       // Clear the EXTENT_HEAD flag and repair the checksum the way a naive
       // editor would.
       final tampered = Uint8List.fromList(page);
@@ -207,26 +221,25 @@ void main() {
   });
 
   group('the index, sections 6 and 8', () {
-    VectorIndex build() {
-      final idx = VectorIndex(
-          region: VectorRegion(dim: 2, dtype: RegionDType.f32, slotCount: 100),
-          metric: VectorMetric.l2);
+    (Collection, VectorIndex) build() {
+      final db = Database();
+      final c = db.createCollection('c');
+      final idx = c.createVectorIndex('emb', dim: 2, initialSlots: 4);
       for (var i = 1; i <= 20; i++) {
-        idx.add(i, [i.toDouble(), 0]);
+        c.put(CNitriteId(i), CDoc({'emb': CVector.f32([i.toDouble(), 0])}));
       }
-      return idx;
+      return (c, idx);
     }
 
     test('the two maps are exact inverses', () {
       // Section 6: "a verifier checks that they are exact inverses."
-      final idx = build();
+      final (_, idx) = build();
       expect(idx.verifyMaps(), isEmpty);
-      expect(idx.slotToDoc.length, 20);
-      expect(idx.docToSlot.length, 20);
+      expect(idx.size, 20);
     });
 
     test('search is ordered nearest first with true distances', () {
-      final idx = build();
+      final (_, idx) = build();
       final r = idx.search([0, 0], 3);
       expect(r.map((e) => e.$1), [1, 2, 3]);
       expect(r[0].$2, closeTo(1, 1e-6));
@@ -237,13 +250,10 @@ void main() {
     });
 
     test('a deleted document disappears IMMEDIATELY, before consolidation', () {
-      // Section 6: "A search MUST skip a slot with no document mapping — this
-      // is what makes deletes correct immediately even though the graph is
-      // repaired later, which is the FreshDiskANN property nitrite-vector
-      // already implements."
-      final idx = build();
+      // Section 6: "A search MUST skip a slot with no document mapping".
+      final (c, idx) = build();
       expect(idx.search([0, 0], 1).single.$1, 1);
-      expect(idx.remove(1), isTrue);
+      c.remove(CNitriteId(1));
       expect(idx.search([0, 0], 1).single.$1, 2,
           reason: 'the deleted document is gone from results at once');
       expect(idx.verifyMaps(), isEmpty,
@@ -253,32 +263,49 @@ void main() {
     });
 
     test('a filter excludes documents without breaking the ordering', () {
-      final idx = build();
+      final (_, idx) = build();
       final r = idx.search([0, 0], 3, filter: (d) => d.isEven);
       expect(r.map((e) => e.$1), [2, 4, 6]);
     });
 
-    test('a foreign algorithm falls back to brute force, never to nothing', () {
-      // Section 8: "An implementation MAY refuse to serve a graph built by a
-      // different algorithm — but it MUST then fall back to a brute-force scan
-      // of the vector region, which is always possible and always correct,
-      // rather than returning nothing."
-      final idx = build();
-      expect(idx.willTraverse('hnsw'), isTrue);
-      expect(idx.willTraverse('vamana'), isFalse);
-      final r = idx.search([0, 0], 3, bruteForce: true);
-      expect(r.map((e) => e.$1), [1, 2, 3],
-          reason: 'the fallback is correct, not empty');
+    test('the graph grows the region and links every slot', () {
+      // initialSlots 4: twenty documents doubled the region three times.
+      final (_, idx) = build();
+      expect(idx.region.slotCount, greaterThan(20));
+      for (var s = 2; s <= 20; s++) {
+        expect(idx.neighbours(s), isNotEmpty, reason: 'slot $s is linked');
+      }
     });
 
     test('entry points live in the descriptor, not in the tree', () {
       // Section 5: "The entry point(s) for a search are in the descriptor, not
       // in the tree, so a search starts with zero tree lookups."
-      final idx = build();
-      expect(idx.entryPoints, isNotEmpty);
-      expect(idx.graph, isEmpty,
-          reason: 'no adjacency lookup is needed to start');
+      final (c, idx) = build();
+      c.db.engine.commit();
+      final eps = c.db.catalog.get(idx.name)!.param('entry_points') as CArray;
+      expect(eps.items, isNotEmpty);
     });
+  });
+}
+
+void _adjacencyVectors() {
+  // F-197: every neighbour zigzag, the first a delta from 0.
+  test('the published adjacency records are reproduced', () {
+    final doc = jsonDecode(File(
+            '${Directory.current.path}/../../conformance/vectors/vector/adjacency.json')
+        .readAsStringSync()) as Map<String, Object?>;
+    String hex(List<int> b) =>
+        [for (final x in b) x.toRadixString(16).padLeft(2, '0')].join();
+    for (final c in (doc['cases']! as List).cast<Map<String, Object?>>()) {
+      final ns = (c['neighbours']! as List).cast<int>();
+      final want = c['record_hex']! as String;
+      expect(hex(Adjacency(ns).encodeRaw()), want, reason: '${c['name']}');
+      final raw = Uint8List.fromList([
+        for (var i = 0; i < want.length; i += 2)
+          int.parse(want.substring(i, i + 2), radix: 16)
+      ]);
+      expect(Adjacency.decodeRaw(raw).neighbours, ns, reason: '${c['name']}');
+    }
   });
 }
 

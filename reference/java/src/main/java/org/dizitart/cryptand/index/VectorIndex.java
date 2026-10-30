@@ -565,7 +565,8 @@ public final class VectorIndex {
     }
 
     /**
-     * {@code u16 degree} then zigzag deltas of {@code slot_id}, first absolute.
+     * {@code u16 degree} then zigzag deltas of {@code slot_id}, the first a
+     * delta from 0 (F-197: it was a plain uvar, which R and D read halved).
      *
      * <p>Zigzag because a proximity graph's neighbour list is ordered by
      * distance, not by id, so the deltas are signed.
@@ -576,11 +577,7 @@ public final class VectorIndex {
         long previous = 0;
         for (int i = 0; i < neighbours.size(); i++) {
             long id = neighbours.get(i);
-            if (i == 0) {
-                w.uvar(id);
-            } else {
-                w.ivar(id - previous);
-            }
+            w.ivar(id - previous);
             previous = id;
         }
         return w.toBytes();
@@ -592,7 +589,7 @@ public final class VectorIndex {
         List<Long> out = new ArrayList<>(degree);
         long previous = 0;
         for (int i = 0; i < degree; i++) {
-            long id = i == 0 ? r.uvar() : previous + r.ivar();
+            long id = previous + r.ivar();
             out.add(id);
             previous = id;
         }

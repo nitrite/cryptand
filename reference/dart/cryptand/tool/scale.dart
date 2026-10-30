@@ -8,6 +8,8 @@
 /// ./scale read PATH N    # fresh process: cold open, gets, scan, verify
 /// ./scale index PATH N   # PLAN 6.5: unique + compound index build, probes, analyze, verify
 /// ./scale text PATH N    # PLAN 6.5: full-text index build, searches, verify
+/// ./scale spatial PATH N # PLAN 6.5: R-tree build, near/nearestK vs brute force, verify
+/// ./scale vector PATH N  # PLAN 6.5: 128-d Vamana build, recall@10 vs brute force, verify
 /// ```
 ///
 /// `read` ends with PASS/FAIL against PLAN 6.3's RSS bar (cache + 256 MB). Run
@@ -88,6 +90,14 @@ void main(List<String> args) {
   }
   if (args[0] == 'text') {
     textRung(path, n, out, sw);
+    return;
+  }
+  if (args[0] == 'spatial') {
+    spatialRung(path, n, out, sw);
+    return;
+  }
+  if (args[0] == 'vector') {
+    vectorRung(path, n, out, sw);
     return;
   }
 
@@ -318,6 +328,189 @@ void textRung(String path, int n, Map<String, Object> out, Stopwatch sw) {
     ..['verify_sound'] =
         db.engine.verifyStructure(claims: db.indexClaims()).isSound
     ..['verify_ms'] = v.elapsedMilliseconds
+    ..['rss_verify_mb'] = rss();
+  db.engine.close();
+  stdout.writeln(jsonEncode(out));
+}
+
+Database _freshFile(String path) {
+  if (File(path).existsSync()) File(path).deleteSync();
+  DatabaseFile.save(
+      Database(
+          engine: Engine(
+              pageSize: profile.pageSize,
+              vlogSegmentBytes: profile.vlogSegmentBytes)
+            ..setProfile(profile)),
+      path);
+  return DatabaseFile.open(path);
+}
+
+/// PLAN 6.5 spatial, as Java `RssScale.xy`: point of document i in [0, 1000)^2.
+(double, double) xy(int i) {
+  var z = i * 0x9E3779B97F4A7C15 + 0x51EDC0DE;
+  z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9;
+  z = (z ^ (z >>> 27)) * 0x94D049BB133111EB;
+  z ^= z >>> 31;
+  return ((z >>> 40) * 1000.0 / (1 << 24), (z & 0xFFFFFF) * 1000.0 / (1 << 24));
+}
+
+/// PLAN 6.5, as Java `spatialRung`: a spatial index on point field `loc`;
+/// near and nearestK checked against brute force. ponytail: plaintext only.
+void spatialRung(String path, int n, Map<String, Object> out, Stopwatch sw) {
+  int rss() => ProcessInfo.currentRss >> 20;
+  final db = _freshFile(path);
+  final c = db.createCollection('c');
+  final sp = c.createSpatialIndex('loc');
+  var peak = 0;
+  for (var i = 0; i < n; i++) {
+    final (x, y) = xy(i);
+    c.put(id(i), CDoc({...benchDoc(i).fields, 'loc': CGeometry(encodeWkb(Geometry(
+        type: GeometryType.point, hasZ: false, hasM: false, coords: [Coord(x, y)])))}));
+    if ((i + 1) % 100000 == 0 || i + 1 == n) {
+      db.engine.commit();
+      peak = math.max(peak, rss());
+      stderr.writeln('${i + 1} t=${sw.elapsed.inSeconds} rss_mb=${rss()}');
+    }
+  }
+  out
+    ..['build_s'] = sw.elapsed.inSeconds
+    ..['file_bytes'] = File(path).lengthSync()
+    ..['rss_build_mb'] = peak;
+  var s = 0x51EDC0DE;
+  final us = <int>[], kus = <int>[];
+  var rows = 0;
+  for (var k = 0; k < 1000; k++) {
+    s = s * 6364136223846793005 + 1442695040888963407;
+    final (x, y) = xy((s >>> 11) % n);
+    var t = Stopwatch()..start();
+    final hits = sp.near(Coord(x, y), 1).length;
+    us.add(t.elapsedMicroseconds);
+    if (hits < 1) throw StateError('near probe $k');
+    rows += hits;
+    t = Stopwatch()..start();
+    if (sp.nearestK(Coord(x, y), 10).length != math.min(10, n)) throw StateError('knn probe $k');
+    kus.add(t.elapsedMicroseconds);
+  }
+  us.sort();
+  kus.sort();
+  const qx = 500.5, qy = 499.5;
+  var brute = 0;
+  final best = <double>[];
+  for (var i = 0; i < n; i++) {
+    final (x, y) = xy(i);
+    final d = math.sqrt((x - qx) * (x - qx) + (y - qy) * (y - qy));
+    if (d <= 1) brute++;
+    if (best.length < 10 || d < best.last) {
+      best
+        ..add(d)
+        ..sort();
+      if (best.length > 10) best.removeLast();
+    }
+  }
+  final got = sp.near(const Coord(qx, qy), 1).length;
+  final knn = sp.nearestK(const Coord(qx, qy), 10);
+  final ring = sp.near(const Coord(qx, qy), best[math.min(10, n) - 1]).toSet();
+  final knnOk = knn.length == math.min(10, n) && knn.every((h) => ring.contains(h.$1));
+  out
+    ..['near_us_p50'] = us[500]
+    ..['near_us_p99'] = us[990]
+    ..['near_rows'] = rows
+    ..['knn10_us_p50'] = kus[500]
+    ..['knn10_us_p99'] = kus[990]
+    ..['near_rows_q'] = got
+    ..['brute_near'] = brute
+    ..['knn_ok'] = knnOk
+    ..['rss_probe_mb'] = rss();
+  if (got != brute || !knnOk) throw StateError('brute force: $out');
+  final t = Stopwatch()..start();
+  out
+    ..['verify_sound'] = db.engine.verifyStructure(claims: db.indexClaims()).isSound
+    ..['verify_ms'] = t.elapsedMilliseconds
+    ..['rss_verify_mb'] = rss();
+  db.engine.close();
+  stdout.writeln(jsonEncode(out));
+}
+
+double _unit(int x) {
+  var z = x + 0x9E3779B97F4A7C15;
+  z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9;
+  z = (z ^ (z >>> 27)) * 0x94D049BB133111EB;
+  return ((z ^ (z >>> 31)) >>> 11) / (1 << 53).toDouble();
+}
+
+/// PLAN 6.5 vectors, as Java `RssScale.vec`: 128-d around one of 1000 centres.
+List<double> vec128(int i) {
+  final c = i % 1000;
+  return [
+    for (var k = 0; k < 128; k++)
+      _unit(c * 128 + k) + 0.15 * (_unit((i + 1) * 0x2545F4914F6CDD1D + k) - 0.5)
+  ];
+}
+
+/// PLAN 6.5, as Java `vectorRung`: a 128-d l2 vector index; 100 searches,
+/// recall@10 against brute force. ponytail: plaintext only.
+void vectorRung(String path, int n, Map<String, Object> out, Stopwatch sw) {
+  int rss() => ProcessInfo.currentRss >> 20;
+  final db = _freshFile(path);
+  final c = db.createCollection('c');
+  final vx = c.createVectorIndex('emb', dim: 128, initialSlots: 1024);
+  var peak = 0;
+  for (var i = 0; i < n; i++) {
+    c.put(id(i), CDoc({...benchDoc(i).fields, 'emb': CVector.f32(vec128(i))}));
+    if ((i + 1) % 100000 == 0 || i + 1 == n) {
+      db.engine.commit();
+      peak = math.max(peak, rss());
+      stderr.writeln('${i + 1} t=${sw.elapsed.inSeconds} rss_mb=${rss()}');
+    } else if ((i + 1) % 10000 == 0) {
+      stderr.writeln('${i + 1} t=${sw.elapsed.inSeconds}');
+    }
+  }
+  out
+    ..['build_s'] = sw.elapsed.inSeconds
+    ..['file_bytes'] = File(path).lengthSync()
+    ..['rss_build_mb'] = peak;
+  const queries = 100;
+  final q = [for (var k = 0; k < queries; k++) vec128(n + 7919 * k)];
+  final us = <int>[];
+  final got = <Set<int>>[];
+  for (final qk in q) {
+    final t = Stopwatch()..start();
+    got.add({for (final h in vx.search(qk, 10)) h.$1});
+    us.add(t.elapsedMicroseconds);
+  }
+  us.sort();
+  // The region holds f32: brute force ranks the vectors as stored.
+  final best = List.generate(queries, (_) => <(double, int)>[]);
+  for (var i = 0; i < n; i++) {
+    final v = CVector.f32(vec128(i)).f32Values!;
+    final docId = (id(i) as CNitriteId).id;
+    for (var k = 0; k < queries; k++) {
+      final d = vectorDistance(q[k], v, VectorMetric.l2);
+      final b = best[k];
+      if (b.length < 10 || d < b.last.$1) {
+        b
+          ..add((d, docId))
+          ..sort((x, y) => x.$1.compareTo(y.$1));
+        if (b.length > 10) b.removeLast();
+      }
+    }
+  }
+  var hit = 0;
+  for (var k = 0; k < queries; k++) {
+    for (final (_, d) in best[k]) {
+      if (got[k].contains(d)) hit++;
+    }
+  }
+  out
+    ..['search_us_p50'] = us[queries ~/ 2]
+    ..['search_us_p99'] = us[queries * 99 ~/ 100]
+    ..['recall10'] = double.parse((hit / (queries * 10)).toStringAsFixed(3))
+    ..['fallbacks'] = vx.fallbacks
+    ..['rss_probe_mb'] = rss();
+  final t = Stopwatch()..start();
+  out
+    ..['verify_sound'] = db.engine.verifyStructure(claims: db.indexClaims()).isSound
+    ..['verify_ms'] = t.elapsedMilliseconds
     ..['rss_verify_mb'] = rss();
   db.engine.close();
   stdout.writeln(jsonEncode(out));

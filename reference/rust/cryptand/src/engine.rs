@@ -287,6 +287,13 @@ pub struct Counters {
 }
 
 pub struct Engine {
+    /// Spatial and vector indexes opened on this engine (F-195/F-196): each
+    /// holds copied pages in memory, so every commit writes them back and
+    /// republishes their descriptors before the catalog is published, as
+    /// Java's commit hooks do. A commit without them would free pages the
+    /// published descriptor still names.
+    pub spatial_indexes: Vec<crate::rtree::SpatialIndex>,
+    pub vector_indexes: Vec<crate::vector::VectorIndex>,
     /// Records the bounded scans have examined. See
     /// [`Engine::scan_records_examined`] for why this counter exists.
     pub scan_examined: u64,
@@ -532,6 +539,8 @@ impl Engine {
             memtable: (0..shards).map(|_| BTreeMap::new()).collect(),
             memtable_bytes: 0,
             memtable_entry_limit: pc.memtable_entries,
+            spatial_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             nonce_headroom: Engine::NONCE_HEADROOM,
             policy: LevelPolicy {
                 l0_trigger: sb.l0_trigger,
@@ -755,6 +764,8 @@ impl Engine {
             memtable: (0..shards).map(|_| BTreeMap::new()).collect(),
             memtable_bytes: 0,
             memtable_entry_limit: pc.memtable_entries,
+            spatial_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             nonce_headroom: Engine::NONCE_HEADROOM,
             policy: LevelPolicy {
                 l0_trigger: sb.l0_trigger,
@@ -3655,6 +3666,25 @@ impl Engine {
         Ok(())
     }
 
+    /// Writes every open spatial and vector index back and republishes its
+    /// descriptor, in this commit.
+    pub(crate) fn commit_indexes(&mut self) -> Result<()> {
+        let mut sp = std::mem::take(&mut self.spatial_indexes);
+        let mut vx = std::mem::take(&mut self.vector_indexes);
+        let r = (|| {
+            for i in sp.iter_mut() {
+                i.commit(self)?;
+            }
+            for i in vx.iter_mut() {
+                i.commit(self)?;
+            }
+            Ok(())
+        })();
+        self.spatial_indexes = sp;
+        self.vector_indexes = vx;
+        r
+    }
+
     fn commit_inner(&mut self, durability: Durability) -> Result<u64> {
         self.arm()?;
         // F-182: placed outputs are off the free list and not in the manifest
@@ -3702,6 +3732,7 @@ impl Engine {
             }
             self.finish_compaction(job)?;
         }
+        self.commit_indexes()?;
         self.publish_tree_index_root()?;
         // §2.3 invariant 2 — the value-log watermark is published here, through
         // the ordinary commit path, because tree 7 is the authority for it and

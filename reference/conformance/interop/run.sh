@@ -310,6 +310,34 @@ for conv in rust java; do
   KEY=""; ok_idx "decrypted by $conv"
 done
 
+# F-195/F-196: spatial and vector indexes kept on pages by every writer. Each
+# writes them, each mutates through its own index maintenance in turn, and
+# after every mutation all three find every 7th document through both
+# indexes and agree the indexes hold exactly the live documents.
+KEY=""
+for w in rust java dart; do
+  say "13. $w writes spatial and vector indexes; rust, java and dart mutate and query"
+  sf="$work/spatial-vector-$w.cryptand"
+  run_impl $w write-indexed "$sf" >/dev/null || { bad "$w could not write the indexed file"; continue; }
+  for m in none rust java dart; do
+    if [[ $m != none ]]; then
+      run_impl $m mutate-indexed "$sf" >/dev/null || { bad "$m could not mutate ${w}'s indexed file"; continue; }
+    fi
+    for r in rust java dart; do
+      q="$(run_impl $r check-indexed "$sf" 2>&1 | tail -1)"
+      [[ "$q" == "indexed: ok" ]] || bad "${w}'s file after $m: $r says $q"
+    done
+  done
+  v1="$(run_impl rust verify "$sf" 2>&1 | head -1)"
+  v2="$(run_impl java verify "$sf" 2>&1 | head -1)"
+  v3="$(run_impl dart verify "$sf" 2>&1 | head -1)"
+  if [[ "$v1" == *" 0 findings"* && "$v2" == *" 0 findings"* && "$v3" == *" 0 findings"* ]]; then
+    ok "every reader agrees after every mutator; rust $v1; java $v2; dart $v3"
+  else
+    bad "rust $v1; java $v2; dart $v3"
+  fi
+done
+
 say "result"
 if [[ $fail -eq 0 ]]; then
   printf '   \033[32mthe round-trip gate passes in both directions\033[0m\n'
