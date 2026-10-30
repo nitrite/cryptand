@@ -156,9 +156,12 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    first id, human: zigzag all, vector `vector/adjacency.json`), F-198 (R+J clear), F-199 (D alloc), F-200 (dicts).
    Rungs: Rust `rss_scale PATH N spatial|vector`, Dart `scale spatial|vector PATH N`, Java `RssScale PATH N spatial|vector`.
    Remote done: sp2 J spatial 1e6 PASS (38 s, 308 MB), 1e7 PASS (839 s, 314 MB, brute match, sound).
-   v1 J vector 1e5 recall10=0.010 (!), 1e6 OOM in LongMap at 520k under -Xmx128m. vx R 2e4 (clustered) recall 1.000.
-   Running: `~/vx1.sh` in `cryptand-vx` (R + J vector 1e5, J -Xmx256m; `runs/vx1-*`, `vx1.done`), then `~/g197.sh`
-   (gate quick at 989b141 -> `~/g197.log`). Next: explain J 0.010 (rung or index), then R/D/J spatial+vector rungs.
+   Vector rung found F-201 (R+J+D, 588c935): graph split per cluster, recall@10 0.010 at 1e5 (J v1, R vx1);
+   prune now keeps m/8 far edges, R 1e5 recall 0.970 (vx2). J 1e6 OOM'd at 520k under -Xmx128m (LongMap doubling):
+   rerun at -Xmx256m, check RSS vs bar. Gate quick green on remote at 989b141 (`~/g197.log`).
+   Running `~/sv3.sh` (log `~/sv3.log`): gate quick at 588c935 -> `~/g201.log`, then in `cryptand-vx`
+   (`runs/sv3-*.{out,err,samples}`, `sv3.done`): R spatial 1e6/1e7, D spatial 1e6/1e7, R/J/D vector 1e5, R/J vector
+   1e6, D vector 1e6 (last; may take many hours). Check: brute_near == near_rows_q, knn_ok, recall10, verify_sound, RSS vs 448.
    Open to the human: spec 05 §3 lists `vector_graph` as levelled, J (and now R+D) root it as a CoW tree.
    Dart still refuses encrypt/decrypt/rotate on files with vector regions (pre-existing).
 
