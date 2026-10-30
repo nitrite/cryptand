@@ -268,7 +268,13 @@ final class VectorRegion {
     final bd = ByteData.sublistView(raw);
     switch (dtype) {
       case RegionDType.f32:
-        return [for (var i = 0; i < dim; i++) bd.getFloat32(i * 4, Endian.little)];
+        // F-204: a typed list, unboxed; a growable list of boxed doubles made
+        // reads and every distance over them the build's two biggest costs.
+        final v = Float64List(dim);
+        for (var i = 0; i < dim; i++) {
+          v[i] = bd.getFloat32(i * 4, Endian.little);
+        }
+        return v;
       default:
         throw UnsupportedFeatureException(
             'this build reads f32 regions; dtype $dtype is specified but not '
@@ -390,6 +396,38 @@ double vectorDistance(List<double> a, List<double> b, String metric) {
     throw InvalidArgumentException(
         'vectors have ${a.length} and ${b.length} dimensions');
   }
+  if (a is Float64List && b is Float64List) return _typedDistance(a, b, metric);
+  switch (metric) {
+    case VectorMetric.l2:
+      var s = 0.0;
+      for (var i = 0; i < a.length; i++) {
+        final d = a[i] - b[i];
+        s += d * d;
+      }
+      return math.sqrt(s);
+    case VectorMetric.dot:
+      var s = 0.0;
+      for (var i = 0; i < a.length; i++) {
+        s += a[i] * b[i];
+      }
+      return -s; // nearest-first ordering wants smaller to mean closer
+    case VectorMetric.cosine:
+      var dot = 0.0, na = 0.0, nb = 0.0;
+      for (var i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+      }
+      if (na == 0 || nb == 0) return 1.0;
+      return 1.0 - dot / (math.sqrt(na) * math.sqrt(nb));
+    default:
+      throw InvalidArgumentException('unknown metric "$metric"');
+  }
+}
+
+/// F-204: [vectorDistance] over typed lists, which the VM loops over unboxed
+/// (0.44 us per 128-d distance through the `List<double>` interface).
+double _typedDistance(Float64List a, Float64List b, String metric) {
   switch (metric) {
     case VectorMetric.l2:
       var s = 0.0;
@@ -693,6 +731,7 @@ final class VectorIndex {
       if (adjacency.get(_adjKey(slot)) == null) _setAdjacency(slot, const []);
       return;
     }
+    v = Float64List.fromList(v); // F-204: typed, for [_typedDistance]
     final cache = <int, List<double>>{slot: v};
     final mine = _prune(slot, _beam(v, efConstruction, cache), cache);
     _setAdjacency(slot, mine);
@@ -721,7 +760,7 @@ final class VectorIndex {
     final ef = math.max(k, vectorEfSearch);
     if (filter == null && size > ef) {
       final hits = <(int, double)>[];
-      for (final c in _beam(query, ef, null)) {
+      for (final c in _beam(Float64List.fromList(query), ef, null)) {
         if (_isLive(c.$2)) hits.add((_slotDoc[c.$2], c.$1));
         if (hits.length == k) return hits;
       }
