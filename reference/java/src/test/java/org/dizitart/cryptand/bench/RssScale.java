@@ -20,7 +20,8 @@ import java.util.Map;
  * Rust {@code examples/rss_scale.rs} and Dart {@code tool/rss_scale.dart
  * build} (same document, commit per 100k). Run under {@code /usr/bin/time -l}.
  * {@code PATH N read}: open, 10k uniform + 10k zipf gets, a 100k-row scan, verify; {@code PATH N settle}:
- * compact + commit + shrink, as Rust's. {@code PATH N text}: PLAN 6.5 full-text rung.
+ * compact + commit + shrink, as Rust's. {@code PATH N text}: PLAN 6.5 full-text rung;
+ * {@code PATH N spatial}: PLAN 6.5 spatial rung.
  */
 public final class RssScale {
     /** {@code CRYPTAND_ENC=1}: encrypted file, fixed raw key (kdf 0), as Rust {@code rss_scale}. */
@@ -161,6 +162,84 @@ public final class RssScale {
         }
     }
 
+    /** PLAN 6.5 spatial: point of document i in [0, 1000)^2, about 10 points per unit square at 10^7. */
+    public static double[] xy(long i) {
+        long z = i * 0x9E3779B97F4A7C15L + 0x51EDC0DEL;
+        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+        z ^= z >>> 31;
+        return new double[] {(z >>> 40) * 1000.0 / (1 << 24), (z & 0xFFFFFF) * 1000.0 / (1 << 24)};
+    }
+
+    /** PLAN 6.5: a spatial index on point field {@code loc}; near and nearestK checked against brute force. */
+    private static void spatialRung(Path path, long n) throws Exception {
+        Files.deleteIfExists(path);
+        Engine.Options o = opts();
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.create(path, o)) {
+            Collection c = db.collection("c");
+            org.dizitart.cryptand.index.SpatialIndex sp = c.createSpatialIndex("loc", 2, null);
+            long t = System.nanoTime();
+            for (long i = 0; i < n; i++) {
+                Map<String, Value> f = new LinkedHashMap<>(XlangCrudBench.doc(i, 0).fields());
+                double[] p = xy(i);
+                f.put("loc", new Value.Geometry(org.dizitart.cryptand.geom.Wkb.point(p[0], p[1])));
+                c.insert(new Value.Doc(f));
+                if ((i + 1) % 100_000 == 0) {
+                    db.commit();
+                    System.err.println((i + 1) + " t=" + (System.nanoTime() - t) / 1_000_000_000 + " rss_mb=" + rssMb());
+                }
+            }
+            db.commit();
+            StringBuilder line = new StringBuilder("built=" + n + " build_s=" + (System.nanoTime() - t) / 1_000_000_000
+                    + " bytes=" + Files.size(path) + " rss_build_mb=" + rssMb());
+            // 1000 near(r=1) probes around a document's own point, and 1000 nearestK(10).
+            long s = 0x51EDC0DEL;
+            long[] us = new long[1000];
+            long[] kus = new long[1000];
+            long rows = 0;
+            for (int k = 0; k < us.length; k++) {
+                s = s * 6364136223846793005L + 1442695040888963407L;
+                double[] p = xy(Long.remainderUnsigned(s >>> 11, n));
+                long g = System.nanoTime();
+                int hits = sp.near(p[0], p[1], 1).size();
+                us[k] = (System.nanoTime() - g) / 1000;
+                if (hits < 1) throw new AssertionError("near probe " + k);
+                rows += hits;
+                g = System.nanoTime();
+                if (sp.nearestK(p[0], p[1], 10).size() != Math.min(10, n)) throw new AssertionError("knn probe " + k);
+                kus[k] = (System.nanoTime() - g) / 1000;
+            }
+            java.util.Arrays.sort(us);
+            java.util.Arrays.sort(kus);
+            line.append(" near_us p50=" + us[500] + " p99=" + us[990] + " near_rows=" + rows
+                    + " knn10_us p50=" + kus[500] + " p99=" + kus[990]);
+            // One query against brute force: near's count, and nearestK inside the 10th distance.
+            double qx = 500.5, qy = 499.5;
+            long brute = 0;
+            double[] best = new double[10];
+            java.util.Arrays.fill(best, Double.MAX_VALUE);
+            for (long i = 0; i < n; i++) {
+                double[] p = xy(i);
+                double d = Math.hypot(p[0] - qx, p[1] - qy);
+                if (d <= 1) brute++;
+                if (d < best[9]) {
+                    int j = 9;
+                    while (j > 0 && best[j - 1] > d) { best[j] = best[j - 1]; j--; }
+                    best[j] = d;
+                }
+            }
+            int got = sp.near(qx, qy, 1).size();
+            List<Long> knn = sp.nearestK(qx, qy, 10);
+            boolean knnOk = knn.size() == Math.min(10, n) && sp.near(qx, qy, best[Math.min(10, (int) n) - 1]).containsAll(knn);
+            line.append(" near_rows_q=" + got + " brute_near=" + brute + " knn_ok=" + knnOk + " rss_probe_mb=" + rssMb());
+            if (got != brute || !knnOk) throw new AssertionError("brute force");
+            long g = System.nanoTime();
+            boolean sound = org.dizitart.cryptand.ops.Verify.run(db.engine()).findings().isEmpty();
+            System.out.println(line + " verify_ms=" + (System.nanoTime() - g) / 1_000_000 + " verify_sound=" + sound + " rss_verify_mb=" + rssMb());
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         Path path = Path.of(args[0]);
         long n = Long.parseLong(args[1]);
@@ -208,6 +287,10 @@ public final class RssScale {
         }
         if (mode.equals("text")) {
             textRung(path, n);
+            return;
+        }
+        if (mode.equals("spatial")) {
+            spatialRung(path, n);
             return;
         }
         if (mode.equals("settle")) {
