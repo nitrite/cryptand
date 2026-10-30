@@ -352,6 +352,21 @@ final class PageStore {
   /// `commit_id <= min_retained_commit`; failing that, extend the file at
   /// `page_count`."
   int allocExtent(int pages) {
+    final at = _allocExtent(pages);
+    _unpublished[at] = pages;
+    return at;
+  }
+
+  /// F-203: extents allocated since the last published superblock, start to
+  /// pages. No superblock names them, so one freed whole is reusable at once
+  /// (commit 0); copy-on-write trees otherwise rewrote the same hot pages into
+  /// fresh ones all window.
+  final Map<int, int> _unpublished = {};
+
+  /// A superblock naming everything allocated so far is durable.
+  void published() => _unpublished.clear();
+
+  int _allocExtent(int pages) {
     if (lowFirst) {
       final low = allocBelow(pages, 1 << 62);
       if (low != null) return low;
@@ -464,6 +479,7 @@ final class PageStore {
   int allocFresh() {
     final start = _pageCount;
     _grow(1);
+    _unpublished[start] = 1;
     return start;
   }
 
@@ -492,7 +508,8 @@ final class PageStore {
   /// reallocatable only once that id is at or below [minRetainedCommit].
   void freeExtent(int startPage, int pages) {
     if (startPage < 2 || pages <= 0) return;
-    _free[(commitId, startPage)] = pages;
+    final fresh = _unpublished.remove(startPage) == pages;
+    _free[(fresh ? 0 : commitId, startPage)] = pages;
   }
 
   void free(int pageId) {

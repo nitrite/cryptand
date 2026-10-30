@@ -57,13 +57,17 @@ void main() {
     });
 
     test('put publishes a new root every time — copy-on-write', () {
-      final t = CowTree(PageStore(), treeId: TreeId.catalog);
+      final store = PageStore();
+      final t = CowTree(store, treeId: TreeId.catalog);
       final roots = <int>{};
       for (var i = 0; i < 20; i++) {
         t.put(_k('key$i'), _k('value$i'));
         roots.add(t.root);
+        // F-203: a page no superblock named yet may be reused; a published
+        // one may not, which is what this checks.
+        store.published();
       }
-      // A root that repeats would mean a page was updated in place.
+      // A root that repeats would mean a published page was updated in place.
       expect(roots.length, 20);
       for (var i = 0; i < 20; i++) {
         expect(_s(t.get(_k('key$i'))!), 'value$i');

@@ -3548,6 +3548,9 @@ impl Engine {
     }
 
     pub fn snapshot(&mut self) -> Snapshot {
+        // F-203: the snapshot names the in-memory roots, published or not, so
+        // nothing allocated so far may be reused as if no one named it.
+        self.pager.published();
         let s = Snapshot {
             seq: self.visible_seq,
             commit_id: self.sb.commit_id,

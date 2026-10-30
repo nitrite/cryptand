@@ -462,6 +462,12 @@ public final class Pager {
         if (pages < 1) {
             throw new InvalidArgumentException("an extent is at least one page, asked for " + pages);
         }
+        long at = allocateUntracked(pages);
+        unpublished.put(at, pages);
+        return at;
+    }
+
+    private long allocateUntracked(int pages) {
         if (lowFirst) {
             long low = allocateBelow(pages, Long.MAX_VALUE);
             if (low >= 0) {
@@ -495,6 +501,9 @@ public final class Pager {
      * the best fit, so everything written while it is set moves down.
      */
     private boolean lowFirst;
+
+    /** F-203: extents allocated since the last published superblock, start to pages. */
+    private final java.util.HashMap<Long, Integer> unpublished = new java.util.HashMap<>();
 
     public synchronized void setLowFirst(boolean on) {
         lowFirst = on;
@@ -628,6 +637,7 @@ public final class Pager {
         }
         long start = pageCount;
         pageCount += pages;
+        unpublished.put(start, pages);
         return start;
     }
 
@@ -664,7 +674,15 @@ public final class Pager {
         if (pages < 1 || startPage >= pageCount) {
             return;
         }
-        pendingFree.add(new FreeExtent(commitId, startPage, pages));
+        Integer n = unpublished.remove(startPage);
+        if (n != null && n == pages) {
+            // F-203: no superblock ever named it, so it is reusable at once
+            // (commit 0, as a failed write's extent); copy-on-write trees
+            // otherwise rewrote the same hot pages into fresh ones all window.
+            free.add(new FreeExtent(0, startPage, pages));
+        } else {
+            pendingFree.add(new FreeExtent(commitId, startPage, pages));
+        }
         // {@link #readTreePage} says this path invalidates, and it did not: a
         // compacted-away segment stayed in the cache until LRU pressure found
         // it, so after one full compaction the cache held 33 MB of which 14 MB
@@ -680,6 +698,7 @@ public final class Pager {
     public synchronized void publishFrees() {
         free.addAll(pendingFree);
         pendingFree.clear();
+        unpublished.clear();
     }
 
     // ==================================================================

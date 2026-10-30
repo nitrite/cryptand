@@ -65,7 +65,23 @@ extension EngineRepair on Engine {
     // resident cache, which after M5 holds only what was recently read. A
     // retired segment's head survives in its freed extent until reused; the
     // free tree is a separate root, so it says which heads are debris.
-    final freed = {for (final x in store.freeExtents) x.startPage};
+    // F-203: by range, not start page: extents freed before any commit named
+    // them coalesce with their neighbours at once.
+    final freed = [
+      for (final x in store.freeExtents) (x.startPage, x.startPage + x.pages)
+    ]..sort((a, b) => a.$1.compareTo(b.$1));
+    bool isFree(int p) {
+      var lo = 0, hi = freed.length;
+      while (lo < hi) {
+        final mid = (lo + hi) >> 1;
+        if (freed[mid].$1 <= p) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      return lo > 0 && p < freed[lo - 1].$2;
+    }
     var page = 2;
     while (page < store.pageCount) {
       final PageHeader h;
@@ -76,7 +92,7 @@ extension EngineRepair on Engine {
         continue;
       }
       final pages = h.extentPages < 1 ? 1 : h.extentPages;
-      if (h.pageType != PageType.segmentHeader || freed.contains(page)) {
+      if (h.pageType != PageType.segmentHeader || isFree(page)) {
         page += pages;
         continue;
       }

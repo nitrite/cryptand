@@ -869,6 +869,9 @@ final class Engine {
   /// no coordination with writers, because segments are immutable and every
   /// version carries its own seq.
   Snapshot snapshot({int nowMs = 0}) {
+    // F-203: the snapshot names the in-memory roots, published or not, so
+    // nothing allocated so far may be reused as if no one named it.
+    store.published();
     final s = Snapshot(
       seq: visibleSeq,
       commitId: commitId,
@@ -1254,6 +1257,7 @@ final class Engine {
       _refreshRetention();
       rethrow;
     }
+    store.published();
     _refreshRetention();
     _pruneWrittenAt();
     _emit(StoreEvent(StoreEventKind.commit,
