@@ -16,6 +16,8 @@
 library;
 
 import 'dart:collection';
+import 'dart:convert' show utf8;
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -107,8 +109,9 @@ final class PageStore {
   /// A store backed by an open file. [file] is positioned by page id; the
   /// store never holds the whole page space in memory, which is the difference
   /// between a database and a buffer that happens to be saved.
-  PageStore.onFile(this.file, {required this.pageSize, required int pageCount})
-      : _pageCount = pageCount {
+  PageStore.onFile(RandomAccessFile file, {required this.pageSize, required int pageCount})
+      : _file = file,
+        _pageCount = pageCount {
     checkPageSize(pageSize);
   }
 
@@ -117,7 +120,56 @@ final class PageStore {
   /// `null` in memory mode. Not owned: whoever opened it closes it, and on a
   /// writing store that close is what releases `spec/01-container.md` §10's
   /// exclusive advisory lock.
-  RandomAccessFile? file;
+  RandomAccessFile? get file => _file;
+  set file(RandomAccessFile? f) {
+    if (!identical(f, _file)) _closeFd();
+    _file = f;
+  }
+
+  RandomAccessFile? _file;
+
+  /// F-204: a second, read-only descriptor for `pread`, one syscall per read
+  /// where `setPosition` + `readInto` pay two. Opened on the first read,
+  /// closed when [file] changes; -1 where libc has no `pread` (Windows).
+  /// Closing it drops the process's fcntl locks on the file, as closing [file]
+  /// does; it closes only alongside [file], and `file.dart` re-takes §10's
+  /// lock for writers still open on the path.
+  int _fd = -1;
+  Pointer<Uint8> _buf = nullptr;
+  int _bufLen = 0;
+
+  void _closeFd() {
+    if (_fd >= 0) _posix!.close(_fd);
+    if (_buf != nullptr) _posix!.free(_buf);
+    _fd = -1;
+    _buf = nullptr;
+    _bufLen = 0;
+  }
+
+  /// [out].length bytes at [pos]; the file must be open.
+  void _fileRead(int pos, Uint8List out) {
+    final px = _posix;
+    if (px != null && _fd < 0) _fd = px.open(_file!.path);
+    if (px == null || _fd < 0) {
+      _file!
+        ..setPositionSync(pos)
+        ..readIntoSync(out);
+      return;
+    }
+    if (_bufLen < out.length) {
+      if (_buf != nullptr) px.free(_buf);
+      _buf = px.malloc(out.length);
+      _bufLen = out.length;
+    }
+    var got = 0;
+    while (got < out.length) {
+      final n = px.pread(_fd, _buf + got, out.length - got, pos + got);
+      if (n < 0) throw FileSystemException('pread failed', _file!.path);
+      if (n == 0) break; // past the end: the rest stays zero, as readInto
+      got += n;
+    }
+    out.setRange(0, got, _buf.asTypedList(got));
+  }
 
   final List<Uint8List> _pages = [];
   int _pageCount = 0;
@@ -651,9 +703,7 @@ final class PageStore {
     }
     final out = Uint8List(len);
     if (file != null) {
-      file!
-        ..setPositionSync(pos)
-        ..readIntoSync(out);
+      _fileRead(pos, out);
       return out;
     }
     for (var o = 0; o < len;) {
@@ -685,9 +735,7 @@ final class PageStore {
   Uint8List _rawRead(int pageId) {
     if (file == null) return _pages[pageId];
     final buf = Uint8List(pageSize);
-    file!
-      ..setPositionSync(pageId * pageSize)
-      ..readIntoSync(buf);
+    _fileRead(pageId * pageSize, buf);
     return buf;
   }
 
@@ -1817,5 +1865,37 @@ final class AdjacencyTree {
     final id = store.alloc();
     store.write(id, page);
     return (id, store.writtenNonce);
+  }
+}
+
+/// libc's `open`/`pread`/`close`, or null where there is no POSIX libc.
+final _Posix? _posix = Platform.isWindows ? null : _Posix();
+
+final class _Posix {
+  final _lib = DynamicLibrary.process();
+  late final _open = _lib.lookupFunction<Int32 Function(Pointer<Uint8>, Int32),
+      int Function(Pointer<Uint8>, int)>('open');
+  late final pread = _lib.lookupFunction<
+      IntPtr Function(Int32, Pointer<Uint8>, IntPtr, Int64),
+      int Function(int, Pointer<Uint8>, int, int)>('pread');
+  late final close =
+      _lib.lookupFunction<Int32 Function(Int32), int Function(int)>('close');
+  late final malloc = _lib.lookupFunction<Pointer<Uint8> Function(IntPtr),
+      Pointer<Uint8> Function(int)>('malloc');
+  late final free = _lib.lookupFunction<Void Function(Pointer<Uint8>),
+      void Function(Pointer<Uint8>)>('free');
+
+  /// O_RDONLY (0 on Darwin and Linux); -1 on failure.
+  int open(String path) {
+    final units = utf8.encode(path);
+    final p = malloc(units.length + 1);
+    try {
+      p.asTypedList(units.length + 1)
+        ..setAll(0, units)
+        ..[units.length] = 0;
+      return _open(p, 0);
+    } finally {
+      free(p);
+    }
   }
 }
