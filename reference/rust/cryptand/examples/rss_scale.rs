@@ -47,6 +47,18 @@ mod hwm {
         }
     }
 }
+/// F-202 experiment: `CRYPTAND_RELIEF=1` hands freed malloc pages back to
+/// the OS (macOS), to tell retained free memory from live memory.
+fn relief() {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("CRYPTAND_RELIEF").is_some() {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    }
+}
+
 #[global_allocator]
 static ALLOC: hwm::Counting = hwm::Counting;
 
@@ -326,6 +338,9 @@ fn spatial_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
         let (x, y) = xy(i);
         f.push(("loc".into(), Value::Geometry(point(x, y))));
         c.insert(&mut db.engine, &Value::Doc(f))?;
+        if (i + 1) % 10_000 == 0 {
+            relief();
+        }
         if (i + 1) % 100_000 == 0 {
             db.commit(Durability::Os)?;
             eprintln!("{} t={} rss_mb={}", i + 1, t.elapsed().as_secs(), rss_mb());
