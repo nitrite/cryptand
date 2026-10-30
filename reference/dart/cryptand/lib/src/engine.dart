@@ -1307,12 +1307,15 @@ final class Engine {
     } finally {
       // The handle, and with it the writer lock, goes even when the last
       // commit fails, as Rust's drop releases it.
+      // F-204: clearing [store.file] first closes its pread descriptor
+      // before the handle, so `_close` re-taking §10's writer lock is last.
+      final f = store.file;
+      store.file = null;
       if (onClose != null) {
         onClose!();
       } else {
-        store.file?.closeSync();
+        f?.closeSync();
       }
-      store.file = null;
       _closed = true;
     }
     _emit(const StoreEvent(StoreEventKind.closed));

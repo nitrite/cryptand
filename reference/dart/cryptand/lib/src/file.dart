@@ -395,7 +395,11 @@ abstract final class DatabaseFile {
     }
     e
       ..store.file = raf
-      ..onClose = () => _close(raf);
+      // F-204: store.file = null closes the pread descriptor before `_close`.
+      ..onClose = () {
+        e.store.file = null;
+        _close(raf);
+      };
 
     // §4.1 rule 1, now that there is somewhere durable to publish to — and
     // before the [Database] below, whose constructor writes the catalog and
@@ -760,8 +764,12 @@ abstract final class DatabaseFile {
     final raf = File(path).openSync(mode: readOnly ? FileMode.read : FileMode.append);
     try {
       if (!readOnly) _takeWriterLock(raf, path);
-      return _openOn(raf, path, key, readOnly: readOnly)
-        ..engine.onClose = () => _close(raf);
+      final db = _openOn(raf, path, key, readOnly: readOnly);
+      return db
+        ..engine.onClose = () {
+          db.engine.store.file = null;
+          _close(raf);
+        };
     } catch (_) {
       _close(raf);
       rethrow;
