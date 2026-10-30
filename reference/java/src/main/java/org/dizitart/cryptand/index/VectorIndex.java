@@ -4,7 +4,6 @@ import org.dizitart.cryptand.Collection;
 import org.dizitart.cryptand.Database;
 import org.dizitart.cryptand.InvalidArgumentException;
 import org.dizitart.cryptand.TreeDescriptor;
-import org.dizitart.cryptand.container.PageTree;
 import org.dizitart.cryptand.container.Pager;
 import org.dizitart.cryptand.key.Cke;
 import org.dizitart.cryptand.key.IndexKeys;
@@ -17,11 +16,14 @@ import org.dizitart.cryptand.value.NumType;
 import org.dizitart.cryptand.value.Value;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 
 /**
  * A vector index — {@code spec/09-vector.md}.
@@ -32,13 +34,16 @@ import java.util.Map;
  * builds that graph is its own business, as long as the recall it achieves is a
  * quality question and not a correctness one.
  *
- * <p><em>ponytail: this implementation writes a conforming Vamana-shaped graph
- * whose adjacency is nearest-neighbour by construction, and searches by the
- * brute-force scan §8 permits.</em> §8 requires exactly that fallback of any
- * implementation that will not traverse a foreign graph, and a flat region is
- * the layout it is designed to make fast — so brute force here is a conforming
- * search, not a stub. The upgrade is a greedy graph traversal over the same
- * bytes; nothing on disk changes.
+ * <p>F-196: a Vamana graph built as documents arrive. A put runs a beam
+ * search ({@code ef_construction} wide) from the entry point, keeps the
+ * robust-pruned ({@link #ALPHA}) nearest {@code m} as the new slot's
+ * neighbours and adds the reverse edges, pruning a list that overflows. A
+ * search is the same beam, {@link #EF_SEARCH} wide, re-ranked by true
+ * distance; a filtered search, and an index small enough that the beam would
+ * visit it all, use the brute-force scan §8 permits.
+ * <em>ponytail: deleted slots stay in the graph and are walked through (§6);
+ * consolidation (§7) is not implemented, so a delete-heavy index degrades
+ * toward the brute-force fallback.</em>
  */
 public final class VectorIndex {
 
@@ -97,10 +102,23 @@ public final class VectorIndex {
     private final int docToSlotTree;
     private TreeDescriptor descriptor;
     private VectorRegion region;
-    private final PageTree adjacency;
-    private final Map<Long, Long> slotToDoc = new LinkedHashMap<>();
-    private final Map<Long, Long> docToSlot = new HashMap<>();
+    private final AdjacencyTree adjacency;
+    /** Slot -> document, for the slots set in {@link #live}. */
+    private long[] slotDoc = new long[16];
+    private final BitSet live = new BitSet();
+    private final LongMap docToSlot = new LongMap();
     private long nextSlot = 1;
+    /** The search entry point (§5 {@code entry_points}); 0 for an empty graph. */
+    private long entry;
+    private final int m;
+    private final int efConstruction;
+
+    /** Robust-prune slack: a candidate is dropped if a kept neighbour is ALPHA times nearer to it. */
+    static final double ALPHA = 1.2;
+    /** Beam width of an unfiltered search (at least k). */
+    static final int EF_SEARCH = 100;
+    /** Unfiltered searches the beam could not answer (tests: a broken graph hides behind the scan). */
+    int fallbacks;
 
     public VectorIndex(Database db, Collection owner, String name, TreeDescriptor descriptor) {
         this.db = db;
@@ -119,8 +137,16 @@ public final class VectorIndex {
         // and the graph in memory, to re-lay them itself.
         db.engine().registerOwner(descriptor.treeId(), this::convertInPlace);
         Long root = descriptor.root();
-        this.adjacency = PageTree.load(db.engine().pager(), descriptor.treeId(), root == null ? 0 : root,
+        this.adjacency = AdjacencyTree.load(db.engine().pager(), descriptor.treeId(), root == null ? 0 : root,
                 descriptor.rootNonce());
+        Value mv = params.field("m");
+        this.m = mv == null ? 32 : (int) SegmentMeta.longOf(mv);
+        Value ef = params.field("ef_construction");
+        this.efConstruction = ef == null ? 200 : (int) SegmentMeta.longOf(ef);
+        Value eps = params.field("entry_points");
+        if (eps instanceof Value.Array && !((Value.Array) eps).items().isEmpty()) {
+            entry = SegmentMeta.longOf(((Value.Array) eps).items().get(0));
+        }
         loadMaps();
     }
 
@@ -137,7 +163,7 @@ public final class VectorIndex {
     }
 
     public synchronized int size() {
-        return slotToDoc.size();
+        return live.cardinality();
     }
 
     // ==================================================================
@@ -156,8 +182,7 @@ public final class VectorIndex {
             while (c.next()) {
                 long slot = SegmentMeta.longOf(Cke.decode(c.row().key()));
                 long doc = ((Value.NitriteId) Cve.decode(c.row().value())).id();
-                slotToDoc.put(slot, doc);
-                docToSlot.put(doc, slot);
+                map(slot, doc);
                 nextSlot = Math.max(nextSlot, slot + 1);
             }
         }
@@ -206,14 +231,14 @@ public final class VectorIndex {
             throw new InvalidArgumentException("vector has " + vector.length
                     + " dimensions, index " + name + " declares " + dim);
         }
-        Long slot = docToSlot.get(nitriteId);
-        if (slot == null) {
+        long slot = docToSlot.get(nitriteId);
+        if (slot == 0) {
             slot = nextSlot++;
             growTo(slot);
         }
         region.write(db.engine().pager(), slot, vector);
-        slotToDoc.put(slot, nitriteId);
-        docToSlot.put(nitriteId, slot);
+        map(slot, nitriteId);
+        link(slot, vector);
         Engine.Batch b = db.engine().batch();
         b.put(slotToDocTree, Cke.encode(Value.integer(NumType.U64, slot)),
                 Cve.encode(new Value.NitriteId(nitriteId)));
@@ -237,11 +262,12 @@ public final class VectorIndex {
     }
 
     private synchronized Engine.Batch stageRemove(long nitriteId) {
-        Long slot = docToSlot.remove(nitriteId);
-        if (slot == null) {
+        long slot = docToSlot.get(nitriteId);
+        if (slot == 0) {
             return null;
         }
-        slotToDoc.remove(slot);
+        docToSlot.remove(nitriteId);
+        live.clear((int) slot);
         Engine.Batch b = db.engine().batch();
         b.remove(slotToDocTree, Cke.encode(Value.integer(NumType.U64, slot)));
         b.remove(docToSlotTree, Cke.encode(new Value.NitriteId(nitriteId)));
@@ -274,8 +300,8 @@ public final class VectorIndex {
         Pager pager = db.engine().pager();
         long want = Math.max(slot + 1, region.slotCount * 2);
         VectorRegion bigger = VectorRegion.create(pager, dim, region.dtype, want);
-        for (Map.Entry<Long, Long> e : slotToDoc.entrySet()) {
-            bigger.writeRaw(pager, e.getKey(), region.readRaw(pager, e.getKey()));
+        for (int s = live.nextSetBit(0); s >= 0; s = live.nextSetBit(s + 1)) {
+            bigger.writeRaw(pager, s, region.readRaw(pager, s));
         }
         pager.freeExtent(region.startPage, region.pages);
         region = bigger;
@@ -294,22 +320,22 @@ public final class VectorIndex {
     private boolean regionDirty;
 
     /**
-     * Rebuilds adjacency and republishes the roots. Called on the commit path,
-     * so the graph, the maps and the document write land under one superblock.
+     * Writes the graph's copied pages back and republishes the roots. Called on
+     * the commit path, so the graph, the maps and the document write land
+     * under one superblock.
      */
     public synchronized void commit() {
-        rebuildAdjacency();
         long root = adjacency.commit();
-        region.liveCount = slotToDoc.size();
+        region.liveCount = live.cardinality();
         Map<String, Value> fields = new LinkedHashMap<>(descriptor.document().fields());
         boolean changed = descriptor.root() == null || descriptor.root() != root
                 || descriptor.rootNonce() != adjacency.rootNonce();
         TreeDescriptor.putRoot(fields, root, adjacency.rootNonce());
-        fields.put("entries", Value.integer(NumType.U64, slotToDoc.size()));
+        fields.put("entries", Value.integer(NumType.U64, live.cardinality()));
         Map<String, Value> params = new LinkedHashMap<>(descriptor.params().fields());
         List<Value> entryPoints = new ArrayList<>();
-        if (!slotToDoc.isEmpty()) {
-            entryPoints.add(Value.integer(NumType.U64, slotToDoc.keySet().iterator().next()));
+        if (entry != 0) {
+            entryPoints.add(Value.integer(NumType.U64, entry));
         }
         params.put("entry_points", new Value.Array(entryPoints));
         fields.put("params", Value.Doc.of(params));
@@ -320,38 +346,215 @@ public final class VectorIndex {
         }
     }
 
-    /**
-     * §3's adjacency record, wrapped in a CVE {@code BYTES} value for the same
-     * reason postings are: every INLINE cell in the format holds a CVE value,
-     * with no exceptions, so generic tooling can dump a tree it does not
-     * understand.
-     */
-    private void rebuildAdjacency() {
-        if (slotToDoc.isEmpty()) {
-            return;
+    private void map(long slot, long doc) {
+        if (slot >= slotDoc.length) {
+            slotDoc = Arrays.copyOf(slotDoc, (int) Math.max(slot + 1, slotDoc.length * 2L));
+        }
+        slotDoc[(int) slot] = doc;
+        live.set((int) slot);
+        docToSlot.put(doc, slot);
+    }
+
+    // ==================================================================
+    // the graph (Vamana, one layer)
+    // ==================================================================
+
+    /** A slot and its distance to the query being searched. */
+    private static final class Scored {
+        final long slot;
+        final double d;
+
+        Scored(long slot, double d) {
+            this.slot = slot;
+            this.d = d;
+        }
+    }
+
+    private List<Long> adjacencyOf(long slot) {
+        byte[] raw = adjacency.get(adjacencyKey(0, slot));
+        return raw == null ? List.of() : decodeAdjacency(((Value.Bytes) Cve.decode(raw)).value());
+    }
+
+    private void setAdjacency(long slot, List<Long> neighbours) {
+        adjacency.put(adjacencyKey(0, slot), Cve.encode(new Value.Bytes(encodeAdjacency(neighbours))));
+    }
+
+    /** Beam search from the entry point: the {@code ef} nearest slots seen, nearest first. */
+    private List<Scored> beam(float[] q, int ef, Map<Long, float[]> cache) {
+        List<Scored> out = new ArrayList<>();
+        if (entry == 0) {
+            return out;
         }
         Pager pager = db.engine().pager();
-        int degree = Math.min(32, Math.max(1, slotToDoc.size() - 1));
-        List<Long> slots = new ArrayList<>(slotToDoc.keySet());
-        Map<Long, float[]> vectors = new HashMap<>();
-        for (long s : slots) {
-            vectors.put(s, region.read(pager, s));
-        }
-        for (long s : slots) {
-            float[] v = vectors.get(s);
-            List<long[]> ranked = new ArrayList<>();
-            for (long other : slots) {
-                if (other != s) {
-                    ranked.add(new long[]{Double.doubleToRawLongBits(
-                            distance(v, vectors.get(other))), other});
+        PriorityQueue<Scored> open = new PriorityQueue<>(Comparator.comparingDouble((Scored c) -> c.d));
+        PriorityQueue<Scored> best = new PriorityQueue<>(Comparator.comparingDouble((Scored c) -> -c.d));
+        java.util.Set<Long> seen = new java.util.HashSet<>();
+        Scored e = new Scored(entry, distance(q, vector(pager, entry, cache)));
+        open.add(e);
+        best.add(e);
+        seen.add(entry);
+        while (!open.isEmpty()) {
+            Scored c = open.poll();
+            if (best.size() >= ef && c.d > best.peek().d) {
+                break;
+            }
+            for (long n : adjacencyOf(c.slot)) {
+                if (!seen.add(n)) {
+                    continue;
+                }
+                double d = distance(q, vector(pager, n, cache));
+                if (best.size() < ef || d < best.peek().d) {
+                    Scored s = new Scored(n, d);
+                    open.add(s);
+                    best.add(s);
+                    if (best.size() > ef) {
+                        best.poll();
+                    }
                 }
             }
-            ranked.sort(Comparator.comparingDouble(a -> Double.longBitsToDouble(a[0])));
-            List<Long> neighbours = new ArrayList<>();
-            for (int i = 0; i < Math.min(degree, ranked.size()); i++) {
-                neighbours.add(ranked.get(i)[1]);
+        }
+        out.addAll(best);
+        out.sort(Comparator.comparingDouble(c -> c.d));
+        return out;
+    }
+
+    private float[] vector(Pager pager, long slot, Map<Long, float[]> cache) {
+        return cache == null ? region.read(pager, slot) : cache.computeIfAbsent(slot, s -> region.read(pager, s));
+    }
+
+    /** Vamana's robust prune: nearest first, dropping a candidate a kept one covers. */
+    private List<Long> prune(long self, List<Scored> nearestFirst, Map<Long, float[]> cache) {
+        Pager pager = db.engine().pager();
+        List<Long> kept = new ArrayList<>();
+        List<float[]> keptVectors = new ArrayList<>();
+        for (Scored c : nearestFirst) {
+            if (kept.size() >= m) {
+                break;
             }
-            adjacency.put(adjacencyKey(0, s), Cve.encode(new Value.Bytes(encodeAdjacency(neighbours))));
+            if (c.slot == self || kept.contains(c.slot)) {
+                continue;
+            }
+            float[] v = vector(pager, c.slot, cache);
+            boolean covered = false;
+            for (float[] k : keptVectors) {
+                if (ALPHA * distance(k, v) <= c.d) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (!covered) {
+                kept.add(c.slot);
+                keptVectors.add(v);
+            }
+        }
+        return kept;
+    }
+
+    /** Links {@code slot} into the graph, reverse edges included. */
+    private void link(long slot, float[] v) {
+        if (entry == 0 || entry == slot) {
+            entry = slot;
+            if (adjacency.get(adjacencyKey(0, slot)) == null) {
+                setAdjacency(slot, List.of());
+            }
+            return;
+        }
+        Map<Long, float[]> cache = new HashMap<>();
+        cache.put(slot, v);
+        List<Long> mine = prune(slot, beam(v, efConstruction, cache), cache);
+        setAdjacency(slot, mine);
+        Pager pager = db.engine().pager();
+        for (long n : mine) {
+            List<Long> theirs = new ArrayList<>(adjacencyOf(n));
+            if (theirs.contains(slot)) {
+                continue;
+            }
+            theirs.add(slot);
+            if (theirs.size() > m) {
+                float[] nv = vector(pager, n, cache);
+                List<Scored> scored = new ArrayList<>(theirs.size());
+                for (long t : theirs) {
+                    scored.add(new Scored(t, distance(nv, vector(pager, t, cache))));
+                }
+                scored.sort(Comparator.comparingDouble(c -> c.d));
+                theirs = prune(n, scored, cache);
+            }
+            setAdjacency(n, theirs);
+        }
+    }
+
+    /** Primitive document -> slot map, open addressing; 0 is "absent" (slot 0 is never used). */
+    static final class LongMap {
+        private long[] keys = new long[16];
+        private long[] vals = new long[16];
+        private boolean[] used = new boolean[16];
+        private int count;
+
+        private int at(long k) {
+            int mask = keys.length - 1;
+            int i = (int) (Long.hashCode(k * 0x9E3779B97F4A7C15L)) & mask;
+            while (used[i] && keys[i] != k) {
+                i = (i + 1) & mask;
+            }
+            return i;
+        }
+
+        long get(long k) {
+            int i = at(k);
+            return used[i] ? vals[i] : 0;
+        }
+
+        void put(long k, long v) {
+            if ((count + 1) * 2 > keys.length) {
+                long[] ok = keys;
+                long[] ov = vals;
+                boolean[] ou = used;
+                keys = new long[ok.length * 2];
+                vals = new long[ok.length * 2];
+                used = new boolean[ok.length * 2];
+                count = 0;
+                for (int j = 0; j < ok.length; j++) {
+                    if (ou[j]) {
+                        put(ok[j], ov[j]);
+                    }
+                }
+            }
+            int i = at(k);
+            if (!used[i]) {
+                used[i] = true;
+                keys[i] = k;
+                count++;
+            }
+            vals[i] = v;
+        }
+
+        /** Backward-shift deletion keeps every probe chain unbroken. */
+        void remove(long k) {
+            int i = at(k);
+            if (!used[i]) {
+                return;
+            }
+            int mask = keys.length - 1;
+            int j = i;
+            while (true) {
+                j = (j + 1) & mask;
+                if (!used[j]) {
+                    break;
+                }
+                int home = (int) (Long.hashCode(keys[j] * 0x9E3779B97F4A7C15L)) & mask;
+                if (((j - home) & mask) >= ((j - i) & mask)) {
+                    keys[i] = keys[j];
+                    vals[i] = vals[j];
+                    i = j;
+                }
+            }
+            used[i] = false;
+            count--;
+        }
+
+        void clear() {
+            Arrays.fill(used, false);
+            count = 0;
         }
     }
 
@@ -419,13 +622,27 @@ public final class VectorIndex {
                     + " dimensions, index " + name + " declares " + dim);
         }
         Pager pager = db.engine().pager();
+        int ef = Math.max(k, EF_SEARCH);
+        if (filter == null && live.cardinality() > ef) {
+            List<Hit> hits = new ArrayList<>();
+            for (Scored c : beam(query, ef, null)) {
+                if (live.get((int) c.slot)) {
+                    hits.add(new Hit(slotDoc[(int) c.slot], c.d));
+                }
+                if (hits.size() == k) {
+                    return hits;
+                }
+            }
+            // Fewer than k live slots in the beam (deletes): the scan below answers.
+            fallbacks++;
+        }
         List<Hit> hits = new ArrayList<>();
-        for (Map.Entry<Long, Long> e : slotToDoc.entrySet()) {
-            long doc = e.getValue();
+        for (int s = live.nextSetBit(0); s >= 0; s = live.nextSetBit(s + 1)) {
+            long doc = slotDoc[s];
             if (filter != null && !filter.test(doc)) {
                 continue;
             }
-            hits.add(new Hit(doc, distance(query, region.read(pager, e.getKey()))));
+            hits.add(new Hit(doc, distance(query, region.read(pager, s))));
         }
         hits.sort(Comparator.comparingDouble(Hit::distance));
         return hits.subList(0, Math.min(k, hits.size()));
@@ -501,9 +718,11 @@ public final class VectorIndex {
      * rebuild rather than fail.
      */
     public synchronized void rebuild() {
-        slotToDoc.clear();
+        live.clear();
         docToSlot.clear();
         nextSlot = 1;
+        entry = 0;
+        adjacency.clear();
         Engine.Batch clear = db.engine().batch();
         clear.removeRange(slotToDocTree, Cke.UNBOUNDED_BELOW, new byte[]{(byte) 0xFE});
         clear.removeRange(docToSlotTree, Cke.UNBOUNDED_BELOW, new byte[]{(byte) 0xFE});

@@ -21,7 +21,7 @@ import java.util.Map;
  * build} (same document, commit per 100k). Run under {@code /usr/bin/time -l}.
  * {@code PATH N read}: open, 10k uniform + 10k zipf gets, a 100k-row scan, verify; {@code PATH N settle}:
  * compact + commit + shrink, as Rust's. {@code PATH N text}: PLAN 6.5 full-text rung;
- * {@code PATH N spatial}: PLAN 6.5 spatial rung.
+ * {@code PATH N spatial}: PLAN 6.5 spatial rung; {@code PATH N vector}: PLAN 6.5 vector rung.
  */
 public final class RssScale {
     /** {@code CRYPTAND_ENC=1}: encrypted file, fixed raw key (kdf 0), as Rust {@code rss_scale}. */
@@ -240,6 +240,96 @@ public final class RssScale {
         }
     }
 
+    /** PLAN 6.5 vectors: component k of document i, 128-d around one of 1000 cluster centres. */
+    public static float[] vec(long i) {
+        float[] v = new float[128];
+        long c = i % 1000;
+        for (int k = 0; k < 128; k++) {
+            v[k] = (float) (unit(c * 128 + k) + 0.15 * (unit((i + 1) * 0x2545F4914F6CDD1DL + k) - 0.5));
+        }
+        return v;
+    }
+
+    private static double unit(long x) {
+        long z = x + 0x9E3779B97F4A7C15L;
+        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+        return ((z ^ (z >>> 31)) >>> 11) / (double) (1L << 53);
+    }
+
+    /** PLAN 6.5: a 128-d l2 vector index; 100 searches, recall@10 against brute force. */
+    private static void vectorRung(Path path, long n) throws Exception {
+        Files.deleteIfExists(path);
+        Engine.Options o = opts();
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.create(path, o)) {
+            Collection c = db.collection("c");
+            org.dizitart.cryptand.index.VectorIndex vx = c.createVectorIndex("emb", 128, "l2", 1024);
+            long t = System.nanoTime();
+            for (long i = 0; i < n; i++) {
+                Map<String, Value> f = new LinkedHashMap<>(XlangCrudBench.doc(i, 0).fields());
+                float[] v = vec(i);
+                org.dizitart.cryptand.util.ByteWriter w = new org.dizitart.cryptand.util.ByteWriter(512);
+                for (float x : v) w.f32(x);
+                f.put("emb", new Value.Vector(Value.Vector.DTYPE_F32, 128, w.toBytes()));
+                c.insert(new Value.Doc(f));
+                if ((i + 1) % 100_000 == 0) {
+                    db.commit();
+                    System.err.println((i + 1) + " t=" + (System.nanoTime() - t) / 1_000_000_000 + " rss_mb=" + rssMb());
+                } else if ((i + 1) % 10_000 == 0) {
+                    System.err.println((i + 1) + " t=" + (System.nanoTime() - t) / 1_000_000_000);
+                }
+            }
+            db.commit();
+            StringBuilder line = new StringBuilder("built=" + n + " build_s=" + (System.nanoTime() - t) / 1_000_000_000
+                    + " bytes=" + Files.size(path) + " rss_build_mb=" + rssMb());
+            // Queries: a document's own cluster, fresh noise; brute force by regenerating every vector.
+            int queries = 100;
+            float[][] q = new float[queries][];
+            for (int k = 0; k < queries; k++) {
+                q[k] = vec(n + 7919L * k);
+            }
+            long[] us = new long[queries];
+            java.util.List<java.util.Set<Long>> got = new java.util.ArrayList<>();
+            for (int k = 0; k < queries; k++) {
+                long g = System.nanoTime();
+                java.util.Set<Long> ids = new java.util.HashSet<>();
+                for (org.dizitart.cryptand.index.VectorIndex.Hit h : vx.search(q[k], 10)) ids.add(h.nitriteId());
+                us[k] = (System.nanoTime() - g) / 1000;
+                got.add(ids);
+            }
+            java.util.Arrays.sort(us);
+            // ids are insertion-ordered: the i-th document's id, by a full scan.
+            long[] idOf = new long[(int) n];
+            try (Engine.Cursor cur = c.scan(false)) {
+                int i = 0;
+                while (cur.next()) idOf[i++] = ((Value.NitriteId) org.dizitart.cryptand.key.Cke.decode(cur.row().key())).id();
+            }
+            long hit = 0;
+            double[][] best = new double[queries][10];
+            long[][] bestId = new long[queries][10];
+            for (double[] b : best) java.util.Arrays.fill(b, Double.MAX_VALUE);
+            for (long i = 0; i < n; i++) {
+                float[] v = vec(i);
+                for (int k = 0; k < queries; k++) {
+                    double d = org.dizitart.cryptand.index.VectorIndex.distance("l2", q[k], v);
+                    if (d < best[k][9]) {
+                        int j = 9;
+                        while (j > 0 && best[k][j - 1] > d) { best[k][j] = best[k][j - 1]; bestId[k][j] = bestId[k][j - 1]; j--; }
+                        best[k][j] = d;
+                        bestId[k][j] = idOf[(int) i];
+                    }
+                }
+            }
+            for (int k = 0; k < queries; k++) for (long id : bestId[k]) if (got.get(k).contains(id)) hit++;
+            line.append(" search_us p50=" + us[queries / 2] + " p99=" + us[queries * 99 / 100]
+                    + String.format(" recall10=%.3f", hit / (queries * 10.0)) + " rss_probe_mb=" + rssMb());
+            long g = System.nanoTime();
+            boolean sound = org.dizitart.cryptand.ops.Verify.run(db.engine()).findings().isEmpty();
+            System.out.println(line + " verify_ms=" + (System.nanoTime() - g) / 1_000_000 + " verify_sound=" + sound + " rss_verify_mb=" + rssMb());
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         Path path = Path.of(args[0]);
         long n = Long.parseLong(args[1]);
@@ -291,6 +381,10 @@ public final class RssScale {
         }
         if (mode.equals("spatial")) {
             spatialRung(path, n);
+            return;
+        }
+        if (mode.equals("vector")) {
+            vectorRung(path, n);
             return;
         }
         if (mode.equals("settle")) {
