@@ -2,7 +2,6 @@ package org.dizitart.cryptand.index;
 
 import org.dizitart.cryptand.CorruptionException;
 import org.dizitart.cryptand.container.PageHeader;
-import org.dizitart.cryptand.container.PageTree;
 import org.dizitart.cryptand.container.Pager;
 import org.dizitart.cryptand.geom.Geometry;
 import org.dizitart.cryptand.geom.Wkb;
@@ -10,9 +9,13 @@ import org.dizitart.cryptand.util.ByteReader;
 import org.dizitart.cryptand.util.ByteWriter;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.PriorityQueue;
+import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * The spatial index — {@code spec/08-spatial.md} §2.
@@ -25,105 +28,166 @@ import java.util.PriorityQueue;
  * specifies for every page in the database.
  *
  * <p><strong>The split algorithm is deliberately not specified</strong>, so this
- * one bulk-loads by Sort-Tile-Recursive packing. Two implementations inserting
- * the same documents produce different, equally valid trees, and a conformance
- * test therefore compares query results and never tree shape.
+ * one inserts by least enlargement and splits a full node at the median of its
+ * widest axis. Two implementations inserting the same documents produce
+ * different, equally valid trees, and a conformance test therefore compares
+ * query results and never tree shape.
  *
- * <p><em>ponytail: entries are held in memory and the tree is repacked when it
- * changes</em> — the same trade {@link PageTree} makes and for the same reason.
- * The ceiling is the number of indexed geometries in one index; an incremental
- * insert path with a real split is the upgrade when that stops fitting.
+ * <p>F-195: the tree is copy-on-write. A write copies the path it touches into
+ * memory and frees the old pages (reusable after the next commit, 01 §6);
+ * {@link #commit} writes the copied nodes back as fresh pages. Past
+ * {@link #DIRTY_BUDGET} copied nodes the same write-back runs early, so the heap
+ * holds a bounded part of the tree whatever its size. Removal needs the
+ * entry's box, which the caller derives from the previous document.
+ * <em>ponytail: no reinsertion on underflow (2.2 allows any population from
+ * 1); a long delete-heavy life leaves sparse nodes, R*-tree condense is the
+ * upgrade.</em>
  */
 public final class RTree {
 
     public static final int FLAG_IS_LEAF = 0x01;
     /** Fixed part of the payload, before the entries. */
     public static final int HEADER = 16;
+    /** Copied nodes held before an early write-back: ~10 KB each, so ~20 MB of heap. */
+    static int DIRTY_BUDGET = 2048;
 
-    public static final class Entry {
-        private final Wkb.Box box;
-        private final long nitriteId;
+    /** One node, read from a page or copied for a write. */
+    private static final class Node {
+        final boolean leaf;
+        int n;
+        Wkb.Box[] box;
+        /** Leaf: nitrite id. Internal: child page, 0 while the child is only in {@link #kid}. */
+        long[] ref;
+        long[] cnt;
+        long[] nonce;
+        /** Internal: the copied child, or null when it is still on its page. */
+        Node[] kid;
 
-        public Entry(Wkb.Box box, long nitriteId) {
-            this.box = box;
-            this.nitriteId = nitriteId;
+        Node(boolean leaf, int cap) {
+            this.leaf = leaf;
+            box = new Wkb.Box[cap];
+            ref = new long[cap];
+            cnt = new long[cap];
+            nonce = new long[cap];
+            kid = new Node[cap];
         }
 
-        public Wkb.Box box() {
-            return box;
-        }
-
-        public long nitriteId() {
-            return nitriteId;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) {
-                return true;
+        void add(Wkb.Box b, long r, long c, long nc, Node k) {
+            if (n == box.length) {
+                int cap = n * 2 + 1;
+                box = Arrays.copyOf(box, cap);
+                ref = Arrays.copyOf(ref, cap);
+                cnt = Arrays.copyOf(cnt, cap);
+                nonce = Arrays.copyOf(nonce, cap);
+                kid = Arrays.copyOf(kid, cap);
             }
-            if (!(o instanceof Entry)) {
-                return false;
+            box[n] = b;
+            ref[n] = r;
+            cnt[n] = c;
+            nonce[n] = nc;
+            kid[n] = k;
+            n++;
+        }
+
+        void removeAt(int i) {
+            n--;
+            box[i] = box[n];
+            ref[i] = ref[n];
+            cnt[i] = cnt[n];
+            nonce[i] = nonce[n];
+            kid[i] = kid[n];
+            box[n] = null;
+            kid[n] = null;
+        }
+
+        long total() {
+            if (leaf) {
+                return n;
             }
-            Entry that = (Entry) o;
-            return java.util.Objects.equals(box, that.box)
-                    && nitriteId == that.nitriteId;
+            long t = 0;
+            for (int i = 0; i < n; i++) {
+                t += cnt[i];
+            }
+            return t;
         }
 
-        @Override
-        public int hashCode() {
-            return java.util.Objects.hash(box, nitriteId);
-        }
-
-        @Override
-        public String toString() {
-            return "Entry[" + "box=" + box + ", " + "nitriteId=" + nitriteId + "]";
+        Wkb.Box cover(int dimensions) {
+            Wkb.Box c = Wkb.Box.empty(dimensions);
+            for (int i = 0; i < n; i++) {
+                c = c.union(box[i]);
+            }
+            return c;
         }
     }
 
     private final Pager pager;
     private final int treeId;
     private final int dimensions;
-    private final List<Entry> entries = new ArrayList<>();
-    private final List<Long> oldPages = new ArrayList<>();
-    private long root;
+    /** The copied root, or null when the root is {@link #rootPage} (0: empty tree). */
+    private Node root;
+    private long rootPage;
     /** F-128: the root's header nonce, as the descriptor's {@code root_nonce}. */
     private long rootNonce;
-    private boolean dirty;
+    private long size;
+    private int dirty;
+    private boolean rewriteAll;
+    /** Pages whose header nonce was checked against their parent (14 §5.5). */
+    private final Set<Long> verified = new HashSet<>();
 
     private RTree(Pager pager, int treeId, int dimensions, long root, long rootNonce) {
         this.pager = pager;
         this.treeId = treeId;
         this.dimensions = dimensions;
-        this.root = root;
+        this.rootPage = root;
         this.rootNonce = rootNonce;
     }
 
-    /** Every page is read here, and each is checked against its parent's nonce (14 §5.5). */
+    /** Reads the root; every other page is checked against its parent's nonce when first read. */
     public static RTree load(Pager pager, int treeId, int dimensions, long root, long rootNonce) {
         RTree t = new RTree(pager, treeId, dimensions, root, rootNonce);
         if (root != 0) {
-            t.read(root, rootNonce);
+            t.size = t.read(root, rootNonce).total();
         }
         return t;
     }
 
     /** Every page the tree occupies now. */
     public List<Long> pages() {
-        return new ArrayList<>(oldPages);
+        List<Long> out = new ArrayList<>();
+        if (root != null) {
+            pagesUnder(root, out);
+        } else if (rootPage != 0) {
+            out.add(rootPage);
+            pagesUnder(read(rootPage, rootNonce), out);
+        }
+        return out;
+    }
+
+    private void pagesUnder(Node node, List<Long> out) {
+        if (node.leaf) {
+            return;
+        }
+        for (int i = 0; i < node.n; i++) {
+            if (node.kid[i] != null) {
+                pagesUnder(node.kid[i], out);
+            } else {
+                out.add(node.ref[i]);
+                pagesUnder(read(node.ref[i], node.nonce[i]), out);
+            }
+        }
     }
 
     /** The next {@link #commit} rewrites every page (F-072: conversion in place). */
     public void markDirty() {
-        dirty = true;
+        rewriteAll = true;
     }
 
-        public int dimensions() {
+    public int dimensions() {
         return dimensions;
     }
 
     public long root() {
-        return root;
+        return rootPage;
     }
 
     public long rootNonce() {
@@ -131,34 +195,270 @@ public final class RTree {
     }
 
     public int size() {
-        return entries.size();
+        return (int) size;
     }
 
-    public List<Entry> entries() {
-        return List.copyOf(entries);
-    }
+    // ==================================================================
+    // writes
+    // ==================================================================
 
     public void insert(Wkb.Box box, long nitriteId) {
-        entries.add(new Entry(box, nitriteId));
-        dirty = true;
+        Node r = rootNode();
+        if (r == null) {
+            r = root = new Node(true, fanout(true) + 1);
+            dirty++;
+        }
+        Node split = insert(r, box, nitriteId);
+        if (split != null) {
+            Node up = new Node(false, fanout(false) + 1);
+            up.add(r.cover(dimensions), 0, r.total(), 0, r);
+            up.add(split.cover(dimensions), 0, split.total(), 0, split);
+            root = up;
+            dirty++;
+        }
+        size++;
+        spillIfOver();
     }
 
-    public void remove(long nitriteId) {
-        if (entries.removeIf(e -> e.nitriteId() == nitriteId)) {
-            dirty = true;
+    /** Returns the new sibling when {@code node} split. */
+    private Node insert(Node node, Wkb.Box box, long nitriteId) {
+        if (node.leaf) {
+            node.add(box, nitriteId, 0, 0, null);
+        } else {
+            int i = choose(node, box);
+            Node c = child(node, i);
+            Node s = insert(c, box, nitriteId);
+            node.box[i] = c.cover(dimensions);
+            node.cnt[i] = c.total();
+            if (s != null) {
+                node.add(s.cover(dimensions), 0, s.total(), 0, s);
+            }
         }
+        return node.n > fanout(node.leaf) ? split(node) : null;
+    }
+
+    /** Least area enlargement, then least area. */
+    private static int choose(Node node, Wkb.Box box) {
+        int best = 0;
+        double bestGrow = Double.POSITIVE_INFINITY;
+        double bestArea = Double.POSITIVE_INFINITY;
+        for (int i = 0; i < node.n; i++) {
+            double area = node.box[i].area();
+            double grow = node.box[i].union(box).area() - area;
+            if (grow < bestGrow || (grow == bestGrow && area < bestArea)) {
+                best = i;
+                bestGrow = grow;
+                bestArea = area;
+            }
+        }
+        return best;
+    }
+
+    /** Median split on the axis whose entry centres spread widest; the upper half moves out. */
+    private Node split(Node node) {
+        int axis = 0;
+        double widest = -1;
+        for (int a = 0; a < dimensions; a++) {
+            double lo = Double.POSITIVE_INFINITY;
+            double hi = Double.NEGATIVE_INFINITY;
+            for (int i = 0; i < node.n; i++) {
+                double c = centre(node.box[i], a);
+                lo = Math.min(lo, c);
+                hi = Math.max(hi, c);
+            }
+            if (hi - lo > widest) {
+                widest = hi - lo;
+                axis = a;
+            }
+        }
+        final int ax = axis;
+        Integer[] order = new Integer[node.n];
+        for (int i = 0; i < node.n; i++) {
+            order[i] = i;
+        }
+        Arrays.sort(order, Comparator.comparingDouble(i -> centre(node.box[i], ax)));
+        Node lo = new Node(node.leaf, node.box.length);
+        Node hi = new Node(node.leaf, node.box.length);
+        for (int k = 0; k < order.length; k++) {
+            int i = order[k];
+            (k < order.length / 2 ? lo : hi).add(node.box[i], node.ref[i], node.cnt[i], node.nonce[i], node.kid[i]);
+        }
+        node.n = lo.n;
+        node.box = lo.box;
+        node.ref = lo.ref;
+        node.cnt = lo.cnt;
+        node.nonce = lo.nonce;
+        node.kid = lo.kid;
+        dirty++;
+        return hi;
+    }
+
+    /** Removes one entry of {@code nitriteId} whose box is {@code box}; false if there is none. */
+    public boolean remove(Wkb.Box box, long nitriteId) {
+        if (size == 0) {
+            return false;
+        }
+        List<Integer> path = new ArrayList<>();
+        if (!find(rootView(), box, nitriteId, path)) {
+            return false;
+        }
+        List<Node> nodes = new ArrayList<>();
+        Node node = rootNode();
+        nodes.add(node);
+        for (int d = 0; d < path.size() - 1; d++) {
+            node = child(node, path.get(d));
+            nodes.add(node);
+        }
+        node.removeAt(path.get(path.size() - 1));
+        for (int d = nodes.size() - 2; d >= 0; d--) {
+            Node parent = nodes.get(d);
+            Node c = nodes.get(d + 1);
+            int i = path.get(d);
+            if (c.n == 0) {
+                parent.removeAt(i);
+                dirty--;
+            } else {
+                parent.box[i] = c.cover(dimensions);
+                parent.cnt[i] = c.total();
+            }
+        }
+        while (root.n == 1 && !root.leaf) {
+            Node only = child(root, 0);
+            root = only;
+            dirty--;
+        }
+        if (root.n == 0) {
+            root = null;
+            dirty--;
+        }
+        size--;
+        spillIfOver();
+        return true;
+    }
+
+    private boolean find(Node node, Wkb.Box box, long nitriteId, List<Integer> path) {
+        for (int i = 0; i < node.n; i++) {
+            if (node.leaf) {
+                // By value: Box.equals compares its arrays by reference.
+                if (node.ref[i] == nitriteId && Arrays.equals(node.box[i].min(), box.min())
+                        && Arrays.equals(node.box[i].max(), box.max())) {
+                    path.add(i);
+                    return true;
+                }
+            } else if (box.isEmpty() || node.box[i].contains(box)) {
+                path.add(i);
+                if (find(view(node, i), box, nitriteId, path)) {
+                    return true;
+                }
+                path.remove(path.size() - 1);
+            }
+        }
+        return false;
+    }
+
+    /** Writes the copied nodes back and returns the root page (0: empty tree). */
+    public long commit() {
+        writeOut();
+        if (rewriteAll) {
+            rewriteAll = false;
+            if (rootPage != 0) {
+                long[] at = rewrite(rootPage, rootNonce);
+                rootPage = at[0];
+                rootNonce = at[1];
+            }
+        }
+        if (rootPage == 0) {
+            rootNonce = 0;
+        }
+        return rootPage;
+    }
+
+    private void spillIfOver() {
+        if (dirty > DIRTY_BUDGET) {
+            writeOut();
+        }
+    }
+
+    private void writeOut() {
+        if (root == null) {
+            return;
+        }
+        long[] at = write(root);
+        rootPage = at[0];
+        rootNonce = at[1];
+        root = null;
+        dirty = 0;
+    }
+
+    /** Streams the whole tree through fresh pages, O(depth) in memory. */
+    private long[] rewrite(long page, long nonce) {
+        Node node = read(page, nonce);
+        free(page);
+        if (!node.leaf) {
+            for (int i = 0; i < node.n; i++) {
+                long[] at = rewrite(node.ref[i], node.nonce[i]);
+                node.ref[i] = at[0];
+                node.nonce[i] = at[1];
+            }
+        }
+        return writePage(node);
+    }
+
+    // ==================================================================
+    // node access
+    // ==================================================================
+
+    /** The root for a write: copied from its page if it is not in memory yet. */
+    private Node rootNode() {
+        if (root == null && rootPage != 0) {
+            root = read(rootPage, rootNonce);
+            free(rootPage);
+            rootPage = 0;
+            dirty++;
+        }
+        return root;
+    }
+
+    /** Child {@code i} for a write: copied from its page, which is freed. */
+    private Node child(Node node, int i) {
+        if (node.kid[i] == null) {
+            node.kid[i] = read(node.ref[i], node.nonce[i]);
+            free(node.ref[i]);
+            node.ref[i] = 0;
+            dirty++;
+        }
+        return node.kid[i];
+    }
+
+    /** The root for a read; null for an empty tree. */
+    private Node rootView() {
+        return root != null ? root : rootPage == 0 ? null : read(rootPage, rootNonce);
+    }
+
+    private Node view(Node node, int i) {
+        return node.kid[i] != null ? node.kid[i] : read(node.ref[i], node.nonce[i]);
+    }
+
+    private void free(long page) {
+        pager.freeExtent(page, 1);
+        verified.remove(page);
     }
 
     // ==================================================================
     // page format, §2.1
     // ==================================================================
 
-    private void read(long page, long nonce) {
-        oldPages.add(page);
-        byte[] raw = pager.readRaw(page);
-        PageHeader h = PageHeader.verify(raw, page);
-        pager.checkNonce(page, h, nonce);
-        byte[] payload = pager.decodePayload(raw, h, page);
+    private Node read(long page, long nonce) {
+        byte[] payload;
+        if (verified.contains(page)) {
+            payload = pager.readPage(page);
+        } else {
+            byte[] raw = pager.readRaw(page);
+            PageHeader h = PageHeader.verify(raw, page);
+            pager.checkNonce(page, h, nonce);
+            payload = pager.decodePayload(raw, h, page);
+            verified.add(page);
+        }
         ByteReader r = new ByteReader(payload);
         int count = r.u16();
         int dims = r.u8();
@@ -173,6 +473,7 @@ public final class RTree {
                     + " dimensions, the descriptor says " + dimensions, page, null);
         }
         boolean leaf = (flags & FLAG_IS_LEAF) != 0;
+        Node node = new Node(leaf, Math.max(count, fanout(leaf)) + 1);
         for (int i = 0; i < count; i++) {
             double[] min = new double[dims];
             double[] max = new double[dims];
@@ -182,14 +483,16 @@ public final class RTree {
             for (int d = 0; d < dims; d++) {
                 max[d] = r.f64();
             }
+            Wkb.Box b = new Wkb.Box(min, max);
             if (leaf) {
-                entries.add(new Entry(new Wkb.Box(min, max), r.u64()));
+                node.add(b, r.u64(), 0, 0, null);
             } else {
                 long child = r.u64();
-                r.u64();
-                read(child, r.u64());
+                long cnt = r.u64();
+                node.add(b, child, cnt, r.u64(), null);
             }
         }
+        return node;
     }
 
     private int entryStride(boolean leaf) {
@@ -200,54 +503,6 @@ public final class RTree {
         return Math.max(2, (pager.payloadSize() - HEADER) / entryStride(leaf));
     }
 
-    /** Repacks the tree if it changed and returns the new root. */
-    public long commit() {
-        if (!dirty) {
-            return root;
-        }
-        for (long p : oldPages) {
-            pager.freeExtent(p, 1);
-        }
-        oldPages.clear();
-        long[] top = entries.isEmpty() ? new long[2] : build();
-        root = top[0];
-        rootNonce = top[1];
-        dirty = false;
-        return root;
-    }
-
-    /**
-     * Sort-Tile-Recursive packing: sort by each axis in turn and slice into
-     * tiles, which gives low-overlap nodes for a static set at O(n log n).
-     */
-    /** {@code {root, rootNonce}}. */
-    private long[] build() {
-        List<Entry> sorted = new ArrayList<>(entries);
-        sorted.sort(Comparator.comparingDouble(e -> centre(e.box(), 0)));
-        int leafFanout = fanout(true);
-        List<Object[]> level = new ArrayList<>();
-        int slices = (int) Math.ceil(Math.sqrt(Math.ceil((double) sorted.size() / leafFanout)));
-        int perSlice = Math.max(leafFanout, (int) Math.ceil((double) sorted.size() / Math.max(1, slices)));
-        for (int start = 0; start < sorted.size(); start += perSlice) {
-            List<Entry> slice = new ArrayList<>(
-                    sorted.subList(start, Math.min(sorted.size(), start + perSlice)));
-            slice.sort(Comparator.comparingDouble(e -> centre(e.box(), 1)));
-            for (int i = 0; i < slice.size(); i += leafFanout) {
-                List<Entry> node = slice.subList(i, Math.min(slice.size(), i + leafFanout));
-                level.add(emitLeaf(node));
-            }
-        }
-        int internalFanout = fanout(false);
-        while (level.size() > 1) {
-            List<Object[]> next = new ArrayList<>();
-            for (int i = 0; i < level.size(); i += internalFanout) {
-                next.add(emitInternal(level.subList(i, Math.min(level.size(), i + internalFanout))));
-            }
-            level = next;
-        }
-        return (long[]) level.get(0)[1];
-    }
-
     private static double centre(Wkb.Box b, int axis) {
         if (axis >= b.dimensions() || b.isEmpty()) {
             return 0;
@@ -255,35 +510,40 @@ public final class RTree {
         return (b.min()[axis] + b.max()[axis]) / 2;
     }
 
-    /** {@code {Box, {pageId, nonce}, subtreeEntries}} for the level above. */
-    private Object[] emitLeaf(List<Entry> node) {
-        ByteWriter w = new ByteWriter(pager.payloadSize());
-        w.u16(node.size()).u8(dimensions).u8(FLAG_IS_LEAF).u32(0).u64(node.size());
-        Wkb.Box cover = Wkb.Box.empty(dimensions);
-        for (Entry e : node) {
-            writeBox(w, e.box());
-            w.u64(e.nitriteId());
-            cover = cover.union(e.box());
+    /** Writes {@code node}'s copied children, then {@code node}; {@code {pageId, nonce}}. */
+    private long[] write(Node node) {
+        if (!node.leaf) {
+            for (int i = 0; i < node.n; i++) {
+                if (node.kid[i] != null) {
+                    long[] at = write(node.kid[i]);
+                    node.ref[i] = at[0];
+                    node.nonce[i] = at[1];
+                    node.kid[i] = null;
+                }
+            }
         }
-        return new Object[]{cover, write(w, PageHeader.Type.RTREE_LEAF), (long) node.size()};
+        return writePage(node);
     }
 
-    private Object[] emitInternal(List<Object[]> children) {
+    /** {@code {pageId, nonce}}: the nonce is what the parent records (14 §5.5). */
+    private long[] writePage(Node node) {
         ByteWriter w = new ByteWriter(pager.payloadSize());
-        long total = 0;
-        for (Object[] c : children) {
-            total += (long) c[2];
+        w.u16(node.n).u8(dimensions).u8(node.leaf ? FLAG_IS_LEAF : 0).u32(0).u64(node.total());
+        for (int i = 0; i < node.n; i++) {
+            writeBox(w, node.box[i]);
+            if (node.leaf) {
+                w.u64(node.ref[i]);
+            } else {
+                w.u64(node.ref[i]).u64(node.cnt[i]).u64(node.nonce[i]);
+            }
         }
-        w.u16(children.size()).u8(dimensions).u8(0).u32(0).u64(total);
-        Wkb.Box cover = Wkb.Box.empty(dimensions);
-        for (Object[] c : children) {
-            Wkb.Box box = (Wkb.Box) c[0];
-            writeBox(w, box);
-            long[] at = (long[]) c[1];
-            w.u64(at[0]).u64((long) c[2]).u64(at[1]);
-            cover = cover.union(box);
-        }
-        return new Object[]{cover, write(w, PageHeader.Type.RTREE_INTERNAL), total};
+        long page = pager.allocate(1);
+        PageHeader h = new PageHeader();
+        h.pageType = node.leaf ? PageHeader.Type.RTREE_LEAF : PageHeader.Type.RTREE_INTERNAL;
+        h.treeId = treeId;
+        pager.writePage(page, h, w.toBytes());
+        verified.add(page);
+        return new long[]{page, h.nonce};
     }
 
     private void writeBox(ByteWriter w, Wkb.Box box) {
@@ -293,17 +553,6 @@ public final class RTree {
         for (int d = 0; d < dimensions; d++) {
             w.f64(d < box.dimensions() ? box.max()[d] : Double.NEGATIVE_INFINITY);
         }
-    }
-
-    /** {@code {pageId, nonce}}: the nonce is what the parent records (14 §5.5). */
-    private long[] write(ByteWriter w, int pageType) {
-        long page = pager.allocate(1);
-        oldPages.add(page);
-        PageHeader h = new PageHeader();
-        h.pageType = pageType;
-        h.treeId = treeId;
-        pager.writePage(page, h, w.toBytes());
-        return new long[]{page, h.nonce};
     }
 
     // ==================================================================
@@ -333,125 +582,26 @@ public final class RTree {
         return search(box -> box.contains(query), box -> box.contains(query));
     }
 
-    /**
-     * Descends the on-disk tree, pruning a subtree whose box fails
-     * {@code descend}.
-     *
-     * <p>An uncommitted tree is scanned linearly instead: the packed pages are
-     * then stale, and a query that used them would miss everything inserted
-     * since. The in-memory entry list is the authority until {@link #commit}
-     * repacks.
-     */
-    private List<Long> search(java.util.function.Predicate<Wkb.Box> descend,
-                              java.util.function.Predicate<Wkb.Box> accept) {
+    /** Descends the tree, copied nodes included, pruning a subtree whose box fails {@code descend}. */
+    private List<Long> search(Predicate<Wkb.Box> descend, Predicate<Wkb.Box> accept) {
         List<Long> out = new ArrayList<>();
-        if (dirty || root == 0) {
-            for (Entry e : entries) {
-                if (accept.test(e.box())) {
-                    out.add(e.nitriteId());
-                }
-            }
-            return out;
+        Node r = rootView();
+        if (r != null) {
+            descend(r, descend, accept, out);
         }
-        descend(root, descend, accept, out);
         return out;
     }
 
-    private void descend(long page, java.util.function.Predicate<Wkb.Box> descend,
-                         java.util.function.Predicate<Wkb.Box> accept, List<Long> out) {
-        Node node = node(page);
-        for (int i = 0; i < node.boxes().size(); i++) {
-            Wkb.Box box = node.boxes().get(i);
-            if (node.leaf()) {
-                if (accept.test(box)) {
-                    out.add(node.payload().get(i));
+    private void descend(Node node, Predicate<Wkb.Box> descend, Predicate<Wkb.Box> accept, List<Long> out) {
+        for (int i = 0; i < node.n; i++) {
+            if (node.leaf) {
+                if (accept.test(node.box[i])) {
+                    out.add(node.ref[i]);
                 }
-            } else if (descend.test(box)) {
-                descend(node.payload().get(i), descend, accept, out);
+            } else if (descend.test(node.box[i])) {
+                descend(view(node, i), descend, accept, out);
             }
         }
-    }
-
-    private static final class Node {
-        private final boolean leaf;
-        private final List<Wkb.Box> boxes;
-        private final List<Long> payload;
-
-        public Node(boolean leaf, List<Wkb.Box> boxes, List<Long> payload) {
-            this.leaf = leaf;
-            this.boxes = boxes;
-            this.payload = payload;
-        }
-
-        public boolean leaf() {
-            return leaf;
-        }
-
-        public List<Wkb.Box> boxes() {
-            return boxes;
-        }
-
-        public List<Long> payload() {
-            return payload;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) {
-                return true;
-            }
-            if (!(o instanceof Node)) {
-                return false;
-            }
-            Node that = (Node) o;
-            return leaf == that.leaf
-                    && java.util.Objects.equals(boxes, that.boxes)
-                    && java.util.Objects.equals(payload, that.payload);
-        }
-
-        @Override
-        public int hashCode() {
-            return java.util.Objects.hash(leaf, boxes, payload);
-        }
-
-        @Override
-        public String toString() {
-            return "Node[" + "leaf=" + leaf + ", " + "boxes=" + boxes + ", " + "payload=" + payload + "]";
-        }
-    }
-
-    private Node node(long page) {
-        byte[] payload = pager.readPage(page);
-        ByteReader r = new ByteReader(payload);
-        int count = r.u16();
-        int dims = r.u8();
-        int flags = r.u8();
-        r.skip(4);
-        r.u64();
-        if (dims != dimensions) {
-            throw new CorruptionException("R-tree page " + page + " declares " + dims
-                    + " dimensions, the descriptor says " + dimensions, page, null);
-        }
-        boolean leaf = (flags & FLAG_IS_LEAF) != 0;
-        List<Wkb.Box> boxes = new ArrayList<>(count);
-        List<Long> ids = new ArrayList<>(count);
-        for (int i = 0; i < count; i++) {
-            double[] min = new double[dims];
-            double[] max = new double[dims];
-            for (int d = 0; d < dims; d++) {
-                min[d] = r.f64();
-            }
-            for (int d = 0; d < dims; d++) {
-                max[d] = r.f64();
-            }
-            boxes.add(new Wkb.Box(min, max));
-            ids.add(r.u64());
-            if (!leaf) {
-                r.u64();
-                r.u64(); // child_nonce, checked when the tree was loaded
-            }
-        }
-        return new Node(leaf, boxes, ids);
     }
 
     /**
@@ -462,12 +612,9 @@ public final class RTree {
     public List<Long> nearest(double[] point, int k) {
         List<Long> out = new ArrayList<>();
         PriorityQueue<Candidate> heap = new PriorityQueue<>(Comparator.comparingDouble(Candidate::distance));
-        if (dirty || root == 0) {
-            for (Entry e : entries) {
-                heap.add(new Candidate(e.box().squaredDistanceTo(point), true, e.nitriteId()));
-            }
-        } else {
-            heap.add(new Candidate(0, false, root));
+        Node r = rootView();
+        if (r != null) {
+            heap.add(new Candidate(0, false, 0, 0, r));
         }
         while (!heap.isEmpty() && out.size() < k) {
             Candidate top = heap.poll();
@@ -475,10 +622,11 @@ public final class RTree {
                 out.add(top.payload());
                 continue;
             }
-            Node node = node(top.payload());
-            for (int i = 0; i < node.boxes().size(); i++) {
-                heap.add(new Candidate(node.boxes().get(i).squaredDistanceTo(point),
-                        node.leaf(), node.payload().get(i)));
+            Node node = top.node != null ? top.node : read(top.payload(), top.nonce);
+            for (int i = 0; i < node.n; i++) {
+                double d = node.box[i].squaredDistanceTo(point);
+                heap.add(node.leaf ? new Candidate(d, true, node.ref[i], 0, null)
+                        : new Candidate(d, false, node.ref[i], node.nonce[i], node.kid[i]));
             }
         }
         return out;
@@ -493,48 +641,30 @@ public final class RTree {
     private static final class Candidate {
         private final double distance;
         private final boolean isEntry;
+        /** An entry's nitrite id, or a subtree's page. */
         private final long payload;
+        private final long nonce;
+        /** A copied subtree, or null: its page is read when it is popped. */
+        private final Node node;
 
-        public Candidate(double distance, boolean isEntry, long payload) {
+        Candidate(double distance, boolean isEntry, long payload, long nonce, Node node) {
             this.distance = distance;
             this.isEntry = isEntry;
             this.payload = payload;
+            this.nonce = nonce;
+            this.node = node;
         }
 
-        public double distance() {
+        double distance() {
             return distance;
         }
 
-        public boolean isEntry() {
+        boolean isEntry() {
             return isEntry;
         }
 
-        public long payload() {
+        long payload() {
             return payload;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) {
-                return true;
-            }
-            if (!(o instanceof Candidate)) {
-                return false;
-            }
-            Candidate that = (Candidate) o;
-            return Double.compare(distance, that.distance) == 0
-                    && isEntry == that.isEntry
-                    && payload == that.payload;
-        }
-
-        @Override
-        public int hashCode() {
-            return java.util.Objects.hash(distance, isEntry, payload);
-        }
-
-        @Override
-        public String toString() {
-            return "Candidate[" + "distance=" + distance + ", " + "isEntry=" + isEntry + ", " + "payload=" + payload + "]";
         }
     }
 }

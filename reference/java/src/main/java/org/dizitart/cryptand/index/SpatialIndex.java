@@ -54,8 +54,8 @@ public final class SpatialIndex {
         Long root = descriptor.root();
         this.tree = RTree.load(db.engine().pager(), descriptor.treeId(), dimensions,
                 root == null ? 0 : root, descriptor.rootNonce());
-        // F-072: a conversion step asks this object, which holds the tree in
-        // memory, to rewrite it; commit() publishes the new root.
+        // F-072: a conversion step asks this object, which holds copied nodes
+        // in memory, to rewrite it; commit() publishes the new root.
         db.engine().registerOwner(descriptor.treeId(), () -> {
             synchronized (this) {
                 tree.markDirty();
@@ -113,31 +113,45 @@ public final class SpatialIndex {
     // not per operation — and the committer holds `structure` around the hook,
     // so this monitor is always taken after it and never before.
 
-    /** Indexes a document's geometry field, or does nothing when it has none. */
-    public synchronized void put(long nitriteId, Value.Doc document, Integer declaredSrid) {
+    /**
+     * Indexes a document's geometry field, or does nothing when it has none.
+     * {@code previous}, the document this one replaces (null for a new one),
+     * names the entries to retract: an R-tree removal needs the box (F-195).
+     */
+    public synchronized void put(long nitriteId, Value.Doc document, Value.Doc previous, Integer declaredSrid) {
         if (declaredSrid != null && srid != null && !declaredSrid.equals(srid)) {
             throw new InvalidArgumentException("geometry declares SRID " + declaredSrid
                     + " but index " + name + " works in SRID " + srid
                     + "; the format does not reproject (spec/08-spatial.md §1)");
         }
-        tree.remove(nitriteId);
-        List<Value> values = IndexKeys.resolve(document, IndexKeys.splitFieldPath(field));
-        if (values == null) {
-            return;
+        remove(nitriteId, previous);
+        for (Wkb.Box box : boxes(document)) {
+            tree.insert(box, nitriteId);
         }
-        for (Value v : values) {
-            if (v instanceof Value.Geometry) {
-                Value.Geometry g = ((Value.Geometry) v);
-                tree.insert(Wkb.envelope(g.wkb(), dimensions), nitriteId);
+    }
+
+    public synchronized void remove(long nitriteId, Value.Doc previous) {
+        if (previous != null) {
+            for (Wkb.Box box : boxes(previous)) {
+                tree.remove(box, nitriteId);
             }
         }
     }
 
-    public synchronized void remove(long nitriteId) {
-        tree.remove(nitriteId);
+    private List<Wkb.Box> boxes(Value.Doc document) {
+        List<Wkb.Box> out = new ArrayList<>();
+        List<Value> values = IndexKeys.resolve(document, IndexKeys.splitFieldPath(field));
+        if (values != null) {
+            for (Value v : values) {
+                if (v instanceof Value.Geometry) {
+                    out.add(Wkb.envelope(((Value.Geometry) v).wkb(), dimensions));
+                }
+            }
+        }
+        return out;
     }
 
-    /** Repacks and republishes the root. Called by the engine's commit path. */
+    /** Writes the copied nodes back and republishes the root. Called by the engine's commit path. */
     public synchronized void commit() {
         long root = tree.commit();
         if (descriptor.root() == null || descriptor.root() != root || descriptor.rootNonce() != tree.rootNonce()) {

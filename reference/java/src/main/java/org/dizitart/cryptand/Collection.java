@@ -172,7 +172,7 @@ public final class Collection {
         Engine.Batch b = engine.batch();
         b.remove(descriptor.treeId(), documentKey(id));
         for (SpatialIndex index : spatialIndexes()) {
-            index.remove(id);
+            index.remove(id, previous);
         }
         for (VectorIndex index : vectorIndexes()) {
             index.remove(id);
@@ -240,7 +240,7 @@ public final class Collection {
             }
         }
         for (SpatialIndex index : spatialIndexes()) {
-            index.put(id, doc, null);
+            index.put(id, doc, previous, null);
         }
         for (VectorIndex index : vectorIndexes()) {
             index.put(id, doc);
@@ -619,7 +619,7 @@ public final class Collection {
         try (Engine.Cursor c = scan(false)) {
             while (c.next()) {
                 index.put(((Value.NitriteId) Cke.decode(c.row().key())).id(),
-                        decode(c.row().value()), null);
+                        decode(c.row().value()), null, null);
             }
         }
         engine.addCommitHook(index::commit);

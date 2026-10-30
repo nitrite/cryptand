@@ -211,7 +211,7 @@ class SpatialTest {
             SpatialIndex index = c.createSpatialIndex("shape", 2, 4326);
             assertEquals(4326, index.srid());
             assertThrows(InvalidArgumentException.class,
-                    () -> index.put(1, geo("x", Wkb.point(0, 0)), 3857));
+                    () -> index.put(1, geo("x", Wkb.point(0, 0)), null, 3857));
         }
     }
 
