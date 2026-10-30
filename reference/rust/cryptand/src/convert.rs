@@ -101,7 +101,9 @@ fn is_spatial(d: &TreeDescriptor) -> bool {
 }
 
 /// One R-tree's pages and its leaf rows, walked from the root.
-fn rtree_walk(pager: &mut crate::pager::Pager, d: &TreeDescriptor) -> Result<(Vec<u64>, Vec<SpatialEntry>)> {
+/// `keep_rows` false collects pages only: verify at 10^7 rows held ~800 MB of
+/// leaf entries it never read (F-202).
+fn rtree_walk(pager: &mut crate::pager::Pager, d: &TreeDescriptor, keep_rows: bool) -> Result<(Vec<u64>, Vec<SpatialEntry>)> {
     let (mut pages, mut rows, mut stack) = (Vec::new(), Vec::new(), vec![(d.root().unwrap_or(0), d.root_nonce())]);
     while let Some((p, nonce)) = stack.pop() {
         let (_h, raw) = pager.read_bound(p, nonce)?;
@@ -109,7 +111,9 @@ fn rtree_walk(pager: &mut crate::pager::Pager, d: &TreeDescriptor) -> Result<(Ve
         pages.push(p);
         for x in n.entries {
             if n.is_leaf {
-                rows.push(SpatialEntry { bbox: x.bbox, id: x.payload });
+                if keep_rows {
+                    rows.push(SpatialEntry { bbox: x.bbox, id: x.payload });
+                }
             } else {
                 stack.push((x.payload as u64, x.child_nonce));
             }
@@ -121,7 +125,7 @@ fn rtree_walk(pager: &mut crate::pager::Pager, d: &TreeDescriptor) -> Result<(Ve
 /// The pages of one index tree, walked in its own format.
 pub(crate) fn index_tree_pages(pager: &mut crate::pager::Pager, d: &TreeDescriptor) -> Result<Vec<u64>> {
     if is_spatial(d) {
-        return Ok(rtree_walk(pager, d)?.0);
+        return Ok(rtree_walk(pager, d, false)?.0);
     }
     let mut out = Vec::new();
     CowTree::new(d.tree_id(), d.root().unwrap_or(0), d.root_nonce()).reachable(pager, &mut out)?;
@@ -313,7 +317,7 @@ impl ConvertApi for Engine {
                     continue;
                 }
                 let root = if is_spatial(&d) {
-                    let (old, rows) = rtree_walk(&mut self.pager, &d)?;
+                    let (old, rows) = rtree_walk(&mut self.pager, &d, true)?;
                     for p in old {
                         self.pager.free_extent(p, 1, commit_id);
                     }
