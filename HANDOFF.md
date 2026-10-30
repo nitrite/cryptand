@@ -146,12 +146,15 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    Rust checked 10-29 for F-190/F-191: not affected (fulltext.rs is codec only; leaf guard is forward-only).
    tx1 (pre-F-192): D 1e6 build 5290 s, 3.8 GB, 216 MB PASS; J 1e7 build 4619 s, 226 MB PASS, and2 p50 9.9 ms (check vs 152 us at 1e6).
    F-192 fixed (D: bounded scans filtered the whole memtable): D 10^5 text build 36 s (J 14). F-193 open to the human:
-   R+D flush every memtable version, D text file 6x Java's. `~/tx2.sh` reruns D 1e6 + D 1e7 (`runs/tx2-*`, `tx2.done`).
+   R+D flush every memtable version, D text file 6x Java's. tx2 (pre-F-193/194, 7f49bfd): D 1e6 build 618 s, 3.8 GB,
+   peak RSS 205 MB PASS, and2 p50 207 us; D 1e7 build 15255 s, 13.1 GB, peak RSS 220 MB PASS, and2 p50 1.46 ms; both sound.
+   `~/tx3.sh` (abcb57a, post-F-194) reruns D 1e6 text (`runs/tx3-*`, `tx3.done`): compare file size vs 3.8 GB.
 5. Rest of 6.5: spatial 10^7, HNSW 10^6 x 128-d recall@10.
    Noticed, not fixed: Java `Collection.clear()` does not clear text indexes.
    Remote `cryptand-f184` uncommitted edits (F-184-era Dart) were discarded by a reset 10-29; they matched pushed commits.
 
 ## Log
+- 10-30: tx2 done (D text 1e6/1e7 PASS, 205/220 MB, files 3.8/13.1 GB pre-F-194); tx3 (D 1e6 post-F-194) running.
 - 10-30: F-194 fixed (R+D publish after the collection write), Dart text 10^5 721 -> 172 MB; gate quick green (remote).
 - 10-30: F-193 not the size cause; F-194 found (D/R compaction frees wait for a user commit; Java's compaction publishes), to the human. tx2 (D 1e6/1e7) running.
 - 10-30: F-193 fixed (R+D flush collapse, human-approved), gate quick green; Dart text 10^5 file 785 -> 721 MB only (Java 126), gap cause still open.
