@@ -169,8 +169,13 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
 7. 10-30 (human): spec 05 §3 / 09 §3 amended, vector_graph is a CoW B+tree, levelled_kinds vector drops it (R+J+D);
    gate `~/gvg.log`. F-202 verify half fixed (561ab7e), gate `~/g202.log`. Next, one by one: F-202 build half
    (heap-profile R sp 1e7 build, 410-500 MB flat), F-203 (R vx 1e6), F-204 (D vector 6x), once sv3 ends.
+8. 10-30 later: F-202 build peak footprint 512 MB, a burst between 90 s heap snapshots (85-240 MB), compaction buffers
+   the likely holder (= F-184 Rust remainder); needs a finer tool, asked the human. F-204 typed fix dd834fa (20k 213 -> 142 s);
+   `~/f204.sh`-style run `~/f204.{out,err,done}` (D vector 1e5 under time -l): if still far behind R/J (368 s), human
+   wants FFI pread considered (two syscalls per region miss).
 
 ## Log
+- 10-30: F-202 verify fixed, build half is a transient burst; F-204 typed vectors (-33%); vuln reporting enabled.
 - 10-30: vector_graph CoW spec amendment (R+J+D); F-202 verify half fixed; D vx 1e6 dropped from sv3.
 - 10-30: sv3 partial read; F-202..F-204 opened (6.5 spatial/vector RSS and build time).
 - 10-30: F-195/F-196 R+D disk-based, as J (989b141); F-197..F-200 found and fixed; local R/J/D + interop green; vx1/g197 queued.
