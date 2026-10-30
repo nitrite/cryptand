@@ -206,3 +206,39 @@ fn clearing_an_indexed_collection_empties_its_spatial_and_vector_indexes() {
     db.commit(Durability::Os).unwrap();
     sound(&mut db);
 }
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "3500 x 128-d builds; the release gate runs it")]
+fn a_clustered_index_is_navigable_beyond_the_entry_points_cluster() {
+    // F-201: K tight clusters of P in D dims (env CL_K/CL_P/CL_D override).
+    // Each cluster outgrows m = 32, and without the far slots every list
+    // filled with its own cluster and a search never left the entry point's:
+    // recall 0.025 here (64-d does not show it; high dimensions do).
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (k, p, dim) = (env("CL_K", 50), env("CL_P", 70), env("CL_D", 128));
+    let (_t, mut db) = db("vector-clusters", Profile::Desktop);
+    let mut rnd = Rng(201);
+    let centres: Vec<Vec<f32>> = (0..k).map(|_| (0..dim).map(|_| rnd.f64() as f32).collect()).collect();
+    let mut c = db.collection("c").unwrap();
+    let ix = db.create_vector_index(&c, "emb", dim as u32, "l2", 64).unwrap();
+    let mut live: HashMap<i64, Vec<f32>> = HashMap::new();
+    for i in 0..(k * p) as i64 {
+        let ctr = &centres[i as usize % k];
+        let v: Vec<f32> = ctr.iter().map(|x| x + 0.15 * (rnd.f64() as f32 - 0.5)).collect();
+        c.insert(&mut db.engine, &doc(i + 1, vec![("emb", Value::VectorF32(v.clone()))])).unwrap();
+        live.insert(i + 1, v);
+    }
+    let mut found = 0;
+    for q in 0..40usize {
+        let q = q * k / 40;
+        let query: Vec<f32> = centres[q].iter().map(|x| x + 0.15 * (rnd.f64() as f32 - 0.5)).collect();
+        let mut all: Vec<(i64, f64)> = live.iter().map(|(id, v)| (*id, l2(&query, v))).collect();
+        all.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let truth: BTreeSet<i64> = all[..10].iter().map(|h| h.0).collect();
+        for (id, _) in db.with_vector(&ix, |v, e| v.search(e, &query, 10, None)).unwrap() {
+            found += truth.contains(&id) as usize;
+        }
+    }
+    let r = found as f64 / 400.0;
+    assert!(r >= 0.9, "recall {r}");
+}

@@ -422,13 +422,21 @@ public final class VectorIndex {
         return cache == null ? region.read(pager, slot) : cache.computeIfAbsent(slot, s -> region.read(pager, s));
     }
 
-    /** Vamana's robust prune: nearest first, dropping a candidate a kept one covers. */
+    /**
+     * Vamana's robust prune: nearest first, dropping a candidate a kept one
+     * covers, up to {@code m - m/8}; F-201: the last {@code m/8} slots go to
+     * the farthest candidates left. In high dimensions near neighbours rarely
+     * cover each other, so a cluster larger than {@code m} filled every list
+     * with itself, the edges out of it were pruned away, and a search never
+     * left the entry point's cluster (recall@10 0.010 at 10^5 x 128-d).
+     */
     private List<Long> prune(long self, List<Scored> nearestFirst, Map<Long, float[]> cache) {
         Pager pager = db.engine().pager();
+        int near = m - Math.max(1, m / 8);
         List<Long> kept = new ArrayList<>();
         List<float[]> keptVectors = new ArrayList<>();
         for (Scored c : nearestFirst) {
-            if (kept.size() >= m) {
+            if (kept.size() >= near) {
                 break;
             }
             if (c.slot == self || kept.contains(c.slot)) {
@@ -445,6 +453,12 @@ public final class VectorIndex {
             if (!covered) {
                 kept.add(c.slot);
                 keptVectors.add(v);
+            }
+        }
+        for (int i = nearestFirst.size() - 1; i >= 0 && kept.size() < m; i--) {
+            long s = nearestFirst.get(i).slot;
+            if (s != self && !kept.contains(s)) {
+                kept.add(s);
             }
         }
         return kept;

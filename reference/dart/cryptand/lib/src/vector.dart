@@ -660,18 +660,28 @@ final class VectorIndex {
     return best.toList()..sort(byD);
   }
 
-  /// Vamana's robust prune: nearest first, dropping a candidate a kept one covers.
+  /// Vamana's robust prune: nearest first, dropping a candidate a kept one
+  /// covers, up to `m - m/8`; F-201: the last `m/8` slots go to the farthest
+  /// candidates left. In high dimensions near neighbours rarely cover each
+  /// other, so a cluster larger than `m` filled every list with itself, the
+  /// edges out of it were pruned away, and a search never left the entry
+  /// point's cluster (recall@10 0.010 at 10^5 x 128-d).
   List<int> _prune(int me, List<(double, int)> nearestFirst, Map<int, List<double>> cache) {
+    final near = m - math.max(1, m ~/ 8);
     final kept = <int>[];
     final keptV = <List<double>>[];
     for (final c in nearestFirst) {
-      if (kept.length >= m) break;
+      if (kept.length >= near) break;
       if (c.$2 == me || kept.contains(c.$2)) continue;
       final v = _vector(c.$2, cache);
       if (!keptV.any((k) => vectorAlpha * _d(k, v) <= c.$1)) {
         kept.add(c.$2);
         keptV.add(v);
       }
+    }
+    for (var i = nearestFirst.length - 1; i >= 0 && kept.length < m; i--) {
+      final s = nearestFirst[i].$2;
+      if (s != me && !kept.contains(s)) kept.add(s);
     }
     return kept;
   }

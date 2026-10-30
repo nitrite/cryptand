@@ -150,18 +150,20 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    peak RSS 205 MB PASS, and2 p50 207 us; D 1e7 build 15255 s, 13.1 GB, peak RSS 220 MB PASS, and2 p50 1.46 ms; both sound.
    `~/tx3.sh` (abcb57a, post-F-194) reruns D 1e6 text (`runs/tx3-*`, `tx3.done`): compare file size vs 3.8 GB.
    tx3 (abcb57a, post-F-194) D 1e6 text: file 3.8 -> 1.04 GB, build 595 s, 173 MB, sound.
-5. Rest of 6.5 (human 10-30: build incremental). Java rungs `RssScale PATH N spatial|vector`.
-   F-195 fixed (8428ab2): CoW incremental R-tree (old tree OOM'd at 10^6 under -Xmx128m); 300k 153 -> 7 s.
-   F-196 fixed (18e7fe7): Vamana graph built at put, beam search, path-copying `AdjacencyTree`; 20k x 128-d
-   recall@10 1.000, build 3.7 ms/doc (ef_construction 200), search p50 1.8 ms. R/D: no collection writers (n/a).
-   Remote chain: `~/g195.sh` (gate quick at 8428ab2 -> `~/g195.log`, then sp2 J spatial 1e6 + 1e7, `runs/sp2-*`,
-   `sp2.done`), then `~/v1.sh` (gate quick at HEAD -> `~/g196.log`, then v1 J vector 1e5 + 1e6, `runs/v1-*`, `v1.done`).
-   Check: both gates `exit 0`; sp2 near_rows_q == brute_near, knn_ok, RSS vs 448; v1 recall10, build_s, RSS.
-   Dart wiring of spatial/vector into collections is not done (`rtree.dart`, `vector.dart` in-memory only).
-   Noticed, not fixed: Java `Collection.clear()` does not clear text indexes.
-   Remote `cryptand-f184` uncommitted edits (F-184-era Dart) were discarded by a reset 10-29; they matched pushed commits.
+5. Rest of 6.5 (human 10-30: build incremental). F-195/F-196 now R+J+D (989b141, human 10-30: R-J-D the same):
+   CoW R-tree + Vamana/AdjacencyTree/disk region in all three, wired into collections (engine commit republishes);
+   R `index_cow_test`, D `index_cow_test`, gate leg 13 (each writes, each mutates, all query). F-197 (J adjacency
+   first id, human: zigzag all, vector `vector/adjacency.json`), F-198 (R+J clear), F-199 (D alloc), F-200 (dicts).
+   Rungs: Rust `rss_scale PATH N spatial|vector`, Dart `scale spatial|vector PATH N`, Java `RssScale PATH N spatial|vector`.
+   Remote done: sp2 J spatial 1e6 PASS (38 s, 308 MB), 1e7 PASS (839 s, 314 MB, brute match, sound).
+   v1 J vector 1e5 recall10=0.010 (!), 1e6 OOM in LongMap at 520k under -Xmx128m. vx R 2e4 (clustered) recall 1.000.
+   Running: `~/vx1.sh` in `cryptand-vx` (R + J vector 1e5, J -Xmx256m; `runs/vx1-*`, `vx1.done`), then `~/g197.sh`
+   (gate quick at 989b141 -> `~/g197.log`). Next: explain J 0.010 (rung or index), then R/D/J spatial+vector rungs.
+   Open to the human: spec 05 §3 lists `vector_graph` as levelled, J (and now R+D) root it as a CoW tree.
+   Dart still refuses encrypt/decrypt/rotate on files with vector regions (pre-existing).
 
 ## Log
+- 10-30: F-195/F-196 R+D disk-based, as J (989b141); F-197..F-200 found and fixed; local R/J/D + interop green; vx1/g197 queued.
 - 10-30: F-195 (J CoW R-tree) and F-196 (J incremental Vamana + CoW adjacency tree) fixed, full J suite green locally; gates + sp2/v1 rungs queued on remote.
 - 10-30: tx3 D text 1e6 1.04 GB (F-194 confirmed); Java spatial rung added, sp1 1e6 running; F-195/F-196 to the human.
 - 10-30: tx2 done (D text 1e6/1e7 PASS, 205/220 MB, files 3.8/13.1 GB pre-F-194); tx3 (D 1e6 post-F-194) running.

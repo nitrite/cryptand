@@ -143,4 +143,55 @@ class VectorGraphTest {
             assertTrue(Verify.run(db.engine()).findings().isEmpty(), Verify.run(db.engine()).findings().toString());
         }
     }
+
+    @Test
+    @DisplayName("F-201: a clustered index is navigable beyond the entry point's cluster")
+    void clusteredRecall(@TempDir Path dir) {
+        // 50 tight clusters of 70 in 128-d: each outgrows m = 32. Without the
+        // far slots recall was 0.025: a search never left the entry's cluster.
+        Engine.Options o = new Engine.Options();
+        o.profile = Profile.DESKTOP;
+        o.durability = Superblock.Durability.OS;
+        int k = 50, p = 70, dim = 128;
+        Random rnd = new Random(201);
+        float[][] centres = new float[k][dim];
+        for (float[] c : centres) {
+            for (int d = 0; d < dim; d++) {
+                c[d] = rnd.nextFloat();
+            }
+        }
+        try (Database db = Database.create(dir.resolve("k.cryptand"), o)) {
+            Collection c = db.collection("c");
+            VectorIndex index = c.createVectorIndex("emb", dim, "l2", 64);
+            Map<Long, float[]> live = new HashMap<>();
+            for (int i = 0; i < k * p; i++) {
+                float[] v = new float[dim];
+                for (int d = 0; d < dim; d++) {
+                    v[d] = centres[i % k][d] + 0.15f * (rnd.nextFloat() - 0.5f);
+                }
+                live.put(c.insert(doc(v)), v);
+            }
+            int found = 0;
+            for (int q = 0; q < 40; q++) {
+                float[] query = new float[dim];
+                for (int d = 0; d < dim; d++) {
+                    query[d] = centres[q * k / 40][d] + 0.15f * (rnd.nextFloat() - 0.5f);
+                }
+                List<Map.Entry<Long, Double>> all = new ArrayList<>();
+                live.forEach((id, v) -> all.add(Map.entry(id, VectorIndex.distance("l2", query, v))));
+                all.sort(Map.Entry.comparingByValue());
+                Set<Long> truth = new HashSet<>();
+                for (int i = 0; i < 10; i++) {
+                    truth.add(all.get(i).getKey());
+                }
+                for (VectorIndex.Hit h : index.search(query, 10)) {
+                    if (truth.contains(h.nitriteId())) {
+                        found++;
+                    }
+                }
+            }
+            double r = found / 400.0;
+            assertTrue(r >= 0.9, "recall " + r);
+        }
+    }
 }

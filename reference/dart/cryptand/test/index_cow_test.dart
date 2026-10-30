@@ -202,4 +202,33 @@ void main() {
     _sound(db);
     db.engine.close();
   });
+
+  test('F-201: a clustered index is navigable beyond the entry point\'s cluster', () {
+    // 50 tight clusters of 70 in 128-d: each outgrows m = 32. Without the far
+    // slots recall was 0.025: a search never left the entry point's cluster.
+    const k = 50, p = 70, dim = 128;
+    final rnd = math.Random(201);
+    final centres = [
+      for (var c = 0; c < k; c++) [for (var d = 0; d < dim; d++) rnd.nextDouble()]
+    ];
+    final c = Database().createCollection('c');
+    final index = c.createVectorIndex('emb', dim: dim, initialSlots: 64);
+    final live = <int, List<double>>{};
+    for (var i = 0; i < k * p; i++) {
+      final f = CVector.f32([for (final x in centres[i % k]) x + 0.15 * (rnd.nextDouble() - 0.5)]);
+      c.put(CNitriteId(i + 1), CDoc({'emb': f}));
+      live[i + 1] = f.f32Values!;
+    }
+    var found = 0;
+    for (var q = 0; q < 40; q++) {
+      final query = [for (final x in centres[q * k ~/ 40]) x + 0.15 * (rnd.nextDouble() - 0.5)];
+      final all = [for (final e in live.entries) (e.key, l2(query, e.value))]
+        ..sort((a, b) => a.$2.compareTo(b.$2));
+      final truth = {for (final h in all.take(10)) h.$1};
+      for (final (id, _) in index.search(query, 10)) {
+        if (truth.contains(id)) found++;
+      }
+    }
+    expect(found / 400, greaterThanOrEqualTo(0.9), reason: 'recall ${found / 400}');
+  }, timeout: const Timeout(Duration(minutes: 5)));
 }

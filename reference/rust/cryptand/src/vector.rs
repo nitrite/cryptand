@@ -1182,12 +1182,18 @@ impl VectorIndex {
         Ok(best.into_sorted_vec())
     }
 
-    /// Vamana's robust prune: nearest first, dropping a candidate a kept one covers.
+    /// Vamana's robust prune: nearest first, dropping a candidate a kept one
+    /// covers, up to `m - m/8`; F-201: the last `m/8` slots go to the farthest
+    /// candidates left. In high dimensions near neighbours rarely cover each
+    /// other, so a cluster larger than `m` filled every list with itself, the
+    /// edges out of it were pruned away, and a search never left the entry
+    /// point's cluster (recall@10 0.010 at 10^5 x 128-d in 1000 clusters).
     fn prune(&self, pager: &mut Pager, me: u64, nearest_first: &[Scored], cache: &mut std::collections::HashMap<u64, Vec<f32>>) -> Result<Vec<u64>> {
+        let near = self.m - (self.m / 8).max(1);
         let mut kept: Vec<u64> = Vec::new();
         let mut kept_v: Vec<Vec<f32>> = Vec::new();
         for c in nearest_first {
-            if kept.len() >= self.m {
+            if kept.len() >= near {
                 break;
             }
             if c.1 == me || kept.contains(&c.1) {
@@ -1197,6 +1203,14 @@ impl VectorIndex {
             if !kept_v.iter().any(|k| ALPHA * distance_f64(self.metric, k, &v) <= c.0) {
                 kept.push(c.1);
                 kept_v.push(v);
+            }
+        }
+        for c in nearest_first.iter().rev() {
+            if kept.len() >= self.m {
+                break;
+            }
+            if c.1 != me && !kept.contains(&c.1) {
+                kept.push(c.1);
             }
         }
         Ok(kept)
