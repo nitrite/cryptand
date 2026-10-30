@@ -1255,10 +1255,17 @@ impl VectorIndex {
     /// §8 `search(query, k, filter?)`, nearest first, with **true** distances,
     /// and never a slot with no live document.
     pub fn search(&mut self, e: &mut crate::engine::Engine, query: &[f32], k: usize, filter: Option<&dyn Fn(i64) -> bool>) -> Result<Vec<(i64, f64)>> {
+        self.search_ef(e, query, k, filter, EF_SEARCH)
+    }
+
+    /// [`Self::search`] with beam width `ef` (F-205): recall against speed,
+    /// which §8 leaves to the caller. 3e5 x 128-d: ef 100 recall 0.948 p50
+    /// 4.2 ms, ef 400 0.987 / 13.5 ms.
+    pub fn search_ef(&mut self, e: &mut crate::engine::Engine, query: &[f32], k: usize, filter: Option<&dyn Fn(i64) -> bool>, ef: usize) -> Result<Vec<(i64, f64)>> {
         if query.len() != self.dim as usize {
             return invalid(format!("query has {} dimensions, index {} declares {}", query.len(), self.name, self.dim));
         }
-        let ef = k.max(EF_SEARCH);
+        let ef = k.max(ef);
         if filter.is_none() && self.live_count as usize > ef {
             let mut hits = Vec::new();
             for c in self.beam(&mut e.pager, query, ef, None)? {

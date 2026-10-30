@@ -113,6 +113,18 @@ class VectorGraphTest {
                 double r = recall(index, live, rnd, dim);
                 assertTrue(r >= 0.95, "recall after reopen " + r);
                 assertEquals(0, index.fallbacks);
+                // F-205: a beam as wide as the index is the exact answer.
+                float[] q = new float[dim];
+                for (int i = 0; i < dim; i++) {
+                    q[i] = rnd.nextFloat();
+                }
+                List<Map.Entry<Long, Double>> all = new ArrayList<>();
+                live.forEach((id, v) -> all.add(Map.entry(id, VectorIndex.distance("l2", q, v))));
+                all.sort(Map.Entry.comparingByValue());
+                List<VectorIndex.Hit> wide = index.search(q, 10, null, live.size());
+                for (int i = 0; i < 10; i++) {
+                    assertEquals(all.get(i).getKey(), wide.get(i).nitriteId());
+                }
                 assertTrue(Verify.run(db.engine()).findings().isEmpty());
             }
         } finally {

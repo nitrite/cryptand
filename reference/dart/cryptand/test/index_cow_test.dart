@@ -179,6 +179,12 @@ void main() {
     final r2 = recall(reopened, live, rnd, dim);
     expect(r2, greaterThanOrEqualTo(0.95), reason: 'recall after reopen $r2');
     expect(reopened.fallbacks, 0);
+    // F-205: a beam as wide as the index is the exact answer.
+    final q = [for (var i = 0; i < dim; i++) rnd.nextDouble()];
+    final all = [for (final e in live.entries) (e.key, l2(q, e.value))]
+      ..sort((a, b) => a.$2.compareTo(b.$2));
+    expect([for (final h in reopened.search(q, 10, ef: live.length)) h.$1],
+        [for (final h in all.take(10)) h.$1]);
     _sound(db);
     db.engine.close();
   });

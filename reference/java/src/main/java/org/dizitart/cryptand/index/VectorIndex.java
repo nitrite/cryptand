@@ -627,13 +627,22 @@ public final class VectorIndex {
      * returned, and a slot with no live document is never returned — which is
      * what makes a delete correct immediately.
      */
-    public synchronized List<Hit> search(float[] query, int k, java.util.function.LongPredicate filter) {
+    public List<Hit> search(float[] query, int k, java.util.function.LongPredicate filter) {
+        return search(query, k, filter, EF_SEARCH);
+    }
+
+    /**
+     * {@link #search(float[], int, java.util.function.LongPredicate)} with beam
+     * width {@code ef} (F-205): recall against speed, which §8 leaves to the
+     * caller. 3e5 x 128-d: ef 100 recall 0.948 p50 4.2 ms, ef 400 0.987 / 13.5 ms.
+     */
+    public synchronized List<Hit> search(float[] query, int k, java.util.function.LongPredicate filter, int ef) {
         if (query.length != dim) {
             throw new InvalidArgumentException("query has " + query.length
                     + " dimensions, index " + name + " declares " + dim);
         }
         Pager pager = db.engine().pager();
-        int ef = Math.max(k, EF_SEARCH);
+        ef = Math.max(k, ef);
         if (filter == null && live.cardinality() > ef) {
             List<Hit> hits = new ArrayList<>();
             for (Scored c : beam(query, ef, null)) {

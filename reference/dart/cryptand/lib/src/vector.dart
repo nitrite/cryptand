@@ -750,14 +750,16 @@ final class VectorIndex {
   }
 
   /// §8's `search(query, k, filter?)`, nearest first, with **true** distances
-  /// and never a slot with no live document.
+  /// and never a slot with no live document. [ef] is the beam width (F-205):
+  /// recall against speed, which §8 leaves to the caller (3e5 x 128-d: 100
+  /// gives recall 0.948 at 4.2 ms p50, 400 gives 0.987 at 13.5 ms).
   List<(int, double)> search(List<double> query, int k,
-      {bool Function(int docId)? filter}) {
+      {bool Function(int docId)? filter, int ef = vectorEfSearch}) {
     if (query.length != dim) {
       throw InvalidArgumentException(
           'query has ${query.length} dimensions, index $name declares $dim');
     }
-    final ef = math.max(k, vectorEfSearch);
+    ef = math.max(k, ef);
     if (filter == null && size > ef) {
       final hits = <(int, double)>[];
       for (final c in _beam(Float64List.fromList(query), ef, null)) {

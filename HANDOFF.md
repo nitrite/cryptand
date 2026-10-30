@@ -175,6 +175,7 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    wants FFI pread considered (two syscalls per region miss).
 
 ## Log
+- 10-30/31: F-203 in-window page reuse R+J+D (3e5 file 5.07 -> 1.10 GB), F-204 pread + fd fix, F-205 per-search ef; v6 10^6 vector R/J/D running.
 - 10-30: F-202 verify fixed, build half is a transient burst; F-204 typed vectors (-33%); vuln reporting enabled.
 - 10-30: vector_graph CoW spec amendment (R+J+D); F-202 verify half fixed; D vx 1e6 dropped from sv3.
 - 10-30: sv3 partial read; F-202..F-204 opened (6.5 spatial/vector RSS and build time).

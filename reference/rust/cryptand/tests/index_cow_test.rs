@@ -181,6 +181,12 @@ fn recall_at_10_against_brute_force_stays_high_through_deletes_and_a_reopen() {
     let (r, fallbacks) = recall(&mut db, &ix, &live, &mut rnd, dim);
     assert!(r >= 0.95, "recall after reopen {r}");
     assert_eq!(0, fallbacks);
+    // F-205: a beam as wide as the index is the exact answer.
+    let q: Vec<f32> = (0..dim).map(|_| rnd.f64() as f32).collect();
+    let mut all: Vec<(i64, f64)> = live.iter().map(|(id, v)| (*id, l2(&q, v))).collect();
+    all.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let wide = db.with_vector(&ix, |v, e| v.search_ef(e, &q, 10, None, live.len())).unwrap();
+    assert_eq!(all[..10].iter().map(|h| h.0).collect::<Vec<_>>(), wide.iter().map(|h| h.0).collect::<Vec<_>>());
     sound(&mut db);
     cryptand::vector::ADJACENCY_DIRTY_BUDGET.store(saved, Ordering::Relaxed);
 }
