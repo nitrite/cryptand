@@ -14,6 +14,42 @@
 //! Run under `/usr/bin/time -l` for max RSS. `CRYPTAND_ENC=1` makes every
 //! mode use an encrypted file (fixed raw key, kdf 0: Argon2id excluded).
 
+/// F-202: `CRYPTAND_HWM=1` counts live heap bytes and prints a backtrace each
+/// time the high-water mark passes another 16 MB, naming a burst that heap
+/// snapshots minutes apart miss. Off, it is one relaxed load per allocation.
+mod hwm {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering::Relaxed};
+    pub static ON: AtomicBool = AtomicBool::new(false);
+    // Signed: memory allocated before `ON` may be freed after it.
+    static LIVE: AtomicIsize = AtomicIsize::new(0);
+    static MARK: AtomicIsize = AtomicIsize::new(0);
+    thread_local!(static IN: Cell<bool> = const { Cell::new(false) });
+    pub struct Counting;
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            if ON.load(Relaxed) {
+                let live = LIVE.fetch_add(l.size() as isize, Relaxed) + l.size() as isize;
+                if live > MARK.load(Relaxed) + (16 << 20) && !IN.with(|f| f.replace(true)) {
+                    MARK.store(live, Relaxed);
+                    eprintln!("HWM {} MB\n{}", live >> 20, std::backtrace::Backtrace::force_capture());
+                    IN.with(|f| f.set(false));
+                }
+            }
+            unsafe { System.alloc(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            if ON.load(Relaxed) {
+                LIVE.fetch_sub(l.size() as isize, Relaxed);
+            }
+            unsafe { System.dealloc(p, l) }
+        }
+    }
+}
+#[global_allocator]
+static ALLOC: hwm::Counting = hwm::Counting;
+
 use cryptand::container::{Durability, Profile};
 use cryptand::database::Database;
 use cryptand::engine::Engine;
@@ -42,6 +78,7 @@ fn doc(i: i64) -> Value {
 
 fn main() -> cryptand::Result<()> {
     let a: Vec<String> = std::env::args().collect();
+    hwm::ON.store(std::env::var_os("CRYPTAND_HWM").is_some(), std::sync::atomic::Ordering::Relaxed);
     let path = std::path::Path::new(&a[1]);
     let n: i64 = a[2].parse().unwrap();
     // ponytail: fixed bench key, never a real secret.
