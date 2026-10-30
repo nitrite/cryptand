@@ -39,8 +39,15 @@ impl EngineRepair for Engine {
         // is reallocated, so the file still holds its `SEGMENT_HEADER` page. The
         // free tree is a separate root and survives a lost manifest, so it is
         // what tells a rebuild which of those headers are debris.
-        let freed: std::collections::HashSet<u64> =
-            self.pager.free_list().iter().map(|e| e.start_page).collect();
+        // F-203: by range, not start page: extents freed before any commit
+        // named them coalesce with their neighbours at once.
+        let mut freed: Vec<(u64, u64)> =
+            self.pager.free_list().iter().map(|e| (e.start_page, e.start_page + e.pages as u64)).collect();
+        freed.sort_unstable();
+        let is_free = |p: u64| {
+            let i = freed.partition_point(|&(s, _)| s <= p);
+            i > 0 && p < freed[i - 1].1
+        };
         let mut page = 2u64;
         while page < self.pager.page_count {
             let raw = match self.pager.read_page(page) {
@@ -63,7 +70,7 @@ impl EngineRepair for Engine {
                 continue;
             };
             let pages = h.extent_pages.max(1);
-            if freed.contains(&page) {
+            if is_free(page) {
                 page += pages as u64;
                 continue;
             }

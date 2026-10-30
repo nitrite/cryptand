@@ -126,6 +126,12 @@ pub struct Pager {
     /// F-160: the one read handle every [`SegmentPages`] shares; one per
     /// segment ran out of descriptors (256 on macOS) at 10^8 documents.
     reader: Option<std::sync::Arc<File>>,
+    /// F-203: extents allocated since the last published superblock, `start ->
+    /// pages`. No durable superblock names them, so freeing one whole makes it
+    /// reusable at once (commit 0, as an ENOSPC orphan) instead of after two
+    /// commits: copy-on-write trees rewrote the same hot pages into fresh ones
+    /// all window, 14 GB of file for a 10^6 vector index.
+    unpublished: std::collections::HashMap<u64, u32>,
 }
 
 impl Pager {
@@ -217,6 +223,7 @@ impl Pager {
             read_nonce: 0,
             lazy_reads: Default::default(),
             reader: None,
+            unpublished: std::collections::HashMap::new(),
         }
     }
 
@@ -277,6 +284,7 @@ impl Pager {
     /// best-fit among those, then extend the file at `page_count`.
     pub fn alloc_extent(&mut self, pages: u32) -> Result<u64> {
         let start = self.alloc_extent_unlogged(pages)?;
+        self.unpublished.insert(start, pages);
         if let Some(log) = self.alloc_log.as_mut() {
             log.push((start, pages));
         }
@@ -341,6 +349,7 @@ impl Pager {
     pub fn alloc_fresh(&mut self, pages: u32) -> Result<u64> {
         let start = self.page_count;
         self.grow(pages as u64)?;
+        self.unpublished.insert(start, pages);
         Ok(start)
     }
 
@@ -352,7 +361,13 @@ impl Pager {
         if start_page < 2 || pages == 0 || start_page >= self.page_count {
             return;
         }
+        let commit_id = if self.unpublished.remove(&start_page) == Some(pages) { 0 } else { commit_id };
         self.free.insert((commit_id, start_page), pages);
+    }
+
+    /// A superblock naming everything allocated so far is durable.
+    pub fn published(&mut self) {
+        self.unpublished.clear();
     }
 
     /// F-080: `pages` pages for tree 1 from the low end of the lowest-addressed

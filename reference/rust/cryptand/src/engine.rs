@@ -3767,6 +3767,7 @@ impl Engine {
             (self.sb.commit_id, self.sb.min_retained_commit, self.pager.min_retained_commit) = durable;
             return Err(e);
         }
+        self.pager.published();
         self.prune_written_at();
         self.events.push(StoreEvent::Commit {
             commit_id: new_commit,
