@@ -149,11 +149,16 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    R+D flush every memtable version, D text file 6x Java's. tx2 (pre-F-193/194, 7f49bfd): D 1e6 build 618 s, 3.8 GB,
    peak RSS 205 MB PASS, and2 p50 207 us; D 1e7 build 15255 s, 13.1 GB, peak RSS 220 MB PASS, and2 p50 1.46 ms; both sound.
    `~/tx3.sh` (abcb57a, post-F-194) reruns D 1e6 text (`runs/tx3-*`, `tx3.done`): compare file size vs 3.8 GB.
-5. Rest of 6.5: spatial 10^7, HNSW 10^6 x 128-d recall@10.
+   tx3 (abcb57a, post-F-194) D 1e6 text: file 3.8 -> 1.04 GB, build 595 s, 173 MB, sound.
+5. Rest of 6.5: Java spatial rung `RssScale PATH N spatial` (28b314a; near r=1 + nearestK 10 vs brute force).
+   sp1 J 1e6 running (`runs/sp1-*`); a watcher kills the 1e7 leg on start and writes `sp1.done`.
+   F-195 (spatial: in-memory STR repack per commit, O(n^2) build) and F-196 (vectors: all-pairs adjacency per
+   commit, brute-force search) block 10^7 spatial / 10^6 HNSW: to the human (build incremental, or descope).
    Noticed, not fixed: Java `Collection.clear()` does not clear text indexes.
    Remote `cryptand-f184` uncommitted edits (F-184-era Dart) were discarded by a reset 10-29; they matched pushed commits.
 
 ## Log
+- 10-30: tx3 D text 1e6 1.04 GB (F-194 confirmed); Java spatial rung added, sp1 1e6 running; F-195/F-196 to the human.
 - 10-30: tx2 done (D text 1e6/1e7 PASS, 205/220 MB, files 3.8/13.1 GB pre-F-194); tx3 (D 1e6 post-F-194) running.
 - 10-30: F-194 fixed (R+D publish after the collection write), Dart text 10^5 721 -> 172 MB; gate quick green (remote).
 - 10-30: F-193 not the size cause; F-194 found (D/R compaction frees wait for a user commit; Java's compaction publishes), to the human. tx2 (D 1e6/1e7) running.
