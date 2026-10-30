@@ -164,8 +164,12 @@ probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/r
    1e6, D vector 1e6 (last; may take many hours). Check: brute_near == near_rows_q, knn_ok, recall10, verify_sound, RSS vs 448.
    Open to the human: spec 05 §3 lists `vector_graph` as levelled, J (and now R+D) root it as a CoW tree.
    Dart still refuses encrypt/decrypt/rotate on files with vector regions (pre-existing).
+6. sv3 partial (10-30, gate quick green at 588c935): R sp 1e6 PASS 366 MB; D sp 1e6 PASS 218 MB; all knn/brute match, sound;
+   R/J/D vector 1e5 recall 0.970 sound (J 407 MB, R 206, D 85). Opened F-202 (R sp 1e7 488/1232 MB FAIL),
+   F-203 (R vx 1e6 RSS 474 MB at 370k, slow), F-204 (D vector build 6x). Still running: r-vx-1e6, then j-vx-1e6, d-sp-1e7, d-vx-1e6.
 
 ## Log
+- 10-30: sv3 partial read; F-202..F-204 opened (6.5 spatial/vector RSS and build time).
 - 10-30: F-195/F-196 R+D disk-based, as J (989b141); F-197..F-200 found and fixed; local R/J/D + interop green; vx1/g197 queued.
 - 10-30: F-195 (J CoW R-tree) and F-196 (J incremental Vamana + CoW adjacency tree) fixed, full J suite green locally; gates + sp2/v1 rungs queued on remote.
 - 10-30: tx3 D text 1e6 1.04 GB (F-194 confirmed); Java spatial rung added, sp1 1e6 running; F-195/F-196 to the human.
