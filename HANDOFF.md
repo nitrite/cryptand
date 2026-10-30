@@ -103,7 +103,6 @@
 
 
 
-- Enable GitHub private vulnerability reporting on nitrite/cryptand (SECURITY.md points there).
 
 ## Next action
 
