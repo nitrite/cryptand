@@ -34,8 +34,7 @@
     "name_dict",
     "postings",
     "term_dict",
-    "term_index",
-    "vector_graph"
+    "term_index"
   ],
   "store_metadata_key": "602473746f72650000",
   "trees": [

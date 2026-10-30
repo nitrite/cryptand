@@ -46,8 +46,8 @@ pub mod kind {
 
     /// §3 — the kinds whose data lives in manifest segments rather than in a
     /// copy-on-write tree rooted at `root`.
-    pub const LEVELLED: [&str; 8] =
-        [DATA, INDEX, KV, NAME_DICT, POSTINGS, TERM_DICT, TERM_INDEX, VECTOR_GRAPH];
+    pub const LEVELLED: [&str; 7] =
+        [DATA, INDEX, KV, NAME_DICT, POSTINGS, TERM_DICT, TERM_INDEX];
 
     pub const KNOWN: [&str; 10] = [
         DATA, NAME_DICT, INDEX, TERM_DICT, TERM_INDEX, POSTINGS, RTREE, VECTOR_GRAPH, KV, INTERNAL,
@@ -497,4 +497,4 @@ impl Attributes {
 pub const PORTABLE_INDEX_TYPES: [&str; 5] = index_type::PORTABLE;
 
 /// §3 — the kinds whose data lives in manifest segments.
-pub const LEVELLED_KINDS: [&str; 8] = kind::LEVELLED;
+pub const LEVELLED_KINDS: [&str; 7] = kind::LEVELLED;

@@ -38,7 +38,8 @@ class TreeKind {
   static const String internal = 'internal';
 
   /// §3: `levelled` is true for every kind whose data lives in manifest
-  /// segments. `rtree` is a copy-on-write tree of its own page types, and the
+  /// segments. `rtree` is a copy-on-write tree of its own page types, `vector_graph` a
+  /// copy-on-write B+tree of node pages, and the
   /// reserved trees 0–15 are copy-on-write too.
   static const Set<String> levelled = {
     data,
@@ -47,7 +48,6 @@ class TreeKind {
     termDict,
     termIndex,
     postings,
-    vectorGraph,
     kv,
   };
 

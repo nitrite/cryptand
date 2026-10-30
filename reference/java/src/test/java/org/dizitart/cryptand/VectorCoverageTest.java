@@ -45,7 +45,7 @@ class VectorCoverageTest {
         assertCount("index/entries.json", "cases", 12);
         assertCount("index/layout.json", "entries", 5);
         assertCount("catalog/trees.json", "trees", 3);
-        assertCount("catalog/trees.json", "levelled_kinds", 8);
+        assertCount("catalog/trees.json", "levelled_kinds", 7);
         assertCount("security/derivation.json", "nonces", 2);
         assertCount("analyzer/std_v1.json", "cases", 14);
     }

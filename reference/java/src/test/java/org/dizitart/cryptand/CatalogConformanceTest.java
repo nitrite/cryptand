@@ -107,8 +107,8 @@ class CatalogConformanceTest {
             published.add(k.asText());
         }
         assertEquals(List.of("data", "index", "kv", "name_dict", "postings",
-                "term_dict", "term_index", "vector_graph"), published);
-        // rtree is deliberately not levelled: it is a copy-on-write tree of its
+                "term_dict", "term_index"), published);
+        // rtree and vector_graph are deliberately not levelled: it is a copy-on-write tree of its
         // own page types, rooted at `root`.
         assertFalse(published.contains(TreeDescriptor.Kind.RTREE));
     }

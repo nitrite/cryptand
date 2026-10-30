@@ -85,6 +85,10 @@ key    = CKE(Array[U8 level, U64 slot_id])
 value  = CVE BYTES wrapping an adjacency record
 ```
 
+The tree is not levelled: it is a copy-on-write B+tree of node pages
+(`04-segments.md` §3.3) rooted at the descriptor's `root`, with `levelled = false`
+(`05-catalog.md` §3).
+
 The record below is a raw byte layout, wrapped in a CVE `BYTES` value (tag
 `0x13`) for the same reason postings are (`07-fulltext.md` §4.2): every INLINE
 cell in the format holds a CVE value, with no exceptions, so generic tooling can

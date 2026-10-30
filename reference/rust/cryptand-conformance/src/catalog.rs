@@ -21,7 +21,7 @@ pub const PORTABLE_INDEX_TYPES: [&str; 5] =
 
 /// §3 — the kinds whose data lives in manifest segments rather than in a
 /// copy-on-write tree rooted at `root`.
-pub const LEVELLED_KINDS: [&str; 8] = [
+pub const LEVELLED_KINDS: [&str; 7] = [
     "data",
     "index",
     "kv",
@@ -29,5 +29,4 @@ pub const LEVELLED_KINDS: [&str; 8] = [
     "postings",
     "term_dict",
     "term_index",
-    "vector_graph",
 ];

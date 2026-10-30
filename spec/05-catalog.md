@@ -62,7 +62,7 @@ The catalog's value, a CVE document:
 | `kind` | `STR` | §4 |
 | `root` | `U64` | root page id for an internal copy-on-write tree; **absent for a levelled tree**, whose segments are in the manifest |
 | `root_nonce` | `U64` | the `root` page's header `nonce` when `cipher = 1` (`14-security.md` §5.5); absent otherwise |
-| `levelled` | `BOOL` | true when this tree's data lives in manifest segments — `data`, `name_dict`, `index`, `term_dict`, `term_index`, `postings`, `vector_graph` and `kv`. False for `rtree`, which is a copy-on-write tree of its own page types rooted at `root`, and for the reserved trees 0–15. |
+| `levelled` | `BOOL` | true when this tree's data lives in manifest segments — `data`, `name_dict`, `index`, `term_dict`, `term_index`, `postings` and `kv`. False for `rtree`, which is a copy-on-write tree of its own page types rooted at `root`; for `vector_graph`, a copy-on-write B+tree of §2.2 node pages (`04-segments.md` §3.3) rooted at `root`; and for the reserved trees 0–15. |
 | `entries` | `U64` | live entry count (an estimate that MUST be exact after a merge) |
 | `created` | `TIMESTAMP` | |
 | `key_kind` | `STR` | `"nitrite_id"`, `"string"`, `"u32"`, `"array"`, `"opaque"` — advisory, for tooling |
