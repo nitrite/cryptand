@@ -349,7 +349,10 @@ final class Engine {
   /// changes... an implementation MUST treat a backwards clock jump as
   /// resurrecting entries rather than as corruption." Making the clock an
   /// injectable field is what lets that rule be tested rather than asserted.
-  int nowMs = 0;
+  // F-208: tests set a fixed clock; unset (the default) reads the wall clock.
+  int? _clockMs;
+  int get nowMs => _clockMs ?? DateTime.now().millisecondsSinceEpoch;
+  set nowMs(int v) => _clockMs = v;
 
   late final ValueLog vlog;
 
@@ -1360,7 +1363,7 @@ final class Engine {
     // comparator, to re-find a value the iteration was already standing on.
     // Measured on the cross-language CRUD matrix, the flushes inside a 20 000
     // document create cost 52 ms of its 64 ms.
-    final b = _builder(level: 0);
+    var b = _builder(level: 0);
     // F-193, §5 at flush: a version with a newer one of its key here and a seq
     // above `visibleSeq` is unreadable (every snapshot and checkpoint took its
     // seq from `visibleSeq`), so it is not written. Without this a full-text
@@ -1382,6 +1385,11 @@ final class Engine {
           continue;
         }
         newer = true;
+      }
+      // F-207: more trees than one head page can list go to another segment.
+      if (b.treeSpanFull(p.internalKey)) {
+        _publish(b, level: 0, group: 0);
+        b = _builder(level: 0);
       }
       b.add(
           SegEntry(p.internalKey, p.valueKind, p.value, expiryMs: p.expiryMs));
@@ -1985,7 +1993,8 @@ final class Engine {
         // A segment boundary is only legal between user keys: two versions of
         // one key in two segments of the same disjoint run would break the
         // "at most one segment per group covers a key" invariant of §3.1.
-        if (job.out.bytes >= (segmentTargetBytes ?? profile.segmentTargetBytes)) {
+        if (job.out.bytes >= (segmentTargetBytes ?? profile.segmentTargetBytes) ||
+            job.out.treeSpanFull(rec.internalKey)) {
           _rotate(job);
         }
         if (job.levelled &&

@@ -352,7 +352,15 @@ impl EngineVerify for Engine {
                         + vlog::DATA_OFFSET as u64
                         + off;
                     let want = ((s.bytes - off) as usize).min(1 << 20);
-                    let raw = self.pager.read_at(at, want)?;
+                    let mut raw = self.pager.read_at(at, want)?;
+                    // F-206: a record longer than the 1 MiB window (a 16 MB
+                    // document) is read whole, not reported as cut short.
+                    if let Ok((len, n)) = crate::varint::get_uvar(&raw) {
+                        let whole = (len as usize).saturating_add(n);
+                        if whole > raw.len() && (whole as u64) <= s.bytes - off {
+                            raw = self.pager.read_at(at, whole)?;
+                        }
+                    }
                     let rec = match vlog::decode_record(&raw, false) {
                         Ok(x) => x,
                         Err(e) => {

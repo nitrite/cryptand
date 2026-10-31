@@ -19,6 +19,7 @@ library;
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:cryptand/cryptand.dart';
 
@@ -98,6 +99,10 @@ void main(List<String> args) {
   }
   if (args[0] == 'vector') {
     vectorRung(path, n, out, sw);
+    return;
+  }
+  if (args[0] == 'patho') {
+    pathoRung(path, n, args.length > 3 ? args[3] : null);
     return;
   }
 
@@ -514,4 +519,156 @@ void vectorRung(String path, int n, Map<String, Object> out, Stopwatch sw) {
     ..['rss_verify_mb'] = rss();
   db.engine.close();
   stdout.writeln(jsonEncode(out));
+}
+
+/// PLAN 6.6, Rust `rss_scale PATH N patho [WORKLOAD]`: same workloads,
+/// checks and output line.
+void pathoRung(String path, int n, String? only) {
+  const t = 16;
+  CValue nid(int i) => CNitriteId(i);
+  CValue pre(int i) =>
+      CStr('${'shared/prefix/' * 16}${i.toString().padLeft(12, '0')}');
+  Uint8List val(int i) => Uint8List(100)..fillRange(0, 100, i % 251);
+  bool same(Uint8List? a, Uint8List b) =>
+      a != null && a.length == b.length && a[0] == b[0] && a.last == b.last;
+  for (final w in const [
+    'mono',
+    'prefix',
+    'bigdoc',
+    'fields',
+    'colls',
+    'tombstone',
+    'rangedel',
+    'ttl'
+  ]) {
+    if (only != null && only != w) continue;
+    final p = '$path.$w';
+    var db = _freshFile(p);
+    var e = db.engine;
+    final sw = Stopwatch()..start();
+    final extra = <String, Object>{};
+    void every(int i) {
+      if ((i + 1) % 100000 == 0) e.commit();
+    }
+
+    switch (w) {
+      case 'mono' || 'tombstone':
+        for (var i = 0; i < n; i++) {
+          e.put(t, nid(i), val(i));
+          every(i);
+        }
+        if (w == 'tombstone') {
+          for (var i = 0; i < n; i++) {
+            e.remove(t, nid(i));
+            every(i);
+          }
+          e.commit();
+          extra['bytes_deleted'] = File(p).lengthSync();
+          for (var i = 0; i < n; i++) {
+            e.put(t, nid(i), val(i + 1));
+            every(i);
+          }
+        }
+      case 'prefix':
+        for (var i = 0; i < n; i++) {
+          e.put(t, pre(i), val(i));
+          every(i);
+        }
+      case 'bigdoc':
+        for (var i = 0; i < 64; i++) {
+          e.put(
+              t, nid(i), Uint8List(16 << 20)..fillRange(0, 16 << 20, i % 251));
+          e.commit();
+        }
+      case 'fields':
+        final c = db.createCollection('c');
+        for (var i = 0; i < 100000; i++) {
+          c.put(
+              nid(i + 1),
+              CDoc({
+                for (var k = 0; k < 10; k++)
+                  'f${i * 10 + k}': CInt.of(NumType.i64, i)
+              }));
+          if ((i + 1) % 10000 == 0) e.commit();
+        }
+      case 'colls':
+        for (var i = 0; i < 100000; i++) {
+          db.createCollection('c$i').put(nid(i + 1), CDoc({}));
+          if ((i + 1) % 10000 == 0) e.commit();
+        }
+      case 'rangedel':
+        for (var i = 0; i < n; i++) {
+          e.put(t, nid(i), val(i));
+          every(i);
+        }
+        e.commit();
+        final spans = n ~/ 100;
+        for (var j = 0; j < spans; j++) {
+          final s = (j * 7919) % spans;
+          e.removeRange(t, nid(s * 100), nid(s * 100 + 100));
+          if ((j + 1) % 1000 == 0) e.commit();
+        }
+      default:
+        final at = DateTime.now().millisecondsSinceEpoch + 2000;
+        for (var i = 0; i < n; i++) {
+          e.put(t, nid(i), val(i), expiryMs: at);
+          every(i);
+        }
+        e.commit();
+        final wait = at + 100 - DateTime.now().millisecondsSinceEpoch;
+        if (wait > 0) sleep(Duration(milliseconds: wait));
+    }
+    e.commit();
+    final buildS = sw.elapsedMilliseconds / 1000;
+    e
+      ..drainCompaction()
+      ..commit()
+      ..close();
+    db = DatabaseFile.open(p);
+    e = db.engine;
+    var bad = 0;
+    final k = w == 'fields'
+        ? 100000
+        : w == 'bigdoc'
+            ? 64
+            : n;
+    final step = w == 'bigdoc' ? 1 : math.max(1, k ~/ 1000);
+    for (var i = 0; i < k && w != 'colls'; i += step) {
+      final ok = switch (w) {
+        'mono' => same(e.get(t, nid(i)), val(i)),
+        'tombstone' => same(e.get(t, nid(i)), val(i + 1)),
+        'prefix' => same(e.get(t, pre(i)), val(i)),
+        'bigdoc' => (e.get(t, nid(i))?.length ?? 0) == 16 << 20 &&
+            e.get(t, nid(i))![0] == i % 251,
+        'fields' =>
+          db.collection('c')!.get(nid(i + 1))?.fields['f${i * 10 + 9}'] ==
+              CInt.of(NumType.i64, i),
+        _ => e.get(t, nid(i)) == null,
+      };
+      if (!ok) bad++;
+    }
+    if (w == 'colls') {
+      final names = db.catalog.collections.length;
+      extra['collections'] = names;
+      if (names != 100000) bad++;
+    }
+    if (w == 'rangedel' || w == 'ttl') {
+      extra['scan_rows'] = e.scanTree(t).length;
+    }
+    final rss = ProcessInfo.currentRss >> 20;
+    final sound = e.verifyStructure(claims: db.indexClaims()).isSound;
+    stdout.writeln(jsonEncode({
+      'impl': 'dart',
+      'workload': w,
+      'n': n,
+      'build_s': buildS,
+      'bytes': File(p).lengthSync(),
+      'bad': bad,
+      'verify_sound': sound,
+      'rss_mb': rss,
+      ...extra,
+    }));
+    e.close();
+    File(p).deleteSync();
+  }
 }

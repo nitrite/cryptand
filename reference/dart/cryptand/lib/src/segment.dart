@@ -645,6 +645,17 @@ final class SegmentBuilder {
     return first;
   }
 
+  /// F-207, 04 §2.1: true when [internalKey] starts a tree this segment lacks
+  /// and its `tree_span[]` entry would leave the head page under 256 bytes for
+  /// the bounds: the writer MUST split here.
+  bool treeSpanFull(Uint8List internalKey) {
+    final t = parseInternalKey(internalKey).treeId;
+    if (_treeSpan.containsKey(t)) return false;
+    // Fixed header fields as written by [_buildHeader], then the two bound lengths.
+    const fixed = 8 + 8 + 1 + 1 + 2 + 4 + 9 * 8 + 1 + 7 + 8 + 8;
+    return fixed + (_treeSpan.length + 1) * 12 + 256 > _payloadSize;
+  }
+
   Uint8List _buildHeader(int rootPage, int rootEntries, int filterPage) {
     final page = Uint8List(pageSize);
     final base = PageHeader.size;

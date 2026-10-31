@@ -389,7 +389,7 @@ pub struct Engine {
     vlog_dirty: HashSet<u64>,
 
     /// §9's wall clock, injectable so a backwards jump can be tested.
-    pub now_ms: u64,
+    pub now_ms: Option<u64>,
 
     pub visible_seq: u64,
     pub next_seq: u64,
@@ -572,7 +572,7 @@ impl Engine {
             vlog_tail: BTreeMap::new(),
             vlog_enc: HashMap::new(),
             vlog_dirty: HashSet::new(),
-            now_ms: 0,
+            now_ms: None,
             visible_seq: 0,
             next_seq: 1,
             live_snapshots: Vec::new(),
@@ -797,7 +797,7 @@ impl Engine {
             vlog_tail: BTreeMap::new(),
             vlog_enc: HashMap::new(),
             vlog_dirty: HashSet::new(),
-            now_ms: 0,
+            now_ms: None,
             visible_seq: sb.visible_seq,
             next_seq: sb.next_seq,
             live_snapshots: Vec::new(),
@@ -1683,16 +1683,7 @@ impl Engine {
         self.memtable_bytes = 0;
         self.memtable_range_deletes = 0;
 
-        let mut b = SegmentBuilder::with_reserve(
-            self.pager.page_size,
-            self.pager.tag_reserve(),
-            self.sb.next_segment_id,
-            0,
-            0,
-            self.filter_bits_at(0),
-        )?;
-        b.commit_id = self.sb.commit_id;
-        self.sb.next_segment_id += 1;
+        let mut b = self.flush_builder()?;
         // F-193, §5 at flush: a version with a newer one of its key here and a
         // seq above `visible_seq` is unreadable (every snapshot and checkpoint
         // took its seq from `visible_seq`), so it is not written. RANGE_DELETE
@@ -1718,13 +1709,36 @@ impl Engine {
                 }
                 newer = true;
             }
+            // F-207: more trees than one head page can list go to another segment.
+            if b.tree_span_full(&ik) {
+                let full = std::mem::replace(&mut b, self.flush_builder()?);
+                self.publish_flushed(full)?;
+            }
             b.add(SegEntry { internal_key: ik, value_kind: e.value_kind, value: e.value, expiry_ms: e.expiry_ms })?;
         }
-        let entries = b.entry_count();
-        let seg_id = b.segment_id;
-        self.publish_segment(b, 0, 0)?;
+        self.publish_flushed(b)?;
         self.visible_seq = self.next_seq.saturating_sub(1);
-        self.events.push(StoreEvent::Flushed { segment_id: seg_id, entries });
+        Ok(())
+    }
+
+    fn flush_builder(&mut self) -> Result<SegmentBuilder> {
+        let mut b = SegmentBuilder::with_reserve(
+            self.pager.page_size,
+            self.pager.tag_reserve(),
+            self.sb.next_segment_id,
+            0,
+            0,
+            self.filter_bits_at(0),
+        )?;
+        b.commit_id = self.sb.commit_id;
+        self.sb.next_segment_id += 1;
+        Ok(b)
+    }
+
+    fn publish_flushed(&mut self, b: SegmentBuilder) -> Result<()> {
+        let (entries, segment_id) = (b.entry_count(), b.segment_id);
+        self.publish_segment(b, 0, 0)?;
+        self.events.push(StoreEvent::Flushed { segment_id, entries });
         Ok(())
     }
 
@@ -2115,7 +2129,7 @@ impl Engine {
             ReadSource::Mem(r) => r.expiry_ms,
             ReadSource::Seg(_, r) => r.expiry_ms,
         };
-        if matches!(expiry, Some(x) if x <= self.now_ms) {
+        if matches!(expiry, Some(x) if x <= self.now()) {
             return Ok(None);
         }
         match best.src {
@@ -2134,10 +2148,15 @@ impl Engine {
         }
     }
 
+    /// F-208: `now_ms` is a test clock; unset (the default) reads the wall clock.
+    fn now(&self) -> u64 {
+        self.now_ms.unwrap_or_else(|| now_millis() as u64)
+    }
+
     fn expired(&self, rec: &SegRecord) -> bool {
         // §9: expiry is evaluated at read time, so it is exact regardless of
         // when compaction runs; a backwards clock jump resurrects entries.
-        matches!(rec.expiry_ms, Some(x) if x <= self.now_ms)
+        matches!(rec.expiry_ms, Some(x) if x <= self.now())
     }
 
     pub fn resolve_value(&mut self, rec: &SegRecord) -> Result<Vec<u8>> {
@@ -2793,7 +2812,7 @@ impl Engine {
         // deadline is older than the oldest live snapshot's wall clock.
         if reaches_last {
             if let Some(x) = rec.expiry_ms {
-                if x <= self.now_ms && seq <= min_retained {
+                if x <= self.now() && seq <= min_retained {
                     self.release_if_vlog(&rec);
                     if rec.value_kind == value_kind::BLOB {
                         job.dead_blobs.push(rec.value.clone());
@@ -2843,7 +2862,8 @@ impl Engine {
             // §3.1.1: split only between user keys, or two segments of one
             // group (or of the last level) overlap on a user key.
             let split = job.builder.as_ref().is_some_and(|b| {
-                b.bytes() >= job.cap_bytes && b.last_user_key() != Some(user_part(&e.internal_key))
+                (b.bytes() >= job.cap_bytes && b.last_user_key() != Some(user_part(&e.internal_key)))
+                    || b.tree_span_full(&e.internal_key)
             });
             if split {
                 self.rotate_output(job)?;

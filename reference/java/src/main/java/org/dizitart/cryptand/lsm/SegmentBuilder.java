@@ -398,6 +398,22 @@ public final class SegmentBuilder {
 
     private static final int CHUNK_PAGES = 128;
 
+    /**
+     * F-207, 04 §2.1: true when {@code ik} starts a tree this segment lacks and
+     * its {@code tree_span[]} entry would leave the head page under 256 bytes
+     * for the bounds: the writer MUST split here.
+     */
+    public boolean treeSpanFull(byte[] ik) {
+        int tid = Ikey.treeIdOf(ik);
+        if (tid == lastTreeId || treeSpan.containsKey(tid)) {
+            return false;
+        }
+        int trees = treeSpan.size() + (lastTreeCount > 0 && !treeSpan.containsKey(lastTreeId) ? 1 : 0);
+        // Fixed header fields, then the two bound lengths.
+        int fixed = 8 + 8 + 1 + 1 + 2 + 4 + 9 * 8 + 1 + 7 + 8 + 8;
+        return fixed + (trees + 1) * 12 + 256 > payloadSize;
+    }
+
     private void flushTreeSpan() {
         if (lastTreeCount > 0) {
             treeSpan.merge(lastTreeId, lastTreeCount, Long::sum);

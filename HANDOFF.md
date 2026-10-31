@@ -8,9 +8,13 @@
 - Vector 10^6 (v6, pre-F-205, ef 100), bar 448 MB, all sound, recall 0.824:
   R build 5339 s, 2.52 GB, peak 172 MB; J 4841 s, 2.33 GB, 370 MB;
   D 7421 s, 2.88 GB, 405 MB. F-205 (per-search beam) committed after.
-- F-205 gate (`~/g205.log`) red on Rust `space_test` f160: `/dev/fd` count is
-  process-wide, a parallel test closed fds -> subtract overflow. Fixed with
-  `saturating_sub` (test only, 10-31); gate not rerun yet.
+- 6.6 rung (10-31): Rust `rss_scale PATH N patho [W]`, Java `RssScale PATH N
+  patho [W]`, Dart `scale patho PATH N [W]`; W = mono prefix bigdoc fields colls
+  tombstone rangedel ttl, one file each, reopen + checks + verify. Local 10^5
+  run found F-206 (R verify), F-207 (S1 R+J+D tree_span split), F-208 (S1 R+D
+  TTL never expired): fixed, tests R+J+D, gate quick at `~/g207.log`.
+  Open: F-209 (D bigdoc 4.65 GB vs R 1.71), F-210 (J colls quadratic, D slow,
+  R 1.36 GB for 10^5 one-doc collections). All other workloads pass R+J+D.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -43,7 +47,9 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Next action
 
-Rerun gate quick on remote at the space_test fix; if green, 6.6 per PLAN.
+If `~/g207.log` is green, commit F-206..F-208 + rungs; then F-210 (Java
+catalog: owner -> index map kept incrementally), F-209, and the 6.6 rungs at
+10^6 on remote.
 
 ## Log
 
@@ -53,3 +59,4 @@ Rerun gate quick on remote at the space_test fix; if green, 6.6 per PLAN.
 - 10-30 — F-192..F-204: spatial/vector on pages R+J+D, Vamana prune, F-202 closed.
 - 10-31 — F-203 fixed (R 865 -> 172 MB), F-205 beam width; v6 vector 10^6 PASS
   R+J+D; F-204 closed at 1.4x; space_test fd flake fixed; handoff trimmed (294 -> ~60 lines).
+- 10-31 — 6.6 rungs R+J+D; F-206..F-208 fixed; F-209, F-210 open.

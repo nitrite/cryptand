@@ -1682,14 +1682,22 @@ public final class Engine implements AutoCloseable {
 
         SegmentBuilder b = new SegmentBuilder(pager, sb.nextSegmentId++, 0, 0, sb.filterBitsUpper);
         EntrySource.Merge merge = new EntrySource.Merge(sources);
+        List<SegmentMeta> built = new ArrayList<>();
         while (merge.isValid()) {
+            // F-207: more trees than one head page can list go to another segment.
+            if (b.treeSpanFull(merge.entry().key())) {
+                built.add(b.finish());
+                b = new SegmentBuilder(pager, sb.nextSegmentId++, 0, 0, sb.filterBitsUpper);
+            }
             b.add(merge.entry());
             merge.next();
         }
-        SegmentMeta built = b.finish();
-        bytesKeyIndex.addAndGet((long) built.pages * sb.pageSize());
-        bytesDevice.addAndGet((long) built.pages * sb.pageSize());
-        manifest.add(built);
+        built.add(b.finish());
+        for (SegmentMeta m : built) {
+            bytesKeyIndex.addAndGet((long) m.pages * sb.pageSize());
+            bytesDevice.addAndGet((long) m.pages * sb.pageSize());
+            manifest.add(m);
+        }
         // The new segment is published BEFORE the entries leave the shards,
         // so a concurrent reader sees the entry in both places rather than
         // in neither. Removing first opens a window in which a committed
@@ -2756,7 +2764,8 @@ public final class Engine implements AutoCloseable {
                 // would otherwise have collapsed, which is exactly what the
                 // concurrency test creates. So a segment rolls over only on a user
                 // key boundary.
-                if (builder != null && newUserKey && builder.emittedBytes() >= targetBytes) {
+                if (builder != null && newUserKey
+                        && (builder.emittedBytes() >= targetBytes || builder.treeSpanFull(out.key()))) {
                     outputs.add(builder.finish());
                     builder = null;
                 }

@@ -365,7 +365,7 @@ fn value_log_collection_keeps_a_values_expiry() {
     let _s = e.snapshot();
     e.put(T + 1, &Value::NitriteId(2), &big).unwrap();
     e.compact().unwrap();
-    e.now_ms = 2_000;
+    e.now_ms = Some(2_000);
     assert!(e.get(T, &Value::NitriteId(5)).unwrap().is_none(), "an expired value is still readable");
 }
 
@@ -503,13 +503,13 @@ fn ttl_is_evaluated_at_read_time_and_a_backwards_clock_resurrects() {
     // §9: "an implementation MUST treat a backwards clock jump as resurrecting
     // entries rather than as corruption."
     let (_t, mut e) = engine("ttl", Profile::Desktop);
-    e.now_ms = 1000;
+    e.now_ms = Some(1000);
     e.put_with_expiry(T, &Value::NitriteId(1), b"x", 2000).unwrap();
     e.flush().unwrap();
     assert!(e.get(T, &Value::NitriteId(1)).unwrap().is_some());
-    e.now_ms = 2000;
+    e.now_ms = Some(2000);
     assert!(e.get(T, &Value::NitriteId(1)).unwrap().is_none(), "expiry is at-or-before");
-    e.now_ms = 1500;
+    e.now_ms = Some(1500);
     assert!(e.get(T, &Value::NitriteId(1)).unwrap().is_some(), "a backwards clock resurrects");
 }
 

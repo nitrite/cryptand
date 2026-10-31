@@ -410,6 +410,32 @@ void main() {
     }
     expect(faults, greaterThan(30), reason: 'the hook never fired');
   });
+
+  test('F-207: a flush over more trees than a head page lists splits', () {
+    // 2000 trees x 12 B of tree_span[] is 24 KB of header: 04 §2.1 says split.
+    final e = Engine();
+    for (var t = 16; t < 2016; t++) {
+      e.put(t, CNitriteId(1), Uint8List.fromList([t & 0xFF]));
+    }
+    e
+      ..flush()
+      ..compact();
+    for (var t = 16; t < 2016; t++) {
+      expect(e.get(t, CNitriteId(1)), [t & 0xFF], reason: 'tree $t');
+    }
+    expect(e.verifyStructure().findings, isEmpty);
+  });
+
+  test('F-208: an expired entry is invisible on the wall clock', () {
+    // `nowMs` was a test clock left at 0, so nothing ever expired.
+    final e = Engine()
+      ..put(16, CNitriteId(1), Uint8List.fromList([1]), expiryMs: 1)
+      ..put(16, CNitriteId(2), Uint8List.fromList([2]));
+    expect(e.get(16, CNitriteId(1)), isNull);
+    e.flush();
+    expect(e.get(16, CNitriteId(1)), isNull);
+    expect(e.get(16, CNitriteId(2)), [2]);
+  });
 }
 
 class _FailNth implements FileHook {

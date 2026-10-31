@@ -2,6 +2,8 @@
 
 **A cross-language storage engine and file format for Nitrite.**
 
+[![Discord](https://img.shields.io/discord/1565965879177519118?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.dizitart.com)
+
 A **cryptand** is a macrobicyclic ligand — a molecular cage that encapsulates an
 ion inside its cavity and holds it there. Azacryptands are studied precisely as
 receptors for small anions, nitrite among them. A cage built to hold nitrite,

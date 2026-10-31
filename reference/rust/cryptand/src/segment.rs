@@ -1025,6 +1025,19 @@ impl SegmentBuilder {
         self.prev_key.as_deref().map(user_part)
     }
 
+    /// F-207, 04 §2.1: true when `internal_key` starts a tree this segment
+    /// lacks and its `tree_span[]` entry would leave the head page under 256
+    /// bytes for the bounds: the writer MUST split here.
+    pub fn tree_span_full(&self, internal_key: &[u8]) -> bool {
+        let Ok(k) = parse_internal_key(internal_key) else { return false };
+        if self.tree_span.contains_key(&k.tree_id) {
+            return false;
+        }
+        // Fixed header fields as written by `build_header`, then the two bound lengths.
+        let fixed = SEGMENT_MAGIC.len() + 8 + 1 + 1 + 2 + 4 + 9 * 8 + 1 + 7 + 8 + 8;
+        fixed + (self.tree_span.len() + 1) * 12 + 256 > self.payload_size
+    }
+
     /// Appends one entry. Keys MUST arrive strictly increasing: bulk
     /// construction is the only construction, so an out-of-order entry is a
     /// caller bug, not something to sort around.

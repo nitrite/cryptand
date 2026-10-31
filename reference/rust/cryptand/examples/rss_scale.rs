@@ -10,6 +10,7 @@
 //!     cargo run --release --example rss_scale PATH N index  # 6.5: unique + compound index build, probes, analyze, verify
 //!     cargo run --release --example rss_scale PATH N spatial  # 6.5: R-tree build, near/nearestK vs brute force, verify
 //!     cargo run --release --example rss_scale PATH N vector   # 6.5: 128-d Vamana build, recall@10 vs brute force, verify
+//!     cargo run --release --example rss_scale PATH N patho [WORKLOAD]  # 6.6: pathological workloads, one file each
 //!
 //! Run under `/usr/bin/time -l` for max RSS. `CRYPTAND_ENC=1` makes every
 //! mode use an encrypted file (fixed raw key, kdf 0: Argon2id excluded).
@@ -161,6 +162,9 @@ fn main() -> cryptand::Result<()> {
     }
     if a.get(3).map(String::as_str) == Some("vector") {
         return vector_rung(path, n);
+    }
+    if a.get(3).map(String::as_str) == Some("patho") {
+        return patho_rung(path, n, a.get(4).map(String::as_str));
     }
     let _ = std::fs::remove_file(path);
     // CRYPTAND_PROFILE=mobile: the profile the file is created with; reads
@@ -456,4 +460,116 @@ fn vector_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
     let sound = db.engine.verify()?.findings.is_empty();
     println!("{line} verify_ms={} verify_sound={sound} rss_verify_mb={}", g.elapsed().as_millis(), rss_mb());
     db.close()
+}
+
+/// PLAN 6.6: each workload builds its own file `PATH.<name>`, checks what it
+/// wrote after a reopen, verifies, and prints one line. N scales the key
+/// workloads; the shape ones use the PLAN's fixed counts.
+fn patho_rung(path: &std::path::Path, n: i64, only: Option<&str>) -> cryptand::Result<()> {
+    use cryptand::verify::EngineVerify;
+    const T: u32 = 16;
+    let id = |i: i64| Value::NitriteId(i);
+    let pre = |i: i64| Value::Str(format!("{}{i:012}", "shared/prefix/".repeat(16)));
+    let val = |i: i64| vec![(i % 251) as u8; 100];
+    let all = ["mono", "prefix", "bigdoc", "fields", "colls", "tombstone", "rangedel", "ttl"];
+    for w in all.iter().filter(|w| only.is_none_or(|o| o == **w)) {
+        let p = path.with_extension(w);
+        let _ = std::fs::remove_file(&p);
+        let mut db = Database::create(&p, Profile::Desktop)?;
+        let t = std::time::Instant::now();
+        let commit_every = |db: &mut Database, i: i64| -> cryptand::Result<()> {
+            if (i + 1) % 100_000 == 0 { db.commit(Durability::Sync)?; }
+            Ok(())
+        };
+        let mut extra = String::new();
+        match *w {
+            "mono" | "tombstone" => {
+                for i in 0..n { db.engine.put(T, &id(i), &val(i))?; commit_every(&mut db, i)?; }
+                if *w == "tombstone" {
+                    for i in 0..n { db.engine.remove(T, &id(i))?; commit_every(&mut db, i)?; }
+                    db.commit(Durability::Sync)?;
+                    extra += &format!(" bytes_deleted={}", std::fs::metadata(&p)?.len());
+                    for i in 0..n { db.engine.put(T, &id(i), &val(i + 1))?; commit_every(&mut db, i)?; }
+                }
+            }
+            "prefix" => for i in 0..n { db.engine.put(T, &pre(i), &val(i))?; commit_every(&mut db, i)?; },
+            // 64 x 16 MB: value log, not segments.
+            "bigdoc" => for i in 0..64 { db.engine.put(T, &id(i), &vec![(i % 251) as u8; 16 << 20])?; db.commit(Durability::Sync)?; },
+            // 10^6 distinct names, 10 new ones per document.
+            "fields" => {
+                let mut c = db.collection("c")?;
+                for i in 0..100_000i64 {
+                    let mut f = vec![("_id".to_string(), id(i + 1))];
+                    f.extend((0..10).map(|k| (format!("f{}", i * 10 + k), Value::int(NumType::I64, i as i128))));
+                    c.insert(&mut db.engine, &Value::Doc(f))?;
+                    if (i + 1) % 10_000 == 0 { db.commit(Durability::Sync)?; }
+                }
+            }
+            "colls" => for i in 0..100_000i64 {
+                let mut c = db.collection(&format!("c{i}"))?;
+                c.insert(&mut db.engine, &Value::Doc(vec![("_id".into(), id(i + 1))]))?;
+                if (i + 1) % 10_000 == 0 { db.commit(Durability::Sync)?; }
+            },
+            // Every 100-key span deleted as a range, in a shuffled order.
+            "rangedel" => {
+                for i in 0..n { db.engine.put(T, &id(i), &val(i))?; commit_every(&mut db, i)?; }
+                db.commit(Durability::Sync)?;
+                let spans = n / 100;
+                for j in 0..spans {
+                    let s = (j * 7919) % spans;
+                    db.engine.remove_range(T, &id(s * 100), &id(s * 100 + 100))?;
+                    if (j + 1) % 1000 == 0 { db.commit(Durability::Sync)?; }
+                }
+            }
+            // All expire 2 s after the write; read after they have.
+            "ttl" => {
+                let at = cryptand::engine::now_millis() as u64 + 2000;
+                for i in 0..n { db.engine.put_with_expiry(T, &id(i), &val(i), at)?; commit_every(&mut db, i)?; }
+                db.commit(Durability::Sync)?;
+                let now = cryptand::engine::now_millis() as u64;
+                if now < at + 100 { std::thread::sleep(std::time::Duration::from_millis(at + 100 - now)); }
+            }
+            _ => unreachable!(),
+        }
+        db.commit(Durability::Sync)?;
+        let build_s = t.elapsed().as_secs_f64();
+        db.engine.drain_compaction()?;
+        db.commit(Durability::Sync)?;
+        db.close()?;
+        let mut db = Database::open(&p, None)?;
+        // Every check probes 1000 spread keys (all for the shape workloads).
+        let probe = |k: i64| (0..1000).map(move |j| j * (k / 1000).max(1)).filter(move |j| *j < k);
+        let bad = match *w {
+            "mono" => probe(n).filter(|&i| db.engine.get(T, &id(i)).ok().flatten() != Some(val(i))).count(),
+            "tombstone" => probe(n).filter(|&i| db.engine.get(T, &id(i)).ok().flatten() != Some(val(i + 1))).count(),
+            "prefix" => probe(n).filter(|&i| db.engine.get(T, &pre(i)).ok().flatten() != Some(val(i))).count(),
+            "bigdoc" => (0..64).filter(|&i| db.engine.get(T, &id(i)).ok().flatten().map(|v| v.len() == 16 << 20 && v[0] == (i % 251) as u8) != Some(true)).count(),
+            "fields" => {
+                let c = db.collection("c")?;
+                probe(100_000).filter(|&i| c.get(&mut db.engine, i + 1).ok().flatten().and_then(|d| d.field(&format!("f{}", i * 10 + 9)).cloned()) != Some(Value::int(NumType::I64, i as i128))).count()
+            }
+            "colls" => {
+                let names = db.collections()?.len();
+                extra += &format!(" collections={names}");
+                usize::from(names != 100_000)
+            }
+            "rangedel" | "ttl" => {
+                extra += &format!(" scan_rows={}", db.engine.scan_tree(T, None, None, None, false)?.len());
+                probe(n).filter(|&i| db.engine.get(T, &id(i)).ok().flatten().is_some()).count()
+            }
+            _ => unreachable!(),
+        };
+        let open_rss = rss_mb();
+        let rep = db.engine.verify()?;
+        for f in rep.findings.iter().take(5) {
+            eprintln!("{w} verify {:?}: {}", f.class, f.what);
+        }
+        println!(
+            "workload={w} n={n} build_s={build_s:.1} bytes={} bad={bad} verify_sound={} rss_mb={open_rss}{extra}",
+            std::fs::metadata(&p)?.len(), rep.ok()
+        );
+        db.close()?;
+        let _ = std::fs::remove_file(&p);
+    }
+    Ok(())
 }

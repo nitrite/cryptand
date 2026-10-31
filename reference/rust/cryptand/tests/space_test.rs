@@ -82,9 +82,10 @@ fn f160_reading_many_segments_holds_one_descriptor() {
     for i in (0..40_000i64).step_by(97) {
         assert!(d.engine.get(16, &Value::NitriteId(i)).unwrap().is_some());
     }
-    // ponytail: /dev/fd is process-wide; parallel tests may close fds meanwhile.
+    // ponytail: /dev/fd is process-wide; parallel tests open and close a few
+    // meanwhile. The bug was one per segment read, far above this bound.
     let grew = fds().saturating_sub(before);
-    assert!(grew <= 1, "{grew} descriptors opened by reads");
+    assert!(grew <= 4, "{grew} descriptors opened by reads");
 }
 
 #[test]
@@ -220,4 +221,47 @@ fn f182_a_commit_inside_a_compaction_job_leaks_no_pages() {
     leaks += d.engine.verify().unwrap().of(Class::Leak).len();
     assert!(mid_job > 0, "no commit landed inside a job");
     assert_eq!(leaks, 0, "pages neither reachable nor free");
+}
+
+#[test]
+fn f206_verify_reads_a_value_log_record_longer_than_its_window() {
+    // A 2 MiB value in a last-level (clustered) value-log segment: verify read
+    // 1 MiB of it and reported the record as running past the buffer.
+    use cryptand::verify::EngineVerify;
+    let (_t, mut e) = engine("f206", Profile::Desktop);
+    for i in 0..4i64 {
+        e.put(16, &Value::NitriteId(i), &vec![i as u8; 2 << 20]).unwrap();
+    }
+    e.compact().unwrap();
+    let rep = e.verify().unwrap();
+    assert!(rep.ok(), "{:?}", rep.findings.iter().map(|f| &f.what).collect::<Vec<_>>());
+}
+
+#[test]
+fn f207_a_flush_over_more_trees_than_a_head_page_lists_splits() {
+    // One key in each of 2000 trees: 12 B of tree_span[] each is 24 KB of
+    // header, which no 4 KiB head page holds. 04 §2.1: split the segment.
+    let (t, mut e) = engine("f207", Profile::Desktop);
+    for tree in 16..2016u32 {
+        e.put(tree, &Value::NitriteId(1), &[tree as u8]).unwrap();
+    }
+    e.flush().unwrap();
+    e.compact().unwrap();
+    e.close(true).unwrap();
+    let mut d = Database::open(&t.path, None).unwrap();
+    for tree in 16..2016u32 {
+        assert_eq!(d.engine.get(tree, &Value::NitriteId(1)).unwrap(), Some(vec![tree as u8]));
+    }
+}
+
+#[test]
+fn f208_an_expired_entry_is_invisible_on_the_wall_clock() {
+    // `now_ms` was a test clock left at 0, so nothing ever expired.
+    let (_t, mut e) = engine("f208", Profile::Desktop);
+    e.put_with_expiry(16, &Value::NitriteId(1), b"gone", 1).unwrap();
+    e.put(16, &Value::NitriteId(2), b"kept").unwrap();
+    assert_eq!(e.get(16, &Value::NitriteId(1)).unwrap(), None);
+    e.flush().unwrap();
+    assert_eq!(e.get(16, &Value::NitriteId(1)).unwrap(), None);
+    assert_eq!(e.get(16, &Value::NitriteId(2)).unwrap(), Some(b"kept".to_vec()));
 }

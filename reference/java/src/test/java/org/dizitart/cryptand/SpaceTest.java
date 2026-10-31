@@ -50,4 +50,24 @@ class SpaceTest {
         }
         assertTrue(len < 16L << 20, "file " + len + " bytes for 1 MiB live");
     }
+
+    @Test
+    void f207AFlushOverMoreTreesThanAHeadPageListsSplits() {
+        // 2000 trees x 12 B of tree_span[] is 24 KB of header: 04 §2.1 says split.
+        Path path = dir.resolve("f207.cryptand");
+        Engine.Options o = new Engine.Options();
+        Engine.create(path, o).close();
+        try (Engine e = Engine.open(path, o)) {
+            for (int t = 16; t < 2016; t++) {
+                e.batch().put(t, Cke.encode(new Value.NitriteId(1)), new byte[] {(byte) t}).commit();
+            }
+            e.commitNow(true);
+            e.compact();
+        }
+        try (Engine e = Engine.open(path, o)) {
+            for (int t = 16; t < 2016; t++) {
+                assertArrayEquals(new byte[] {(byte) t}, e.get(t, Cke.encode(new Value.NitriteId(1))), "tree " + t);
+            }
+        }
+    }
 }

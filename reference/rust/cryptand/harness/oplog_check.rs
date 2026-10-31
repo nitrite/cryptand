@@ -208,7 +208,7 @@ impl Run {
             "shrink" => drop(self.e.relocate_and_truncate().map_err(|e| format!("shrink: {e}"))?),
             "ttl_advance" => {
                 self.clock += j["ms"].as_u64().unwrap();
-                self.e.now_ms = self.clock;
+                self.e.now_ms = Some(self.clock);
             }
             // M2.2's maintenance ops: no model effect; skipped where they do
             // not apply, as an application would not call them.
@@ -231,7 +231,7 @@ impl Run {
             "rotate" if self.encrypted && self.snaps.is_empty() => {
                 let e = std::mem::replace(&mut self.e, Engine::create_in_memory(Profile::Desktop).map_err(|e| e.to_string())?);
                 self.e = cryptand::rotate::rotate_master_key(e, &KEY, 0, 0, 0, 0).map_err(|e| format!("rotate: {e}"))?;
-                self.e.now_ms = self.clock;
+                self.e.now_ms = Some(self.clock);
             }
             "backup" => {
                 use cryptand::backup::{Backup, BackupMode};
@@ -255,7 +255,7 @@ impl Run {
                 self.e.close(true).map_err(|e| format!("close: {e}"))?;
                 let key = self.encrypted.then_some(&KEY[..]);
                 self.e = Engine::open(&self.path, key).map_err(|e| format!("open: {e}"))?;
-                self.e.now_ms = self.clock;
+                self.e.now_ms = Some(self.clock);
                 self.digest_check()?;
             }
             op => return Err(format!("unknown op {op}")),
@@ -371,7 +371,7 @@ fn hop(log: &str, db: &Path, from: usize, to: usize) -> Result<String, String> {
         _ => Engine::open(db, key),
     }
     .map_err(|e| format!("open: {e}"))?;
-    e.now_ms = clock;
+    e.now_ms = Some(clock);
     let trees = h["trees"].as_u64().unwrap_or(1) as u32;
     let seen_visible = e.visible_seq;
     let mut r = Run { path: db.to_path_buf(), encrypted, e, committed: model.clone(), model, snaps: HashMap::new(), clock, trees, seen_visible, erased: false };
@@ -486,7 +486,7 @@ fn torture_check(log: &str, db: &Path, ack: usize) -> Result<usize, String> {
                 now += j["ms"].as_u64().unwrap();
             }
             r.clock = now;
-            r.e.now_ms = now;
+            r.e.now_ms = Some(now);
             match r.digest_check() {
                 Ok(_) => return Ok(p),
                 Err(e) => last_err = e,

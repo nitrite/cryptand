@@ -387,6 +387,10 @@ public final class RssScale {
             vectorRung(path, n);
             return;
         }
+        if (mode.equals("patho")) {
+            pathoRung(path, n, args.length > 3 ? args[3] : null);
+            return;
+        }
         if (mode.equals("settle")) {
             try (Engine e = Engine.open(path, opts())) {
                 e.compact();
@@ -410,5 +414,122 @@ public final class RssScale {
             }
         }
         System.out.println("built " + n + " bytes=" + Files.size(path));
+    }
+
+    private static byte[] id(long i) {
+        return org.dizitart.cryptand.key.Cke.encode(new Value.NitriteId(i));
+    }
+
+    private static byte[] pre(long i) {
+        return org.dizitart.cryptand.key.Cke.encode(new Value.Str("shared/prefix/".repeat(16) + String.format("%012d", i)));
+    }
+
+    private static byte[] val(long i) {
+        byte[] v = new byte[100];
+        java.util.Arrays.fill(v, (byte) (i % 251));
+        return v;
+    }
+
+    /** PLAN 6.6, Rust {@code rss_scale PATH N patho [WORKLOAD]}: same workloads, checks and output line. */
+    private static void pathoRung(Path path, long n, String only) throws Exception {
+        final int t = 16;
+        for (String w : List.of("mono", "prefix", "bigdoc", "fields", "colls", "tombstone", "rangedel", "ttl")) {
+            if (only != null && !only.equals(w)) continue;
+            Path p = Path.of(path + "." + w);
+            Files.deleteIfExists(p);
+            Engine.Options o = opts();
+            o.durability = Superblock.Durability.OS;
+            long t0 = System.nanoTime();
+            String extra = "";
+            try (Database db = Database.create(p, o)) {
+                Engine e = db.engine();
+                if (w.equals("mono") || w.equals("tombstone")) {
+                    for (long i = 0; i < n; i++) { e.batch().put(t, id(i), val(i)).commit(); if ((i + 1) % 100_000 == 0) db.commit(); }
+                    if (w.equals("tombstone")) {
+                        for (long i = 0; i < n; i++) { e.batch().remove(t, id(i)).commit(); if ((i + 1) % 100_000 == 0) db.commit(); }
+                        db.commit();
+                        extra += " bytes_deleted=" + Files.size(p);
+                        for (long i = 0; i < n; i++) { e.batch().put(t, id(i), val(i + 1)).commit(); if ((i + 1) % 100_000 == 0) db.commit(); }
+                    }
+                } else if (w.equals("prefix")) { for (long i = 0; i < n; i++) { e.batch().put(t, pre(i), val(i)).commit(); if ((i + 1) % 100_000 == 0) db.commit(); }
+                } else if (w.equals("bigdoc")) {
+                    for (long i = 0; i < 64; i++) {
+                        byte[] v = new byte[16 << 20];
+                        java.util.Arrays.fill(v, (byte) (i % 251));
+                        e.batch().put(t, id(i), v).commit();
+                        db.commit();
+                    }
+                } else if (w.equals("fields")) {
+                    Collection c = db.collection("c");
+                    for (long i = 0; i < 100_000; i++) {
+                        Map<String, Value> f = new LinkedHashMap<>();
+                        f.put("_id", new Value.NitriteId(i + 1));
+                        for (int k = 0; k < 10; k++) f.put("f" + (i * 10 + k), Value.i64(i));
+                        c.insert(new Value.Doc(f));
+                        if ((i + 1) % 10_000 == 0) db.commit();
+                    }
+                } else if (w.equals("colls")) {
+                    for (long i = 0; i < 100_000; i++) {
+                        db.collection("c" + i).insert(new Value.Doc(Map.of("_id", new Value.NitriteId(i + 1))));
+                        if ((i + 1) % 10_000 == 0) db.commit();
+                    }
+                } else if (w.equals("rangedel")) {
+                    for (long i = 0; i < n; i++) { e.batch().put(t, id(i), val(i)).commit(); if ((i + 1) % 100_000 == 0) db.commit(); }
+                    db.commit();
+                    long spans = n / 100;
+                    for (long j = 0; j < spans; j++) {
+                        long s = (j * 7919) % spans;
+                        e.batch().removeRange(t, id(s * 100), id(s * 100 + 100)).commit();
+                        if ((j + 1) % 1000 == 0) db.commit();
+                    }
+                } else {
+                    long at = System.currentTimeMillis() + 2000;
+                    for (long i = 0; i < n; i++) { e.batch().putWithExpiry(t, id(i), val(i), at).commit(); if ((i + 1) % 100_000 == 0) db.commit(); }
+                    db.commit();
+                    long now = System.currentTimeMillis();
+                    if (now < at + 100) Thread.sleep(at + 100 - now);
+                }
+                db.commit();
+            }
+            double buildS = (System.nanoTime() - t0) / 1e9;
+            try (Database db = Database.open(p, opts())) {
+                db.engine().compact();
+                db.commit();
+            }
+            try (Database db = Database.open(p, opts())) {
+                Engine e = db.engine();
+                long bad = 0;
+                long k = w.equals("fields") ? 100_000 : w.equals("bigdoc") ? 64 : n;
+                long step = Math.max(1, k / 1000);
+                for (long i = 0; i < k && !w.equals("colls"); i += w.equals("bigdoc") ? 1 : step) {
+                    boolean ok;
+                    if (w.equals("mono")) ok = java.util.Arrays.equals(e.get(t, id(i)), val(i));
+                    else if (w.equals("tombstone")) ok = java.util.Arrays.equals(e.get(t, id(i)), val(i + 1));
+                    else if (w.equals("prefix")) ok = java.util.Arrays.equals(e.get(t, pre(i)), val(i));
+                    else if (w.equals("bigdoc")) { byte[] v = e.get(t, id(i)); ok = v != null && v.length == 16 << 20 && v[0] == (byte) (i % 251); }
+                    else if (w.equals("fields")) {
+                        Value.Doc d = db.collection("c").get(i + 1);
+                        ok = d != null && Value.i64(i).equals(d.fields().get("f" + (i * 10 + 9)));
+                    } else ok = e.get(t, id(i)) == null;
+                    if (!ok) bad++;
+                }
+                if (w.equals("colls")) {
+                    int names = db.collectionNames().size();
+                    extra += " collections=" + names;
+                    if (names != 100_000) bad++;
+                }
+                if (w.equals("rangedel") || w.equals("ttl")) {
+                    long rows = 0;
+                    try (Engine.Cursor c = e.scan(t, null, null, false)) { while (c.next()) rows++; }
+                    extra += " scan_rows=" + rows;
+                }
+                long rss = rssMb();
+                var rep = org.dizitart.cryptand.ops.Verify.run(e);
+                rep.findings().stream().limit(5).forEach(f -> System.err.println(w + " verify " + f));
+                System.out.printf("workload=%s n=%d build_s=%.1f bytes=%d bad=%d verify_sound=%b rss_mb=%d%s%n",
+                        w, n, buildS, Files.size(p), bad, rep.findings().isEmpty(), rss, extra);
+            }
+            Files.deleteIfExists(p);
+        }
     }
 }
