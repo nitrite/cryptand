@@ -1048,7 +1048,11 @@ space-only trigger left an aged scan at 1.58× where a debt trigger held it at
 Define, over the live value-log bytes of a database:
 
 ```
-ideal_runs    = ceil(live bytes in COLD-tier runs / vlog_segment_bytes)
+record_max    = max over COLD-tier runs holding live data of
+                ceil(bytes written / records written)
+run_capacity  = max(record_max,
+                    floor(vlog_segment_bytes / record_max) * record_max)
+ideal_runs    = ceil(live bytes in COLD-tier runs / run_capacity)
 
 locality_debt = live bytes in surplus runs
                 ─────────────────────────────
@@ -1060,6 +1064,18 @@ segments that still hold live data by live bytes, descending, and taking
 everything past the first `ideal_runs` of them. Live bytes in a cold-tier run
 that is not key-clustered are surplus regardless of where it sorts. The
 denominator stays *all* live value-log bytes.
+
+**`run_capacity`, and an earlier draft divided by `vlog_segment_bytes`.** Records
+are not split across runs, so a run holds only whole records: 16 MiB values
+framed to just over 16 MiB fit three to a 64 MiB run, not four. Dividing by the
+segment size asked for 16 runs where 22 are the fewest possible, read **20.3 %**
+on a database that no rewrite could improve, and a collector bound to that MUST
+rewrote 1 GB four times in one commit (`FINDINGS.md` F-209). For values small
+against `vlog_segment_bytes`, `run_capacity` is within one record of it and the
+metric is unchanged; a record larger than `vlog_segment_bytes` is a run of its
+own. `record_max` is a run's *mean* framed record, from the `bytes` and
+`records` §6.7 already keeps, because no implementation keeps a per-record
+maximum and the bound must be computable from the stats tree alone.
 
 **The cold tier only, and an earlier draft said "the value-log segments"
 without the qualifier.** Both halves of that draft flagged a healthy database:

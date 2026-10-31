@@ -687,8 +687,15 @@ final class ValueLog {
       ..sort((a, b) => b.liveBytes.compareTo(a.liveBytes));
     if (live.isEmpty) return 0;
     final cold = live.fold<int>(0, (a, s) => a + s.liveBytes);
+    // F-209: a run holds whole records, so count runs at what they can pack.
+    var recordMax = 1;
+    for (final s in live) {
+      final r = s.records < 1 ? 1 : s.records;
+      recordMax = max(recordMax, (s.bytes + r - 1) ~/ r);
+    }
+    final runCapacity = max(recordMax, segmentBytes ~/ recordMax * recordMax);
     final ideal =
-        ((cold + segmentBytes - 1) ~/ segmentBytes).clamp(1, live.length);
+        ((cold + runCapacity - 1) ~/ runCapacity).clamp(1, live.length);
     var surplus = 0;
     for (var i = ideal; i < live.length; i++) {
       surplus += live[i].liveBytes;

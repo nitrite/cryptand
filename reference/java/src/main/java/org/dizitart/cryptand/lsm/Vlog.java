@@ -1571,9 +1571,13 @@ public final class Vlog {
      * <em>promoted</em>. The denominator stays all live value-log bytes.
      */
     public double localityDebt() {
+        return localityDebt(allStats(), segmentBytes);
+    }
+
+    static double localityDebt(List<VlogStats> stats, long segmentBytes) {
         List<VlogStats> cold = new ArrayList<>();
         long totalLive = 0;
-        for (VlogStats s : allStats()) {
+        for (VlogStats s : stats) {
             if (s.liveBytes == 0) {
                 continue;
             }
@@ -1586,10 +1590,14 @@ public final class Vlog {
             return 0;
         }
         long coldLive = 0;
+        // F-209: a run holds whole records, so count runs at what they can pack.
+        long recordMax = 1;
         for (VlogStats s : cold) {
             coldLive += s.liveBytes;
+            recordMax = Math.max(recordMax, (s.bytes + Math.max(1, s.records) - 1) / Math.max(1, s.records));
         }
-        int idealRuns = (int) Math.max(1, (coldLive + segmentBytes - 1) / segmentBytes);
+        long runCapacity = Math.max(recordMax, segmentBytes / recordMax * recordMax);
+        int idealRuns = (int) Math.max(1, (coldLive + runCapacity - 1) / runCapacity);
         cold.sort((a, b) -> Long.compare(b.liveBytes, a.liveBytes));
         long surplus = 0;
         for (int i = 0; i < cold.size(); i++) {

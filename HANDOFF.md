@@ -14,9 +14,8 @@
   run found F-206 (R verify), F-207 (S1 R+J+D tree_span split), F-208 (S1 R+D
   TTL never expired): fixed, tests R+J+D, gate quick at `~/g207.log`.
   F-210 confirmed at 10^5 on remote (R 47 s 137 MB, J 2.8 s, D 111 s, 90 MB).
-  F-209 partial: R+D debt loop stops when a pass does not lower the debt
-  (D 4.43 -> 3.41 GB); residual is D promoting what R never does, plus a
-  spec question (§6.9 ideal_runs unreachable for 16 MiB values).
+  F-209 fixed (human-approved spec 04 §6.9 `run_capacity`): D bigdoc
+  4.65 GB / 51 s -> 2.10 GB / 7.2 s; R 1.71, J 2.35.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -46,13 +45,10 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 ## Open questions for the human
 
 - New schedule for 6.6–6.8, M7, M8 (the PLAN dates have passed).
-- F-209: may §6.9 `ideal_runs` count runs by how values pack (a 16 MiB value
-  fits three to a 64 MiB run), so bigdoc databases can meet the 20 % MUST?
 
 ## Next action
 
-F-209 residual: profile why D's 64-commit bigdoc reaches the last level and
-promotes 1 GB while R does not; then the 6.6 rungs at 10^6 on remote.
+Run the 6.6 patho rungs at 10^6 on remote, R+J+D.
 
 ## Log
 
@@ -66,3 +62,4 @@ promotes 1 GB while R does not; then the 6.6 rungs at 10^6 on remote.
 - 10-31 — F-206..F-208 committed (gate green); F-210 J fixed; f160 fd bound 4.
 - 10-31 — F-210 R (eager free of unpublished catalog pages) + D (owner map) fixed.
 - 11-01 — F-210 10^5 rerun PASS R+J+D; F-209 debt-loop guard R+D (partial).
+- 11-01 — F-209 closed: spec §6.9 run_capacity (human go), R+J+D.

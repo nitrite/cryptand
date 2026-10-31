@@ -342,7 +342,10 @@ pub fn locality_debt(stats: &[VlogStats], vlog_segment_bytes: u64) -> f64 {
     }
     cold.sort_by(|a, b| b.live_bytes.cmp(&a.live_bytes));
     let cold_bytes: u64 = cold.iter().map(|s| s.live_bytes).sum();
-    let ideal = (cold_bytes.div_ceil(vlog_segment_bytes.max(1)).max(1) as usize).min(cold.len());
+    // F-209: a run holds whole records, so count runs at what they can pack.
+    let record_max = cold.iter().map(|s| s.bytes.div_ceil(s.records.max(1))).max().unwrap_or(1).max(1);
+    let run_capacity = record_max.max(vlog_segment_bytes / record_max * record_max);
+    let ideal = (cold_bytes.div_ceil(run_capacity).max(1) as usize).min(cold.len());
     let mut surplus = 0u64;
     for (i, s) in cold.iter().enumerate() {
         if i >= ideal || !s.clustered {
@@ -388,4 +391,26 @@ pub fn check_segment_bytes(vlog_segment_bytes: u32) -> Result<()> {
         return invalid("vlog_segment_bytes must be positive");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod f209 {
+    use super::*;
+
+    #[test]
+    fn runs_packed_with_whole_records_have_no_debt() {
+        // 22 full clustered runs of three 256 KiB values framed past a quarter
+        // of a 1 MiB run: the fewest possible. Dividing by the segment size
+        // asked for 17 and read 22.7 %.
+        let run = VlogStats {
+            tier: Tier::Cold as u8,
+            clustered: true,
+            records: 3,
+            live_records: 3,
+            bytes: 3 * ((256 << 10) + 64),
+            live_bytes: 3 * ((256 << 10) + 64),
+            ..Default::default()
+        };
+        assert_eq!(locality_debt(&vec![run; 22], 1 << 20), 0.0);
+    }
 }

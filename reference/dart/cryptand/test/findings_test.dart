@@ -444,6 +444,19 @@ void main() {
     }
     expect(db.catalog.allBuilds, lessThan(10));
   });
+
+  test('F-209: values that pack three to a run read inside the debt bound', () {
+    // Scaled bigdoc: 256 KiB values frame to just over a quarter of a 1 MiB
+    // run, so the fewest runs hold three each.
+    final e = Engine(vlogSegmentBytes: 1 << 20);
+    for (var i = 0; i < 64; i++) {
+      e.put(16, CNitriteId(i), Uint8List(256 << 10)..fillRange(0, 256 << 10, i));
+      e.commit();
+    }
+    e.compact();
+    // 20.3 % when ideal_runs divided by vlog_segment_bytes.
+    expect(e.vlog.localityDebt * 100, lessThanOrEqualTo(e.localityDebtPct));
+  });
 }
 
 class _FailNth implements FileHook {
