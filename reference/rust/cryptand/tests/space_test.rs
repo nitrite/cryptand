@@ -82,7 +82,8 @@ fn f160_reading_many_segments_holds_one_descriptor() {
     for i in (0..40_000i64).step_by(97) {
         assert!(d.engine.get(16, &Value::NitriteId(i)).unwrap().is_some());
     }
-    let grew = fds() - before;
+    // ponytail: /dev/fd is process-wide; parallel tests may close fds meanwhile.
+    let grew = fds().saturating_sub(before);
     assert!(grew <= 1, "{grew} descriptors opened by reads");
 }
 

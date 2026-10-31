@@ -1,294 +1,58 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-13, IST)
+## State (2026-10-31)
 
-- Branch `packaging/v1.0.0`. Manifests 1.0.0, nothing published, no tags.
-- Done: M0, M1.1, M1.2 (Rust, Java), M2.1–2.3 (Rust, Java), M3 (8 cargo-fuzz
-  targets x 4 h, 7 Jazzer targets x 2 h under JDK 21: clean), M4.1, M4.2.
-  Dart halves wait for M5. Details: git log and PLAN status table.
-- Jazzer: remote clone `~/Documents/codebase/cryptand-fuzz`, run under
-  `JAVA_HOME=/opt/homebrew/opt/openjdk@21` (JDK 24 silently voids the run):
-  `JAZZER_FUZZ=1 mvn -B surefire:test -Dtest=JazzerTest#<t>` in `reference/java`.
-- **Format changes approved 10-12, both in all three, corpus regenerated:**
-  F-127: optional bit 16 `CONVERTING` (14 §8.3); F-128: parent-recorded
-  nonces (14 §5.5: superblock `root_nonces` at 328, descriptor `root_nonce`,
-  CoW cell and R-tree entry `child_nonce`, manifest `nonce`, checkpoint
-  `root_nonces`, segment pages carry the head's `commit_id`). Vector regions
-  are unbound (documented); overflow chains unchecked (no writer makes one,
-  ponytail in Java `resolveValue`). **M5's Dart rewrite must carry both.**
-- Corpus regeneration order: `dart run tool/generate_corpus.dart`, then Rust
-  `convert_test make_converting_vector` and `replay_test make_replay_vector`
-  (both `--ignored`): `v1.0-encrypted` is not deterministic.
-- M4.3 done: `tools/security_attack.py` 3 writers x 3 readers, 1479 runs,
-  0 failures, value-log records and segment heads included (interop `write`
-  now sets `vlog_min` 256 in all three). Blob chunks: no writer exists (F-103);
-  vector regions unbound by design. Value-log head CRC spans 40+64 bytes only.
-- M4.4 done: F-133 (all three: nonce floor overflow near 2^64, Java/Dart
-  wrapped to 0) and F-134 (Java vlog `nonce_base` not allocated) fixed.
-  Concurrency: Java 32-thread test; Rust cursor behind `&mut Engine`; Dart
-  one isolate. Crash reuse: existing row 9 tests + M2.2 kills.
-  **M5's Dart rewrite must keep `_cmpU64`/`_addSaturating` semantics.**
-- M4.5 done: passwords zeroed by every Java/Dart entry point (F-135; raw
-  keys left to the host: zeroing them broke every reusing caller); failed
-  opens zero the cipher/ring (F-136); marker tests R+J+D. **M5 keeps both.**
-- F-137 fixed (human 10-12): 14 §6.1 MUST refuse a key on a plaintext file;
-  R+D now refuse like Java. F-135 API kept: passwords zeroed, raw keys are
-  the host's (14 §11 note). **M5 keeps the F-137 refusal.**
-- F-132 (Dart, fixed): converting files mix plaintext/encrypted vlog records;
-  Dart probes per record (ponytail) until M5 writes byte 39 (F-076).
-- M4.6 done: F-138 (all three: value-log `record_len` / Dart cell suffix
-  used before checked; Rust rotate aborted). Dart `uvar()` returns >= 2^63
-  as negative: every length check needs `< 0 ||`. **M5 keeps both.**
-- M4.7 done: F-139 (all three): created db, sidecar, rotation temp and
-  restore target `0600`; sidecar `O_NOFOLLOW`. Dart sets the mode by libc
-  `chmod` over FFI (`_writeOwnerOnly`). F-140 (Dart default `vlogMin` 2048
-  unsaveable at 4096 pages) open for M5. **M5 keeps `_writeOwnerOnly`.**
-- M4.8 done: `cargo deny check` + `cargo audit` clean on remote (tools in
-  remote `~/.cargo/bin`); release workflows pinned like CI; Rust/Java attach
-  CycloneDX SBOMs to the tag's GitHub release (`gh release create` if absent);
-  Dart has no SBOM step (no tool in PLAN). `SECURITY.md` uses GitHub private
-  reporting: **[H] enable it in repo settings.**
-- M4.9 done: `pager.rs` also has 3 FFI `unsafe` blocks (the plan missed them),
-  `security.rs` has none; README/CHANGELOG no longer say "no `unsafe`".
-- Fuzz crash to regress file: CRC-repair with `JazzerTest.repairCrcs` into
-  `reference/conformance/files/fuzz-regress/fNNN-*.cryptand`
-  (`CRYPTAND_FUZZ_DUMP` keeps only the last input replayed). Replaying
-  Jazzer inputs needs `process-test-resources`: `surefire:test` reads `target/test-classes`.
-- Remote gate clone `cryptand-gate` (rsync the tree; Dart SDK `~/dart-sdk/bin`).
-- F-150 fixed (R+D; Java not affected): `space_test` in all three. Residue: tiered
-  levels keep superseded versions until the last level (§5 condition 3), so 1 MB
-  live sits in ~30 MB (Rust desktop) / ~80 MB (Dart `Engine()` default). Residue fixed 10-13 (human approved
-  04 §5 change: superseded non-RANGE_DELETE versions drop at any level, R+J+D): ~13 / ~26 MB.
-  Dart FINDINGS cells done 10-13 (`test/findings_test.dart` ports the R/J repros); F-079 was a Dart
-  verify false-leak bug, fixed (`Database.indexClaims`). Left `?`: F-007/008/010/012 (M6 scale).
-- F-151 fixed 10-13 (R+D): page-granular segment reads. 10^6 remote: Rust get p50 3 us, Dart 28 us.
-- F-152 fixed 10-14 (R+D): compaction paced per put (one bounded step per
-  `step / pace` bytes, pace 4..64 by §6 x²); L0 was 46 (Dart), Rust L1 tier at hard.
-  The M6 RSS bar is PLAN 6.3's (cache + memtables + 256 MB); `scale.dart` checked
-  M5.5's +64 MB open bar: Dart 10^6 read 206 MB now PASS (320).
-- F-153 fixed 10-14 (Rust): `write` flushes at `memtable_entry_limit` (as Dart, Java per
-  shard). Rust 10^6: file 652 MB, writer 467 MB, levels 3/2/3/5, backpressure none.
-  Mandatory read-tail test sets the limit to 501 so its own flush+drain still runs.
-- F-156 (S0, Rust, regression from F-151) fixed 10-14: `relocate_down` left a moved
-  segment cached; its lazy loader read the old place. Any new code that moves an
-  extent keeping its segment id MUST evict it. Hop flake = layout varies with Java timing.
-- F-154 fixed 10-14 (D): Dart `shrink()` was a stub; now ports Rust relocate+truncate. Settled
-  10^6 (`scale settle` / `rss_scale PATH N settle`): Rust 495 MB (1.14x live), Dart 688 MB (1.58x,
-  bar 1.6: thin margin; Dart segments run ~40% larger than Rust's for the same data, unexplained).
-  F-155 profiled 10-14: live heap 25 MB; max RSS is shared `__LINKEDIT` + freed-dirty malloc;
-  peak footprint 304 MB < 352. Human 10-14: 6.3 bar is peak footprint (PLAN edited).
-- Dart fault seam: `fileHook` in `cow.dart` (`fileWrite`/`fileSync`); `test/fault_test.dart`
-  (`CRYPTAND_FAULT_SEEDS=a..b`). Corpus replay: `test/corpus_replay_test.dart`, skipped unless
-  `CRYPTAND_CORPUS_DIRS` (remote: `cryptand-gate/.../fuzz/{corpus,artifacts}` + `cryptand-kill-plain/reference/java/.cifuzz-corpus/...JazzerTest`).
-- Traps: corpus test without `--features harness` reuses a stale `interop`
-  binary (the gate passes the feature); Rust `stall_test` fails while another job fsyncs on /Volumes/External;
-  never build Java in a clone where a hop, torture or Jazzer runs; rebuilding
-  classes under a running Jazzer breaks it.
+- Branch `dart-storage` (pushed). Manifests 1.0.0, nothing published, no tags.
+  Done: M0, M4; M1–M3, M5 per PLAN status table. M6 6.5 rungs (index,
+  full-text, spatial, vector) PASS R+J+D at 10^6 (10^7 for index/text/spatial).
+- Vector 10^6 (v6, pre-F-205, ef 100), bar 448 MB, all sound, recall 0.824:
+  R build 5339 s, 2.52 GB, peak 172 MB; J 4841 s, 2.33 GB, 370 MB;
+  D 7421 s, 2.88 GB, 405 MB. F-205 (per-search beam) committed after.
+- F-204 (Dart vector build) open: libc pread landed (adf92b1); D now 1.4x R
+  at 10^6 (was 6x at 10^5). FINDINGS row not yet updated with that.
+- F-205 gate (`~/g205.log`) red on Rust `space_test` f160: `/dev/fd` count is
+  process-wide, a parallel test closed fds -> subtract overflow. Fixed with
+  `saturating_sub` (test only, 10-31); gate not rerun yet.
+
+## Must-keep (any Dart rewrite or refactor)
+
+F-127/F-128 format bits; `_cmpU64`/`_addSaturating`; F-135/F-136 zeroing;
+F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
+(0600); code that moves an extent keeping its segment id MUST evict it (F-156).
+
+## Remote and traps
+
+- Remote `anindya@207.254.39.186`, one clone per job (gate `cryptand-gate`,
+  bench `cryptand-f184`, Jazzer `cryptand-fuzz` under JDK 21 only).
+- Corpus regen: `dart run tool/generate_corpus.dart`, then Rust
+  `convert_test make_converting_vector` and `replay_test make_replay_vector` (`--ignored`).
+- Corpus test needs `--features harness`; Rust `stall_test` fails while
+  another job fsyncs; never build Java in a clone where a long job runs.
+- Rungs: Rust `rss_scale PATH N <mode>`, Java `RssScale PATH N <mode>`,
+  Dart `scale <mode> PATH N`; modes read/index/text/spatial/vector.
 
 ## Decisions in force (human)
 
-- Scope = the three engine packages. Dart storage rewrite (M5) on
-  `dart-storage`: **go (human 10-27), Dart ships 1.0.0.** Freeze Tue 10-27,
-  tags Fri 10-30. Human 10-27: keep doing M6.5 as written; schedule
-  (6.6-6.8, M7 unstarted) decided later.
-- Java `--release 11`, built on JDK 17, as nitrite-java.
-- F-072: all of 13 §5 in all three for 1.0 (Dart's in M5). Rotation is
-  copy-and-swap; no format change.
-- F-103: value log, no put-time BLOBs.
-- Push every commit; one finding per commit unless files are shared.
-- CPU-heavy work (fuzz, torture, soak, bench, M1.2) runs on the remote Mac
-  (`anindya@207.254.39.186`), one clone per job, never here.
+- Scope = three engine packages; Dart ships 1.0.0 (go 10-27). Freeze/tag dates
+  (10-27/10-30) passed; schedule for 6.6–6.8, M7, M8 to be set by the human.
+- Java `--release 11` on JDK 17. F-072 all of 13 §5 in all three. F-103 value
+  log, no put-time BLOBs. Spec 05/09: vector_graph is a CoW B+tree.
+- Push every commit; one finding per commit. CPU-heavy work on remote only.
 
 ## Open questions for the human
 
-
-
+- New schedule for 6.6–6.8, M7, M8 (the PLAN dates have passed).
+- Close F-204 at 1.4x Rust, or keep optimising Dart vector build?
 
 ## Next action
 
-M6.5 in progress (session 10-27). Harness: `rss_scale PATH N index` (Rust example):
-unique idx `ordReference` + compound (`custCityName` 1000 cities, `ordTotMinorU`),
-probes, `analyze`, `verify`. Remote clone `cryptand-m6`, logs `reference/bench/runs/ix-r-N.{out,err}`.
-- 10^7 (pre-fix): build 460 s, file 6.16 GB, unique p50 31 us, compound 10k rows 6 ms,
-  analyze RSS 303 -> 1502 MB (F-183), peak footprint 1.95 GB, verify unsound (F-182).
-- F-182 committed 79a63a1 (R+D; J not affected), gate quick green on remote.
-- F-183 (R+J+D `analyze` streams two passes) committed, gate quick green.
-- 10^6 post-fix (ix2-r-1000000): verify sound, analyze RSS flat (398 -> 398 MB), unique p50 7 us;
-  peak footprint 375 MB: PASS against the indexed bar 416 (64 cache + 3 trees x 32 memtable + 256; PLAN 6.3 now says one memtable per tree).
-- 10^7 post-fix: verify sound, analyze flat, unique p50 30 us; peak footprint 499 then 368 MB on a rerun
-  (bar 416): F-184 open, the peak varies by run. F-185 (J: short scans merged the rest of the tree,
-  index probe 1.3 ms -> 3 us) fixed, gate quick green. J (`RssScale PATH N index`) + D (`scale index`) rungs exist.
-1. ix4 done (10-28), all verify_sound: Rust 10^7 356/356 MB PASS, Java 10^6 233 / 10^7 220 PASS,
-   Dart 10^6 312 PASS, Dart 10^7 509 MB FAIL (bar 416). F-184 now mostly Dart. `~/ix5.sh` running:
-   Dart 10^7 with 1 s RSS/footprint samples in `runs/ix5-d-1e7.samples` (`ix5.done` when finished,
-   ~1.7 h); build_s ~5000 locates build vs analyze/verify phases.
-2. F-186 (10-28): Rust unique probe 30 -> 11 -> 10 us (manifest clone, per-hit budget sum); rest is descent/pread/alloc, see FINDINGS; Java 7, Dart 32 still unexplained.
-   Rust 10^7 footprints 641 / 411 MB after it (F-184 spread persists in Rust too).
-2b. F-187 fixed (R+D, 10-28): commit runs compaction while L0 > l0_trigger (backlog was 14 L0 segs at 10^7);
-   Rust 10^7 probe 16 -> 4 segs, p50 9 -> 5 us (Java 7). Counter `SCAN_SEGMENTS` (R+J), `segs_per_probe` in R/J rungs,
-   `CRYPTAND_DRAIN=1` in Rust rung. Its replay test exposed F-188 (S1, R+D: segment pages stamped commit 0, replay
-   binding vacuous), fixed with human approval, corpus regenerated. Rust 10^7 footprint 516 MB after F-187: recheck (F-184).
-   ix5 done: Dart 10^7 peak footprint 484 MB, spike in analyze/verify (samples ~169k of 171k lines).
-3. F-184 Dart fixed (df8b037): whole-tree scans pinned every decoded node (cache budget checked per `segment()` only);
-   now uncached via `segmentStream`. ix9 Dart 10^7 peak 314 MB PASS. Rust has no scan pin (F-170 streams after 4 batches);
-   ix10/ix11 Rust 10^7: RSS spikes spread over inserts, commits and compactions (no single holder, left open).
-   ix11 found F-189: 32 GB compacted for a 6.2 GB file, the whole last level rewritten every 200k docs.
-   F-189 fixed (391b31f, R+J+D, human-approved 10 §6 bound now counts runs): ix12 Rust 10^7 compacted 33 -> 18 GB,
-   build 360 -> 261 s, peak RSS 391 MB PASS. ix13 J 10^7 build 674 -> 260 s, RSS 284 MB; D build 5100 -> 4661 s, RSS 315 MB; all sound.
-4. Full text (10-29): rung `RssScale PATH N text` (J) / `scale text` (D), ordNotesText = 8 words of 26^3,
-   1000 two-term searches, one term vs brute-force df, verify. Rust: no collection full-text writer (n/a).
-   Building it found F-190 (S1, J+D: every write rewrote the whole posting list; Java also walked every term)
-   and F-191 (S1, J+D: reverse scan false "leaf reached twice"); both fixed, gate quick green on remote.
-   `~/tx1.sh` running in `cryptand-f184` (J 1e6, D 1e6, J 1e7, D 1e7; `runs/tx1-*.{out,err,samples}`,
-   `tx1.done` at the end). Check footprint vs bar (64 cache + 4 trees x 32 + 256 = 448) and build time.
-   J 1e6 done: build 224 s, RSS 296 MB PASS, and2 p50 152 us, df matches brute force, verify sound.
-   Rust checked 10-29 for F-190/F-191: not affected (fulltext.rs is codec only; leaf guard is forward-only).
-   tx1 (pre-F-192): D 1e6 build 5290 s, 3.8 GB, 216 MB PASS; J 1e7 build 4619 s, 226 MB PASS, and2 p50 9.9 ms (check vs 152 us at 1e6).
-   F-192 fixed (D: bounded scans filtered the whole memtable): D 10^5 text build 36 s (J 14). F-193 open to the human:
-   R+D flush every memtable version, D text file 6x Java's. tx2 (pre-F-193/194, 7f49bfd): D 1e6 build 618 s, 3.8 GB,
-   peak RSS 205 MB PASS, and2 p50 207 us; D 1e7 build 15255 s, 13.1 GB, peak RSS 220 MB PASS, and2 p50 1.46 ms; both sound.
-   `~/tx3.sh` (abcb57a, post-F-194) reruns D 1e6 text (`runs/tx3-*`, `tx3.done`): compare file size vs 3.8 GB.
-   tx3 (abcb57a, post-F-194) D 1e6 text: file 3.8 -> 1.04 GB, build 595 s, 173 MB, sound.
-5. Rest of 6.5 (human 10-30: build incremental). F-195/F-196 now R+J+D (989b141, human 10-30: R-J-D the same):
-   CoW R-tree + Vamana/AdjacencyTree/disk region in all three, wired into collections (engine commit republishes);
-   R `index_cow_test`, D `index_cow_test`, gate leg 13 (each writes, each mutates, all query). F-197 (J adjacency
-   first id, human: zigzag all, vector `vector/adjacency.json`), F-198 (R+J clear), F-199 (D alloc), F-200 (dicts).
-   Rungs: Rust `rss_scale PATH N spatial|vector`, Dart `scale spatial|vector PATH N`, Java `RssScale PATH N spatial|vector`.
-   Remote done: sp2 J spatial 1e6 PASS (38 s, 308 MB), 1e7 PASS (839 s, 314 MB, brute match, sound).
-   Vector rung found F-201 (R+J+D, 588c935): graph split per cluster, recall@10 0.010 at 1e5 (J v1, R vx1);
-   prune now keeps m/8 far edges, R 1e5 recall 0.970 (vx2). J 1e6 OOM'd at 520k under -Xmx128m (LongMap doubling):
-   rerun at -Xmx256m, check RSS vs bar. Gate quick green on remote at 989b141 (`~/g197.log`).
-   Running `~/sv3.sh` (log `~/sv3.log`): gate quick at 588c935 -> `~/g201.log`, then in `cryptand-vx`
-   (`runs/sv3-*.{out,err,samples}`, `sv3.done`): R spatial 1e6/1e7, D spatial 1e6/1e7, R/J/D vector 1e5, R/J vector
-   1e6, D vector 1e6 (last; may take many hours). Check: brute_near == near_rows_q, knn_ok, recall10, verify_sound, RSS vs 448.
-   Open to the human: spec 05 §3 lists `vector_graph` as levelled, J (and now R+D) root it as a CoW tree.
-   Dart still refuses encrypt/decrypt/rotate on files with vector regions (pre-existing).
-6. sv3 partial (10-30, gate quick green at 588c935): R sp 1e6 PASS 366 MB; D sp 1e6 PASS 218 MB; all knn/brute match, sound;
-   R/J/D vector 1e5 recall 0.970 sound (J 407 MB, R 206, D 85). Opened F-202 (R sp 1e7 488/1232 MB FAIL),
-   F-203 (R vx 1e6 RSS 474 MB at 370k, slow), F-204 (D vector build 6x). Still running: r-vx-1e6, then j-vx-1e6, d-sp-1e7; d-vx-1e6 dropped (human 10-30, watcher kills it) until F-204.
-7. 10-30 (human): spec 05 §3 / 09 §3 amended, vector_graph is a CoW B+tree, levelled_kinds vector drops it (R+J+D);
-   gate `~/gvg.log`. F-202 verify half fixed (561ab7e), gate `~/g202.log`. Next, one by one: F-202 build half
-   (heap-profile R sp 1e7 build, 410-500 MB flat), F-203 (R vx 1e6), F-204 (D vector 6x), once sv3 ends.
-8. 10-30 later: F-202 build peak footprint 512 MB, a burst between 90 s heap snapshots (85-240 MB), compaction buffers
-   the likely holder (= F-184 Rust remainder); needs a finer tool, asked the human. F-204 typed fix dd834fa (20k 213 -> 142 s);
-   `~/f204.sh`-style run `~/f204.{out,err,done}` (D vector 1e5 under time -l): if still far behind R/J (368 s), human
-   wants FFI pread considered (two syscalls per region miss).
+Rerun gate quick on remote at the space_test fix; if green, 6.6 per PLAN.
 
 ## Log
-- 10-30/31: F-203 in-window page reuse R+J+D (3e5 file 5.07 -> 1.10 GB), F-204 pread + fd fix, F-205 per-search ef; v6 10^6 vector R/J/D running.
-- 10-30: F-202 verify fixed, build half is a transient burst; F-204 typed vectors (-33%); vuln reporting enabled.
-- 10-30: vector_graph CoW spec amendment (R+J+D); F-202 verify half fixed; D vx 1e6 dropped from sv3.
-- 10-30: sv3 partial read; F-202..F-204 opened (6.5 spatial/vector RSS and build time).
-- 10-30: F-195/F-196 R+D disk-based, as J (989b141); F-197..F-200 found and fixed; local R/J/D + interop green; vx1/g197 queued.
-- 10-30: F-195 (J CoW R-tree) and F-196 (J incremental Vamana + CoW adjacency tree) fixed, full J suite green locally; gates + sp2/v1 rungs queued on remote.
-- 10-30: tx3 D text 1e6 1.04 GB (F-194 confirmed); Java spatial rung added, sp1 1e6 running; F-195/F-196 to the human.
-- 10-30: tx2 done (D text 1e6/1e7 PASS, 205/220 MB, files 3.8/13.1 GB pre-F-194); tx3 (D 1e6 post-F-194) running.
-- 10-30: F-194 fixed (R+D publish after the collection write), Dart text 10^5 721 -> 172 MB; gate quick green (remote).
-- 10-30: F-193 not the size cause; F-194 found (D/R compaction frees wait for a user commit; Java's compaction publishes), to the human. tx2 (D 1e6/1e7) running.
-- 10-30: F-193 fixed (R+D flush collapse, human-approved), gate quick green; Dart text 10^5 file 785 -> 721 MB only (Java 126), gap cause still open.
-- 10-29: tx1 stopped (D 1e7 ~15 h); F-192 (D memtable scan) fixed, gate quick green; F-193 filed; tx2 (D) running.
-- 10-29: Rust confirmed unaffected by F-190/F-191; tx1 J 1e6 PASS (296 MB), D 1e6 running.
-- 10-29: F-189 size-ratio level picker (R+J+D), spec 10 §6 runs bound; ix12 measured; ix13 J+D 10^7 rerun.
 
-- 2026-10-10 — Jazzer was under JDK 24 (void); openjdk@21 installed; F-119 fixed; Java M1.2 encrypted seed 9334 diverges, not reproduced locally. Earlier sessions: git history.
-- 2026-10-11 — F-120 fixed in spec (option a); F-121 (Java verify horizon mix) found via seed 9334 and fixed; final Java M1.2 encrypted run started.
-- 2026-10-11 — Jazzer openFile/openEncrypted/cveDecode/analyzer 2 h clean under 21; last 3 targets started.
-- 2026-10-11 — M1.2 Java encrypted 0..10000 clean; last 3 Jazzer targets clean, M3 Rust/Java done.
-- 2026-10-11 — M4 started: SECURITY-REVIEW.md first pass; F-122 fixed (R+J tests), F-123 converting vector added after approval.
-- 2026-10-11 — spec 14 §13 reworded for security-converting; M4.1 done (F-124 tests, F-125 docs).
-- 2026-10-11 — M4.2 KATs in all three; F-126 Argon2id (J+D) found and fixed.
-- 2026-10-11 — interop password leg; M4.3 harness (1197 runs); F-129, F-130 fixed; F-127/F-128 to the human.
-- 2026-10-12 — F-127 (CONVERTING bit) and F-128 (parent-recorded nonces, option b) fixed in R+J+D after the human's decisions; corpus regenerated, `v1.0-security-replay` added; F-131 (Java segment commit race) found by interop and fixed; gate quick green.
-- 2026-10-12 — M4.3 done: vlog record/head attacks (1479 runs clean); interop fixture now separates values in all three, exposing F-132 (Dart converting-file vlog read), fixed; gate quick green.
-- 2026-10-12 — M4.4 done: F-133 nonce exhaustion wrap (R+J+D), F-134 (J nonce_base); gate quick green.
-- 2026-10-12 — M4.5 done: F-135/F-136 (J+D), marker tests R+J+D; F-137 to the human; gate quick green.
-- 2026-10-12 — F-137 fixed R+D + spec MUST after the human's decision; F-135 raw-key ownership noted in 14 §11; gate quick green.
-- 2026-10-12 — M4.6 done: F-138 length checks (R+J+D), tests fail reverted; gate quick green.
-- 2026-10-12 — M4.7 done: F-139 file modes 0600 + sidecar no-follow (R+J+D), tests fail reverted; F-140 (Dart) for M5; gate quick green.
-- 2026-10-12 — M4.8 done: deny/audit clean, release workflows pinned, SBOMs, SECURITY.md.
-- 2026-10-12 — M4.9 done (SAFETY comments + lints, bench unsafe removed); M4 done R+J; gate quick green.
-- 2026-10-12 — M5 started: branch `dart-storage`, 5.1 design (mirror Rust: segment LRU, vlog positioned writes, commit = Rust commit).
-- 2026-10-12 — M5 step 2: segment LRU + place-on-publish; 694 Dart tests, interop gate green.
-- 2026-10-12 — M5 step 1: open on `onFile`; rebuildManifest scans pages; 694 Dart tests, interop gate green.
-- 2026-10-12 — M5 step 3: value log on positioned I/O; 694 Dart tests, interop gate green.
-- 2026-10-12 — M5 step 5 core: save on the open file commits in place, slots alternate; 695 Dart tests, interop gate green.
-- 2026-10-12 — M5 steps 4+5 done: Engine.commit publishes in place, lock held for the session, create on file; 698 Dart tests, interop gate green.
-- 2026-10-13 — lock/created parity with R/J; F-141; M2.2 Dart 1 000 kills 0 failures (fault control caught); 699 Dart tests, interop green.
-- 2026-10-13 — F-140, F-142 fixed; F-072 Dart done (keyslots, rotate, encrypt/decrypt), gate steps 7–9 with Dart; 10⁷ open RSS 58 MB PASS; 704 Dart tests, interop green.
-- 2026-10-13 — Dart kill mix with maint ops: F-143..F-146 (F-146 S0) and F-094/F-096 Dart fixed; M2.2 Dart 1000 kills 0 failures; 709 Dart tests, gate green.
-- 2026-10-13 — remote cleaned (21 -> 37 GB free); F-147 Dart compaction streams inputs/outputs: 10^7 build 2.36 GB -> 201 MB RSS, 1000 kills clean; R+J open.
-- 2026-10-13 — F-147 Rust fixed (streamed merge, 1980 -> 348 MB at 10^7), Java not affected; gate quick green.
-- 2026-10-13 — M2.1 Dart done (3000 seeds x crash/EIO/ENOSPC, F-095 D); M3.4 Dart corpus replay (47730 inputs) found F-148 (R+D) and F-149 (D); F-076 D; F-150 (R+D space) opened; gate green.
-- 2026-10-13 — F-150 fixed: Rust level trigger + space-target GC + cold extent sizing, Dart close finishes job + free-list coalesce; Java measured unaffected; space_test R+J+D; gate quick green.
-- 2026-10-13 — F-150 residue: 04 §5 superseded versions drop at any level (approved), R+J+D; Rust 30->13 MB, Dart 80->26 MB.
-- 2026-10-13 — Dart FINDINGS cells: 34 resolved (13 ported tests in `findings_test`), F-079 Dart verify fixed, interop step 12 verifies with Dart.
-- 2026-10-13 — committed F-150 residue + Dart FINDINGS (gate quick green); SECURITY-REVIEW Dart rows done (F-124, F-122 Dart tests).
-- 2026-10-13 — M6 started: `tool/scale.dart` (Dart rung, JSON line) and Rust `rss_scale read`; 10^6 rung: F-151 (whole-segment reads per cache miss, R+D) Dart get p50 36 ms, Rust 7.6 ms.
-- 2026-10-13 — F-151 fixed R+D (page-granular segment reads); 10^6 rung: Rust p50 7.6 ms -> 5 us, Dart 36 ms -> 29 us, Dart read RSS 153 MB (budget 128) open; gate quick green.
-- 2026-10-14 — Dart read RSS was the wrong bar (M5.5 +64 vs 6.3 +256): 206 MB PASS; F-152 (R+D compaction pacing, L0 46 -> 2) fixed; F-153, F-154 opened; gate quick green.
-- 2026-10-14 — F-153 (Rust memtable unbounded between commits) fixed; F-155 opened (Rust build RSS 467 > 352); F-156 S0 (Rust shrink + lazy cache) found by the hop, fixed.
-- 2026-10-14 — F-154: settle measured (Rust 495 MB passes); Dart `shrink()` stub replaced by a relocate+truncate port, 1487 -> 688 MB; 734 Dart tests.
-- 2026-10-14 — F-155 profiled: Rust live heap 25 MB, footprint 304 MB (pass), RSS is shared/freed pages; metric question to the human.
-- 2026-10-14 — 6.3 bar = peak footprint (human); 10^7 rung R+D: F-157 (R settle 923 MB), F-158 (D build 381 MB), F-159 (D get 1 ms) opened.
-- 2026-10-14 — F-157 fixed (R: streamed compaction runs + sliced segment moves; D: page-by-page move): Rust 10^7 settle 923 -> 251 MB; gate quick green.
-- 2026-10-14 — F-159 closed as a harness bug (Dart rung ran 4 MB cache): p50 1058 -> 29 us; F-158 now 603 MB build at Desktop pages.
-- 2026-10-14 — Engine() default 8 KB page (human); F-158 fixed (D: outputs not admitted, builder single-hold, uncached compaction/verify streams): 10^7 AOT build 343 MB, read 270.
-- 2026-10-14 — F-158 R: `SegmentBuilder::build` drains pages; Rust 10^7 build footprint 291 -> 282 MB; 40 Rust test binaries green.
-- 2026-10-14 — Java 10^7 column: build footprint 301 MB at -Xmx128m (PASS), get p50 86 us, settled amp 1.37; F-158 J bounded; 10^8 blocked on remote disk.
-- 2026-10-15 — 10^8: Rust build 736 s / 281 MB, read p50 226 us (after F-160 EMFILE fix), settle 408 MB FAIL; Java OOM at ~2x10^7: F-161 to the human.
-- 2026-10-15 — F-161 option B (04 §3.1 writer rule: byte-capped outputs, run trigger, small-neighbour absorb) R+J+D; F-163 Dart tree-1 placement; F-162 filed.
-- 2026-10-15 — 10^8 rerun: Rust PASS (settle 315 MB); Java compactor OOM (F-164, F-161 regression), writer stalled 10.7 h; F-162 widened to dead-compactor liveness.
-- 2026-10-15 — F-162 fixed (J+R: dead background thread fails the next write), F-164 fixed (J: chunked extent write); Java 5x10^6 at 128m PASS.
-- 2026-10-16 — Java + Dart AOT 10^8 rung launched on remote (`cryptand-1e8`, jd-1e8.sh).
-- 2026-10-16 — 10^8 Dart: build/settle PASS, read 637 MB FAIL (F-165); Java db vanished from /tmp, rerun under ~/j1e8.
-- 2026-10-17 — Java 10^8 build PASS, read OOM (F-166 filters unbounded, R+J+D), settle OOM (F-167); F-165 Dart verify extent sweep.
-- 2026-10-17 — F-165 R+J, F-166 R+J+D fixed (human chose extent sweep + page-cache filters); 10^8 rerun launched.
-- 2026-10-17 — rerun: Java read PASS (F-166), settle OOM F-167 fixed R+J+D; Dart 10^8 read FAIL 467 MB / verify 8.4 h (F-168); Java rerun launched.
-- 2026-10-17 — F-167 fixed R+J+D; Java 10^8 all PASS; F-168 (D verify filter per entry, F-166 regression) fixed.
-- 2026-10-18 — Dart 10^8 read 466 MB: per-step RSS put it on scan; F-169 (D scan opened every segment) fixed, read 246 MB PASS, verify 510 s; 10^8 PASS R+J+D.
-- 2026-10-18 — R/J read rungs gain zipf, scan, verify; 10^8 Java PASS, Rust read 382 MB FAIL: F-170 (Rust scan materializes, no cursor) to the human.
-- 2026-10-18 — F-170 fixed (human: for 1.0): Rust `scan_cursor` (04 §8), pages released on long scans; Rust 10^8 read 305 MB PASS; gate quick green.
-- 2026-10-18 — F-171 (R+D: unbounded scan unpruned; Rust `collection` opened every segment): Rust 10^8 open 230 -> 3 MB, read 180 MB.
-- 2026-10-18 — 10^9 deferred past 1.0 (human, disk); PLAN M6 row updated; remote r1e8.db freed (108 GB free).
-- 2026-10-18 — rss_scale `CRYPTAND_ENC=1`; encrypted 10^8 Rust rung launched on remote.
-- 2026-10-19 — F-172 (S1, R+D: encrypted writes never re-published the nonce floor, died after 2^20 pages) fixed; gate quick green; encrypted 10^8 Rust rung relaunched.
-- 2026-10-19 — enc 10^8 Rust build+read PASS; settle hit F-173 (R: compact/shrink never re-armed the nonce window; J+D unaffected), fixed, gate quick green; settle rerun launched.
-- 2026-10-19 — F-174 (R: encrypted `write_extent` sealed a whole 32 MiB extent into a 2nd buffer; 10^7 compact 161 -> 131 MB) fixed, gate quick green; J/D harnesses take CRYPTAND_ENC; enc 10^8 R/J/D chain launched.
-- 2026-10-19 — enc 10^8 Rust PASS (settle 288 MB); Java run void (RssScale never set `encrypt`), fixed and requeued after Dart.
-- 2026-10-20 — Dart enc 10^8 stopped (61 GiB, disk near full); 10^6: size not from encryption, enc load 4.8x slower; Java enc 10^8 running.
-- 2026-10-20 — Java enc 10^8 build+read PASS; settle void (empty output, disk suspected), rerun with disk log.
-- 2026-10-20 — Dart enc 10^8 rerun queued after Java (frees ~26 GB dbs + Rust targets, gated on 125 GB).
-- 2026-10-20 — Java enc 10^8 settle died on full disk again; cleanup gives 118 GB, Dart rerun gated out.
-- 2026-10-20 — Java enc 10^8 PASS (settle 200 MB) after disk cleanup; Dart enc 10^8 rerun running.
-- 2026-10-21 — Dart enc 10^8 PASS memory (settle 113 MB); slow reads folded into F-175; enc rows in RESULTS.
-- 2026-10-21 — F-175 profiled: Dart put walks the catalog twice per doc (2M decrypts at 10^6); Java caches, Rust never reads it.
-- 2026-10-21 — F-175 fixed (D): catalog cache; 10^6 enc load 2660 -> 10136 docs/s, plain 12658 -> 30913.
-- 2026-10-21 — Dart enc 10^8 after F-175: build 3.8 h (was 11.9), PASS; enc reads unchanged, F-176 opened.
-- 2026-10-21 — F-176 profiled: each Dart enc read decrypts its page in pure-Dart AEAD (no decrypted cache); fix options to the human.
-- 2026-10-21 — F-176 partial (D): AEAD 129 -> 265 MB/s, KATs green; enc get 259 -> 214 us; rest of the gap unlocated.
-- 2026-10-21 — F-176 profiled via VM service: enc page read runs crc32c ~4x (35% of a get) besides decrypt (40%).
-- 2026-10-21 — F-176 CRC: Dart verifies each page checksum once (2.92 -> 1.08 per read); warm 10^6 enc get p50 74 us (plain 26).
-- 2026-10-22 — Dart enc 10^8 after F-176: get p50 2262 -> 1263 us, verify 2826 -> 1336 s, build 3.8 -> 2.6 h; PASS.
-- 2026-10-22 — harnesses take CRYPTAND_PROFILE (R+J+D); mobile plaintext ladder 10^6..10^8 launched on remote.
-- 2026-10-24 — mobile 10^8: Rust done; Java build 69% (~17 h left), Dart queued.
-- 2026-10-25 — Java mobile 10^8 root-caused: F-177 (J perf) and F-178 (J S1 visible_seq regression) fixed; rerun launched.
-- 2026-10-26 — mobile 10^8 done R+J+D, memory PASS, rows in RESULTS; F-179 (Rust settle doubles file) opened.
-- 2026-10-26 — F-179 10^7 split repro: compact 4.8 -> 9.4 GB, shrink -> 4.7; 10^8 failure is in shrink.
-- 2026-10-26 — F-179 fixed (R): free tree written at the cut point blocked `cut_tail`; mobile 10^8 settle 93.2 -> 46.8 GB; gate quick green (remote).
-- 2026-10-27 — 6.4: F-007 point index charged to the cache (R+D) / capped at the budget (J); F-008 closed.
-- 2026-10-27 — F-180 fixed (J: clustering liveness scan due-gated); Java single writer default, spec serialized publish; torture 5000 kills 1 failure = F-181 (pre-existing); gate quick green; merged into dart-storage.
-- 2026-10-27 — F-181 bisected to ee3a58b (exposer only): after-kill checker read states at a rewound clock; checker fixed R+J+D; torture J 500 / R 300 / D 300 clean, gate quick green (remote); merged into dart-storage.
-- 2026-10-27 — Dart go (human). 6.5 index rung: F-182 (R+D commit mid-job leaked placed outputs) fixed, gate green; F-183 (R+J+D analyze held every key, +1.2 GB at 10^7) fixed, gate green.
-- 2026-10-27 — F-183 committed (gate green); 10^6 index rung post-fix: verify sound, analyze flat, footprint 375 MB; 10^7 running.
-- 2026-10-28 — 10^7 index footprint 499/368 MB (F-184 open); F-185 Java scan bound fixed; J+D index rungs; ix4 chain running.
-- 2026-10-28 — ix4: R/J index rungs PASS (Rust 10^7 356 x2), Dart 10^7 509 MB FAIL; ix5 sampling run launched.
-- 2026-10-28 — F-186 (R: manifest cloned per scan) fixed, probe 30 -> 11 us; gate quick green (remote); 10 stale remote clones deleted (109 GB free).
-- 2026-10-28 — F-186 profiled: per-hit budget sum moved to once per cursor, probe 10 us; gate quick green (remote).
-- 2026-10-27 — 6.3 bar for indexed builds counts one memtable per tree (desktop 3 trees: 416 MB); 10^6 index 375 MB PASS; 10^7 at 6.7M rows, RSS ~200-290 MB.
-- 2026-10-28 — F-187 (R+D L0 backlog, probe 16 -> 4 segs) and F-188 (S1 R+D segment commit_id 0) fixed, corpus regenerated; gate quick green (remote).
-- 2026-10-28 — ix5 samples: Dart 10^7 index spike is VM heap garbage in analyze's two passes (F-184); remote idle.
-- 10-29: F-184 analyze allocation cut (23ffb57) did not move the Dart 10^7 peak (ix8 486 MB); docs refreshed (README, changelogs, RESULTS §7).
-- 10-29: F-184 Dart cause found and fixed (df8b037), Dart 10^7 index 314 MB PASS.
-- 10-29: Rust has no F-184 scan pin; its 10^7 peak is build-phase (ix10 482 MB RSS at t=200 s).
-- 10-29: Rust build RSS spikes have no single holder; F-189 opened (last level rewritten every other commit).
-- 10-29: 6.5 full-text rung built (J+D); F-190, F-191 fixed (J+D); 10 unpushed commits pushed; tx1 ladder running.
+- 10-27 — Dart go; 6.5 index rung, F-182/F-183 fixed.
+- 10-28 — F-184..F-188 (index footprint, probes, L0 backlog, segment commit_id).
+- 10-29 — F-184 Dart fixed; F-189 compaction bound; full-text rung, F-190/F-191.
+- 10-30 — F-192..F-204: spatial/vector on pages R+J+D, Vamana prune, F-202 closed.
+- 10-31 — F-203 fixed (R 865 -> 172 MB), F-205 beam width; v6 vector 10^6 PASS
+  R+J+D; space_test fd flake fixed; handoff trimmed (294 -> ~60 lines).
