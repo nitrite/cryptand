@@ -419,4 +419,21 @@ class CollectionsTest {
             assertThrows(ConflictException.class, a::commit);
         }
     }
+
+    @Test
+    @DisplayName("F-210: creating collections does not re-decode the catalog per insert")
+    void f210CollectionCreatesDoNotRebuildCatalog(@TempDir Path dir) {
+        try (Database db = Database.create(dir.resolve("f210.cryptand"), options())) {
+            for (long i = 0; i < 200; i++) {
+                db.collection("c" + i).insert(new Value.Doc(Map.of("_id", new Value.NitriteId(i + 1))));
+            }
+            assertTrue(db.catalogBuilds < 10, "catalog decoded " + db.catalogBuilds + " times");
+            // The owner map follows an index created after it was built.
+            Collection c = db.collection("c0");
+            Collection.IndexBinding idx = c.createIndex(List.of("country"), false, false);
+            long id = c.insert(new Value.Doc(Map.of("country", new Value.Str("DE"))));
+            assertEquals(List.of(id), idx.find(List.of(new Value.Str("DE"))));
+            assertEquals(1, c.indexes().size());
+        }
+    }
 }

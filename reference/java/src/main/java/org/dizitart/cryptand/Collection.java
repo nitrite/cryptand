@@ -521,6 +521,9 @@ public final class Collection {
 
     public List<IndexBinding> indexes() {
         List<IndexBinding> out = new ArrayList<>();
+        if (db.owned(name).isEmpty()) {
+            return out; // F-210
+        }
         for (Map.Entry<String, TreeDescriptor> e : db.catalog().entrySet()) {
             TreeDescriptor d = e.getValue();
             if (!TreeDescriptor.Kind.INDEX.equals(d.kind()) || !name.equals(d.owner())) {
@@ -733,7 +736,7 @@ public final class Collection {
     }
 
     public List<FullTextIndex> textIndexes() {
-        if (textIndexes.isEmpty()) {
+        if (textIndexes.isEmpty() && !db.owned(name).isEmpty()) {
             for (Map.Entry<String, TreeDescriptor> e : db.catalog().entrySet()) {
                 TreeDescriptor d = e.getValue();
                 if (TreeDescriptor.Kind.POSTINGS.equals(d.kind()) && name.equals(d.owner())) {
@@ -820,7 +823,7 @@ public final class Collection {
     }
 
     public List<VectorIndex> vectorIndexes() {
-        if (vectorIndexes.isEmpty()) {
+        if (vectorIndexes.isEmpty() && !db.owned(name).isEmpty()) {
             for (Map.Entry<String, TreeDescriptor> e : db.catalog().entrySet()) {
                 TreeDescriptor d = e.getValue();
                 if (TreeDescriptor.Kind.VECTOR_GRAPH.equals(d.kind()) && name.equals(d.owner())) {
@@ -851,6 +854,9 @@ public final class Collection {
     private boolean indexedValue;
 
     private boolean indexed() {
+        if (db.owned(name).isEmpty()) {
+            return false; // F-210
+        }
         Map<String, TreeDescriptor> catalog = db.catalog();
         if (catalog != indexedFor) {
             boolean any = false;
@@ -875,7 +881,7 @@ public final class Collection {
 
     /** Opens the spatial indexes this collection already has. */
     public List<SpatialIndex> spatialIndexes() {
-        if (spatialIndexes.isEmpty()) {
+        if (spatialIndexes.isEmpty() && !db.owned(name).isEmpty()) {
             for (Map.Entry<String, TreeDescriptor> e : db.catalog().entrySet()) {
                 TreeDescriptor d = e.getValue();
                 if (TreeDescriptor.Kind.RTREE.equals(d.kind()) && name.equals(d.owner())) {

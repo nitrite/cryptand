@@ -164,6 +164,9 @@ public final class Database implements AutoCloseable {
             // rebuilt by scanning the catalog if it is ever missing.
             engine.treeIndexTree().put(Cke.encode(Value.integer(NumType.U32, d.treeId())),
                     Cve.encode(new Value.Str(name)));
+            if (ownedBuilt) {
+                addOwned(d, name);
+            }
         } finally {
             engine.unlockStructure();
         }
@@ -218,6 +221,49 @@ public final class Database implements AutoCloseable {
 
     private volatile CachedCatalog catalogCache;
 
+    /** F-210's test reads it: full catalog decodes so far. */
+    long catalogBuilds;
+
+    /**
+     * F-210: owner name -> names of the index trees (any kind) it owns. Built by one catalog
+     * scan, then kept by {@link #putDescriptor} and {@link #removeCatalogEntry},
+     * the only writers of a descriptor's owner. Without it every collection
+     * create changed the catalog version and the next insert into any
+     * collection re-decoded the whole catalog: 10^5 collections was quadratic.
+     */
+    private final Map<String, java.util.Set<String>> owned = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile boolean ownedBuilt;
+
+    /** F-210: the index trees {@code owner} owns; empty means it has none. */
+    public java.util.Set<String> owned(String owner) {
+        if (!ownedBuilt) {
+            engine.lockStructure();
+            try {
+                if (!ownedBuilt) {
+                    for (Map.Entry<String, TreeDescriptor> e : catalog().entrySet()) {
+                        addOwned(e.getValue(), e.getKey());
+                    }
+                    ownedBuilt = true;
+                }
+            } finally {
+                engine.unlockStructure();
+            }
+        }
+        return owned.getOrDefault(owner, java.util.Set.of());
+    }
+
+    private void addOwned(TreeDescriptor d, String name) {
+        String k = d.kind();
+        if (d.owner() != null && (TreeDescriptor.Kind.INDEX.equals(k) || TreeDescriptor.Kind.RTREE.equals(k)
+                || TreeDescriptor.Kind.VECTOR_GRAPH.equals(k) || TreeDescriptor.Kind.POSTINGS.equals(k))) {
+            owned.merge(d.owner(), java.util.Set.of(name), (a, b) -> {
+                java.util.Set<String> s = new java.util.HashSet<>(a);
+                s.addAll(b);
+                return java.util.Set.copyOf(s);
+            });
+        }
+    }
+
     /**
      * Every catalog entry, name and descriptor.
      *
@@ -257,6 +303,7 @@ public final class Database implements AutoCloseable {
             }
             Map<String, TreeDescriptor> frozen = java.util.Collections.unmodifiableMap(out);
             catalogCache = new CachedCatalog(v, frozen);
+            catalogBuilds++;
             return frozen;
         } finally {
             engine.unlockStructure();
@@ -445,6 +492,13 @@ public final class Database implements AutoCloseable {
             engine.catalogTree().remove(TreeDescriptor.catalogKey(name));
             if (d != null) {
                 engine.treeIndexTree().remove(Cke.encode(Value.integer(NumType.U32, d.treeId())));
+                if (d.owner() != null) {
+                    owned.computeIfPresent(d.owner(), (o, s) -> {
+                        java.util.Set<String> t = new java.util.HashSet<>(s);
+                        t.remove(name);
+                        return t.isEmpty() ? null : java.util.Set.copyOf(t);
+                    });
+                }
             }
         } finally {
             engine.unlockStructure();
