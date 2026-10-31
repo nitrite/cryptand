@@ -63,3 +63,4 @@ the 6.7–6.8 / M7 / M8 schedule.
 - 11-01 — F-210 10^5 rerun PASS R+J+D; F-209 debt-loop guard R+D (partial).
 - 11-01 — F-209 closed: spec §6.9 run_capacity (human go), R+J+D.
 - 11-01 — 6.6 PASS at 10^6 R+J+D.
+- 11-01 — F-211 R colls 46.6 -> 10.4 s (CoW node cache); write-back and D open.

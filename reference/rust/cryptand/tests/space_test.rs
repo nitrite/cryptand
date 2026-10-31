@@ -281,3 +281,20 @@ fn f210_collection_creates_in_one_window_reuse_their_path_copies() {
     let bytes = std::fs::metadata(&t.path).unwrap().len();
     assert!(bytes < 8 << 20, "2000 one-document collections took {bytes} bytes");
 }
+
+#[test]
+fn f211_collection_creates_do_not_reread_the_pages_they_wrote() {
+    // Each create path-copied three catalog trees and read every page back
+    // from the file to edit it again: ~19 page reads per create, most of 47 s
+    // at 10^5. Pages this window wrote are now edited from memory.
+    let (t, mut e) = engine("f211", Profile::Desktop);
+    e.close(true).unwrap();
+    let mut db = Database::open(&t.path, None).unwrap();
+    let before = db.engine.pager.page_reads;
+    for i in 0..2_000i64 {
+        let mut c = db.collection(&format!("c{i}")).unwrap();
+        c.insert(&mut db.engine, &Value::Doc(vec![("_id".into(), Value::NitriteId(i + 1))])).unwrap();
+    }
+    let reads = db.engine.pager.page_reads - before;
+    assert!(reads < 2_000, "2000 creates read {reads} pages");
+}

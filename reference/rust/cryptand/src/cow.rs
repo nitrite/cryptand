@@ -7,6 +7,8 @@
 //! publishes the new root in the next superblock. Freed pages go to the free
 //! tree at the committing `commit_id` (`01-container.md` §6).
 
+use std::collections::HashMap;
+
 use crate::error::{corrupt, invalid, Result};
 use crate::pager::Pager;
 use crate::segment::{
@@ -126,11 +128,20 @@ pub struct CowTree {
     /// (the manifest is): 10^4 collection creates in one commit window path-
     /// copied ~19 pages each into fresh ones, 1.36 GB of file at 10^5.
     pub eager_free: bool,
+    /// F-211: nodes this tree wrote, by `(page_id, nonce)`, taken back out by
+    /// the next edit of their path; every node on an edited path is replaced,
+    /// so nothing is cloned. A nonce is per write, so a reused page misses.
+    /// 10^5 collection creates spent most of 47 s re-reading, verifying and
+    /// re-decoding pages they had just written.
+    pub(crate) nodes: HashMap<(u64, u64), CowNode>,
 }
+
+/// ponytail: cleared when full; an LRU only if a hot path outgrows it.
+const NODE_CACHE: usize = 1024;
 
 impl CowTree {
     pub fn new(tree_id: u32, root: u64, root_nonce: u64) -> CowTree {
-        CowTree { tree_id, root, root_nonce, commit_id: 0, freed: Vec::new(), pages_copied: 0, eager_free: false }
+        CowTree { tree_id, root, root_nonce, commit_id: 0, freed: Vec::new(), pages_copied: 0, eager_free: false, nodes: HashMap::new() }
     }
 
     fn root_link(&self) -> (u64, u64) {
@@ -146,10 +157,29 @@ impl CowTree {
         CowNode::decode(&page, page_id)
     }
 
+    /// [`Self::load`] for a node about to be replaced: the cached copy if this
+    /// tree wrote it, moved out.
+    fn take(&mut self, pager: &mut Pager, at: (u64, u64)) -> Result<CowNode> {
+        match self.nodes.remove(&at) {
+            Some(n) => Ok(n),
+            None => self.load(pager, at),
+        }
+    }
+
     /// Returns the page id and the nonce it was sealed under.
     fn write(&mut self, pager: &mut Pager, n: &CowNode) -> Result<(u64, u64)> {
         let id = pager.alloc_extent(1)?;
         self.write_at(pager, id, n)
+    }
+
+    /// [`Self::write`], keeping the node for the next edit of its path.
+    fn write_kept(&mut self, pager: &mut Pager, n: CowNode) -> Result<(u64, u64)> {
+        let at = self.write(pager, &n)?;
+        if self.nodes.len() >= NODE_CACHE {
+            self.nodes.clear();
+        }
+        self.nodes.insert(at, n);
+        Ok(at)
     }
 
     fn write_at(&mut self, pager: &mut Pager, id: u64, n: &CowNode) -> Result<(u64, u64)> {
@@ -185,7 +215,14 @@ impl CowTree {
         }
         let mut page_id = self.root_link();
         for _ in 0..=MAX_DEPTH {
-            let n = self.load(pager, page_id)?;
+            let loaded;
+            let n = match self.nodes.get(&page_id) {
+                Some(n) => n,
+                None => {
+                    loaded = self.load(pager, page_id)?;
+                    &loaded
+                }
+            };
             if n.is_leaf {
                 return match find(&n.keys, key) {
                     Some(i) => Ok(Some(value_of(&n.payloads[i])?)),
@@ -342,7 +379,7 @@ impl CowTree {
             if path.len() > MAX_DEPTH {
                 return too_deep();
             }
-            let n = self.load(pager, at_link)?;
+            let n = self.take(pager, at_link)?;
             if n.is_leaf {
                 path.push((at_link.0, n, usize::MAX));
                 break;
@@ -389,18 +426,20 @@ impl CowTree {
     fn publish(&mut self, pager: &mut Pager, mut path: Vec<(u64, CowNode, usize)>) -> Result<()> {
         let mut level = path.len() - 1;
         let cap = pager.payload_cap() + crate::container::PAGE_HEADER_BYTES;
-        let mut replacements = self.split(cap, path[level].1.clone())?;
+        let leaf = std::mem::replace(&mut path[level].1, CowNode { is_leaf: true, keys: Vec::new(), payloads: Vec::new() });
+        let mut replacements = self.split(cap, leaf)?;
         if path[level].0 != 0 {
             self.retire(pager, path[level].0);
         }
 
         while level > 0 {
             let mut children = Vec::with_capacity(replacements.len());
-            for n in &replacements {
+            for n in replacements {
                 // An emptied page is unlinked, not written: writing it first
                 // allocated a page nothing referenced or freed (F-065).
                 if n.count() > 0 {
-                    children.push((self.write(pager, n)?, n.clone()));
+                    let (first, entries) = (n.keys[0].clone(), n.subtree_entries());
+                    children.push((self.write_kept(pager, n)?, first, entries));
                 }
             }
             let (parent_id, parent, child_index) = &mut path[level - 1];
@@ -412,17 +451,18 @@ impl CowTree {
             parent.keys.remove(ci);
             parent.payloads.remove(ci);
             let mut at = ci;
-            for ((id, nonce), n) in &children {
-                parent.keys.insert(at, n.keys[0].clone());
-                parent.payloads.insert(at, child_payload(*id, n.subtree_entries(), *nonce));
+            for ((id, nonce), first, entries) in children {
+                parent.keys.insert(at, first);
+                parent.payloads.insert(at, child_payload(id, entries, nonce));
                 at += 1;
             }
-            replacements = self.split(cap, parent.clone())?;
+            let parent = std::mem::replace(parent, CowNode { is_leaf: false, keys: Vec::new(), payloads: Vec::new() });
+            replacements = self.split(cap, parent)?;
             level -= 1;
         }
 
         if replacements.len() == 1 {
-            let only = &replacements[0];
+            let only = replacements.pop().unwrap();
             (self.root, self.root_nonce) = if only.count() == 0 {
                 (0, 0)
             } else if !only.is_leaf && only.count() == 1 {
@@ -430,23 +470,24 @@ impl CowTree {
                 // a valid root, so the level is dropped rather than written.
                 link(&only.payloads[0])?
             } else {
-                self.write(pager, only)?
+                self.write_kept(pager, only)?
             };
             return Ok(());
         }
         // The root split: a new level above it.
         let mut keys = Vec::new();
         let mut payloads = Vec::new();
-        for n in &replacements {
+        for n in replacements {
             if n.count() == 0 {
                 continue;
             }
             keys.push(n.keys[0].clone());
-            let (id, nonce) = self.write(pager, n)?;
-            payloads.push(child_payload(id, n.subtree_entries(), nonce));
+            let entries = n.subtree_entries();
+            let (id, nonce) = self.write_kept(pager, n)?;
+            payloads.push(child_payload(id, entries, nonce));
         }
         let node = CowNode { is_leaf: false, keys, payloads };
-        (self.root, self.root_nonce) = self.write(pager, &node)?;
+        (self.root, self.root_nonce) = self.write_kept(pager, node)?;
         Ok(())
     }
 
