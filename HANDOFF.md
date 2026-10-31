@@ -8,8 +8,6 @@
 - Vector 10^6 (v6, pre-F-205, ef 100), bar 448 MB, all sound, recall 0.824:
   R build 5339 s, 2.52 GB, peak 172 MB; J 4841 s, 2.33 GB, 370 MB;
   D 7421 s, 2.88 GB, 405 MB. F-205 (per-search beam) committed after.
-- F-204 (Dart vector build) open: libc pread landed (adf92b1); D now 1.4x R
-  at 10^6 (was 6x at 10^5). FINDINGS row not yet updated with that.
 - F-205 gate (`~/g205.log`) red on Rust `space_test` f160: `/dev/fd` count is
   process-wide, a parallel test closed fds -> subtract overflow. Fixed with
   `saturating_sub` (test only, 10-31); gate not rerun yet.
@@ -42,7 +40,6 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 ## Open questions for the human
 
 - New schedule for 6.6–6.8, M7, M8 (the PLAN dates have passed).
-- Close F-204 at 1.4x Rust, or keep optimising Dart vector build?
 
 ## Next action
 
@@ -55,4 +52,4 @@ Rerun gate quick on remote at the space_test fix; if green, 6.6 per PLAN.
 - 10-29 — F-184 Dart fixed; F-189 compaction bound; full-text rung, F-190/F-191.
 - 10-30 — F-192..F-204: spatial/vector on pages R+J+D, Vamana prune, F-202 closed.
 - 10-31 — F-203 fixed (R 865 -> 172 MB), F-205 beam width; v6 vector 10^6 PASS
-  R+J+D; space_test fd flake fixed; handoff trimmed (294 -> ~60 lines).
+  R+J+D; F-204 closed at 1.4x; space_test fd flake fixed; handoff trimmed (294 -> ~60 lines).
