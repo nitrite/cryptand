@@ -14,7 +14,7 @@
   run found F-206 (R verify), F-207 (S1 R+J+D tree_span split), F-208 (S1 R+D
   TTL never expired): fixed, tests R+J+D, gate quick at `~/g207.log`.
   Open: F-209 (D bigdoc 4.65 GB vs R 1.71), F-210 (J colls quadratic, D slow,
-  R 1.36 GB for 10^5 one-doc collections; J fixed, not yet rerun at scale). All other workloads pass R+J+D.
+  R 1.36 GB for 10^5 one-doc collections; fixed R+J+D, not yet rerun at 10^5). All other workloads pass R+J+D.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -47,9 +47,8 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Next action
 
-F-210 Rust size (13.6 KB per one-document collection) and Dart (profile the
-colls rung first); then rerun Java patho colls at 10^5 on remote to confirm
-the J fix in time; then F-209, and the 6.6 rungs at 10^6 on remote.
+Rerun patho colls at 10^5 on remote, R+J+D, to confirm F-210 in time and
+size; then F-209 (Dart bigdoc 4.65 GB), then the 6.6 rungs at 10^6 on remote.
 
 ## Log
 
@@ -61,3 +60,4 @@ the J fix in time; then F-209, and the 6.6 rungs at 10^6 on remote.
   R+J+D; F-204 closed at 1.4x; space_test fd flake fixed; handoff trimmed (294 -> ~60 lines).
 - 10-31 — 6.6 rungs R+J+D; F-206..F-208 fixed; F-209, F-210 open.
 - 10-31 — F-206..F-208 committed (gate green); F-210 J fixed; f160 fd bound 4.
+- 10-31 — F-210 R (eager free of unpublished catalog pages) + D (owner map) fixed.

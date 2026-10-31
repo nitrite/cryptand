@@ -265,3 +265,19 @@ fn f208_an_expired_entry_is_invisible_on_the_wall_clock() {
     assert_eq!(e.get(16, &Value::NitriteId(1)).unwrap(), None);
     assert_eq!(e.get(16, &Value::NitriteId(2)).unwrap(), Some(b"kept".to_vec()));
 }
+
+#[test]
+fn f210_collection_creates_in_one_window_reuse_their_path_copies() {
+    // Each create path-copied the catalog into fresh pages kept until commit:
+    // 2000 creates in one window grew the file to 84 MB for ~1.2 MB live.
+    let (t, mut e) = engine("f210", Profile::Desktop);
+    e.close(true).unwrap();
+    let mut db = Database::open(&t.path, None).unwrap();
+    for i in 0..2_000i64 {
+        let mut c = db.collection(&format!("c{i}")).unwrap();
+        c.insert(&mut db.engine, &Value::Doc(vec![("_id".into(), Value::NitriteId(i + 1))])).unwrap();
+    }
+    db.commit(Durability::Sync).unwrap();
+    let bytes = std::fs::metadata(&t.path).unwrap().len();
+    assert!(bytes < 8 << 20, "2000 one-document collections took {bytes} bytes");
+}

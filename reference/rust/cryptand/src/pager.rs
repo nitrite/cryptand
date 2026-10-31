@@ -365,6 +365,11 @@ impl Pager {
         self.free.insert((commit_id, start_page), pages);
     }
 
+    /// F-210: a one-page extent no durable superblock or snapshot names yet.
+    pub fn is_unpublished(&self, page: u64) -> bool {
+        self.unpublished.get(&page) == Some(&1)
+    }
+
     /// A superblock naming everything allocated so far is durable.
     pub fn published(&mut self) {
         self.unpublished.clear();

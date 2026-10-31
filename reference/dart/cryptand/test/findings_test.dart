@@ -436,6 +436,14 @@ void main() {
     expect(e.get(16, CNitriteId(1)), isNull);
     expect(e.get(16, CNitriteId(2)), [2]);
   });
+
+  test('F-210: creating collections does not re-decode the catalog per put', () {
+    final db = Database(engine: Engine());
+    for (var i = 0; i < 200; i++) {
+      db.createCollection('c$i').put(CNitriteId(i + 1), CDoc({}));
+    }
+    expect(db.catalog.allBuilds, lessThan(10));
+  });
 }
 
 class _FailNth implements FileHook {

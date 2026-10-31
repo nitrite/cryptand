@@ -288,8 +288,8 @@ impl Catalog {
     /// The tree index is rooted from its own descriptor, loaded after open.
     pub fn new((root, nonce): (u64, u64), next_tree_id: u64) -> Catalog {
         Catalog {
-            tree: CowTree::new(tree_id::CATALOG, root, nonce),
-            by_id: CowTree::new(tree_id::TREE_INDEX, 0, 0),
+            tree: CowTree { eager_free: true, ..CowTree::new(tree_id::CATALOG, root, nonce) },
+            by_id: CowTree { eager_free: true, ..CowTree::new(tree_id::TREE_INDEX, 0, 0) },
             next_tree_id,
         }
     }
@@ -440,7 +440,7 @@ pub const STORE_ATTRIBUTES_KEY: &str = "$store";
 
 impl Attributes {
     pub fn new((root, nonce): (u64, u64)) -> Attributes {
-        Attributes { tree: CowTree::new(tree_id::ATTRIBUTES, root, nonce) }
+        Attributes { tree: CowTree { eager_free: true, ..CowTree::new(tree_id::ATTRIBUTES, root, nonce) } }
     }
 
     pub fn get(&self, pager: &mut Pager, name: &str) -> Result<Option<Vec<(String, Value)>>> {

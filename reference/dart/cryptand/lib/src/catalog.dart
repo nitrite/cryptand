@@ -270,6 +270,20 @@ final class Catalog {
   void put(String name, TreeDescriptor d) {
     tree.put(_nameKey(name), d.encode());
     byId.put(_idKey(d.treeId), encodeValue(CStr(name)));
+    if (_owned != null) _addOwned(name, d);
+  }
+
+  /// F-210: owner -> names of the index trees it owns, built by one scan and
+  /// kept by [put] and [drop], the only writers of an owner. [indexesOf] went
+  /// through [all], which every create invalidated: 10^5 collections were
+  /// quadratic (Dart timed out at 20 min).
+  Map<String, Set<String>>? _owned;
+
+  void _addOwned(String name, TreeDescriptor d) {
+    final o = d.owner;
+    if (o != null && TreeKind.indexKinds.contains(d.kind)) {
+      (_owned![o] ??= {}).add(name);
+    }
   }
 
   TreeDescriptor? get(String name) {
@@ -309,10 +323,13 @@ final class Catalog {
     }
     tree.remove(_nameKey(name));
     byId.remove(_idKey(d.treeId));
+    if (d.owner != null) _owned?[d.owner]?.remove(name);
   }
 
   /// Cached against [CowTree.version] (F-175: `Collection.put` reads the
   /// catalog twice per document, and each walk decrypted every node).
+  /// F-210's test reads it: full catalog decodes so far.
+  int allBuilds = 0;
   List<(String, TreeDescriptor)>? _all;
   int _allVersion = -1;
 
@@ -327,6 +344,7 @@ final class Catalog {
           )
       ]);
       _allVersion = v;
+      allBuilds++;
     }
     return _all!;
   }
@@ -405,9 +423,15 @@ final class Catalog {
       .where((e) => e.$2.param('key') != null)
       .map((e) => e.$1);
 
-  Iterable<(String, TreeDescriptor)> indexesOf(String dataTree) => all.where(
-      (e) =>
-          e.$2.owner == dataTree && TreeKind.indexKinds.contains(e.$2.kind));
+  Iterable<(String, TreeDescriptor)> indexesOf(String dataTree) {
+    if (_owned == null) {
+      _owned = {};
+      for (final (n, d) in all) {
+        _addOwned(n, d);
+      }
+    }
+    return [for (final n in _owned![dataTree] ?? const <String>{}) (n, get(n)!)];
+  }
 
   Iterable<(String, TreeDescriptor)> get staleTrees =>
       all.where((e) => e.$2.staleFrom != null);

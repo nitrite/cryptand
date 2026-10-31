@@ -121,11 +121,16 @@ pub struct CowTree {
     /// committing `commit_id`.
     pub freed: Vec<u64>,
     pub pages_copied: u64,
+    /// F-210: hand a never-published page straight back to the pager instead
+    /// of `freed`. Only for trees nothing rolls back to an older in-memory root
+    /// (the manifest is): 10^4 collection creates in one commit window path-
+    /// copied ~19 pages each into fresh ones, 1.36 GB of file at 10^5.
+    pub eager_free: bool,
 }
 
 impl CowTree {
     pub fn new(tree_id: u32, root: u64, root_nonce: u64) -> CowTree {
-        CowTree { tree_id, root, root_nonce, commit_id: 0, freed: Vec::new(), pages_copied: 0 }
+        CowTree { tree_id, root, root_nonce, commit_id: 0, freed: Vec::new(), pages_copied: 0, eager_free: false }
     }
 
     fn root_link(&self) -> (u64, u64) {
@@ -372,13 +377,21 @@ impl CowTree {
         self.publish(pager, path)
     }
 
+    fn retire(&mut self, pager: &mut Pager, id: u64) {
+        if self.eager_free && pager.is_unpublished(id) {
+            pager.free_extent(id, 1, 0);
+        } else {
+            self.freed.push(id);
+        }
+    }
+
     /// Writes the copied path back up, splitting where a page no longer fits.
     fn publish(&mut self, pager: &mut Pager, mut path: Vec<(u64, CowNode, usize)>) -> Result<()> {
         let mut level = path.len() - 1;
         let cap = pager.payload_cap() + crate::container::PAGE_HEADER_BYTES;
         let mut replacements = self.split(cap, path[level].1.clone())?;
         if path[level].0 != 0 {
-            self.freed.push(path[level].0);
+            self.retire(pager, path[level].0);
         }
 
         while level > 0 {
@@ -392,7 +405,8 @@ impl CowTree {
             }
             let (parent_id, parent, child_index) = &mut path[level - 1];
             if *parent_id != 0 {
-                self.freed.push(*parent_id);
+                let id = *parent_id;
+                self.retire(pager, id);
             }
             let ci = *child_index;
             parent.keys.remove(ci);

@@ -128,8 +128,8 @@ final class Database {
   /// Opens [owner]'s spatial and vector indexes once.
   void _openIndexes(String owner) {
     if (!_indexesOpened.add(owner)) return;
-    for (final (n, d) in catalog.all) {
-      if (d.owner != owner) continue;
+    // F-210: the owner's index trees, not a scan of the whole catalog.
+    for (final (n, d) in catalog.indexesOf(owner)) {
       if (d.kind == TreeKind.rtree && !spatialIndexes.containsKey(n)) {
         _register(spatialIndexes[n] = SpatialIndex(this, n, d));
       } else if (d.kind == TreeKind.vectorGraph && !vectorIndexes.containsKey(n)) {
