@@ -1830,10 +1830,17 @@ final class Engine {
   /// old and large, and only one of those two has been tested".
   void collectWhileOverDebt({int maxPasses = 4}) {
     var passes = 0;
-    while (vlog.localityDebt * 100 > localityDebtPct && passes++ < maxPasses) {
+    var debt = vlog.localityDebt;
+    while (debt * 100 > localityDebtPct && passes++ < maxPasses) {
       final refs = refsAt(lastLevel);
       if (refs.isEmpty) return;
       _compactInto(refs, lastLevel, forceRecluster: true);
+      // F-209: a pass that did not lower the debt cannot be helped by another
+      // (values too big to pack runs to `vlog_segment_bytes`); four of them
+      // rewrote 1 GB of 16 MiB values four times over in one commit.
+      final after = vlog.localityDebt;
+      if (after >= debt) return;
+      debt = after;
     }
   }
 

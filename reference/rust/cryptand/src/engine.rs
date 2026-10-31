@@ -3540,12 +3540,20 @@ impl Engine {
     /// compaction *starts* over the bound, so a merge that begins inside it
     /// can still end above it — hence the loop.
     pub fn collect_while_over_debt(&mut self, max_passes: usize) -> Result<()> {
+        let mut debt = self.locality_debt();
         for _ in 0..max_passes {
-            if self.locality_debt() * 100.0 <= self.sb.locality_debt_pct as f64 {
+            if debt * 100.0 <= self.sb.locality_debt_pct as f64 {
                 return Ok(());
             }
             self.collect()?;
             self.flush()?;
+            // F-209: a pass that did not lower the debt cannot be helped by
+            // another (values too big to pack runs to `vlog_segment_bytes`).
+            let after = self.locality_debt();
+            if after >= debt {
+                return Ok(());
+            }
+            debt = after;
         }
         Ok(())
     }

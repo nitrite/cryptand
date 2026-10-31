@@ -13,8 +13,10 @@
   tombstone rangedel ttl, one file each, reopen + checks + verify. Local 10^5
   run found F-206 (R verify), F-207 (S1 R+J+D tree_span split), F-208 (S1 R+D
   TTL never expired): fixed, tests R+J+D, gate quick at `~/g207.log`.
-  Open: F-209 (D bigdoc 4.65 GB vs R 1.71), F-210 (J colls quadratic, D slow,
-  R 1.36 GB for 10^5 one-doc collections; fixed R+J+D, not yet rerun at 10^5). All other workloads pass R+J+D.
+  F-210 confirmed at 10^5 on remote (R 47 s 137 MB, J 2.8 s, D 111 s, 90 MB).
+  F-209 partial: R+D debt loop stops when a pass does not lower the debt
+  (D 4.43 -> 3.41 GB); residual is D promoting what R never does, plus a
+  spec question (§6.9 ideal_runs unreachable for 16 MiB values).
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -44,11 +46,13 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 ## Open questions for the human
 
 - New schedule for 6.6–6.8, M7, M8 (the PLAN dates have passed).
+- F-209: may §6.9 `ideal_runs` count runs by how values pack (a 16 MiB value
+  fits three to a 64 MiB run), so bigdoc databases can meet the 20 % MUST?
 
 ## Next action
 
-Rerun patho colls at 10^5 on remote, R+J+D, to confirm F-210 in time and
-size; then F-209 (Dart bigdoc 4.65 GB), then the 6.6 rungs at 10^6 on remote.
+F-209 residual: profile why D's 64-commit bigdoc reaches the last level and
+promotes 1 GB while R does not; then the 6.6 rungs at 10^6 on remote.
 
 ## Log
 
@@ -61,3 +65,4 @@ size; then F-209 (Dart bigdoc 4.65 GB), then the 6.6 rungs at 10^6 on remote.
 - 10-31 — 6.6 rungs R+J+D; F-206..F-208 fixed; F-209, F-210 open.
 - 10-31 — F-206..F-208 committed (gate green); F-210 J fixed; f160 fd bound 4.
 - 10-31 — F-210 R (eager free of unpublished catalog pages) + D (owner map) fixed.
+- 11-01 — F-210 10^5 rerun PASS R+J+D; F-209 debt-loop guard R+D (partial).
