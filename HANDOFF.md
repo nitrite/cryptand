@@ -8,14 +8,12 @@
 - Vector 10^6 (v6, pre-F-205, ef 100), bar 448 MB, all sound, recall 0.824:
   R build 5339 s, 2.52 GB, peak 172 MB; J 4841 s, 2.33 GB, 370 MB;
   D 7421 s, 2.88 GB, 405 MB. F-205 (per-search beam) committed after.
-- 6.6 rung (10-31): Rust `rss_scale PATH N patho [W]`, Java `RssScale PATH N
-  patho [W]`, Dart `scale patho PATH N [W]`; W = mono prefix bigdoc fields colls
-  tombstone rangedel ttl, one file each, reopen + checks + verify. Local 10^5
-  run found F-206 (R verify), F-207 (S1 R+J+D tree_span split), F-208 (S1 R+D
-  TTL never expired): fixed, tests R+J+D, gate quick at `~/g207.log`.
-  F-210 confirmed at 10^5 on remote (R 47 s 137 MB, J 2.8 s, D 111 s, 90 MB).
-  F-209 fixed (human-approved spec 04 §6.9 `run_capacity`): D bigdoc
-  4.65 GB / 51 s -> 2.10 GB / 7.2 s; R 1.71, J 2.35.
+- 6.6 PASS (11-01, remote, 72e7823): patho at 10^6, 8 workloads x R+J+D, all
+  verify sound, bad=0. Wall: R 106 s, J 95 s, D 807 s. bigdoc R 1.71 / J 2.35 /
+  D 2.10 GB; colls R 47 s / J 2.4 s / D 112 s. J process peak 4.4 GB (one JVM
+  for all 8; per-workload RSS not split). Logs: remote bench/runs/p66.
+  Rungs: Rust `rss_scale PATH N patho [W]`, Java `RssScale PATH N patho [W]`,
+  Dart `scale patho PATH N [W]`.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -48,7 +46,8 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Next action
 
-Run the 6.6 patho rungs at 10^6 on remote, R+J+D.
+6.7 soak (24 h mixed at 10^8, R and J, kill -9) on remote, once the human sets
+the 6.7–6.8 / M7 / M8 schedule.
 
 ## Log
 
@@ -63,3 +62,4 @@ Run the 6.6 patho rungs at 10^6 on remote, R+J+D.
 - 10-31 — F-210 R (eager free of unpublished catalog pages) + D (owner map) fixed.
 - 11-01 — F-210 10^5 rerun PASS R+J+D; F-209 debt-loop guard R+D (partial).
 - 11-01 — F-209 closed: spec §6.9 run_capacity (human go), R+J+D.
+- 11-01 — 6.6 PASS at 10^6 R+J+D.
