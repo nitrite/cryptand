@@ -1,5 +1,7 @@
 # Cryptand
 
+[![Discord](https://img.shields.io/discord/1565965879177519118?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.dizitart.com)
+
 **A cross-language storage engine and file format for Nitrite.**
 
 A **cryptand** is a macrobicyclic ligand — a molecular cage that encapsulates an
