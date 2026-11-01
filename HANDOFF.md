@@ -15,6 +15,12 @@
   Rungs: Rust `rss_scale PATH N patho [W]`, Java `RssScale PATH N patho [W]`,
   Dart `scale patho PATH N [W]`.
 
+- 6.7 soak RUNNING (started 11-01, remote `~/soak67.sh`, log `~/soak67.log`):
+  gate quick -> R 10^8 build (prior run 46.5 GB, 25 min) -> 24 h R soak -> rm ->
+  J 10^8 build -> 24 h J soak. Outputs in remote `reference/bench/runs/soak/`
+  (`rust.out`, `java.out`, `*/cycles.csv`, `*/samples.csv`; `done` when finished).
+  Driver `tools/soak.py`; child is `rss_scale PATH N soak SEED` / `RssScale ... soak`.
+
 ## Must-keep (any Dart rewrite or refactor)
 
 F-127/F-128 format bits; `_cmpU64`/`_addSaturating`; F-135/F-136 zeroing;
@@ -23,8 +29,9 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Remote and traps
 
-- Remote `anindya@207.254.39.186`, one clone per job (gate `cryptand-gate`,
-  bench `cryptand-f184`, Jazzer `cryptand-fuzz` under JDK 21 only).
+- Remote `anindya@207.254.39.186`: ONE clone `~/Documents/codebase/cryptand`
+  (consolidated 11-01 at the human's request; old dirty diffs saved in
+  `~/cryptand-patches`). Jazzer needs JDK 21. Databases go in `~/soakdb`.
 - Corpus regen: `dart run tool/generate_corpus.dart`, then Rust
   `convert_test make_converting_vector` and `replay_test make_replay_vector` (`--ignored`).
 - Corpus test needs `--features harness`; Rust `stall_test` fails while
@@ -42,12 +49,13 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
-- New schedule for 6.6–6.8, M7, M8 (the PLAN dates have passed).
+- None. Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
 
-6.7 soak (24 h mixed at 10^8, R and J, kill -9) on remote, once the human sets
-the 6.7–6.8 / M7 / M8 schedule.
+When remote `reference/bench/runs/soak/done` exists: read `rust.out`/`java.out`,
+record them in RESULTS.md (Scale table) and tick 6.7; file a finding for any
+GREW/unsound. Then 6.8 (P2 vs fjall/RocksDB).
 
 ## Log
 
@@ -64,3 +72,4 @@ the 6.7–6.8 / M7 / M8 schedule.
 - 11-01 — F-209 closed: spec §6.9 run_capacity (human go), R+J+D.
 - 11-01 — 6.6 PASS at 10^6 R+J+D.
 - 11-01 — F-211 R colls 46.6 -> 10.4 s (CoW node cache); write-back and D open.
+- 11-01 — remote consolidated to one clone (114 GB free); soak harness; 6.7 launched.
