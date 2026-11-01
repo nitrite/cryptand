@@ -4,6 +4,8 @@ Reference implementation of the **Cryptand File Format** (CFF v1.0) — a
 cross-language, encrypted storage engine and on-disk format for
 [Nitrite](https://nitrite.dizitart.com).
 
+**Questions, ideas, or want to follow along?** [Join the Dizitart Discord](https://discord.dizitart.com) to chat with the maintainers and other users.
+
 A `.cryptand` file written by this crate can be opened, queried, mutated and
 closed by the Dart reference implementation and back, with no export step, no
 conversion, and no loss. Any SDK in any language reaches the same file by
@@ -89,6 +91,10 @@ record the last `commit_id` you saw somewhere the attacker cannot write (an OS
 keychain, a server) and refuse to open a file whose `commit_id` is lower. An
 unencrypted file has no tamper detection at all: CRC-32C catches accidents, not
 edits (§9.4).
+
+## Community
+
+Questions, bug hunting, design discussion and release news happen on Discord: **[Join the Dizitart Discord](https://discord.dizitart.com)**. Everyone is welcome.
 
 ## License
 

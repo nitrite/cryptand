@@ -4,6 +4,8 @@ Reference implementation of the **Cryptand File Format** (CFF v1.0) in pure
 Dart — a cross-language, encrypted storage engine and on-disk format for
 [Nitrite](https://nitrite.dizitart.com).
 
+**Questions, ideas, or want to follow along?** [Join the Dizitart Discord](https://discord.dizitart.com) to chat with the maintainers and other users.
+
 A `.cryptand` file written by this package can be opened, queried, mutated and
 closed by the Rust reference implementation and back, with no export step, no
 conversion, and no loss. Any SDK in any language reaches the same file by
@@ -88,6 +90,10 @@ dart analyze
 `bench/` holds the benchmarks that test the `design/` predictions;
 `tool/generate_vectors.dart` produces the shared conformance vectors;
 `REPORT.md` records every spec defect this implementation has found.
+
+## Community
+
+Questions, bug hunting, design discussion and release news happen on Discord: **[Join the Dizitart Discord](https://discord.dizitart.com)**. Everyone is welcome.
 
 ## License
 

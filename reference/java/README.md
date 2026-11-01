@@ -4,6 +4,8 @@ Java implementation of the **Cryptand File Format** (CFF v1.0), a
 cross-language, encrypted storage engine and on-disk format for
 [Nitrite](https://nitrite.dizitart.com).
 
+**Questions, ideas, or want to follow along?** [Join the Dizitart Discord](https://discord.dizitart.com) to chat with the maintainers and other users.
+
 A `.cryptand` file written here is opened, verified, mutated and written back by
 the Rust and Dart implementations, and theirs by this one, plaintext and
 encrypted, with no export step and no conversion.
@@ -68,6 +70,10 @@ mvn verify         # 325 tests, coverage ratchet, sources and javadoc jars
 The cross-language gate is `../conformance/interop/run.sh`. Benchmarks, the
 interop harness and the fuzzer live under `src/test`, so none of them reach the
 published jar.
+
+## Community
+
+Questions, bug hunting, design discussion and release news happen on Discord: **[Join the Dizitart Discord](https://discord.dizitart.com)**. Everyone is welcome.
 
 ## License
 

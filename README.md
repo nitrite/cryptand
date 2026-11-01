@@ -2,7 +2,7 @@
 
 **A cross-language storage engine and file format for Nitrite.**
 
-[![Discord](https://img.shields.io/discord/1565965879177519118?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.dizitart.com)
+**Questions, ideas, or want to follow along?** [Join the Dizitart Discord](https://discord.dizitart.com) to chat with the maintainers and other users.
 
 A **cryptand** is a macrobicyclic ligand — a molecular cage that encapsulates an
 ion inside its cavity and holds it there. Azacryptands are studied precisely as
@@ -240,6 +240,10 @@ Read in this order.
 | [`spec/12-profiles.md`](spec/12-profiles.md) | Device profiles — phone, tablet, desktop, server — and the frame-budget rules |
 | [`spec/13-operations.md`](spec/13-operations.md) | Backup, checkpoints, repair, corruption containment, required metrics, TTL, change feed, planner statistics |
 | [`spec/14-security.md`](spec/14-security.md) | **Threat model**, keys and keyslots, nonces, what is encrypted, superblock authentication, what still leaks, crypto-erase, hardening against a hostile file |
+
+## Community
+
+Questions, bug hunting, design discussion and release news happen on Discord: **[Join the Dizitart Discord](https://discord.dizitart.com)**. Everyone is welcome.
 
 ## Status
 
