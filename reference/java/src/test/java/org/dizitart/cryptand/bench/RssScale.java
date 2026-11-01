@@ -387,6 +387,33 @@ public final class RssScale {
             vectorRung(path, n);
             return;
         }
+        if (mode.equals("soak")) {
+            // PLAN 6.7, Rust `rss_scale PATH N soak SEED`: verify, then the same mix until killed.
+            try (Engine e = Engine.open(path, opts())) {
+                long g = System.nanoTime();
+                var findings = org.dizitart.cryptand.ops.Verify.run(e).findings();
+                findings.forEach(f -> System.err.println("verify " + f));
+                System.out.println("verify_ms=" + (System.nanoTime() - g) / 1_000_000 + " verify_sound=" + findings.isEmpty());
+                long[] s = {(args.length > 3 ? Long.parseLong(args[3]) : 1) * 0x9E3779B97F4A7C15L | 1};
+                java.util.function.LongSupplier rnd = () -> {
+                    s[0] = s[0] * 6364136223846793005L + 1442695040888963407L;
+                    return s[0] >>> 11;
+                };
+                long span = n + n / 10;
+                for (long ops = 1; ops > 0; ops++) {
+                    long r = rnd.getAsLong() % 10, k = rnd.getAsLong() % span;
+                    if (r < 5) e.get(16, XlangCrudBench.keyOf(k));
+                    else if (r < 8) e.batch().put(16, XlangCrudBench.keyOf(k), Cve.encode(XlangCrudBench.doc(k, rnd.getAsLong()))).commit();
+                    else e.batch().remove(16, XlangCrudBench.keyOf(k)).commit();
+                    if (ops % 1000 == 0) {
+                        e.commitNow();
+                        System.out.println("acked=" + ops);
+                        System.out.flush();
+                    }
+                }
+            }
+            return;
+        }
         if (mode.equals("patho")) {
             pathoRung(path, n, args.length > 3 ? args[3] : null);
             return;

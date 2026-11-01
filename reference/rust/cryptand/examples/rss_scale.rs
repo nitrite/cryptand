@@ -166,6 +166,9 @@ fn main() -> cryptand::Result<()> {
     if a.get(3).map(String::as_str) == Some("patho") {
         return patho_rung(path, n, a.get(4).map(String::as_str));
     }
+    if a.get(3).map(String::as_str) == Some("soak") {
+        return soak(path, n, a.get(4).map_or(1, |s| s.parse().unwrap()));
+    }
     let _ = std::fs::remove_file(path);
     // CRYPTAND_PROFILE=mobile: the profile the file is created with; reads
     // take it from the file.
@@ -296,6 +299,49 @@ fn index_rung(path: &std::path::Path, n: i64) -> cryptand::Result<()> {
     }
     println!("{line} verify_ms={} verify_sound={ok} rss_verify_mb={}", t.elapsed().as_millis(), rss());
     db.close()
+}
+
+/// PLAN 6.7, driven by `tools/soak.py`: open, verify, then a mixed loop until
+/// killed: 50% get, 30% upsert, 20% delete over keys [0, 1.1 N), a Sync commit
+/// every 1000 ops. The key range is bounded, so nothing should grow for good.
+fn soak(path: &std::path::Path, n: i64, seed: u64) -> cryptand::Result<()> {
+    use cryptand::verify::EngineVerify;
+    use std::io::Write;
+    let mut db = Database { engine: Engine::open(path, None)? };
+    let t = std::time::Instant::now();
+    let report = db.engine.verify()?;
+    for f in &report.findings {
+        eprintln!("verify {:?}: {}", f.class, f.what);
+    }
+    println!("verify_ms={} verify_sound={}", t.elapsed().as_millis(), report.ok());
+    let mut c = db.collection("c")?;
+    let id = |k: i64| 1767225600000 * 4194304 + k * 4096 + 1;
+    let mut s = seed.wrapping_mul(0x9E3779B97F4A7C15) | 1;
+    let mut rnd = || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s >> 11
+    };
+    let span = (n + n / 10) as u64;
+    for ops in 1u64.. {
+        let (r, k) = (rnd() % 10, (rnd() % span) as i64);
+        if r < 5 {
+            c.get(&mut db.engine, id(k))?;
+        } else if r < 8 {
+            let mut d = doc(k);
+            if let Value::Doc(f) = &mut d {
+                f[15].1 = Value::int(NumType::I64, rnd() as i128);
+            }
+            c.insert(&mut db.engine, &d)?;
+        } else {
+            c.remove(&mut db.engine, id(k))?;
+        }
+        if ops % 1000 == 0 {
+            db.commit(Durability::Sync)?;
+            println!("acked={ops}");
+            std::io::stdout().flush()?;
+        }
+    }
+    unreachable!()
 }
 
 fn rss_mb() -> u64 {
