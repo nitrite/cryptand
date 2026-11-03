@@ -15,7 +15,7 @@
   Rungs: Rust `rss_scale PATH N patho [W]`, Java `RssScale PATH N patho [W]`,
   Dart `scale patho PATH N [W]`.
 
-- 6.7 soak RUNNING (started 11-01, remote `~/soak67.sh`, log `~/soak67.log`):
+- 6.7 soak RUNNING (relaunched 11-03 at 6b26155 after F-212 killed the 11-01 gate; remote `~/soak67.sh`, log `~/soak67.log`):
   gate quick -> R 10^8 build (prior run 46.5 GB, 25 min) -> 24 h R soak -> rm ->
   J 10^8 build -> 24 h J soak. Outputs in remote `reference/bench/runs/soak/`
   (`rust.out`, `java.out`, `*/cycles.csv`, `*/samples.csv`; `done` when finished).
@@ -73,3 +73,4 @@ GREW/unsound. Then 6.8 (P2 vs fjall/RocksDB).
 - 11-01 — 6.6 PASS at 10^6 R+J+D.
 - 11-01 — F-211 R colls 46.6 -> 10.4 s (CoW node cache); write-back and D open.
 - 11-01 — remote consolidated to one clone (114 GB free); soak harness; 6.7 launched.
+- 11-03 — F-212 (J aged scan, stale liveness gate) fixed; soak 6.7 relaunched.
