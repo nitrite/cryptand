@@ -374,6 +374,15 @@ public final class Engine implements AutoCloseable {
         // make the first commit of the new session publish `visible_seq = 0`
         // and lose every key the file already holds.
         this.completedThrough = sb.visibleSeq;
+        // F-213: a kill with a batch in flight persists next_seq past seqs that
+        // never reached visible_seq. Nothing will complete them, so fold them in
+        // as abandoned, as restore does (F-066), or the first batch sits above a
+        // hole the prefix never crosses and a sync writer waits forever.
+        if (sb.nextSeq - 1 > sb.visibleSeq) {
+            this.completedThrough = sb.nextSeq - 1;
+            this.restoredGapEnd = completedThrough;
+            this.restoredSeq = sb.visibleSeq;
+        }
     }
 
     // ==================================================================
