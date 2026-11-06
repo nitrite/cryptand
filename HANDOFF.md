@@ -15,11 +15,12 @@
   Rungs: Rust `rss_scale PATH N patho [W]`, Java `RssScale PATH N patho [W]`,
   Dart `scale patho PATH N [W]`.
 
-- 6.7 soak RUNNING (relaunched 11-03 at 6b26155 after F-212 killed the 11-01 gate; remote `~/soak67.sh`, log `~/soak67.log`):
-  gate quick -> R 10^8 build (prior run 46.5 GB, 25 min) -> 24 h R soak -> rm ->
-  J 10^8 build -> 24 h J soak. Outputs in remote `reference/bench/runs/soak/`
-  (`rust.out`, `java.out`, `*/cycles.csv`, `*/samples.csv`; `done` when finished).
-  Driver `tools/soak.py`; child is `rss_scale PATH N soak SEED` / `RssScale ... soak`.
+- 6.7 Rust soak PASS (11-03 run, remote `reference/bench/runs/soak-11-03/`): 69 cycles at 10^8,
+  all sound, RSS 1312 -> 1262 MB, fds 8, bytes flat 90.2 GB. Not yet in RESULTS.md.
+- 6.7 Java soak RELAUNCHED 11-06 at 0150b00 (F-213: the 11-03 run acked 0 writes after cycle 1,
+  writer hung on reopen). Remote `~/soak67j.sh`, log `~/soak67j.log`: gate quick -> J 10^8 build
+  -> 24 h soak. Outputs in remote `reference/bench/runs/soak/` (`java.out`, `java/cycles.csv`, `done`).
+  Check the `acked` column is non-zero every cycle, not just PASS.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -53,11 +54,12 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Next action
 
-When remote `reference/bench/runs/soak/done` exists: read `rust.out`/`java.out`,
+When remote `reference/bench/runs/soak/done` exists: read `java.out` (+ `soak-11-03/rust.out`),
 record them in RESULTS.md (Scale table) and tick 6.7; file a finding for any
 GREW/unsound. Then 6.8 (P2 vs fjall/RocksDB).
 
 ## Log
+- 11-06: F-213 (Java reopen hang after kill) fixed; Java soak relaunched on remote.
 
 - 10-27 — Dart go; 6.5 index rung, F-182/F-183 fixed.
 - 10-28 — F-184..F-188 (index footprint, probes, L0 backlog, segment commit_id).
