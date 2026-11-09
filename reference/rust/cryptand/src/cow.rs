@@ -130,7 +130,8 @@ pub struct CowTree {
     pub eager_free: bool,
     /// F-211: nodes this tree wrote, by `(page_id, nonce)`, taken back out by
     /// the next edit of their path; every node on an edited path is replaced,
-    /// so nothing is cloned. A nonce is per write, so a reused page misses.
+    /// so nothing is cloned. Unencrypted, the nonce is always 0, so
+    /// [`Self::write_at`] drops a page's entry when it writes the page again (F-214).
     /// 10^5 collection creates spent most of 47 s re-reading, verifying and
     /// re-decoding pages they had just written.
     pub(crate) nodes: HashMap<(u64, u64), CowNode>,
@@ -195,6 +196,10 @@ impl CowTree {
         )?;
         pager.write_page(id, &page)?;
         self.pages_copied += 1;
+        // F-214: unencrypted, every nonce is 0, so a page this tree freed and
+        // now writes again has the key of the node it held before. `build`
+        // writes without caching, and `get` served that old node.
+        self.nodes.remove(&(id, pager.written_nonce));
         Ok((id, pager.written_nonce))
     }
 

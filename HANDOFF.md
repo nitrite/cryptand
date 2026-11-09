@@ -17,8 +17,8 @@
 
 - 6.7 Rust soak PASS (11-03 run, remote `reference/bench/runs/soak-11-03/`): 69 cycles at 10^8,
   all sound, RSS 1312 -> 1262 MB, fds 8, bytes flat 90.2 GB. Not yet in RESULTS.md.
-- 6.7 Java soak RELAUNCHED 11-06 at 0150b00 (F-213: the 11-03 run acked 0 writes after cycle 1,
-  writer hung on reopen). Remote `~/soak67j.sh`, log `~/soak67j.log`: gate quick -> J 10^8 build
+- 6.7 Java soak RELAUNCHED 11-09 after F-214 (the 11-06 launch at 0150b00 never ran: its gate
+  failed on an intermittent oplog hop, a stale Rust CoW node cache after shrink). Remote `~/soak67j.sh`, log `~/soak67j.log`: gate quick -> J 10^8 build
   -> 24 h soak. Outputs in remote `reference/bench/runs/soak/` (`java.out`, `java/cycles.csv`, `done`).
   Check the `acked` column is non-zero every cycle, not just PASS.
 
@@ -60,6 +60,7 @@ GREW/unsound. Then 6.8 (P2 vs fjall/RocksDB).
 
 ## Log
 - 11-06: F-213 (Java reopen hang after kill) fixed; Java soak relaunched on remote.
+- 11-09: F-214 (R CoW node cache stale after shrink, unencrypted) fixed; Java soak relaunched.
 
 - 10-27 — Dart go; 6.5 index rung, F-182/F-183 fixed.
 - 10-28 — F-184..F-188 (index footprint, probes, L0 backlog, segment commit_id).

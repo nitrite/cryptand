@@ -35,3 +35,21 @@ fn every_page_is_reachable_or_freed_also_when_a_leaf_empties() {
         check(&t, &mut pager, &format!("after removing key {i}"));
     }
 }
+
+/// F-214: unencrypted, every nonce is 0, so a page the tree wrote, freed and
+/// then rebuilt onto (`relocate`, as `shrink` does) kept its old cached node,
+/// and `get` read the value from before the rebuild.
+#[test]
+fn a_rebuild_onto_a_reused_page_reads_the_new_node() {
+    let mut pager = Pager::in_memory(4096);
+    pager.low_first = true;
+    let mut t = CowTree::new(2, 0, 0);
+    t.put(&mut pager, b"k", b"old").unwrap();
+    t.relocate(&mut pager).unwrap();
+    t.put(&mut pager, b"k", b"new").unwrap();
+    for p in std::mem::take(&mut t.freed) {
+        pager.free_extent(p, 1, 0);
+    }
+    t.relocate(&mut pager).unwrap();
+    assert_eq!(t.get(&mut pager, b"k").unwrap().as_deref(), Some(&b"new"[..]));
+}
