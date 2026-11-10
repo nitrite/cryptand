@@ -1,6 +1,6 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-10-31)
+## State (2026-11-11)
 
 - Branch `dart-storage` (pushed). Manifests 1.0.0, nothing published, no tags.
   Done: M0, M4; M1–M3, M5 per PLAN status table. M6 6.5 rungs (index,
@@ -17,10 +17,14 @@
 
 - 6.7 Rust soak PASS (11-03 run, remote `reference/bench/runs/soak-11-03/`): 69 cycles at 10^8,
   all sound, RSS 1312 -> 1262 MB, fds 8, bytes flat 90.2 GB. Not yet in RESULTS.md.
-- 6.7 Java soak RELAUNCHED 11-09 after F-214 (the 11-06 launch at 0150b00 never ran: its gate
-  failed on an intermittent oplog hop, a stale Rust CoW node cache after shrink). Remote `~/soak67j.sh`, log `~/soak67j.log`: gate quick -> J 10^8 build
-  -> 24 h soak. Outputs in remote `reference/bench/runs/soak/` (`java.out`, `java/cycles.csv`, `done`).
-  Check the `acked` column is non-zero every cycle, not just PASS.
+- 6.7 Java soak 11-09 FAILED on harness, not engine: 65 cycles all sound, but the Java
+  soak fsynced every op (~20 ops/s vs Rust's 1000-op commits), an uncapped JVM heap read as
+  RSS growth, and the deadline cut the last cycle (acked 0). Fixed in 4991082 (Java batches
+  1000 ops, -Xms=-Xmx 3g, no truncated cycle) + Dart soak mode (human 11-11: Dart soaks too).
+  Smoke at 2e4: R ~140k, J ~100k, D ~80k ops/s. Old run: remote `runs/soak-11-09-java-fail`.
+- RERUN launched 11-11 00:50 IST: remote `~/soak67jd.sh`, outputs `runs/soak2/`: gate ->
+  Java 24 h on existing j.cff (`java-done`) -> rm j.cff -> Dart 10^8 build -> Dart 24 h (`done`).
+  Check acked non-zero every cycle and min RSS flat, not just PASS.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -54,7 +58,8 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Next action
 
-When remote `reference/bench/runs/soak/done` exists: read `java.out` (+ `soak-11-03/rust.out`),
+When remote `reference/bench/runs/soak2/java-done` exists, read `java.out`; at `done`, `dart.out`
+(+ `soak-11-03/rust.out`). Add Dart to PLAN 6.7's scope line,
 record them in RESULTS.md (Scale table) and tick 6.7; file a finding for any
 GREW/unsound. Then 6.8 (P2 vs fjall/RocksDB).
 
@@ -77,3 +82,4 @@ GREW/unsound. Then 6.8 (P2 vs fjall/RocksDB).
 - 11-01 — F-211 R colls 46.6 -> 10.4 s (CoW node cache); write-back and D open.
 - 11-01 — remote consolidated to one clone (114 GB free); soak harness; 6.7 launched.
 - 11-03 — F-212 (J aged scan, stale liveness gate) fixed; soak 6.7 relaunched.
+- 11-11: 6.7 Java soak FAIL traced to harness (per-op fsync, uncapped heap, cut cycle); fixed 4991082, Dart soak added, J+D rerun launched.
