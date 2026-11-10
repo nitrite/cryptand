@@ -10,6 +10,7 @@
 /// ./scale text PATH N    # PLAN 6.5: full-text index build, searches, verify
 /// ./scale spatial PATH N # PLAN 6.5: R-tree build, near/nearestK vs brute force, verify
 /// ./scale vector PATH N  # PLAN 6.5: 128-d Vamana build, recall@10 vs brute force, verify
+/// ./scale soak PATH N SEED # PLAN 6.7, driven by tools/soak.py: verify, then a mix until killed
 /// ```
 ///
 /// `read` ends with PASS/FAIL against PLAN 6.3's RSS bar (cache + 256 MB). Run
@@ -99,6 +100,10 @@ void main(List<String> args) {
   }
   if (args[0] == 'vector') {
     vectorRung(path, n, out, sw);
+    return;
+  }
+  if (args[0] == 'soak') {
+    soak(path, n, int.parse(args[3]));
     return;
   }
   if (args[0] == 'patho') {
@@ -670,5 +675,34 @@ void pathoRung(String path, int n, String? only) {
     }));
     e.close();
     File(p).deleteSync();
+  }
+}
+
+/// PLAN 6.7, as Rust `rss_scale PATH N soak SEED`: open, verify, then 50% get,
+/// 30% upsert, 20% delete over keys [0, 1.1 N), a sync commit every 1000 ops.
+void soak(String path, int n, int seed) {
+  // Sync writes: `stdout` on a pipe flushes only when the event loop runs,
+  // and this loop never yields.
+  final out = File('/dev/stdout').openSync(mode: FileMode.writeOnly);
+  final db = DatabaseFile.open(path, key: key);
+  final t = Stopwatch()..start();
+  final sound = db.engine.verifyStructure(claims: db.indexClaims()).isSound;
+  out.writeStringSync('verify_ms=${t.elapsedMilliseconds} verify_sound=$sound\n');
+  final c = db.collection('c')!;
+  final rnd = math.Random(seed);
+  final span = n + n ~/ 10;
+  for (var ops = 1;; ops++) {
+    final r = rnd.nextInt(10), k = rnd.nextInt(span);
+    if (r < 5) {
+      c.get(id(k));
+    } else if (r < 8) {
+      c.put(id(k), benchDoc(rnd.nextInt(n)));
+    } else {
+      c.remove(id(k));
+    }
+    if (ops % 1000 == 0) {
+      db.engine.commit();
+      out.writeStringSync('acked=$ops\n');
+    }
   }
 }

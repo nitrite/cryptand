@@ -400,12 +400,17 @@ public final class RssScale {
                     return s[0] >>> 11;
                 };
                 long span = n + n / 10;
+                // Like Rust: the writes of 1000 ops form one durable commit, not
+                // one fsync each (that ran ~20 ops/s against Rust's ~10k).
+                var b = e.batch();
                 for (long ops = 1; ops > 0; ops++) {
                     long r = rnd.getAsLong() % 10, k = rnd.getAsLong() % span;
                     if (r < 5) e.get(16, XlangCrudBench.keyOf(k));
-                    else if (r < 8) e.batch().put(16, XlangCrudBench.keyOf(k), Cve.encode(XlangCrudBench.doc(k, rnd.getAsLong()))).commit();
-                    else e.batch().remove(16, XlangCrudBench.keyOf(k)).commit();
+                    else if (r < 8) b.put(16, XlangCrudBench.keyOf(k), Cve.encode(XlangCrudBench.doc(k, rnd.getAsLong())));
+                    else b.remove(16, XlangCrudBench.keyOf(k));
                     if (ops % 1000 == 0) {
+                        b.commit();
+                        b = e.batch();
                         e.commitNow();
                         System.out.println("acked=" + ops);
                         System.out.flush();

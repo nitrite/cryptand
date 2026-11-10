@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """PLAN 6.7 soak. Runs `rss_scale PATH N soak SEED` (Rust) or `RssScale PATH N
-soak SEED` (Java) on an existing N-document file, SIGKILLs it after 10-30 min,
+soak SEED` (Java) or `scale soak PATH N SEED` (Dart) on an existing N-document file, SIGKILLs it after 10-30 min,
 restarts it (the child verifies on open), for HOURS, then a final verify.
 SOAK_KILL_S=lo,hi overrides the kill window in seconds (smoke tests). Every 30 s it samples RSS,
 open fds and file bytes into OUT/samples.csv; each cycle's peaks go to
 OUT/cycles.csv. Fails on any unsound verify, or when a metric's peak over the
 last third of cycles is >10% above the first third (monotonic growth).
 
-  tools/soak.py rust|java PATH N HOURS OUT
-Build the base first: `rss_scale PATH N` / `RssScale PATH N`.
+  tools/soak.py rust|java|dart PATH N HOURS OUT
+Build the base first: `rss_scale PATH N` / `RssScale PATH N` / `scale build PATH N`.
+Java runs with a fixed heap (SOAK_JAVA_XMX, default 3g): an uncapped JVM grows
+its heap lazily toward 1/4 of RAM, which the growth check reads as a leak.
 """
 import csv, os, random, signal, subprocess, sys, time
 
@@ -20,13 +22,20 @@ def command(lang):
         rs = f"{root}/reference/rust"
         subprocess.run(["cargo", "build", "-q", "--release", "--example", "rss_scale"], cwd=rs, check=True)
         return [f"{rs}/target/release/examples/rss_scale"], lambda p, n, s: [p, str(n), "soak", str(s)]
+    if lang == "dart":
+        d = f"{root}/reference/dart/cryptand"
+        os.makedirs(f"{d}/build", exist_ok=True)
+        subprocess.run(["dart", "compile", "exe", "tool/scale.dart", "-o", "build/scale"], cwd=d, check=True,
+                       stdout=subprocess.DEVNULL)
+        return [f"{d}/build/scale"], lambda p, n, s: ["soak", p, str(n), str(s)]
     java = f"{root}/reference/java"
     subprocess.run(["mvn", "-B", "-q", "test-compile", "-Djacoco.skip=true"], cwd=java, check=True)
     cp = f"{java}/target/soak-cp.txt"
     subprocess.run(["mvn", "-B", "-q", "dependency:build-classpath", f"-Dmdep.outputFile={cp}",
                     "-Dmdep.includeScope=test"], cwd=java, check=True)
     jcp = f"{java}/target/classes:{java}/target/test-classes:{open(cp).read().strip()}"
-    return ["java", "-cp", jcp, "org.dizitart.cryptand.bench.RssScale"], lambda p, n, s: [p, str(n), "soak", str(s)]
+    xmx = os.environ.get("SOAK_JAVA_XMX", "3g")
+    return ["java", f"-Xms{xmx}", f"-Xmx{xmx}", "-cp", jcp, "org.dizitart.cryptand.bench.RssScale"], lambda p, n, s: [p, str(n), "soak", str(s)]
 
 
 def sample(pid, path):
@@ -47,7 +56,7 @@ def main(lang, path, n, hours, out):
     cycles.writerow(["cycle", "verify_ms", "sound", "acked", "peak_rss_mb", "peak_fds", "peak_bytes"])
     peaks = []
     kill_s = [float(x) for x in os.environ.get("SOAK_KILL_S", "600,1800").split(",")]
-    while time.time() < end:
+    while time.time() + kill_s[0] < end:  # no cycle the deadline would cut short
         cycle += 1
         log = open(f"{out}/cycle{cycle}.log", "w")
         p = subprocess.Popen(exe + args(path, n, cycle), stdout=subprocess.PIPE, stderr=log, text=True)
