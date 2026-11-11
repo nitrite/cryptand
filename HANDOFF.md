@@ -50,7 +50,7 @@
   a reader claim could land between the writer's slot read and its superblock; the writer now
   holds the claim lock across both. F-212 re-fixed (reset was conditional). F-218: first CI runs
   read, 7/26 red: Dart Windows `_close` re-lock (product bug), Windows test teardown, two 3.5.0
-  lints, F-220 test race, F-212; all fixed locally, **Windows unverified until CI runs**.
+  lints, F-220 test race, F-212; all fixed, plus an unclosed db in `hostile_test`. **CI 26/26 green on 98b7ce4** (run 43116666856).
 - Remote has Dart at `~/dart-sdk/bin` (not on the default PATH; the gate needs it). The gate now
   raises `ulimit -n`: at 256 the Dart runner died of EMFILE in the 65-reader test and hung.
   F-222's MUST is in 13 §8 (human 11-12).
@@ -90,12 +90,11 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Next action
 
-1. `gh run list --branch dart-storage`: read the run for the 11-12 commits (gate quick green on
-   remote, 1050 s); fix what Windows still shows (A1.3). 2. Soak: when remote
+1. Soak: when remote
    `reference/bench/runs/soak2/java-done` exists, read `java.out`; at `done`, `dart.out` (+
-   `soak-11-03/rust.out`); record in RESULTS.md, tick 6.7. 3. A1.4's interop full-text step. Then 6.8.
+   `soak-11-03/rust.out`); record in RESULTS.md, tick 6.7. 2. A1.4's interop full-text step. Then 6.8.
 
 ## Log
-- 11-12: review of F-205..F-221: F-222 (claim/floor race) and F-223 (failed commit lost catalog edits) found and fixed; F-212 re-fixed; CI failures read and fixed locally.
+- 11-12: review of F-205..F-221: F-222 (claim/floor race) and F-223 (failed commit lost catalog edits) found and fixed; F-212 re-fixed; CI failures read and fixed; CI 26/26 green (A1.3 done). A push run can stick queued with no jobs: `gh workflow run CI --ref dart-storage`.
 - 11-11: F-211 redesign R+D (deferred reserved trees) + F-221 in R; F-221 fixed (D); F-211 Dart 4x; soak2 found dead (ENOSPC).
 - 11-11: F-220 fixed R+J+D (reader page checks, no format change); F-221 filed (Dart CoW commit_id 0).

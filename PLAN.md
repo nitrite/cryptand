@@ -392,7 +392,7 @@ and differential tests reach. In priority order:
   key; Dart decided by the key in hand. Fixed R+D, Java was right.
 - [x] **A1.2** F-217 (S0) postings decode trusted file lengths: Java OOM,
   Rust overflow. Fixed R+J.
-- [ ] **A1.3** F-218 (S1) CI dark since 10-12 and red on Windows. Test import
+- [x] **A1.3** F-218 (S1) CI dark since 10-12 and red on Windows. Test import
   fixed, `dart-storage` added to the trigger. Fix whatever the first run shows
   on Linux and Windows (a month of unbuilt code, incl. the Dart rewrite).
   **Verify:** one CI run with all 26 jobs green on the release commit.
