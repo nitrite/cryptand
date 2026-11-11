@@ -26,6 +26,11 @@
   Java 24 h on existing j.cff (`java-done`) -> rm j.cff -> Dart 10^8 build -> Dart 24 h (`done`).
   Check acked non-zero every cycle and min RSS flat, not just PASS.
 
+- Audit 11-11 (PLAN A1): F-215 (blob read, R+D), F-216 (Dart postings `first_doc`, human go),
+  F-217 (postings decode, R+J) fixed, each with a test that fails reverted. F-218: CI had not
+  run since 10-12 (trigger lacked `dart-storage`) and was red on Windows; test fixed, branch
+  added, **first run not yet read**. F-219: multi-process readers unwired; human: wire for 1.0.
+
 ## Must-keep (any Dart rewrite or refactor)
 
 F-127/F-128 format bits; `_cmpU64`/`_addSaturating`; F-135/F-136 zeroing;
@@ -58,28 +63,14 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Next action
 
-When remote `reference/bench/runs/soak2/java-done` exists, read `java.out`; at `done`, `dart.out`
-(+ `soak-11-03/rust.out`). Add Dart to PLAN 6.7's scope line,
-record them in RESULTS.md (Scale table) and tick 6.7; file a finding for any
-GREW/unsound. Then 6.8 (P2 vs fjall/RocksDB).
+1. `gh run list --branch dart-storage`: read the first CI run since 10-12; fix what Linux and
+   Windows show (A1.3). 2. Soak: when remote `reference/bench/runs/soak2/java-done` exists, read
+   `java.out`; at `done`, `dart.out` (+ `soak-11-03/rust.out`); add Dart to PLAN 6.7's scope line,
+   record in RESULTS.md, tick 6.7. 3. A1.5 (F-219) Rust leg, then A1.4's interop step. Then 6.8.
 
 ## Log
+- 11-11: audit A1: F-215..F-219 filed; F-215/216/217 fixed, F-218 CI trigger + Windows test, F-219 approved to wire.
 - 11-06: F-213 (Java reopen hang after kill) fixed; Java soak relaunched on remote.
 - 11-09: F-214 (R CoW node cache stale after shrink, unencrypted) fixed; Java soak relaunched.
-
-- 10-27 — Dart go; 6.5 index rung, F-182/F-183 fixed.
-- 10-28 — F-184..F-188 (index footprint, probes, L0 backlog, segment commit_id).
-- 10-29 — F-184 Dart fixed; F-189 compaction bound; full-text rung, F-190/F-191.
-- 10-30 — F-192..F-204: spatial/vector on pages R+J+D, Vamana prune, F-202 closed.
-- 10-31 — F-203 fixed (R 865 -> 172 MB), F-205 beam width; v6 vector 10^6 PASS
-  R+J+D; F-204 closed at 1.4x; space_test fd flake fixed; handoff trimmed (294 -> ~60 lines).
-- 10-31 — 6.6 rungs R+J+D; F-206..F-208 fixed; F-209, F-210 open.
-- 10-31 — F-206..F-208 committed (gate green); F-210 J fixed; f160 fd bound 4.
-- 10-31 — F-210 R (eager free of unpublished catalog pages) + D (owner map) fixed.
-- 11-01 — F-210 10^5 rerun PASS R+J+D; F-209 debt-loop guard R+D (partial).
-- 11-01 — F-209 closed: spec §6.9 run_capacity (human go), R+J+D.
-- 11-01 — 6.6 PASS at 10^6 R+J+D.
-- 11-01 — F-211 R colls 46.6 -> 10.4 s (CoW node cache); write-back and D open.
-- 11-01 — remote consolidated to one clone (114 GB free); soak harness; 6.7 launched.
 - 11-03 — F-212 (J aged scan, stale liveness gate) fixed; soak 6.7 relaunched.
 - 11-11: 6.7 Java soak FAIL traced to harness (per-op fsync, uncapped heap, cut cycle); fixed 4991082, Dart soak added, J+D rerun launched.

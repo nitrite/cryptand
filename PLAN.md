@@ -24,6 +24,7 @@ interop gate 12/12 directions plaintext+encrypted.
 | M6 | Scale 10⁶→10⁹, soak, P2 | C | 10-24 | in progress (6.6 PASS R+J+D at 10^6 11-01, all 8 workloads verify sound, after F-206..F-210; 6.5 vector 10^6 PASS R+J+D 10-31; 6.5 started 10-27: index rung, F-182 fixed, F-183; full-text rung 10-29, F-190/F-191 fixed; spatial/vector R+J+D on pages 10-30 (F-195..F-201), J spatial 10^7 PASS, vector rungs running; 10-13: Dart `tool/scale.dart`, Rust `rss_scale read`; 10⁶ rung R+D failed point-read bar: F-151, fixed (p50 Rust 5 us, Dart 29 us); F-152 pacing fixed (L0 46 -> 2); Dart read RSS 206 MB PASS against 6.3's bar; F-153 Rust memtable fixed; F-154 Dart shrink fixed, settled amp R 1.14 / D 1.58; F-155 closed (bar = peak footprint); 10⁷ rung: F-157 R settle 923 MB (fixed: 251), F-158 D build 381 MB, F-159 D get p50 1 ms; 10⁸ read rungs (uniform+zipf, scan, verify) PASS R+J+D 10-18: Rust 180 MB, Java 189, Dart 246 after F-160..F-171; 10⁹ deferred past 1.0 (human 10-18: remote disk; 10⁸ is the top rung), mobile + encrypted at 10⁸, 6.4–6.8) |
 | M7 | Platforms, Flutter on device, API freeze, dry runs | all | 10-26 | todo |
 | M8 | Freeze 10-27 → RC → final tags 10-30 | all | 10-30 | todo |
+| A1 | Audit 11-11: findings F-215..F-219 | all | before M7 | in progress (F-215, F-216, F-217 fixed 11-11; F-218 fixed locally, CI run pending; F-219 to wire, A1.5) |
 
 Tracks can run as parallel sessions, each in its own git worktree on its own
 branch, merged into `packaging/v1.0.0`: **A** correctness+security
@@ -379,6 +380,53 @@ Nothing has run above 10⁶ documents. The target is 10⁹ for Rust and Java (hu
   Update the README Status table.
   **Verify:** each registry serves 1.0.0, and the 8.4 checks pass against
   1.0.0.
+
+---
+
+## A1 — Design and code audit (2026-11-11)
+
+A read of the three implementations against the spec, outside what the fuzzers
+and differential tests reach. In priority order:
+
+- [x] **A1.1** F-215 (S0) BLOB read: Rust panic on an ENCRYPTED head with no
+  key; Dart decided by the key in hand. Fixed R+D, Java was right.
+- [x] **A1.2** F-217 (S0) postings decode trusted file lengths: Java OOM,
+  Rust overflow. Fixed R+J.
+- [ ] **A1.3** F-218 (S1) CI dark since 10-12 and red on Windows. Test import
+  fixed, `dart-storage` added to the trigger. Fix whatever the first run shows
+  on Linux and Windows (a month of unbuilt code, incl. the Dart rewrite).
+  **Verify:** one CI run with all 26 jobs green on the release commit.
+- [ ] **A1.4** F-216 (S1) Dart postings `first_doc` was zigzag, the spec and
+  R/J say raw i64. Dart fixed 11-11 (human go); one byte literal asserted in
+  all three. Left: a full-text write/search step in `interop/run.sh`, all 6
+  directions.
+  **Verify:** the interop step fails with the Dart fix reverted, passes with it.
+- [ ] **A1.5** F-219 (S2) wire 13 §8 multi-process readers into all three
+  (human 11-11: for 1.0). Rust first, then Java, then Dart:
+  (a) the writer creates the sidecar at open, refreshes `writer_heartbeat_ms`
+  on commit and at least every `reader_heartbeat_ms`, and zeroes `writer_pid`
+  at close; (b) the retention floor at each commit is
+  `Sidecar::min_retained_commit(own, now)` and stale slots are reclaimed
+  there; (c) a read-only open claims a slot, **re-reads the superblock after
+  the claim** and re-pins if it moved, heartbeats, releases at close, and
+  reports volatile mode with its reason; (d) a slot is this reader's only
+  while pid **and** commit_id match; `now_ms` cannot panic; (e) delete the
+  copy in `cryptand-write`, or make it re-export the engine's; (f) Dart gets
+  the sidecar module (it has none). Set `MULTIPROC_READ` only when (a)-(c) hold.
+  **Verify:** per language, a two-process test: a reader pinned at commit N
+  scans to the end while the writer overwrites, compacts and shrinks (fails
+  with (b) reverted); a killed reader's slot is reclaimed after 3 heartbeats;
+  cross-language: a Java or Dart reader against a Rust writer and back.
+- [ ] **A1.6** Coverage gaps the audit found, each small: a fuzz target for
+  postings and R-tree/vector page decoders (3.1 covers neither); a BLOB in the
+  hop corpus now that no writer makes one (a Java-written fixture); the
+  ledger rows still `suspect`/`open` whose milestone is done (F-003, F-009,
+  F-014) re-checked and closed with a number.
+- [ ] **A1.7** Left as filed, for M7.3: F-023 (Rust `Engine::commit` does not
+  flush; 25 internal callers, so the fix is the API surface, not the method),
+  F-025, F-013.
+  **Verify:** F-215..F-218 fixed with a test that fails reverted; A1.4 and
+  A1.5 Verify lines pass; CI green; gate quick green.
 
 ---
 
