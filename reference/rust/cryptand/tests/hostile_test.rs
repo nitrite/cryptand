@@ -446,6 +446,30 @@ fn a_blob_longer_than_the_file_is_refused_before_allocating() {
     assert!(e.read_blob(&ptr).is_err());
 }
 
+/// F-215: a BLOB whose head page claims `flags.ENCRYPTED` in a file opened
+/// with no key is a typed refusal (it was an `unwrap` on the absent key ring).
+#[test]
+fn an_encrypted_blob_head_with_no_key_is_refused_not_a_panic() {
+    let clean = std::fs::read(corpus()).unwrap();
+    let ps = Superblock::parse(&clean[..4096]).unwrap().page_size();
+    let tmp = std::env::temp_dir().join(format!("cryptand-f215-{}.cryptand", std::process::id()));
+    // Any page the open itself does not read will do as the forged head.
+    let (page, mut e) = (2..clean.len() / ps)
+        .find_map(|page| {
+            let mut b = clean.clone();
+            b[page * ps + 5] |= 2; // flags.ENCRYPTED
+            std::fs::write(&tmp, &b).unwrap();
+            Engine::open_read_only(&tmp, None).ok().map(|e| (page, e))
+        })
+        .expect("a page the open does not read");
+    let mut ptr = [0u8; 16];
+    ptr[0..8].copy_from_slice(&(page as u64).to_le_bytes());
+    ptr[8..12].copy_from_slice(&10u32.to_le_bytes());
+    let r = e.read_blob(&ptr);
+    let _ = std::fs::remove_file(&tmp);
+    assert!(matches!(r, Err(cryptand::Error::CannotUnlock)), "{r:?}");
+}
+
 /// Generator for `fuzz-regress/f113-catalog-cycle.cryptand` (F-113): a real
 /// catalog (a copy-on-write tree) whose root's last child points back at the
 /// root. Run once with `cargo test --test hostile_test -- --ignored make_f113`.

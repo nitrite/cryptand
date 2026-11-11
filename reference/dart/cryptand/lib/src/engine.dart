@@ -2088,7 +2088,7 @@ final class Engine {
     for (final b in job.deadBlobs) {
       final r = ByteReader(b);
       final start = r.u64(), len = r.u32();
-      store.freeExtent(start, blobPages(len));
+      store.freeExtent(start, blobPages(start, len));
     }
     vlog
       ..sealCold()
@@ -2569,11 +2569,17 @@ final class Engine {
 
   /// Pages a blob of [len] bytes occupies: the head page's payload follows its
   /// 40-byte header; encrypted, each page holds one §5.4 chunk.
-  int blobPages(int len) {
-    final chunk = store.crypto == null ? pageSize : pageSize - 24;
+  int blobPages(int start, int len) {
+    final chunk = _blobEncrypted(start) ? pageSize - 24 : pageSize;
     final head = chunk - PageHeader.size;
     return len <= head ? 1 : 1 + (len - head + chunk - 1) ~/ chunk;
   }
+
+  /// A blob is chunked per its own head page's `flags.ENCRYPTED`, never per
+  /// the key in hand (14 §5.2, F-215); a strict file has no plaintext blob.
+  bool _blobEncrypted(int start) =>
+      store.strict ||
+      PageHeader.read(store.readClear(start), pageId: start).isEncrypted;
 
   Uint8List readBlob(Uint8List pointer) {
     if (pointer.length != kPointerBytes) {
@@ -2583,17 +2589,19 @@ final class Engine {
     final r = ByteReader(pointer);
     final start = r.u64(), len = r.u32(), crc = r.u32();
     final out = BytesBuilder(copy: false);
+    final encrypted = _blobEncrypted(start);
     final crypto = store.crypto;
+    if (encrypted && crypto == null) throw const CannotUnlockException();
     // §5.4: a page less the 8-byte counter and the 16-byte tag.
-    final chunk = crypto == null ? pageSize : pageSize - 24;
+    final chunk = encrypted ? pageSize - 24 : pageSize;
     for (var i = 0; out.length < len; i++) {
       final page = store.readClear(start + i);
       final at = i == 0 ? PageHeader.size : 0;
       final n = (len - out.length).clamp(0, chunk - at);
-      out.add(crypto == null
+      out.add(!encrypted
           ? Uint8List.sublistView(page, at, at + n)
           : decryptExtentChunk(
-              keys: crypto.ring,
+              keys: crypto!.ring,
               headPageId: start,
               chunkIndex: i,
               stored: Uint8List.sublistView(page, at, at + 8 + n + 16)));

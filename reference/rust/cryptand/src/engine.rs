@@ -2200,6 +2200,10 @@ impl Engine {
         let crc = u32::from_le_bytes(ptr[12..16].try_into().unwrap());
         let ps = self.pager.page_size;
         let encrypted = self.blob_encrypted(start);
+        // F-215: the flag is the file's word; a key may not be in hand.
+        if encrypted && self.pager.crypto.is_none() {
+            return Err(crate::error::Error::CannotUnlock);
+        }
         let chunk = if encrypted { ps - 24 } else { ps };
         // F-112: `len` is the file's word; its pages must exist before the buffer does.
         let pages = (len as u64 + crate::container::PAGE_HEADER_BYTES as u64).div_ceil(chunk as u64);

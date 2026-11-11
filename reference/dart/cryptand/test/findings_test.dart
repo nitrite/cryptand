@@ -31,6 +31,38 @@ void main() {
     expect(s.residentBytes - before, greaterThanOrEqualTo(1000 * 16));
   });
 
+  group('F-215: a blob is read per its own head page, not the key in hand', () {
+    // A one-page blob extent holding [value], written raw as Java lays it out.
+    Uint8List blobAt(Engine e, List<int> value, {int flags = PageFlags.extentHead}) {
+      final start = e.store.allocExtent(1);
+      final page = Uint8List(e.pageSize)..setRange(PageHeader.size, PageHeader.size + value.length, value);
+      PageHeader(pageType: PageType.blob, flags: flags, extentPages: 1, payloadLen: value.length).writeInto(page);
+      e.store.writeClear(start, page);
+      return (ByteWriter()..u64(start)..u32(value.length)..u32(crc32c(b(value)))).takeBytes();
+    }
+
+    test('a head flagged ENCRYPTED with no key is CannotUnlock', () {
+      final e = Engine();
+      final ptr = blobAt(e, [1, 2, 3], flags: PageFlags.extentHead | PageFlags.encrypted);
+      expect(() => e.readBlob(ptr), throwsA(isA<CannotUnlockException>()));
+    });
+
+    test('a plaintext blob in a converting file reads and is sized as plaintext', () {
+      final dir = Directory.systemTemp.createTempSync('f215');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final path = '${dir.path}/a.cryptand';
+      DatabaseFile.save(Database(engine: Engine()), path);
+      final db = DatabaseFile.open(path);
+      final ptr = blobAt(db.engine, [7, 8, 9]);
+      db.engine.commit();
+      db.encrypt(List<int>.filled(32, 3), kdf: Keyslot.kdfRaw);
+      expect(db.engine.readBlob(ptr), [7, 8, 9]);
+      final room = db.engine.pageSize - PageHeader.size;
+      expect(db.engine.blobPages(ByteReader(ptr).u64(), room), 1);
+      db.engine.close();
+    });
+  });
+
   test('F-171: an unbounded scan opens only its own tree\'s segments', () {
     final e = Engine(segmentTargetBytes: 4096);
     for (var i = 0; i < 5; i++) {
