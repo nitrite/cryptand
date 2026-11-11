@@ -44,8 +44,16 @@
 - F-211 fixed 11-11 R+D: catalog/tree 3/attributes held in memory, flushed before any page/root read
   (J's design; R `snapshot()` and `Transaction::begin` now return Result). colls 10^5 R 5.7 s, D 6.5 s,
   J 2.4; costs file +20-40% and R RSS 321 -> 614 MB.
-- Remote soak2 DIED 11-11 02:12: ENOSPC after 3 Java cycles (all sound); `~/soakdb/j.cff` is 98 GB,
-  7 GB free. Nothing running. Dart soak never started.
+- Review 11-12 of F-205..F-221 (committed, gate quick green on remote):
+  F-223 (S0, R+D): F-211's `flush` dropped held catalog edits before writing them, so a commit
+  retried after ENOSPC/EIO lost new collections; fixed, tests fail reverted. F-222 (S2, R+J+D):
+  a reader claim could land between the writer's slot read and its superblock; the writer now
+  holds the claim lock across both. F-212 re-fixed (reset was conditional). F-218: first CI runs
+  read, 7/26 red: Dart Windows `_close` re-lock (product bug), Windows test teardown, two 3.5.0
+  lints, F-220 test race, F-212; all fixed locally, **Windows unverified until CI runs**.
+- Remote has Dart at `~/dart-sdk/bin` (not on the default PATH; the gate needs it). The gate now
+  raises `ulimit -n`: at 256 the Dart runner died of EMFILE in the 65-reader test and hung.
+  F-222's MUST is in 13 §8 (human 11-12).
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -75,19 +83,19 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
-- Soak: free remote disk (j.cff 98 GB) and how to relaunch 6.7 J+D.
-- None. Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
+- 13 §8 rules 1 and 5 ask for a heartbeat every `reader_heartbeat_ms`; Dart beats on its own
+  operations only (idle reader reclaimed after 6 s, idle writer reads as "no live writer").
+  Relax the spec for single-threaded runtimes, or give Dart an isolate-backed beat?
+- Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
 
-1. `gh run list --branch dart-storage`: read the first CI run since 10-12 (now also runs the
-   multiproc tests on Windows); fix what Linux and Windows show (A1.3). 2. Soak: when remote
+1. `gh run list --branch dart-storage`: read the run for the 11-12 commits (gate quick green on
+   remote, 1050 s); fix what Windows still shows (A1.3). 2. Soak: when remote
    `reference/bench/runs/soak2/java-done` exists, read `java.out`; at `done`, `dart.out` (+
    `soak-11-03/rust.out`); record in RESULTS.md, tick 6.7. 3. A1.4's interop full-text step. Then 6.8.
 
 ## Log
+- 11-12: review of F-205..F-221: F-222 (claim/floor race) and F-223 (failed commit lost catalog edits) found and fixed; F-212 re-fixed; CI failures read and fixed locally.
 - 11-11: F-211 redesign R+D (deferred reserved trees) + F-221 in R; F-221 fixed (D); F-211 Dart 4x; soak2 found dead (ENOSPC).
 - 11-11: F-220 fixed R+J+D (reader page checks, no format change); F-221 filed (Dart CoW commit_id 0).
-- 11-11: F-219 multi-process readers wired R+J+D, spec 13 §8 pinned (magic, lock byte, no-sidecar), 3x3 gate stage; F-220 filed.
-- 11-11: audit A1: F-215..F-219 filed; F-215/216/217 fixed, F-218 CI trigger + Windows test, F-219 approved to wire.
-- 11-11: 6.7 Java soak FAIL traced to harness (per-op fsync, uncapped heap, cut cycle); fixed 4991082, Dart soak added, J+D rerun launched.
