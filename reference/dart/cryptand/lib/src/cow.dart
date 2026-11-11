@@ -1224,6 +1224,7 @@ final class CowTree {
           payloads: n.payloads,
           subtreeEntries: n.subtreeEntries,
           treeId: treeId,
+          commitId: store.commitId, // F-221: 01 §3
         ));
     pagesCopied++;
     return (id, store.writtenNonce);
@@ -1923,6 +1924,7 @@ final class AdjacencyTree {
       payloads: _payloads(n),
       subtreeEntries: n.total,
       treeId: treeId,
+      commitId: store.commitId, // F-221: 01 §3
     );
     final id = store.alloc();
     store.write(id, page);

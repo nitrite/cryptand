@@ -149,9 +149,12 @@ void main() {
     final dir = Directory('${Directory.current.path}/../../conformance/files/fuzz-regress');
     final files = dir.listSync().whereType<File>().toList();
     expect(files, isNotEmpty);
+    // A writable open may recover the file; never on the committed corpus.
+    final scratch = '${Directory.systemTemp.createTempSync('regress-rw-').path}/db.cryptand';
     for (final f in files) {
+      f.copySync(scratch);
       try {
-        exercise(f.path);
+        exercise(scratch);
       } on CryptandException {
         // A named, typed refusal.
       }

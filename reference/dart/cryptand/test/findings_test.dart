@@ -41,6 +41,38 @@ void main() {
     expect(PostingsBlock.decodeRaw(want).postings.map((p) => p.docId), [5, 9]);
   });
 
+  test('F-221: a copy-on-write page carries the commit that wrote it (01 §3)', () {
+    final dir = Directory.systemTemp.createTempSync('f221');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final path = '${dir.path}/a.cryptand';
+    DatabaseFile.save(Database(engine: Engine()), path);
+    final db = DatabaseFile.open(path);
+    for (var c = 0; c < 3; c++) {
+      db.createCollection('c$c').put(CNitriteId(c + 1), CDoc({}));
+      db.engine.commit();
+    }
+    final size = db.engine.pageSize;
+    db.engine.close();
+    final r = DatabaseFile.openReadOnly(path).engine;
+    final last = r.commitId;
+    r.close(flushMemtable: false);
+    final raw = File(path).readAsBytesSync();
+    final seen = <int>{};
+    for (var id = 2; (id + 1) * size <= raw.length; id++) {
+      final PageHeader h;
+      try {
+        h = PageHeader.read(Uint8List.sublistView(raw, id * size, (id + 1) * size), pageId: id);
+      } on CorruptionException {
+        continue; // a headerless continuation page or a zeroed one
+      }
+      final node = h.pageType == PageType.btreeInternal || h.pageType == PageType.btreeLeaf;
+      if (!node || h.treeId >= TreeId.firstUserTree) continue;
+      expect(h.commitId, inInclusiveRange(1, last), reason: 'page $id, tree ${h.treeId}');
+      seen.add(h.commitId);
+    }
+    expect(seen.length, greaterThan(1), reason: 'pages of more than one commit');
+  });
+
   group('F-215: a blob is read per its own head page, not the key in hand', () {
     // A one-page blob extent holding [value], written raw as Java lays it out.
     Uint8List blobAt(Engine e, List<int> value, {int flags = PageFlags.extentHead}) {
