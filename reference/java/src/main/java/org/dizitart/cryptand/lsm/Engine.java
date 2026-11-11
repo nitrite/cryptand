@@ -4336,14 +4336,16 @@ public final class Engine implements AutoCloseable {
             if (flushShards(visible)) {
                 makeVisible(visible);
             }
+            // F-212: compaction rewrites the pointers the due-gated liveness
+            // scan last saw; force the next one exact, or a stale live==bytes
+            // hides the debt from maintain(). Unconditional: when the
+            // background compactor got here first there is nothing left to
+            // compact below, and the stats are just as stale.
+            vlogBytesAtLastLiveness = 0;
             int last = lastLevel();
             for (int l = 0; l < last; l++) {
                 if (!manifest.at(l).isEmpty()) {
                     compactLevels(0, last - 1);
-                    // F-212: an explicit compaction rewrites the pointers the
-                    // due-gated liveness scan last saw; force the next one exact,
-                    // or a stale live==bytes hides the debt from maintain().
-                    vlogBytesAtLastLiveness = 0;
                     return;
                 }
             }
