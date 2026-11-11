@@ -794,6 +794,9 @@ abstract final class DatabaseFile {
       _writers.remove(key);
       return;
     }
+    // F-218: a LockFileEx lock belongs to its handle; closing another one
+    // drops nothing, and re-taking a held range fails (errno 33).
+    if (Platform.isWindows) return;
     final String path;
     try {
       path = File(f.path).resolveSymbolicLinksSync();

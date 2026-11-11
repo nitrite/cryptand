@@ -42,7 +42,14 @@ final class Reader {
 void main() {
   late Directory dir;
   setUp(() => dir = Directory.systemTemp.createTempSync('cryptand-mp-'));
-  tearDown(() => dir.deleteSync(recursive: true));
+  tearDown(() {
+    try {
+      dir.deleteSync(recursive: true);
+    } on FileSystemException {
+      // Windows: a killed child may still be letting go of its handles.
+      if (!Platform.isWindows) rethrow;
+    }
+  });
   String db(String name) => '${dir.path}/$name.cryptand';
   int live(String path) {
     final s = Sidecar.openReader(path, defaultReaderHeartbeatMs, (_) {})!;

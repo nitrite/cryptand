@@ -3,6 +3,10 @@
 # Exits non-zero on the first failing stage; prints the time per stage.
 # Not gated on purpose: cargo fmt, clippy style lints.
 set -uo pipefail
+# The Dart suite runs in one process and its 13 §8 "full sidecar" test alone
+# holds 65 readers (two descriptors each): past macOS's default 256 the test
+# runner dies of EMFILE and hangs instead of exiting.
+ulimit -n 4096 2>/dev/null || true
 mode="${1:-}"; [[ $mode == quick || $mode == full ]] || { echo "usage: $0 quick|full" >&2; exit 2; }
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ref="$root/reference"

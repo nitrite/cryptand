@@ -1057,7 +1057,7 @@ void lockTests() {
     var db = DatabaseFile.create(path,
         credential: k(1), kdf: Keyslot.kdfRaw, profile: Profile.desktop);
     final c = db.createCollection('c');
-    CDoc doc(int i, int n) => CDoc({'i': CStr('x' * n + '$i')});
+    CDoc doc(int i, int n) => CDoc({'i': CStr('${'x' * n}$i')});
     for (var i = 0; i < 300; i++) {
       c.put(CStr('k$i'), doc(i, i.isEven ? 3000 : 10)); // even: value log
     }
@@ -1113,7 +1113,7 @@ void lockTests() {
     final path = tmp('convert');
     DatabaseFile.save(Database(engine: Engine())..createCollection('c'), path);
     var db = DatabaseFile.open(path);
-    CDoc doc(int i) => CDoc({'i': CStr('v' * (i.isEven ? 2000 : 8) + '$i')});
+    CDoc doc(int i) => CDoc({'i': CStr('${'v' * (i.isEven ? 2000 : 8)}$i')});
     for (var i = 0; i < 400; i++) {
       db.collection('c')!.put(CStr('k$i'), doc(i));
     }

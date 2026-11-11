@@ -175,7 +175,12 @@ Database _create(String path, bool encrypted) {
 }
 
 /// The process dies: no close, no flush. Only the handle (and lock) goes.
-void _abandon(Database db) => db.engine.onClose!();
+void _abandon(Database db) {
+  // The sidecar handle goes with the process too (Windows cannot delete a
+  // directory holding an open file); `writer_pid` stays, as after a kill.
+  db.engine.multiproc?.sidecar?.close();
+  db.engine.onClose!();
+}
 
 /// The smallest value any page or record of this session may have used.
 int _nonceBound(Engine e) {
