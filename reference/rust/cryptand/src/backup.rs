@@ -66,7 +66,7 @@ impl Backup for Engine {
 
         // 1. take a snapshot (nothing is locked; nothing is quiesced — that
         //    falls out of immutability).
-        let snap = self.snapshot();
+        let snap = self.snapshot()?;
         // 2. copy the superblock's roots and every extent reachable from them.
         let bytes = self.pager.snapshot_bytes()?;
         result.bytes_copied = bytes.len() as u64;

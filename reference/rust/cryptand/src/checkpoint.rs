@@ -132,7 +132,7 @@ pub trait Checkpoints {
 
 impl Checkpoints for Engine {
     fn create_checkpoint(&mut self, name: &str, expires: Option<i64>) -> Result<Checkpoint> {
-        let s = self.snapshot();
+        let s = self.snapshot()?;
         self.release(&s);
         let c = Checkpoint {
             name: name.to_string(),
@@ -215,6 +215,9 @@ impl Checkpoints for Engine {
         let Some(c) = self.checkpoint(name)? else {
             return invalid(format!("no checkpoint named \"{name}\""));
         };
+        self.catalog.tree.discard_pending();
+        self.catalog.by_id.discard_pending();
+        self.attributes.tree.discard_pending();
         self.catalog.tree.root = c.catalog_root;
         self.freelist.root = c.freelist_root;
         self.attributes.tree.root = c.attributes_root;

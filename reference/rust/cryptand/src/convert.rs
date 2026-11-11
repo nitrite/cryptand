@@ -159,6 +159,7 @@ pub(crate) fn vector_regions(e: &mut Engine) -> Result<Vec<(String, TreeDescript
 }
 
 fn census(e: &mut Engine) -> Result<Census> {
+    e.flush_reserved()?;
     // The target: encrypted, unless `decrypt()` is under way.
     let want = !e.pager.write_clear;
     let mut c = Census {

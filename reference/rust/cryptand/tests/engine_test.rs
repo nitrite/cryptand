@@ -345,7 +345,7 @@ fn value_log_collection_does_not_resurrect_a_range_deleted_row() {
     e.put(T + 1, &Value::NitriteId(1), &big).unwrap();
     e.compact().unwrap();
     e.put(T, &Value::NitriteId(5), &big).unwrap();
-    let s = e.snapshot();
+    let s = e.snapshot().unwrap();
     e.remove_range(T, &Value::NitriteId(0), &Value::NitriteId(10)).unwrap();
     e.compact().unwrap();
     assert!(e.get(T, &Value::NitriteId(5)).unwrap().is_none(), "a deleted row came back");
@@ -362,7 +362,7 @@ fn value_log_collection_keeps_a_values_expiry() {
     e.put(T + 1, &Value::NitriteId(1), &big).unwrap();
     e.compact().unwrap();
     e.put_with_expiry(T, &Value::NitriteId(5), &big, 1_000).unwrap();
-    let _s = e.snapshot();
+    let _s = e.snapshot().unwrap();
     e.put(T + 1, &Value::NitriteId(2), &big).unwrap();
     e.compact().unwrap();
     e.now_ms = Some(2_000);
@@ -379,7 +379,7 @@ fn compaction_does_not_resurrect_a_deleted_version_under_a_snapshot() {
     e.put(T, &Value::NitriteId(1), b"v1").unwrap();
     e.remove(T, &Value::NitriteId(1)).unwrap();
     e.flush().unwrap();
-    let s = e.snapshot();
+    let s = e.snapshot().unwrap();
     e.put(T, &Value::NitriteId(1), b"v2").unwrap();
     e.flush().unwrap();
     e.compact().unwrap();
@@ -457,7 +457,7 @@ fn the_point_index_answers_exactly_what_the_descent_does() {
     // A flush is what advances `visible_seq`, so it has to precede the
     // snapshot that pins these versions.
     e.flush().unwrap();
-    let snap = e.snapshot();
+    let snap = e.snapshot().unwrap();
     for i in (0..n).step_by(2) {
         e.put(T, &key(i), format!("b{i}").as_bytes()).unwrap();
     }
@@ -821,7 +821,7 @@ fn flush_writes_one_version_per_key_above_visible_seq() {
     let k = Value::NitriteId(1);
     e.put(T, &k, b"v1").unwrap();
     e.flush().unwrap();
-    let s = e.snapshot(); // sees v1 only
+    let s = e.snapshot().unwrap(); // sees v1 only
     for v in 2..=5u8 {
         e.put(T, &k, &[v]).unwrap();
     }

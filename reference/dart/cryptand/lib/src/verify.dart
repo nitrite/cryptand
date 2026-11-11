@@ -123,6 +123,7 @@ extension EngineVerify on Engine {
   VerifyReport verifyStructure(
       {bool deep = true,
       List<(int start, int pages, String what)> claims = const []}) {
+    flushOuter(); // F-211
     final f = <Finding>[];
     var segs = 0;
     var entries = 0;

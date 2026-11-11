@@ -298,3 +298,31 @@ fn f211_collection_creates_do_not_reread_the_pages_they_wrote() {
     let reads = db.engine.pager.page_reads - before;
     assert!(reads < 2_000, "2000 creates read {reads} pages");
 }
+
+#[test]
+fn f221_copy_on_write_pages_carry_the_commit_that_wrote_them() {
+    // 01 §3: a page's commit_id is the commit that wrote it; F-220's reader
+    // ceiling is blind on pages stamped 0.
+    let (t, mut e) = engine("f221", Profile::Desktop);
+    e.close(true).unwrap();
+    let mut db = Database::open(&t.path, None).unwrap();
+    for i in 0..3i64 {
+        let mut c = db.collection(&format!("c{i}")).unwrap();
+        c.insert(&mut db.engine, &Value::Doc(vec![("_id".into(), Value::NitriteId(i + 1))])).unwrap();
+        db.engine.commit(Durability::Sync).unwrap();
+    }
+    let ps = db.engine.pager.page_size as usize;
+    db.engine.close(true).unwrap();
+    let raw = std::fs::read(&t.path).unwrap();
+    let mut seen = std::collections::BTreeMap::new();
+    for id in 2..raw.len() / ps {
+        let Ok(h) = cryptand::container::PageHeader::parse(&raw[id * ps..(id + 1) * ps]) else { continue };
+        // B+tree pages (0x01, 0x02) of reserved trees.
+        if !(h.page_type == 1 || h.page_type == 2) || h.tree_id >= 16 || h.tree_id == 0 {
+            continue;
+        }
+        seen.entry(h.tree_id).or_insert_with(Vec::new).push((id, h.commit_id));
+    }
+    let zero: Vec<_> = seen.iter().filter(|(_, v)| v.iter().any(|(_, c)| *c == 0)).map(|(t, _)| *t).collect();
+    assert!(zero.is_empty(), "trees with commit_id 0 pages: {zero:?} ({seen:?})");
+}

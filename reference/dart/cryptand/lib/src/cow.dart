@@ -1202,10 +1202,66 @@ final class CowTree {
     store.resetCounters();
   }
 
-  bool get isEmpty => root == 0;
+  bool get isEmpty => deferred ? _mem.isEmpty : root == 0;
 
-  int get entryCount =>
-      root == 0 ? 0 : _load(_rootLink).subtreeEntries;
+  int get entryCount => deferred
+      ? _mem.length
+      : root == 0
+          ? 0
+          : _load(_rootLink).subtreeEntries;
+
+  /// F-211, as Java's `PageTree` and Rust's `CowTree::deferred`: the tree's
+  /// entries are read into memory once and served from there, and edits are
+  /// held in [_pending] (null a removal) until [flush], which runs before
+  /// anything reads this tree's pages or root ([Engine.flushOuter]).
+  /// Path-copying every collection create wrote ~10 pages and read ~5.
+  bool deferred = false;
+  final SplayTreeMap<Uint8List, Uint8List?> _pending =
+      SplayTreeMap(compareKeys);
+  SplayTreeMap<Uint8List, Uint8List>? _memMap;
+
+  SplayTreeMap<Uint8List, Uint8List> get _mem {
+    var m = _memMap;
+    if (m != null) return m;
+    m = SplayTreeMap(compareKeys);
+    for (final (k, v) in _scanPages()) {
+      m[k] = v;
+    }
+    return _memMap = m;
+  }
+
+  bool get isDirty => _pending.isNotEmpty;
+
+  /// Drops held edits: the root is being replaced.
+  void discardPending() {
+    _pending.clear();
+    _memMap = null;
+  }
+
+  void _published() {
+    assert(_pending.isEmpty, 'tree $treeId: flush() before reading its pages');
+  }
+
+  /// F-211: writes the held edits. Many against the tree's size: one
+  /// rebuild through the allocator, as [relocate]; few: a path copy each.
+  void flush() {
+    if (_pending.isEmpty) return;
+    final pending = Map.of(_pending);
+    _pending.clear();
+    // ponytail: a path copy is ~height pages, a rebuild ~entries/50; rebuild
+    // once a 64th of the tree changed. Tune if commits get slow.
+    final total = root == 0 ? 0 : _load(_rootLink).subtreeEntries;
+    if (pending.length * 64 < total) {
+      pending.forEach(
+          (k, v) => _edit(k, v == null ? null : _Node.leafPayload(v)));
+      return;
+    }
+    final old = reachablePages().toList();
+    rebuildFresh([for (final e in _mem.entries) (e.key, e.value)], low: true);
+    for (final p in old) {
+      store.free(p);
+    }
+  }
 
   /// F-211: nodes this tree wrote in [_publish], by `(page_id, nonce)`, taken
   /// back out by the next edit of their path (every node on an edited path is
@@ -1265,6 +1321,7 @@ final class CowTree {
   // -------------------------------------------------------------------------
 
   Uint8List? get(Uint8List key) {
+    if (deferred) return _mem[key];
     if (root == 0) return null;
     var at = _rootLink;
     for (var depth = 0;; depth++) {
@@ -1287,6 +1344,22 @@ final class CowTree {
   /// cached, and a recursive walk over it is the same asymptotics with a
   /// tenth of the code.
   Iterable<(Uint8List, Uint8List)> scan(
+      {Uint8List? lower, Uint8List? upper}) sync* {
+    if (!deferred) {
+      yield* _scanPages(lower: lower, upper: upper);
+      return;
+    }
+    final m = _mem;
+    var k = lower == null
+        ? m.firstKey()
+        : (m.containsKey(lower) ? lower : m.firstKeyAfter(lower));
+    while (k != null && (upper == null || compareKeys(k, upper) < 0)) {
+      yield (k, m[k]!);
+      k = m.firstKeyAfter(k);
+    }
+  }
+
+  Iterable<(Uint8List, Uint8List)> _scanPages(
       {Uint8List? lower, Uint8List? upper}) sync* {
     if (root == 0) return;
     yield* _walk(_rootLink, lower, upper, 0, <int>{});
@@ -1317,6 +1390,7 @@ final class CowTree {
   /// double-allocations". A verifier cannot do that without asking each tree
   /// which pages it holds, and there was no way to ask.
   Iterable<int> reachablePages() sync* {
+    _published();
     if (root == 0) return;
     yield* _reachable(_rootLink, 0, <int>{});
   }
@@ -1423,10 +1497,24 @@ final class CowTree {
   // Writing
   // -------------------------------------------------------------------------
 
-  void put(Uint8List key, Uint8List value) =>
-      _edit(key, _Node.leafPayload(value));
+  void put(Uint8List key, Uint8List value) {
+    if (deferred) {
+      final k = Uint8List.fromList(key);
+      _mem[k] = value;
+      _pending[k] = value;
+      version++;
+      return;
+    }
+    _edit(key, _Node.leafPayload(value));
+  }
 
   bool remove(Uint8List key) {
+    if (deferred) {
+      if (_mem.remove(key) == null) return false;
+      _pending[Uint8List.fromList(key)] = null;
+      version++;
+      return true;
+    }
     if (root == 0) return false;
     if (get(key) == null) return false;
     _edit(key, null);
@@ -1548,6 +1636,7 @@ final class CowTree {
   /// [low]: `shrink()` places the copy in the lowest free pages instead of
   /// at the end of the file.
   void relocate({bool low = false}) {
+    _published();
     if (root == 0) return;
     final old = reachablePages().toList();
     final rows = scan().toList();

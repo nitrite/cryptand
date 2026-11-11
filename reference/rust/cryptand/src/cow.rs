@@ -7,7 +7,7 @@
 //! publishes the new root in the next superblock. Freed pages go to the free
 //! tree at the committing `commit_id` (`01-container.md` §6).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::error::{corrupt, invalid, Result};
 use crate::pager::Pager;
@@ -135,6 +135,15 @@ pub struct CowTree {
     /// 10^5 collection creates spent most of 47 s re-reading, verifying and
     /// re-decoding pages they had just written.
     pub(crate) nodes: HashMap<(u64, u64), CowNode>,
+    /// F-211, as Java's `PageTree`: the tree's entries are read into
+    /// [`Self::mem`] once and served from there, and edits are held in
+    /// [`Self::pending`] (`None` a removal) until [`Self::flush`], which the
+    /// engine runs before anything reads this tree's pages or root (commit,
+    /// snapshot, relocate, cut, convert, verify). Path-copying every
+    /// collection create wrote ~10 pages and read back ~5.
+    pub deferred: bool,
+    pub(crate) pending: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub(crate) mem: std::cell::OnceCell<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 /// ponytail: cleared when full; an LRU only if a hot path outgrows it.
@@ -142,7 +151,7 @@ const NODE_CACHE: usize = 1024;
 
 impl CowTree {
     pub fn new(tree_id: u32, root: u64, root_nonce: u64) -> CowTree {
-        CowTree { tree_id, root, root_nonce, commit_id: 0, freed: Vec::new(), pages_copied: 0, eager_free: false, nodes: HashMap::new() }
+        CowTree { tree_id, root, root_nonce, commit_id: 0, freed: Vec::new(), pages_copied: 0, eager_free: false, nodes: HashMap::new(), deferred: false, pending: BTreeMap::new(), mem: std::cell::OnceCell::new() }
     }
 
     fn root_link(&self) -> (u64, u64) {
@@ -211,6 +220,7 @@ impl CowTree {
     }
 
     pub fn entry_count(&self, pager: &mut Pager) -> Result<u64> {
+        self.published();
         if self.root == 0 {
             return Ok(0);
         }
@@ -221,7 +231,27 @@ impl CowTree {
     // Reading
     // -----------------------------------------------------------------
 
+    /// The deferred tree's entries, read from its pages on first use.
+    fn mem(&self, pager: &mut Pager) -> Result<&BTreeMap<Vec<u8>, Vec<u8>>> {
+        if self.mem.get().is_none() {
+            let mut out = Vec::new();
+            if self.root != 0 {
+                self.walk(pager, self.root_link(), None, None, &mut out, 0, &mut Default::default())?;
+            }
+            let _ = self.mem.set(out.into_iter().collect());
+        }
+        Ok(self.mem.get().unwrap())
+    }
+
+    fn mem_mut(&mut self, pager: &mut Pager) -> Result<&mut BTreeMap<Vec<u8>, Vec<u8>>> {
+        self.mem(pager)?;
+        Ok(self.mem.get_mut().unwrap())
+    }
+
     pub fn get(&self, pager: &mut Pager, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        if self.deferred {
+            return Ok(self.mem(pager)?.get(key).cloned());
+        }
         if self.root == 0 {
             return Ok(None);
         }
@@ -257,10 +287,18 @@ impl CowTree {
         upper: Option<&[u8]>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut out = Vec::new();
-        if self.root == 0 {
-            return Ok(out);
+        if self.deferred {
+            use std::ops::Bound::{Excluded, Included, Unbounded};
+            let lo = lower.map_or(Unbounded, Included);
+            let hi = upper.map_or(Unbounded, Excluded);
+            if lower.is_some() && upper.is_some() && lower >= upper {
+                return Ok(out);
+            }
+            return Ok(self.mem(pager)?.range::<[u8], _>((lo, hi)).map(|(k, v)| (k.clone(), v.clone())).collect());
         }
-        self.walk(pager, self.root_link(), lower, upper, &mut out, 0, &mut Default::default())?;
+        if self.root != 0 {
+            self.walk(pager, self.root_link(), lower, upper, &mut out, 0, &mut Default::default())?;
+        }
         Ok(out)
     }
 
@@ -319,6 +357,7 @@ impl CowTree {
     /// Every page the tree reaches, for the verifier's reachability pass
     /// (`01-container.md` §9 step 7).
     pub fn reachable(&self, pager: &mut Pager, out: &mut Vec<u64>) -> Result<()> {
+        self.published();
         if self.root == 0 {
             return Ok(());
         }
@@ -355,16 +394,70 @@ impl CowTree {
     // -----------------------------------------------------------------
 
     pub fn put(&mut self, pager: &mut Pager, key: &[u8], value: &[u8]) -> Result<()> {
+        if self.deferred {
+            self.mem_mut(pager)?.insert(key.to_vec(), value.to_vec());
+            self.pending.insert(key.to_vec(), Some(value.to_vec()));
+            return Ok(());
+        }
         let payload = leaf_payload(value);
         self.edit(pager, key, Some(payload))
     }
 
     pub fn remove(&mut self, pager: &mut Pager, key: &[u8]) -> Result<bool> {
+        if self.deferred {
+            let had = self.mem_mut(pager)?.remove(key).is_some();
+            if had {
+                self.pending.insert(key.to_vec(), None);
+            }
+            return Ok(had);
+        }
         if self.root == 0 || self.get(pager, key)?.is_none() {
             return Ok(false);
         }
         self.edit(pager, key, None)?;
         Ok(true)
+    }
+
+    /// True while edits are held for [`Self::flush`].
+    pub fn is_dirty(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Drops held edits: the root is being replaced (restore, reload).
+    pub fn discard_pending(&mut self) {
+        self.pending.clear();
+        self.mem = std::cell::OnceCell::new();
+    }
+
+    /// A page-level reader of a tree with held edits would miss them.
+    fn published(&self) {
+        debug_assert!(self.pending.is_empty(), "tree {}: flush() before reading its pages", self.tree_id);
+    }
+
+    /// F-211: writes the held edits. Many against the tree's size: one
+    /// rebuild through the allocator, as `relocate`; few: a path copy each.
+    pub fn flush(&mut self, pager: &mut Pager) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.pending);
+        // ponytail: a path copy is ~height pages, a rebuild ~entries/50;
+        // rebuild once a 64th of the tree changed. Tune if commits get slow.
+        let total = if self.root == 0 { 0 } else { self.entry_count(pager)? };
+        if (pending.len() as u64) * 64 < total {
+            for (k, v) in pending {
+                self.edit(pager, &k, v.map(|v| leaf_payload(&v)))?;
+            }
+            return Ok(());
+        }
+        let entries = self.scan(pager, None, None)?;
+        let mut old = Vec::new();
+        self.reachable(pager, &mut old)?;
+        self.build(pager, entries, Place::Alloc)?;
+        for id in old {
+            self.retire(pager, id);
+        }
+        Ok(())
     }
 
     fn edit(&mut self, pager: &mut Pager, key: &[u8], payload: Option<Vec<u8>>) -> Result<()> {
@@ -535,6 +628,7 @@ impl CowTree {
     /// `13-operations.md` §5's `shrink()`: every page rewritten through the
     /// ordinary allocator, the old ones orphaned into `freed`.
     pub fn relocate(&mut self, pager: &mut Pager) -> Result<()> {
+        self.published();
         if self.root == 0 {
             return Ok(());
         }
@@ -613,6 +707,7 @@ impl CowTree {
     }
 
     pub fn height(&self, pager: &mut Pager) -> Result<usize> {
+        self.published();
         if self.root == 0 {
             return Ok(0);
         }

@@ -148,7 +148,7 @@ impl Run {
                     .map_err(|e| format!("range_del: {e}"))?;
             }
             "batch" => {
-                let mut tx = Transaction::begin(&mut self.e, Isolation::Snapshot);
+                let mut tx = Transaction::begin(&mut self.e, Isolation::Snapshot).unwrap();
                 for w in j["ops"].as_array().unwrap() {
                     self.apply_write(w, Some(&mut tx))?;
                 }
@@ -183,7 +183,7 @@ impl Run {
                 if self.snaps.contains_key(&j["id"].as_u64().unwrap()) {
                     return Err(INVALID.into());
                 }
-                let s = self.e.snapshot();
+                let s = self.e.snapshot().unwrap();
                 self.snaps.insert(j["id"].as_u64().unwrap(), (s, self.committed.clone()));
             }
             "release" => {

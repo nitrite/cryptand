@@ -288,8 +288,8 @@ impl Catalog {
     /// The tree index is rooted from its own descriptor, loaded after open.
     pub fn new((root, nonce): (u64, u64), next_tree_id: u64) -> Catalog {
         Catalog {
-            tree: CowTree { eager_free: true, ..CowTree::new(tree_id::CATALOG, root, nonce) },
-            by_id: CowTree { eager_free: true, ..CowTree::new(tree_id::TREE_INDEX, 0, 0) },
+            tree: CowTree { eager_free: true, deferred: true, ..CowTree::new(tree_id::CATALOG, root, nonce) },
+            by_id: CowTree { eager_free: true, deferred: true, ..CowTree::new(tree_id::TREE_INDEX, 0, 0) },
             next_tree_id,
         }
     }
@@ -338,7 +338,8 @@ impl Catalog {
 
     pub fn name_of(&self, pager: &mut Pager, id: u32) -> Result<Option<String>> {
         // A read-only handle does not rebuild a missing tree 3 (F-148): scan.
-        if self.by_id.root == 0 {
+        // F-211: an unflushed tree 3 has root 0 too.
+        if self.by_id.root == 0 && !self.by_id.is_dirty() {
             return Ok(self.all(pager)?.into_iter().find(|(_, d)| d.tree_id() == id).map(|(n, _)| n));
         }
         match self.by_id.get(pager, &id_key(id))? {
@@ -440,7 +441,7 @@ pub const STORE_ATTRIBUTES_KEY: &str = "$store";
 
 impl Attributes {
     pub fn new((root, nonce): (u64, u64)) -> Attributes {
-        Attributes { tree: CowTree { eager_free: true, ..CowTree::new(tree_id::ATTRIBUTES, root, nonce) } }
+        Attributes { tree: CowTree { eager_free: true, deferred: true, ..CowTree::new(tree_id::ATTRIBUTES, root, nonce) } }
     }
 
     pub fn get(&self, pager: &mut Pager, name: &str) -> Result<Option<Vec<(String, Value)>>> {

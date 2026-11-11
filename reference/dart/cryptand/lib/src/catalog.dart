@@ -220,8 +220,10 @@ final class Catalog {
   Catalog(this.store,
       {int catalogRoot = 0, int catalogNonce = 0, int treeIndexRoot = 0})
       : tree = CowTree(store,
-            treeId: TreeId.catalog, root: catalogRoot, rootNonce: catalogNonce),
-        byId = CowTree(store, treeId: TreeId.treeIndex, root: treeIndexRoot);
+            treeId: TreeId.catalog, root: catalogRoot, rootNonce: catalogNonce)
+          ..deferred = true, // F-211
+        byId = CowTree(store, treeId: TreeId.treeIndex, root: treeIndexRoot)
+          ..deferred = true;
 
   final PageStore store;
   final CowTree tree;
@@ -293,7 +295,8 @@ final class Catalog {
 
   String? nameOf(int treeId) {
     // A read-only handle does not rebuild a missing tree 3 (F-148): scan.
-    if (byId.root == 0) {
+    // F-211: an unflushed tree 3 has root 0 too.
+    if (byId.root == 0 && !byId.isDirty) {
       for (final (name, d) in all) {
         if (d.treeId == treeId) return name;
       }
@@ -375,6 +378,7 @@ final class Catalog {
     final root = d?.root ?? 0;
     if (root != 0) {
       byId
+        ..discardPending()
         ..root = root
         ..rootNonce = d!.rootNonce;
     } else if (rebuild) {
@@ -451,7 +455,8 @@ final class Catalog {
 final class Attributes {
   Attributes(PageStore store, {int root = 0, int rootNonce = 0})
       : tree = CowTree(store,
-            treeId: TreeId.attributes, root: root, rootNonce: rootNonce);
+            treeId: TreeId.attributes, root: root, rootNonce: rootNonce)
+          ..deferred = true; // F-211
 
   final CowTree tree;
 

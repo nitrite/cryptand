@@ -290,7 +290,7 @@ fn converts_under_live_snapshot() {
         e.put(T, &Value::NitriteId(i), &value(i)).unwrap();
     }
     e.flush().unwrap(); // what advances `visible_seq`
-    let snap = e.snapshot();
+    let snap = e.snapshot().unwrap();
     for i in (0..300).step_by(2) {
         e.put(T, &Value::NitriteId(i), &value(i + 300)).unwrap();
     }

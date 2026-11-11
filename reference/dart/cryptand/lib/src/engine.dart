@@ -1728,12 +1728,23 @@ final class Engine {
     return before - store.pageCount;
   }
 
-  List<CowTree> get _relocatableTrees => [
-        manifest.tree,
-        checkpoints.tree,
-        changeFeed.tree,
-        ...outerTrees.values,
-      ];
+  /// F-211: writes the edits the catalog, tree 3 and attributes hold in
+  /// memory. Runs before anything reads those trees' pages or roots.
+  void flushOuter() {
+    for (final t in outerTrees.values) {
+      t.flush();
+    }
+  }
+
+  List<CowTree> get _relocatableTrees {
+    flushOuter(); // F-211: their pages are about to be read
+    return [
+      manifest.tree,
+      checkpoints.tree,
+      changeFeed.tree,
+      ...outerTrees.values,
+    ];
+  }
 
   void _relocateTrees() {
     for (final t in _relocatableTrees) {

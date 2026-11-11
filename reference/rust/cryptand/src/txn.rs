@@ -43,18 +43,19 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    pub fn begin(engine: &mut Engine, isolation: Isolation) -> Transaction {
+    pub fn begin(engine: &mut Engine, isolation: Isolation) -> Result<Transaction> {
         // From here until this transaction finishes, every write records its
         // seq — see `Engine::live_transactions`.
+        let snapshot = engine.snapshot()?;
         engine.transaction_began();
-        Transaction {
+        Ok(Transaction {
             isolation,
-            snapshot: engine.snapshot(),
+            snapshot,
             writes: Vec::new(),
             reads: Vec::new(),
             savepoints: Vec::new(),
             committed: false,
-        }
+        })
     }
 
     pub fn put(&mut self, tree: u32, key: Value, value: Vec<u8>) -> Result<()> {
@@ -82,7 +83,7 @@ impl Transaction {
             self.reads.push(user_prefix(tree, &crate::cke::encode(key)?));
         }
         if self.isolation == Isolation::ReadCommitted {
-            self.snapshot = engine.snapshot();
+            self.snapshot = engine.snapshot()?;
         }
         // A buffered write of the same key is visible to its own transaction.
         for w in self.writes.iter().rev() {

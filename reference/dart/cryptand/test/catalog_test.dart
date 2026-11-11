@@ -46,6 +46,7 @@ void main() {
       // F-148: answered by scanning the catalog, as a read-only handle must.
       expect(c.nameOf(d.treeId), 'orders');
       c.rebuildTreeIndex();
+      c.byId.flush(); // F-211: held in memory until then
       expect(c.byId.root, isNot(0));
       expect(c.nameOf(d.treeId), 'orders');
     });

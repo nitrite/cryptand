@@ -143,7 +143,9 @@ abstract final class DatabaseFile {
     // descriptor. Publishing it is what stops the next open from rebuilding
     // the tree and orphaning this one — a leak per open, and the only thing
     // that ever finds it is another implementation's §9 step 7.
+    e.flushOuter(); // F-211: tree 3's root, then the catalog edit naming it
     db.catalog.publishTreeIndex();
+    e.flushOuter();
     // §4.1 rule 1 applies to a *writer*, and the writer is about to place
     // every extent below. On a file this session created, the floor was
     // published by [create]; on one it opened, by [open]. Nothing here
@@ -1516,7 +1518,7 @@ extension ConvertApi on Database {
   /// The objects not yet in the target mode, read from the objects.
   ({int converted, List<SegmentRef> segments, int treePages, int vlogs})
       _census() {
-    final e = engine;
+    final e = engine..flushOuter(); // F-211
     final store = e.store;
     final want = !_decrypting;
     bool sealed(int page) =>

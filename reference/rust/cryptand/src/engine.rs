@@ -857,12 +857,25 @@ impl Engine {
             Some(d) => (d.root().unwrap_or(0), d.root_nonce()),
             None => (0, 0),
         };
+        self.catalog.by_id.discard_pending();
         self.catalog.by_id.root = root;
         self.catalog.by_id.root_nonce = nonce;
         // F-148: a read-only handle writes nothing, so it leaves tree 3 empty
         // and `Catalog::name_of` scans the catalog instead.
         if root == 0 && !self.read_only {
             self.catalog.rebuild_tree_index(&mut self.pager)?;
+        }
+        Ok(())
+    }
+
+    /// F-211: writes the catalog, tree index and attributes edits held in
+    /// memory, stamped with this commit (01 §3; F-221: they carried 0).
+    /// Runs before anything reads those trees' pages or roots.
+    pub(crate) fn flush_reserved(&mut self) -> Result<()> {
+        let c = self.sb.commit_id;
+        for t in [&mut self.catalog.tree, &mut self.catalog.by_id, &mut self.attributes.tree] {
+            t.commit_id = c;
+            t.flush(&mut self.pager)?;
         }
         Ok(())
     }
@@ -3231,6 +3244,7 @@ impl Engine {
 
     pub(crate) fn relocate_trees(&mut self) -> Result<()> {
         self.arm()?;
+        self.flush_reserved()?;
         let commit_id = self.sb.commit_id;
         for t in [
             &mut self.catalog.tree,
@@ -3310,6 +3324,7 @@ impl Engine {
     /// that page while the live superblock still names the old tree 1, so the
     /// cut is skipped when the two could overlap.
     fn cut_tail(&mut self) -> Result<()> {
+        self.flush_reserved()?;
         let mut high = 2u64;
         for r in self.all_refs()? {
             high = high.max(r.start_page + r.pages as u64);
@@ -3626,7 +3641,9 @@ impl Engine {
         ]
     }
 
-    pub fn snapshot(&mut self) -> Snapshot {
+    pub fn snapshot(&mut self) -> Result<Snapshot> {
+        // F-211: the roots must include the edits held in memory.
+        self.flush_reserved()?;
         // F-203: the snapshot names the in-memory roots, published or not, so
         // nothing allocated so far may be reused as if no one named it.
         self.pager.published();
@@ -3644,7 +3661,7 @@ impl Engine {
             created_ms: now_millis(),
         };
         self.live_snapshots.push(s);
-        s
+        Ok(s)
     }
 
     pub fn release(&mut self, s: &Snapshot) {
@@ -3815,6 +3832,7 @@ impl Engine {
             self.finish_compaction(job)?;
         }
         self.commit_indexes()?;
+        self.flush_reserved()?;
         self.publish_tree_index_root()?;
         // §2.3 invariant 2 — the value-log watermark is published here, through
         // the ordinary commit path, because tree 7 is the authority for it and
@@ -3822,6 +3840,7 @@ impl Engine {
         for id in std::mem::take(&mut self.vlog_dirty) {
             self.write_vlog_stats(id)?;
         }
+        self.flush_reserved()?;
         // Trees the commit itself edits, published as roots below.
         self.persist_freelist()?;
         let pinned = self.reader_pins()?;

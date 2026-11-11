@@ -27,7 +27,7 @@ fn a_snapshot_transaction_commits_and_a_conflicting_one_aborts() {
     e.flush().unwrap();
     e.commit(Durability::Sync).unwrap();
 
-    let mut a = Transaction::begin(&mut e, Isolation::Snapshot);
+    let mut a = Transaction::begin(&mut e, Isolation::Snapshot).unwrap();
     a.put(T, Value::NitriteId(1), b"from-a".to_vec()).unwrap();
     e.put(T, &Value::NitriteId(1), b"interloper").unwrap();
     e.flush().unwrap();
@@ -44,7 +44,7 @@ fn rollback_is_free_and_leaves_no_trace() {
     // today, which writes and then reverses."
     let (_t, mut e) = engine("rollback", Profile::Desktop);
     let before = e.pager.page_writes;
-    let mut tx = Transaction::begin(&mut e, Isolation::Snapshot);
+    let mut tx = Transaction::begin(&mut e, Isolation::Snapshot).unwrap();
     for i in 0..100i64 {
         tx.put(T, Value::NitriteId(i), b"x".to_vec()).unwrap();
     }
@@ -56,7 +56,7 @@ fn rollback_is_free_and_leaves_no_trace() {
 #[test]
 fn savepoints_discard_buffered_entries_after_a_mark() {
     let (_t, mut e) = engine("savepoint", Profile::Desktop);
-    let mut tx = Transaction::begin(&mut e, Isolation::Snapshot);
+    let mut tx = Transaction::begin(&mut e, Isolation::Snapshot).unwrap();
     tx.put(T, Value::NitriteId(1), b"keep".to_vec()).unwrap();
     let mark = tx.savepoint();
     tx.put(T, Value::NitriteId(2), b"drop".to_vec()).unwrap();
@@ -72,7 +72,7 @@ fn a_read_only_transaction_cannot_write_and_never_conflicts() {
     e.put(T, &Value::NitriteId(1), b"v").unwrap();
     e.flush().unwrap();
     e.commit(Durability::Sync).unwrap();
-    let mut tx = Transaction::begin(&mut e, Isolation::ReadOnly);
+    let mut tx = Transaction::begin(&mut e, Isolation::ReadOnly).unwrap();
     assert!(tx.put(T, Value::NitriteId(2), b"x".to_vec()).is_err());
     e.put(T, &Value::NitriteId(1), b"changed").unwrap();
     e.flush().unwrap();

@@ -72,6 +72,7 @@ pub trait EngineVerify {
 
 impl EngineVerify for Engine {
     fn verify(&mut self) -> Result<VerifyReport> {
+        self.flush_reserved()?;
         let mut r = VerifyReport::default();
 
         // Step 1 — validate both superblocks.
