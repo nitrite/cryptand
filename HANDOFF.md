@@ -22,9 +22,9 @@
   RSS growth, and the deadline cut the last cycle (acked 0). Fixed in 4991082 (Java batches
   1000 ops, -Xms=-Xmx 3g, no truncated cycle) + Dart soak mode (human 11-11: Dart soaks too).
   Smoke at 2e4: R ~140k, J ~100k, D ~80k ops/s. Old run: remote `runs/soak-11-09-java-fail`.
-- RERUN launched 11-11 00:50 IST: remote `~/soak67jd.sh`, outputs `runs/soak2/`: gate ->
-  Java 24 h on existing j.cff (`java-done`) -> rm j.cff -> Dart 10^8 build -> Dart 24 h (`done`).
-  Check acked non-zero every cycle and min RSS flat, not just PASS.
+- RERUN launched 11-11 00:50 IST (`~/soak67jd.sh`) DIED: remote disk full, Java soak hit ENOSPC
+  (`runs/soak2/java.out`). 11-11 cleanup deleted `~/soakdb/j.cff`, all Ollama models and sheaflet
+  GGUFs; remote now ~146 GB free. Rerun needs a fresh Java 10^8 build before the 24 h soak.
 
 - Audit 11-11 (PLAN A1): F-215 (blob read, R+D), F-216 (Dart postings `first_doc`, human go),
   F-217 (postings decode, R+J) fixed, each with a test that fails reverted. F-218: CI had not
