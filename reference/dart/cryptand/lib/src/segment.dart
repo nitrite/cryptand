@@ -241,11 +241,18 @@ Uint8List encodeNodePage({
     final cellSize = _uvarLen(suffixLen) + suffixLen + payloads[i].length;
     cellTop -= cellSize;
     ptrs[i] = cellTop;
-    final w = ByteWriter(cellSize)
-      ..uvar(suffixLen)
-      ..bytes(Uint8List.sublistView(k, prefixLen))
-      ..bytes(payloads[i]);
-    page.setRange(base + cellTop, base + cellTop + cellSize, w.view);
+    // F-211: straight into the page; a ByteWriter per cell was most of a
+    // copy-on-write page write.
+    var at = base + cellTop;
+    var v = suffixLen;
+    while (v >= 0x80) {
+      page[at++] = (v & 0x7F) | 0x80;
+      v >>= 7;
+    }
+    page[at++] = v;
+    page.setRange(at, at + suffixLen, k, prefixLen);
+    at += suffixLen;
+    page.setRange(at, at + payloads[i].length, payloads[i]);
   }
 
   final freeStart = 16 + prefixLen + 2 * count;

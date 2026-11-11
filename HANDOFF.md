@@ -39,7 +39,12 @@
   idle Dart reader >6 s is reclaimed and its next read says reopen; R/J beat on a thread.
   F-220 fixed 11-11 R+J+D: a reader rejects pages newer than its snapshot, segment pages off
   their head's commit, a segment head naming another `segment_id`, a CoW page of another tree.
-  F-221 (open, needs human go): Dart CoW pages carry `commit_id` 0 (a byte change).
+  F-221 fixed 11-11 (D, human go): Dart CoW pages carry their commit (a byte change); Dart hostile_test
+  no longer rewrites the fuzz-regress corpus in place.
+- F-211 11-11: Dart colls 10^5 112.7 -> 27.4 s (node cache as Rust, cell encode, typed CRC). R 10.5, J 2.4:
+  the rest is R+D writing every path copy; closing it is a redesign (open question below).
+- Remote soak2 DIED 11-11 02:12: ENOSPC after 3 Java cycles (all sound); `~/soakdb/j.cff` is 98 GB,
+  7 GB free. Nothing running. Dart soak never started.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -69,7 +74,8 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
-- F-221: may Dart stamp `commit_id` on CoW pages (01 §3; R and J do)? Changes Dart's bytes.
+- F-211 rest: rebuild reserved trees once per commit (J's design) in R+D, or accept R 10.5 / D 27 s at 10^5?
+- Soak: free remote disk (j.cff 98 GB) and how to relaunch 6.7 J+D.
 - None. Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
@@ -80,6 +86,7 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
    `soak-11-03/rust.out`); record in RESULTS.md, tick 6.7. 3. A1.4's interop full-text step. Then 6.8.
 
 ## Log
+- 11-11: F-221 fixed (D); F-211 Dart 4x (cache, encode, CRC); soak2 found dead (ENOSPC).
 - 11-11: F-220 fixed R+J+D (reader page checks, no format change); F-221 filed (Dart CoW commit_id 0).
 - 11-11: F-219 multi-process readers wired R+J+D, spec 13 §8 pinned (magic, lock byte, no-sidecar), 3x3 gate stage; F-220 filed.
 - 11-11: audit A1: F-215..F-219 filed; F-215/216/217 fixed, F-218 CI trigger + Windows test, F-219 approved to wire.

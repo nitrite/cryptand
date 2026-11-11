@@ -511,6 +511,22 @@ void main() {
     expect(e.get(16, CNitriteId(2)), [2]);
   });
 
+  test('F-211: collection creates do not re-read the pages they wrote', () {
+    final dir = Directory.systemTemp.createTempSync('f211');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final path = '${dir.path}/a.cryptand';
+    DatabaseFile.save(Database(engine: Engine()), path);
+    final db = DatabaseFile.open(path);
+    int reads() => db.catalog.tree.nodeReads + db.catalog.byId.nodeReads + db.attributes.tree.nodeReads;
+    final before = reads();
+    for (var i = 0; i < 2000; i++) {
+      db.createCollection('c$i').put(CNitriteId(i + 1), CDoc({}));
+    }
+    // 23 465 before the node cache.
+    expect(reads() - before, lessThan(2000));
+    db.engine.close();
+  });
+
   test('F-210: creating collections does not re-decode the catalog per put', () {
     final db = Database(engine: Engine());
     for (var i = 0; i < 200; i++) {

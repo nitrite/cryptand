@@ -46,6 +46,7 @@ List<Uint32List> _buildTables() {
 /// CRC-32C over `bytes[start..end)`, returned as an unsigned 32-bit value.
 int crc32c(List<int> bytes, [int start = 0, int? end]) {
   final stop = end ?? bytes.length;
+  if (bytes is Uint8List) return _crcTyped(bytes, start, stop);
   final t0 = _tables[0];
   var crc = 0xFFFFFFFF;
   var i = start;
@@ -69,6 +70,35 @@ int crc32c(List<int> bytes, [int start = 0, int? end]) {
         _tables[2][(w1 >> 8) & 0xFF] ^
         _tables[1][(w1 >> 16) & 0xFF] ^
         t0[(w1 >> 24) & 0xFF];
+    i += 8;
+  }
+  for (; i < stop; i++) {
+    crc = t0[(crc ^ bytes[i]) & 0xFF] ^ (crc >> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
+}
+
+/// F-211: [crc32c] over a [Uint8List], the page path: little-endian words
+/// read whole and the tables held in locals. A third of a copy-on-write page
+/// write went to the generic `List<int>` loop.
+int _crcTyped(Uint8List bytes, int start, int stop) {
+  RangeError.checkValidRange(start, stop, bytes.length);
+  final bd = ByteData.sublistView(bytes);
+  final t0 = _tables[0], t1 = _tables[1], t2 = _tables[2], t3 = _tables[3];
+  final t4 = _tables[4], t5 = _tables[5], t6 = _tables[6], t7 = _tables[7];
+  var crc = 0xFFFFFFFF;
+  var i = start;
+  while (stop - i >= 8) {
+    final w0 = bd.getUint32(i, Endian.little) ^ crc;
+    final w1 = bd.getUint32(i + 4, Endian.little);
+    crc = t7[w0 & 0xFF] ^
+        t6[(w0 >> 8) & 0xFF] ^
+        t5[(w0 >> 16) & 0xFF] ^
+        t4[w0 >> 24] ^
+        t3[w1 & 0xFF] ^
+        t2[(w1 >> 8) & 0xFF] ^
+        t1[(w1 >> 16) & 0xFF] ^
+        t0[w1 >> 24];
     i += 8;
   }
   for (; i < stop; i++) {

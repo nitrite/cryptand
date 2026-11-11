@@ -1207,8 +1207,35 @@ final class CowTree {
   int get entryCount =>
       root == 0 ? 0 : _load(_rootLink).subtreeEntries;
 
-  _Node _load((int, int) link) =>
-      _Node.decode(store.readBound(link.$1, link.$2, treeId: treeId), link.$1);
+  /// F-211: nodes this tree wrote in [_publish], by `(page_id, nonce)`, taken
+  /// back out by the next edit of their path (every node on an edited path is
+  /// replaced, so none is copied). 10^5 collection creates spent most of 112 s
+  /// re-reading, verifying and re-decoding pages they had just written.
+  /// ponytail: cleared when full, as Rust's `NODE_CACHE`; an LRU if a hot
+  /// path outgrows it.
+  final Map<(int, int), _Node> _nodes = {};
+  static const _nodeCache = 1024;
+
+  /// Pages read and decoded from the store (F-211's test).
+  int nodeReads = 0;
+
+  _Node _load((int, int) link) {
+    final kept = _nodes[link];
+    if (kept != null) return kept;
+    nodeReads++;
+    return _Node.decode(store.readBound(link.$1, link.$2, treeId: treeId), link.$1);
+  }
+
+  /// [_load] for a node about to be replaced: the kept copy, moved out.
+  _Node _take((int, int) link) => _nodes.remove(link) ?? _load(link);
+
+  /// [_write], keeping the node for the next edit of its path.
+  (int, int) _writeKept(_Node n) {
+    final at = _write(n);
+    if (_nodes.length >= _nodeCache) _nodes.clear();
+    _nodes[at] = n;
+    return at;
+  }
 
   /// The page id and the nonce it was sealed under.
   (int, int) _write(_Node n) => _writeAt(store.alloc(), n);
@@ -1227,6 +1254,9 @@ final class CowTree {
           commitId: store.commitId, // F-221: 01 §3
         ));
     pagesCopied++;
+    // F-214: unencrypted every nonce is 0, so a page freed and written again
+    // has the key of the node it held before.
+    _nodes.remove((id, store.writtenNonce));
     return (id, store.writtenNonce);
   }
 
@@ -1418,7 +1448,7 @@ final class CowTree {
     var link = _rootLink;
     while (true) {
       _checkDepth(path.length, link.$1);
-      final n = _load(link);
+      final n = _take(link);
       if (n.isLeaf) {
         path.add((link.$1, n, -1));
         break;
@@ -1459,7 +1489,7 @@ final class CowTree {
       // a page nothing referenced or freed (F-065).
       final children = [
         for (final n in replacements)
-          if (n.count > 0) (_write(n), n)
+          if (n.count > 0) (_writeKept(n), n)
       ];
       final (parentId, parent, childIndex) = path[level - 1];
       store.free(parentId);
@@ -1485,7 +1515,7 @@ final class CowTree {
         // valid root, so the level is dropped rather than written.
         _setRoot(_Node.link(only.payloads[0]));
       } else {
-        _setRoot(_write(only));
+        _setRoot(_writeKept(only));
       }
       return;
     }
@@ -1495,10 +1525,10 @@ final class CowTree {
     for (final n in replacements) {
       if (n.count == 0) continue;
       keys.add(Uint8List.fromList(n.keys.first));
-      final (id, nonce) = _write(n);
+      final (id, nonce) = _writeKept(n);
       payloads.add(_Node.childPayload(id, n.subtreeEntries, nonce));
     }
-    _setRoot(_write(_Node(false, keys, payloads)));
+    _setRoot(_writeKept(_Node(false, keys, payloads)));
   }
 
   /// Replaces the whole tree with [entries] (sorted, distinct keys), built
