@@ -237,3 +237,28 @@ fn a_reader_with_no_sidecar_creates_one_with_no_writer() {
     assert!(matches!(r.multiproc().unwrap().reader_mode(), Some(ReaderMode::Slotted(_))));
     assert!(!r.multiproc().unwrap().writer_alive());
 }
+
+/// F-220: pages reused under a reader must fail its read, not hang it or end
+/// it short. The slot is released behind the reader's back while the writer
+/// churns, then restored, so neither rule 3 nor rule 4 sees anything: only
+/// the page-level check (01 §3 `commit_id` above the snapshot) stands.
+#[test]
+fn f220_a_read_of_reused_pages_fails_loudly() {
+    let (t, mut e) = populated("mp-f220");
+    let pinned = e.sb.commit_id;
+    let mut v = Engine::open_read_only(&t.path, None).unwrap();
+    let Some(ReaderMode::Slotted(slot)) = v.multiproc().unwrap().reader_mode() else { panic!("not slotted") };
+    let sc = Sidecar::open_reader(&t.path, DEFAULT_READER_HEARTBEAT_MS).unwrap().unwrap();
+    sc.release(&slot).unwrap();
+    churn(&mut e);
+    assert!(e.sb.min_retained_commit > pinned, "the writer must have reclaimed past {pinned}");
+    let back = sc.claim(pinned, cryptand::multiproc::now_ms()).unwrap().unwrap();
+    assert_eq!(back, slot, "the slot must come back as the reader's own");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(v.scan_tree(TREE, None, None, None, true).map(|r| r.len()).map_err(|e| e.to_string()));
+    });
+    let r = rx.recv_timeout(std::time::Duration::from_secs(30)).expect("read of reused pages hung");
+    assert!(r.as_ref().is_err_and(|m| m.contains("reclaimed under")), "read of reused pages returned {r:?}");
+    e.close(true).unwrap();
+}

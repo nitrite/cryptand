@@ -173,6 +173,37 @@ class MultiprocTest {
         }
     }
 
+    /**
+     * F-220: pages reused under a reader fail its read, not hang it or end it
+     * short. The slot is released behind the reader's back while the writer
+     * churns, then restored, so neither rule 3 nor rule 4 sees anything.
+     */
+    @Test
+    @DisplayName("F-220: a read of reused pages fails loudly")
+    void readOfReusedPagesFails(@TempDir Path dir) {
+        Path db = dir.resolve("f220.cryptand");
+        Engine.Options ro = new Engine.Options();
+        ro.readOnly = true;
+        try (Engine e = populated(db); Engine v = Engine.open(db, ro);
+             LockSidecar sc = LockSidecar.openReader(db, LockSidecar.DEFAULT_HEARTBEAT_MS)) {
+            long pinned = e.superblock().commitId;
+            LockSidecar.Slot slot = v.readerSlot();
+            sc.release(slot);
+            churn(e);
+            assertTrue(e.superblock().minRetainedCommit > pinned, "the writer must have reclaimed");
+            LockSidecar.Slot back = sc.claim(pinned, System.currentTimeMillis());
+            assertEquals(slot.index(), back.index());
+            CorruptionException x = assertThrows(CorruptionException.class, () -> {
+                try (Engine.Cursor c = v.scan(TREE, null, null, false)) {
+                    while (c.next()) {
+                        // drain
+                    }
+                }
+            });
+            assertTrue(x.getMessage().contains("reclaimed under"), x.getMessage());
+        }
+    }
+
     @Test
     @DisplayName("a full sidecar opens volatile, says why, and revalidates")
     void fullSidecarIsVolatile(@TempDir Path dir) {

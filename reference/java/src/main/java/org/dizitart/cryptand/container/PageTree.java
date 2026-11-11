@@ -89,6 +89,10 @@ public final class PageTree {
         byte[] page = pager.readRaw(pageId);
         PageHeader h = PageHeader.verify(page, pageId);
         pager.checkNonce(pageId, h, nonce);
+        if (h.treeId != treeId) { // F-220: another tree's page is a misdirected link
+            throw new CorruptionException("page " + pageId + " belongs to tree " + Integer.toUnsignedString(h.treeId)
+                    + ", not tree " + treeId + ": misdirected link", pageId, null);
+        }
         byte[] payload = pager.decodePayload(page, h, pageId);
         BtreePage p = BtreePage.parse(payload, 0, payload.length);
         if (p.isLeaf()) {

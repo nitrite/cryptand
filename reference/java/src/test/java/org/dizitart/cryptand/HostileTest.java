@@ -108,6 +108,9 @@ class HostileTest {
         int n = 0;
         try (java.util.stream.Stream<Path> files = Files.list(dir)) {
             for (Path f : (Iterable<Path>) files::iterator) {
+                if (f.getFileName().toString().endsWith("-lock")) {
+                    continue; // a 13 §8 sidecar another suite's reader left beside it
+                }
                 Path copy = Files.copy(f, tmp.resolve(f.getFileName()));
                 try {
                     exercise(copy);

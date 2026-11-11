@@ -614,6 +614,9 @@ public final class Engine implements AutoCloseable {
             // a decoration in every implementation: declared and unread in Rust,
             // absent here, and this pager read through to the file on every page.
             pager.pageCacheBytes(options.profile.pageCacheBytes());
+            if (options.readOnly) {
+                pager.setReadCeiling(sb.commitId);
+            }
             Engine e = new Engine(file, pager, sb, options);
             if (mp != null) {
                 e.adoptReader(mp);
@@ -813,7 +816,7 @@ public final class Engine implements AutoCloseable {
             // wrong keys. Segment ids are never reused, which is what makes
             // them the safe half of the key.
             if (cached == null || cached.meta().segmentId != m.segmentId) {
-                cached = Segment.open(pager, m.startPage, m.nonce);
+                cached = Segment.open(pager, m);
                 Segment stale = segmentCache.put(m.startPage, cached);
                 if (stale != null) {
                     stale.releasePointIndex(); // F-007
@@ -2867,7 +2870,7 @@ public final class Engine implements AutoCloseable {
         inputs.sort(Comparator.<SegmentMeta>comparingInt(m -> m.level)
                 .thenComparing(m -> -m.segmentId));
         for (SegmentMeta m : inputs) {
-            Segment s = Segment.open(pager, m.startPage, m.nonce);
+            Segment s = Segment.open(pager, m);
             open.add(s);
             sources.add(new EntrySource.OfSegment(s));
         }
@@ -5039,7 +5042,7 @@ public final class Engine implements AutoCloseable {
             } else {
                 c.plainSegments.add(m);
             }
-            Segment seg = Segment.open(pager, m.startPage, m.nonce);
+            Segment seg = Segment.open(pager, m);
             for (EntrySource.OfSegment it = new EntrySource.OfSegment(seg); it.isValid(); it.next()) {
                 BtreePage.Leaf cell = it.entry();
                 if (cell.kind() == BtreePage.Kind.BLOB) {
@@ -5157,7 +5160,7 @@ public final class Engine implements AutoCloseable {
                 for (long p = m.startPage; p < m.startPage + m.pages; p++) {
                     pages.add(p);
                 }
-                Segment seg = Segment.open(e.pager, m.startPage, m.nonce);
+                Segment seg = Segment.open(e.pager, m);
                 for (EntrySource.OfSegment it = new EntrySource.OfSegment(seg); it.isValid(); it.next()) {
                     if (it.entry().kind() == BtreePage.Kind.BLOB) {
                         Blob b = Blob.decode(it.entry().value());

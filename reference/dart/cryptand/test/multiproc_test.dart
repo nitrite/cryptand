@@ -131,6 +131,29 @@ void main() {
     s.close();
   });
 
+  // F-220: pages reused under a reader fail its read, not hang it or end it
+  // short. The slot is released behind the reader's back while the writer
+  // churns, then restored, so neither rule 3 nor rule 4 sees anything.
+  test('F-220: a read of reused pages fails loudly', () {
+    final path = db('f220');
+    final e = child.populated(path);
+    final pinned = e.commitId;
+    final v = DatabaseFile.openReadOnly(path).engine;
+    final slot = v.multiproc!.slot!;
+    final sc = Sidecar.openReader(path, defaultReaderHeartbeatMs, (_) {})!;
+    sc.release(slot);
+    child.churn(e);
+    expect(e.minRetainedCommit, greaterThan(pinned));
+    expect(sc.claim(pinned, DateTime.now().millisecondsSinceEpoch)!.index, slot.index);
+    expect(
+        () => v.scanTree(child.tree).length,
+        throwsA(isA<CorruptionException>().having(
+            (x) => x.toString(), 'message', contains('reclaimed under'))));
+    sc.close();
+    v.close(flushMemtable: false);
+    e.close();
+  });
+
   test('a full sidecar opens volatile, says why, and revalidates', () {
     final path = db('full');
     final e = child.populated(path);

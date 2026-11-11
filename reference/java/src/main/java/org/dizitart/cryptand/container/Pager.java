@@ -416,6 +416,26 @@ public final class Pager {
      */
     private volatile boolean strict;
 
+    /**
+     * F-220, 13 §8: a read-only handle's snapshot commit id. A page whose header
+     * says a later commit wrote it was reused under this reader: corruption,
+     * never data. {@code Long.MAX_VALUE} for a writer.
+     */
+    private volatile long readCeiling = Long.MAX_VALUE;
+
+    public void setReadCeiling(long commitId) {
+        this.readCeiling = commitId;
+    }
+
+    /** F-220: every page a snapshot reaches was written at or before it. */
+    public void checkCeiling(long pageId, PageHeader h) {
+        if (Long.compareUnsigned(h.commitId, readCeiling) > 0) {
+            throw new CorruptionException("page " + pageId + " was written by commit "
+                    + Long.toUnsignedString(h.commitId) + ", after this reader's snapshot " + readCeiling
+                    + ": reclaimed under it (13 §8): reopen", pageId, null);
+        }
+    }
+
     public void setStrict(boolean strict) {
         this.strict = strict;
     }
@@ -717,6 +737,7 @@ public final class Pager {
      * Checked whenever a key is in hand; with {@code cipher = 0} both are 0.
      */
     public void checkNonce(long pageId, PageHeader h, long want) {
+        checkCeiling(pageId, h);
         if (crypto != null && h.nonce != want) {
             throw new org.dizitart.cryptand.TamperingException("page " + pageId + " has nonce " + h.nonce
                     + ", its parent recorded " + want + ": an older write replayed", pageId);
@@ -761,6 +782,7 @@ public final class Pager {
         checkInFile(pageId);
         file.readFully(offsetOf(pageId), page, 0, pageSize);
         PageHeader h = PageHeader.verify(page, pageId);
+        checkCeiling(pageId, h);
         byte[] payload = decodePayload(page, h, pageId);
         admitPayload(pageId, payload);
         return payload.clone();
@@ -841,6 +863,13 @@ public final class Pager {
      * commit's id; another is an older extent's page replayed in place.
      */
     public void checkCommit(long pageId, PageHeader h, long want) {
+        checkCeiling(pageId, h);
+        if (crypto == null && want >= 0 && h.commitId != want && readCeiling != Long.MAX_VALUE) {
+            // F-220, 04 §2.1: every headed page of a segment carries its head's
+            // commit id, encrypted or not; for a reader another is reuse.
+            throw new CorruptionException("page " + pageId + " has commit " + h.commitId + ", its extent "
+                    + want + ": reclaimed under this reader (13 §8): reopen", pageId, null);
+        }
         if (crypto != null && want >= 0 && h.commitId != want) {
             throw new org.dizitart.cryptand.TamperingException("page " + pageId + " has commit " + h.commitId
                     + ", its extent " + want + ": an older write replayed", pageId);

@@ -491,7 +491,7 @@ final class Engine {
     }
     cacheMisses++;
     final p = store.segmentPages(r.startPage, r.pages, r.nonce);
-    final seg = Segment.lazy(p.head, p.page, r.pages, pageSize);
+    final seg = _named(r, Segment.lazy(p.head, p.page, r.pages, pageSize));
     _admit(seg);
     return seg;
   }
@@ -501,8 +501,20 @@ final class Engine {
   /// Never the cached copy: filling every page into it pinned the extent.
   Segment segmentStream(SegmentRef r) {
     final p = store.segmentPages(r.startPage, r.pages, r.nonce);
-    return Segment.lazy(p.head, p.page, r.pages, pageSize, retain: false)
+    return _named(r, Segment.lazy(p.head, p.page, r.pages, pageSize, retain: false))
       ..cacheEnabled = false;
+  }
+
+  /// F-220: the extent at [r]'s start page is the segment the manifest names,
+  /// not another one moved into pages reused under a reader.
+  Segment _named(SegmentRef r, Segment seg) {
+    if (seg.header.segmentId != r.segmentId) {
+      throw CorruptionException(
+          'page ${r.startPage} holds segment ${seg.header.segmentId}, the '
+          'manifest names ${r.segmentId}',
+          pageId: r.startPage);
+    }
+    return seg;
   }
 
   /// `spec/12-profiles.md` §1's page cache budget, as Rust `Engine::admit`:

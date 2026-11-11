@@ -194,6 +194,11 @@ final class PageStore {
   /// plaintext page is not a converting file's mixture but a forgery.
   bool strict = false;
 
+  /// F-220, 13 §8: a read-only handle's snapshot `commit_id`. A page whose
+  /// header says a later commit wrote it was reused under this reader, so
+  /// reading it is corruption, never data. `null` for a writer.
+  int? readCeiling;
+
   /// F-072, 14 §8.3 `decrypt()`: the cipher stays installed so encrypted pages
   /// still read, but new pages are written in the clear.
   bool writePlain = false;
@@ -217,11 +222,25 @@ final class PageStore {
     }
   }
 
-  /// [read], then [checkNonce].
-  Uint8List readBound(int pageId, int nonce) {
-    final page = read(pageId);
+  /// [read], then [checkNonce]. A page its parent links to MUST carry a valid
+  /// header (01 §3), as Rust `read_bound` and Java `PageTree`: F-220, a zeroed
+  /// or foreign page here decoded as an empty node, so a reader of pages
+  /// reclaimed under it saw an empty tree instead of an error.
+  /// [treeId], when given, is the tree whose link this is: a page of another
+  /// tree (F-220) is one reused under a reader.
+  Uint8List readBound(int pageId, int nonce, {int? treeId}) {
+    final raw = readClear(pageId);
+    final h = PageHeader.read(raw, pageId: pageId);
+    readNonce = h.nonce;
+    // Tampering (a replayed write) is reported as such before anything else.
     checkNonce(pageId, nonce);
-    return page;
+    if (treeId != null && h.treeId != treeId) {
+      throw CorruptionException(
+          'page $pageId belongs to tree ${h.treeId}, not tree $treeId: '
+          'reclaimed under this reader (13 §8) or misdirected',
+          pageId: pageId);
+    }
+    return _open(pageId, raw, h);
   }
 
   /// Plaintext bytes per chunk of an extent that is (or is not) encrypted,
@@ -654,9 +673,28 @@ final class PageStore {
     _checkExtent(startPage, pages);
     final rawHead = readClear(startPage);
     if (crypto == null) {
+      final head = _open(startPage, rawHead);
+      if (readCeiling == null) {
+        return (head: head, page: (i) => read(startPage + i));
+      }
+      // F-220, 04 §2.1: every headed page of a segment carries its head's
+      // commit id, encrypted or not; for a reader another is reuse.
+      final want = PageHeader.read(rawHead, pageId: startPage).commitId;
       return (
-        head: _open(startPage, rawHead),
-        page: (i) => read(startPage + i)
+        head: head,
+        page: (i) {
+          final id = startPage + i;
+          final raw = readClear(id);
+          final p = PageHeader.read(raw, pageId: id);
+          if (p.commitId != want) {
+            throw CorruptionException(
+                'page $id of the segment at $startPage has commit '
+                '${p.commitId}, its head $want: reclaimed under this reader '
+                '(13 §8): reopen',
+                pageId: id);
+          }
+          return _open(id, raw, p);
+        }
       );
     }
     final h = PageHeader.read(rawHead, pageId: startPage);
@@ -777,6 +815,13 @@ final class PageStore {
         // Left to whoever reads the page next, as both stages always did.
         return raw;
       }
+    }
+    final ceiling = readCeiling;
+    if (ceiling != null && _gtU64(h.commitId, ceiling)) {
+      throw CorruptionException(
+          'page $pageId was written by commit ${h.commitId.toUnsigned(64)}, '
+          "after this reader's snapshot $ceiling: reclaimed under it (13 §8): reopen",
+          pageId: pageId);
     }
     // §5.2's read order: verify checksum, decrypt, then decompress.
     final (plain, ph) = crypto == null ? (raw, h) : _openPage(pageId, raw, h);
@@ -1163,7 +1208,7 @@ final class CowTree {
       root == 0 ? 0 : _load(_rootLink).subtreeEntries;
 
   _Node _load((int, int) link) =>
-      _Node.decode(store.readBound(link.$1, link.$2), link.$1);
+      _Node.decode(store.readBound(link.$1, link.$2, treeId: treeId), link.$1);
 
   /// The page id and the nonce it was sealed under.
   (int, int) _write(_Node n) => _writeAt(store.alloc(), n);
@@ -1663,7 +1708,7 @@ final class AdjacencyTree {
   }
 
   _ANode _read(int page, int nonce) {
-    final c = _Node.decode(store.readBound(page, nonce), page);
+    final c = _Node.decode(store.readBound(page, nonce, treeId: treeId), page);
     final n = _ANode(c.isLeaf);
     for (var i = 0; i < c.count; i++) {
       n.key.add(c.keys[i]);
@@ -1916,3 +1961,7 @@ final class _Posix {
     }
   }
 }
+
+/// Unsigned 64-bit `a > b` (commit ids are `u64`, Dart `int` is signed).
+bool _gtU64(int a, int b) => (a ^ _signBit) > (b ^ _signBit);
+const int _signBit = -0x8000000000000000;

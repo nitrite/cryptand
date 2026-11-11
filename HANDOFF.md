@@ -37,7 +37,9 @@
   `*.cryptand-lock` beside files they open (gitignored; corpus digests skip them).
   Dart beats on its own ops only (a Dart timer kept never-closed handles' processes alive): an
   idle Dart reader >6 s is reclaimed and its next read says reopen; R/J beat on a thread.
-  F-220 (open): a read of reused pages hangs (R) or returns 0 rows (J, D) instead of failing.
+  F-220 fixed 11-11 R+J+D: a reader rejects pages newer than its snapshot, segment pages off
+  their head's commit, a segment head naming another `segment_id`, a CoW page of another tree.
+  F-221 (open, needs human go): Dart CoW pages carry `commit_id` 0 (a byte change).
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -67,6 +69,7 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
+- F-221: may Dart stamp `commit_id` on CoW pages (01 §3; R and J do)? Changes Dart's bytes.
 - None. Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
@@ -77,6 +80,7 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
    `soak-11-03/rust.out`); record in RESULTS.md, tick 6.7. 3. A1.4's interop full-text step. Then 6.8.
 
 ## Log
+- 11-11: F-220 fixed R+J+D (reader page checks, no format change); F-221 filed (Dart CoW commit_id 0).
 - 11-11: F-219 multi-process readers wired R+J+D, spec 13 §8 pinned (magic, lock byte, no-sidecar), 3x3 gate stage; F-220 filed.
 - 11-11: audit A1: F-215..F-219 filed; F-215/216/217 fixed, F-218 CI trigger + Windows test, F-219 approved to wire.
 - 11-11: 6.7 Java soak FAIL traced to harness (per-op fsync, uncapped heap, cut cycle); fixed 4991082, Dart soak added, J+D rerun launched.

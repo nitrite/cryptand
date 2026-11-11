@@ -800,6 +800,9 @@ impl Engine {
             sb,
         };
         e.pager.min_retained_commit = e.sb.min_retained_commit;
+        if read_only {
+            e.pager.read_ceiling = e.sb.commit_id;
+        }
         // `01-container.md` §7 — the codec is a *default* for newly written
         // pages and comes from the file, not from this build's profile, so a
         // desktop that opens a phone's database keeps writing the codec the
@@ -1863,10 +1866,19 @@ impl Engine {
     }
 
     pub(crate) fn segment_uncached(&mut self, r: &SegmentRef) -> Result<Segment> {
-        match self.pager.segment_pages(r.start_page, r.pages, r.nonce)? {
+        let seg = match self.pager.segment_pages(r.start_page, r.pages, r.nonce)? {
             Some((head, pages)) => Segment::lazy(head, pages, r.pages, self.pager.page_size),
             None => Segment::open(self.pager.read_segment(r.start_page, r.pages, r.nonce)?, self.pager.page_size),
+        }?;
+        // F-220: the extent at `start_page` is the segment the manifest names,
+        // not another one moved into pages reused under a reader.
+        if seg.header.segment_id != r.segment_id {
+            return corrupt(format!(
+                "page {} holds segment {}, the manifest names {}",
+                r.start_page, seg.header.segment_id, r.segment_id
+            ));
         }
+        Ok(seg)
     }
 
     pub fn segment(&mut self, r: &SegmentRef) -> Result<Arc<Segment>> {

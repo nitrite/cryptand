@@ -154,7 +154,14 @@ impl CowTree {
     }
 
     fn load(&self, pager: &mut Pager, (page_id, nonce): (u64, u64)) -> Result<CowNode> {
-        let (_h, page) = pager.read_bound(page_id, nonce)?;
+        let (h, page) = pager.read_bound(page_id, nonce)?;
+        // F-220: a page of another tree is one reused under a reader.
+        if h.tree_id != self.tree_id {
+            return corrupt(format!(
+                "page {page_id} belongs to tree {}, not tree {}: reclaimed under this reader (13 §8) or misdirected",
+                h.tree_id, self.tree_id
+            ));
+        }
         CowNode::decode(&page, page_id)
     }
 

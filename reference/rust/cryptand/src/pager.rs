@@ -115,6 +115,10 @@ pub struct Pager {
     /// F-127, 14 §8.3: `cipher = 1` and `CONVERTING` clear, so a plaintext
     /// page is not a converting file's mixture but a forgery.
     pub strict: bool,
+    /// F-220, 13 §8: a read-only handle's snapshot `commit_id`. A page whose
+    /// header says a later commit wrote it was reused under this reader, so
+    /// reading it is corruption, never data. `u64::MAX` for a writer.
+    pub read_ceiling: u64,
     /// F-128, 14 §5.5: the header `nonce` of the page [`Pager::write_page`]
     /// last wrote, which its parent records, and of the page
     /// [`Pager::read_page`] last read, which [`Pager::check_nonce`] compares.
@@ -219,6 +223,7 @@ impl Pager {
             low_first: false,
             write_clear: false,
             strict: false,
+            read_ceiling: u64::MAX,
             written_nonce: 0,
             read_nonce: 0,
             lazy_reads: Default::default(),
@@ -771,6 +776,14 @@ impl Pager {
     /// carries the head's `commit_id` (04 §2.1), so none is an older extent's.
     pub fn read_segment(&mut self, start_page: u64, pages: u32, nonce: u64) -> Result<Vec<u8>> {
         let out = self.read_extent(start_page, pages)?;
+        if self.read_ceiling != u64::MAX {
+            let head = PageHeader::parse(&out)?.commit_id;
+            above_ceiling(start_page, head, self.read_ceiling)?;
+            for i in 1..pages as usize {
+                let h = PageHeader::parse(&out[i * self.page_size..])?;
+                same_extent(start_page, start_page + i as u64, h.commit_id, head)?;
+            }
+        }
         if self.crypto.is_none() {
             return Ok(out);
         }
@@ -818,6 +831,8 @@ impl Pager {
         };
         let raw = self.read_at(self.page_offset(start_page)?, self.page_size)?;
         self.page_reads += 1;
+        let head_commit = PageHeader::parse(&raw)?.commit_id;
+        above_ceiling(start_page, head_commit, self.read_ceiling)?;
         let commit_id = match &self.crypto {
             None => None,
             Some(_) => {
@@ -842,6 +857,7 @@ impl Pager {
                 ring: self.crypto.as_ref().map(|c| c.ring.clone()),
                 strict: self.strict,
                 commit_id,
+                reader_head: (self.read_ceiling != u64::MAX).then_some(head_commit),
                 reads: self.lazy_reads.clone(),
             },
         )))
@@ -1121,6 +1137,7 @@ impl Pager {
     pub fn read_verified(&mut self, page_id: u64) -> Result<(PageHeader, Vec<u8>)> {
         let page = self.read_page(page_id)?;
         let h = PageHeader::verify(&page, page_id)?;
+        above_ceiling(page_id, h.commit_id, self.read_ceiling)?;
         Ok((h, page))
     }
 
@@ -1303,6 +1320,27 @@ pub(crate) fn lock_byte(file: &File, at: u64, lock: bool) -> std::io::Result<boo
     if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION) { Ok(false) } else { Err(e) }
 }
 
+/// F-220: every page a snapshot reaches was written at or before it.
+fn above_ceiling(page_id: u64, commit_id: u64, ceiling: u64) -> Result<()> {
+    if commit_id > ceiling {
+        return corrupt(format!(
+            "page {page_id} was written by commit {commit_id}, after this reader's snapshot {ceiling}: reclaimed under it (13 §8): reopen"
+        ));
+    }
+    Ok(())
+}
+
+/// F-220, 04 §2.1: a reader finding another commit's page inside a segment
+/// extent is reading pages reused under it.
+fn same_extent(start_page: u64, page_id: u64, commit_id: u64, head: u64) -> Result<()> {
+    if commit_id != head {
+        return corrupt(format!(
+            "page {page_id} of the segment at {start_page} has commit {commit_id}, its head {head}: reclaimed under this reader (13 §8): reopen"
+        ));
+    }
+    Ok(())
+}
+
 /// [`Pager::open_page`] without the pager: also what [`SegmentPages`] uses.
 /// The flag is `Some(encrypted)` for a page with a header.
 fn open_page_with(ring: Option<&KeyRing>, strict: bool, page_id: u64, page: Vec<u8>) -> Result<(Vec<u8>, Option<bool>)> {
@@ -1357,6 +1395,9 @@ pub struct SegmentPages {
     strict: bool,
     /// The head's `commit_id` on an encrypted file (F-128, 04 §2.1).
     commit_id: Option<u64>,
+    /// F-220: a reader's copy of the head's `commit_id`, which every headed
+    /// page of the extent carries (04 §2.1) whether or not it is encrypted.
+    reader_head: Option<u64>,
     reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1372,6 +1413,9 @@ impl SegmentPages {
             return Err(e.into());
         }
         self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(head) = self.reader_head {
+            same_extent(self.start_page, page_id, PageHeader::parse(&raw)?.commit_id, head)?;
+        }
         if let Some(c) = self.commit_id {
             if let Ok(h) = PageHeader::parse(&raw) {
                 if h.encrypted() && h.commit_id != c {

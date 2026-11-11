@@ -935,6 +935,9 @@ abstract final class DatabaseFile {
         // phone chose. It has to be set before the first page is read, because
         // an already-compressed page is decompressed on the way out.
         ..pageCodec = sb.pageCodec;
+      // F-220, 13 §8: a reader's pages were all written at or before its
+      // snapshot; a later one was reused under it.
+      if (readOnly) store.readCeiling = sb.commitId;
 
       final e = Engine(
         pageSize: sb.pageSize,

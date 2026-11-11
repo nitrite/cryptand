@@ -64,6 +64,20 @@ public final class Segment {
     }
 
     /** A segment its manifest entry names, with the nonce that entry recorded (14 §5.5). */
+    /**
+     * F-220: {@link #open} for the segment manifest entry {@code m} names; the
+     * extent there must be that segment, not another one moved into pages
+     * reused under a reader.
+     */
+    public static Segment open(Pager pager, SegmentMeta m) {
+        Segment s = open(pager, m.startPage, m.nonce);
+        if (s.meta().segmentId != m.segmentId) {
+            throw new CorruptionException("page " + m.startPage + " holds segment " + s.meta().segmentId
+                    + ", the manifest names " + m.segmentId, m.startPage, null);
+        }
+        return s;
+    }
+
     public static Segment open(Pager pager, long startPage, long nonce) {
         PageHeader h = pager.readHeader(startPage);
         pager.checkNonce(startPage, h, nonce);
