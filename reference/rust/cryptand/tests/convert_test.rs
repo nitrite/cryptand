@@ -161,7 +161,7 @@ fn rotate_master_key_rekeys_everything_and_drops_the_old_keys() {
 #[test]
 fn rotate_refuses_a_hostile_value_log_record_length() {
     use cryptand::rotate::rotate_master_key;
-    use std::os::unix::fs::FileExt;
+    use cryptand::posio::PosIo;
     let t = TempDb::new("rotate-vlog");
     let mut e = Engine::create_encrypted(&t.path, Profile::Desktop, &[1u8; 32], 0, 0, 0, 0).unwrap();
     for i in 0..300 {
