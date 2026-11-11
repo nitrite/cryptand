@@ -1246,8 +1246,21 @@ final class CowTree {
   /// rebuild through the allocator, as [relocate]; few: a path copy each.
   void flush() {
     if (_pending.isEmpty) return;
+    // F-223: the edits are dropped only once written. A failed flush (ENOSPC,
+    // EIO) is retried whole by the next one: a put twice is the same put, a
+    // removal of an absent key a no-op. Dropped up front, the retried commit
+    // published a tree without them.
     final pending = Map.of(_pending);
     _pending.clear();
+    try {
+      _writeHeld(pending);
+    } catch (_) {
+      _pending.addAll(pending);
+      rethrow;
+    }
+  }
+
+  void _writeHeld(Map<Uint8List, Uint8List?> pending) {
     // ponytail: a path copy is ~height pages, a rebuild ~entries/50; rebuild
     // once a 64th of the tree changed. Tune if commits get slow.
     final total = root == 0 ? 0 : _load(_rootLink).subtreeEntries;

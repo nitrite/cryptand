@@ -511,6 +511,42 @@ void main() {
     expect(e.get(16, CNitriteId(2)), [2]);
   });
 
+  // F-223: `flush` dropped the catalog's held edits before writing them, so a
+  // commit retried after a failed write published a catalog without the new
+  // collections while this handle still served them from memory.
+  test('F-223: a failed commit keeps the catalog edits for the retry', () {
+    final dir = Directory.systemTemp.createTempSync('f223');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final path = '${dir.path}/a.cryptand';
+    DatabaseFile.save(Database(engine: Engine()), path);
+    var db = DatabaseFile.open(path);
+    var made = 0;
+    void make(int n) {
+      for (var i = 0; i < n; i++) {
+        made++;
+        db.createCollection('c$made').put(CNitriteId(made), CDoc({}));
+      }
+    }
+
+    make(300);
+    db.engine.commit();
+    for (var at = 1; at <= 8; at++) {
+      make(2);
+      fileHook = _FailNth(at);
+      try {
+        expect(db.engine.commit, throwsA(anything), reason: 'write $at');
+      } finally {
+        fileHook = null;
+      }
+      db.engine
+        ..commit()
+        ..close();
+      db = DatabaseFile.open(path);
+      expect(db.catalog.collections.length, made, reason: 'ENOSPC at write $at');
+    }
+    db.engine.close();
+  });
+
   test('F-211: collection creates do not re-read the pages they wrote', () {
     final dir = Directory.systemTemp.createTempSync('f211');
     addTearDown(() => dir.deleteSync(recursive: true));

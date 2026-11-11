@@ -440,13 +440,25 @@ impl CowTree {
         if self.pending.is_empty() {
             return Ok(());
         }
+        // F-223: the edits are dropped only once written. A failed flush
+        // (ENOSPC, EIO) is retried whole by the next one: a put twice is the
+        // same put, a removal of an absent key a no-op. Dropped up front, the
+        // retried commit published a tree without them.
         let pending = std::mem::take(&mut self.pending);
+        let r = self.write_held(pager, &pending);
+        if r.is_err() {
+            self.pending = pending;
+        }
+        r
+    }
+
+    fn write_held(&mut self, pager: &mut Pager, pending: &BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> Result<()> {
         // ponytail: a path copy is ~height pages, a rebuild ~entries/50;
         // rebuild once a 64th of the tree changed. Tune if commits get slow.
         let total = if self.root == 0 { 0 } else { self.entry_count(pager)? };
         if (pending.len() as u64) * 64 < total {
             for (k, v) in pending {
-                self.edit(pager, &k, v.map(|v| leaf_payload(&v)))?;
+                self.edit(pager, k, v.as_deref().map(leaf_payload))?;
             }
             return Ok(());
         }

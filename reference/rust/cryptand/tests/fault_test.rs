@@ -291,3 +291,37 @@ fn a_fresh_hot_segment_is_not_a_full_extent() {
     let len = std::fs::metadata(&t.path).unwrap().len();
     assert!(len < 16 << 20, "file is {len} bytes");
 }
+
+/// F-223: a commit that fails while writing the catalog's held edits keeps
+/// them for the retry. `flush` used to take the edits before writing them, so
+/// the retried commit published a catalog without the new collections while
+/// this handle still served them from memory: gone at the next open. (A small
+/// catalog hid it: any later edit rebuilt the whole tree from memory.)
+#[test]
+fn f223_a_failed_commit_keeps_the_catalog_edits_for_the_retry() {
+    let t = TempDb::new("f223");
+    create(&t.path, false).close(true).unwrap();
+    let mut db = cryptand::database::Database::open(&t.path, None).unwrap();
+    let mut made = 0i64;
+    let mut make = |db: &mut cryptand::database::Database, n: i64| {
+        for _ in 0..n {
+            made += 1;
+            let mut c = db.collection(&format!("c{made}")).unwrap();
+            c.insert(&mut db.engine, &Value::Doc(vec![("_id".into(), Value::NitriteId(made))])).unwrap();
+        }
+        made as usize
+    };
+    make(&mut db, 300);
+    db.engine.commit(Durability::Sync).unwrap();
+    for at in 0..8u64 {
+        let want = make(&mut db, 2);
+        fault::arm(&t.path, Plan { enospc_at_write: Some(at), ..Plan::default() });
+        let failed = db.engine.commit(Durability::Sync).is_err();
+        fault::disarm(&t.path);
+        db.engine.commit(Durability::Sync).unwrap();
+        db.engine.close(true).unwrap();
+        db = cryptand::database::Database::open(&t.path, None).unwrap();
+        let have = db.collections().unwrap().len();
+        assert_eq!(have, want, "ENOSPC at write {at} (commit failed: {failed})");
+    }
+}
