@@ -133,7 +133,11 @@ impl PostingsBlock {
         for _ in 1..count {
             let (d, n) = get_ivar(&b[at..])?;
             at += n;
-            docs.push(docs.last().unwrap() + d);
+            // F-217: file data; the sum overflowed (a debug panic).
+            match docs[docs.len() - 1].checked_add(d) {
+                Some(doc) => docs.push(doc),
+                None => return corrupt("postings doc id overflows"),
+            }
         }
         let mut freqs = Vec::with_capacity(count);
         for _ in 0..count {
@@ -159,7 +163,10 @@ impl PostingsBlock {
                     }
                     let (d, n) = get_uvar(&b[p..])?;
                     p += n;
-                    let v = if i == 0 { d as u32 } else { prev + d as u32 };
+                    let v = match u32::try_from(d).ok().and_then(|d| if i == 0 { Some(d) } else { prev.checked_add(d) }) {
+                        Some(v) => v,
+                        None => return corrupt("postings position overflows"),
+                    };
                     post.positions.push(v);
                     prev = v;
                 }

@@ -295,4 +295,22 @@ class FullTextTest {
             assertEquals(expected[i], actual[i], "element " + i);
         }
     }
+
+    /** F-217: a postings frequency is file data; it must not size an array unchecked. */
+    @Test
+    void aHostilePostingsFrequencyIsCorruptionNotAnAllocation() {
+        // version 1, positions, count 1, first_doc 0, then the frequency.
+        byte[] head = {1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        byte[][] freqs = {
+            {(byte) 0xF0, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, 0x07},             // 2^31 - 16
+            {(byte) 0x80, (byte) 0x80, (byte) 0x80, (byte) 0x80, 0x08},             // 2^31
+        };
+        for (byte[] f : freqs) {
+            byte[] block = java.util.Arrays.copyOf(head, head.length + f.length + 1);
+            System.arraycopy(f, 0, block, head.length, f.length);
+            // trailing 0: an empty positions area
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    org.dizitart.cryptand.CryptandException.class, () -> Postings.decode(block));
+        }
+    }
 }

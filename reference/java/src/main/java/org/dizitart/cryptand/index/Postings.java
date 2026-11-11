@@ -160,7 +160,12 @@ public final class Postings {
         }
         int[] freq = new int[count];
         for (int i = 0; i < count; i++) {
-            freq[i] = (int) r.uvar();
+            // F-217: file data; a huge or negative count sized `new int[freq]`.
+            long f = r.uvar();
+            if (f < 0 || f > Integer.MAX_VALUE) {
+                throw new CorruptionException("postings frequency " + Long.toUnsignedString(f) + " is out of range");
+            }
+            freq[i] = (int) f;
         }
         List<Posting> out = new ArrayList<>(count);
         if (!positions) {
@@ -172,6 +177,10 @@ public final class Postings {
         int bytes = r.uvarLength("postings positions area");
         ByteReader pr = new ByteReader(r.bytesView(), r.position(), bytes);
         for (int i = 0; i < count; i++) {
+            // A position is at least one byte.
+            if (freq[i] > pr.remaining()) {
+                throw new CorruptionException("postings positions truncated");
+            }
             int[] ps = new int[freq[i]];
             long last = 0;
             for (int j = 0; j < freq[i]; j++) {

@@ -255,3 +255,19 @@ fn a_term_entry_round_trips() {
     let t = TermEntry { id: 7, df: 3, ttf: 11 };
     assert_eq!(TermEntry::decode(&t.encode()).unwrap(), t);
 }
+
+/// F-217: doc-id deltas and position deltas are file data; their sums must not
+/// overflow (a panic in a debug build, a wrapped id in release).
+#[test]
+fn hostile_postings_sums_are_corruption_not_overflow() {
+    // version 1, no positions, count 2, first_doc i64::MAX, delta +1 (zigzag 2), two freqs.
+    let mut b = vec![1u8, 0, 2, 0];
+    b.extend_from_slice(&i64::MAX.to_le_bytes());
+    b.extend_from_slice(&[2, 1, 1]);
+    assert!(PostingsBlock::decode(&b).is_err());
+    // positions, count 1, doc 0, freq 2, 6 position bytes: u32::MAX then +1.
+    let mut b = vec![1u8, 1, 1, 0];
+    b.extend_from_slice(&0i64.to_le_bytes());
+    b.extend_from_slice(&[2, 6, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 1]);
+    assert!(PostingsBlock::decode(&b).is_err());
+}
