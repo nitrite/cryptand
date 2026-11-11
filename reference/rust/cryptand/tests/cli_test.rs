@@ -28,15 +28,27 @@ fn bin() -> PathBuf {
     p.join("cryptand")
 }
 
+/// Held while a test holds a database open in this process, and around each
+/// spawn. A spawn forks; until the child execs it shares every open file
+/// description, including the fixture's `01-container.md` §10 writer lock (an
+/// OFD lock), so a sibling test's CLI saw "open for writing by another
+/// process" on a file nobody else had open.
+static FORK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn run(args: &[&str]) -> Output {
-    Command::new(bin())
+    let fork = FORK.lock().unwrap_or_else(|e| e.into_inner());
+    let child = Command::new(bin())
         .args(args)
         // §7's `open` reads a key from here; the tests below are unencrypted,
         // and an inherited value from the developer's shell would make them
         // fail for a reason that has nothing to do with the CLI.
         .env_remove("CRYPTAND_KEY")
-        .output()
-        .unwrap_or_else(|e| panic!("could not run {}: {e}", bin().display()))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("could not run {}: {e}", bin().display()));
+    drop(fork);
+    child.wait_with_output().unwrap()
 }
 
 fn stdout(o: &Output) -> String {
@@ -56,6 +68,7 @@ fn populated(dir: &Path, name: &str) -> PathBuf {
 
     let path = dir.join(name);
     {
+        let _fork = FORK.lock().unwrap_or_else(|e| e.into_inner());
         let mut db = Database::create(&path, cryptand::container::Profile::Desktop).unwrap();
         let mut c = db.collection("people").unwrap();
         let idx = db.create_index(&c, &["city"], "non_unique", false).unwrap();
