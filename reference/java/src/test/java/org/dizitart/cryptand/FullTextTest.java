@@ -313,4 +313,14 @@ class FullTextTest {
                     org.dizitart.cryptand.CryptandException.class, () -> Postings.decode(block));
         }
     }
+
+    /** F-216: a postings block is the bytes of 07 §4.2 (same literal in Rust and Dart). */
+    @Test
+    void aPostingsBlockIsTheSpecBytes() {
+        byte[] want = {1, 1, 2, 0, 5, 0, 0, 0, 0, 0, 0, 0, 8, 1, 2, 3, 3, 1, 3};
+        org.junit.jupiter.api.Assertions.assertArrayEquals(want, Postings.encode(List.of(
+                new Postings.Posting(5, 1, new int[]{3}),
+                new Postings.Posting(9, 2, new int[]{1, 4})), true));
+        assertEquals(9, Postings.decode(want).get(1).nitriteId());
+    }
 }

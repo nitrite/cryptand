@@ -31,6 +31,16 @@ void main() {
     expect(s.residentBytes - before, greaterThanOrEqualTo(1000 * 16));
   });
 
+  test('F-216: a postings block is the bytes of 07 §4.2 (same literal in R and J)', () {
+    final block = PostingsBlock([
+      Posting(5, 1, const [3]),
+      Posting(9, 2, const [1, 4]),
+    ], hasPositions: true);
+    final want = b([1, 1, 2, 0, 5, 0, 0, 0, 0, 0, 0, 0, 8, 1, 2, 3, 3, 1, 3]);
+    expect(block.encodeRaw(), want);
+    expect(PostingsBlock.decodeRaw(want).postings.map((p) => p.docId), [5, 9]);
+  });
+
   group('F-215: a blob is read per its own head page, not the key in hand', () {
     // A one-page blob extent holding [value], written raw as Java lays it out.
     Uint8List blobAt(Engine e, List<int> value, {int flags = PageFlags.extentHead}) {

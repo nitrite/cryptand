@@ -271,3 +271,18 @@ fn hostile_postings_sums_are_corruption_not_overflow() {
     b.extend_from_slice(&[2, 6, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 1]);
     assert!(PostingsBlock::decode(&b).is_err());
 }
+
+/// F-216: a postings block is the bytes of 07 §4.2 (same literal in Java and Dart).
+#[test]
+fn a_postings_block_is_the_spec_bytes() {
+    let block = PostingsBlock {
+        postings: vec![
+            Posting { doc: 5, freq: 1, positions: vec![3] },
+            Posting { doc: 9, freq: 2, positions: vec![1, 4] },
+        ],
+        has_positions: true,
+    };
+    let want = [1u8, 1, 2, 0, 5, 0, 0, 0, 0, 0, 0, 0, 8, 1, 2, 3, 3, 1, 3];
+    assert_eq!(block.encode().unwrap(), want);
+    assert_eq!(PostingsBlock::decode(&want).unwrap(), block);
+}

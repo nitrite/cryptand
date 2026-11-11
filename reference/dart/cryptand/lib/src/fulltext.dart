@@ -77,7 +77,8 @@ final class PostingsBlock {
       ..u8(version)
       ..u8(hasPositions ? flagHasPositions : 0)
       ..u16(postings.length)
-      ..u64(_zigzagEncode(postings.first.docId));
+      // §4.2: `i64 first_doc`, the absolute id; only the deltas are zigzag (F-216).
+      ..i64(postings.first.docId);
 
     // §4.2: "zigzag deltas from the previous doc id". Ids inside a block are
     // strictly increasing so the deltas are positive; zigzag is used anyway
@@ -138,7 +139,7 @@ final class PostingsBlock {
       throw CorruptionException('postings block declares $count documents');
     }
 
-    final docs = <int>[_zigzagDecode(r.u64())];
+    final docs = <int>[r.i64()];
     for (var i = 1; i < count; i++) {
       docs.add(docs.last + _zigzagDecode(r.uvar()));
     }
