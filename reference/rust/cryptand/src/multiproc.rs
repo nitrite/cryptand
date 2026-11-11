@@ -197,6 +197,13 @@ impl Sidecar {
     /// Runs `f` holding the claim lock (§8): spin, because a holder keeps it
     /// for one slot scan.
     fn locked<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.lock()?;
+        let r = f();
+        let _ = lock_byte(&self.file, CLAIM_LOCK_BYTE, false);
+        r
+    }
+
+    fn lock(&self) -> Result<()> {
         let start = std::time::Instant::now();
         while !lock_byte(&self.file, CLAIM_LOCK_BYTE, true)? {
             if start.elapsed() > Duration::from_secs(10) {
@@ -204,9 +211,7 @@ impl Sidecar {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        let r = f();
-        let _ = lock_byte(&self.file, CLAIM_LOCK_BYTE, false);
-        r
+        Ok(())
     }
 
     pub fn slot_count(&self) -> u32 {
@@ -323,17 +328,40 @@ impl Sidecar {
     /// Rules 2 and 3 for the writer, under one lock: reclaims stale slots and
     /// returns the lowest `commit_id` any live slot pins.
     pub fn reclaim_and_min_pinned(&self, now: u64) -> Result<Option<u64>> {
-        self.locked(|| {
-            let mut min = None;
-            for slot in self.slots()? {
-                if slot.is_stale(now, self.interval_ms) {
-                    self.write_slot(slot.index, 0, 0, 0)?;
-                } else if !slot.is_free() {
-                    min = Some(min.map_or(slot.commit_id, |m: u64| m.min(slot.commit_id)));
-                }
+        self.locked(|| self.reclaim_unlocked(now))
+    }
+
+    /// F-222: [`Self::reclaim_and_min_pinned`] with the claim lock kept until
+    /// the guard drops, which the writer does once the superblock carrying
+    /// this floor is written. A claim then lands before this read (counted)
+    /// or after that superblock (the reader's re-read sees it and re-pins);
+    /// released in between, a claim could land unseen by both and the next
+    /// window reused its pages.
+    pub fn reclaim_and_hold(self: &Arc<Self>, now: u64) -> Result<(Option<u64>, ClaimGuard)> {
+        self.lock()?;
+        let guard = ClaimGuard(self.clone());
+        Ok((self.reclaim_unlocked(now)?, guard))
+    }
+
+    fn reclaim_unlocked(&self, now: u64) -> Result<Option<u64>> {
+        let mut min = None;
+        for slot in self.slots()? {
+            if slot.is_stale(now, self.interval_ms) {
+                self.write_slot(slot.index, 0, 0, 0)?;
+            } else if !slot.is_free() {
+                min = Some(min.map_or(slot.commit_id, |m: u64| m.min(slot.commit_id)));
             }
-            Ok(min)
-        })
+        }
+        Ok(min)
+    }
+}
+
+/// The claim lock, held until dropped.
+pub struct ClaimGuard(Arc<Sidecar>);
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        let _ = lock_byte(&self.0.file, CLAIM_LOCK_BYTE, false);
     }
 }
 

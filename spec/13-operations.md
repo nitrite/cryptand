@@ -367,6 +367,15 @@ re-reads the superblock after its claim lands and, if `commit_id` moved,
 re-pins to the new superblock before reading any page: the writer may have
 computed a floor between the reader's first read and the claim.
 
+That re-read is only half of the exclusion. The writer MUST hold the claim
+lock from the moment it reads the slots for rule 2 until the superblock
+carrying the resulting `min_retained_commit` is written. A claim then lands
+either before that read, and is counted, or after that superblock, where the
+reader's re-read sees it and re-pins. Were the lock released in between, a
+claim could land after the slots were read and be re-checked before the
+superblock appeared: the reader would keep a snapshot the new floor does not
+retain, and the writer's next commit would reuse its pages.
+
 1. A reader claims a slot with a compare-and-swap and publishes the
    `commit_id` it pinned, refreshing `heartbeat_ms` at least every
    `reader_heartbeat_ms` (default 2000). **A stale slot (rule 3) is a free slot

@@ -46,7 +46,7 @@ public final class LockSidecar implements AutoCloseable {
      * overlapping lock, and closing any channel on the file drops the
      * process's POSIX locks; both are serialized here.
      */
-    private static final Object JVM_LOCK = new Object();
+    private static final java.util.concurrent.locks.ReentrantLock JVM_LOCK = new java.util.concurrent.locks.ReentrantLock();
 
     /** Rule 4: which of the two ways a reader is volatile. */
     public enum Volatile { SIDECAR_READ_ONLY, SIDECAR_FULL }
@@ -291,7 +291,46 @@ public final class LockSidecar implements AutoCloseable {
 
     /** Rules 2 and 3 for the writer: reclaim stale slots, return the lowest live pin. */
     public OptionalLong reclaimAndMinPinned(long nowMs) {
-        return withLock(() -> {
+        try (Held h = reclaimAndHold(nowMs)) {
+            return h.pinned;
+        }
+    }
+
+    /** The claim lock and the floor read under it; closing releases the lock. */
+    public static final class Held implements AutoCloseable {
+        public final OptionalLong pinned;
+        private final FileLock lock;
+
+        private Held(OptionalLong pinned, FileLock lock) {
+            this.pinned = pinned;
+            this.lock = lock;
+        }
+
+        @Override
+        public void close() {
+            try {
+                lock.release();
+            } catch (IOException ignored) {
+                // The channel is gone, and the lock with it.
+            } finally {
+                JVM_LOCK.unlock();
+            }
+        }
+    }
+
+    /**
+     * F-222: {@link #reclaimAndMinPinned} with the claim lock kept until the
+     * result is closed, which the writer does once the superblock carrying
+     * this floor is written. A claim then lands before this read (counted) or
+     * after that superblock (the reader's re-read sees it and re-pins);
+     * released in between, a claim could land unseen by both and the next
+     * window reused its pages. Close on the calling thread.
+     */
+    public Held reclaimAndHold(long nowMs) {
+        JVM_LOCK.lock();
+        FileLock lock = null;
+        try {
+            lock = channel.lock(CLAIM_LOCK_BYTE, 1, false);
             long min = Long.MAX_VALUE;
             for (int i = 0; i < slotCount; i++) {
                 Slot s = slot(i);
@@ -301,8 +340,21 @@ public final class LockSidecar implements AutoCloseable {
                     min = Math.min(min, s.commitId());
                 }
             }
-            return min == Long.MAX_VALUE ? OptionalLong.empty() : OptionalLong.of(min);
-        });
+            return new Held(min == Long.MAX_VALUE ? OptionalLong.empty() : OptionalLong.of(min), lock);
+        } catch (IOException | RuntimeException x) {
+            try {
+                if (lock != null) {
+                    lock.release();
+                }
+            } catch (IOException ignored) {
+                // Reported below.
+            }
+            JVM_LOCK.unlock();
+            if (x instanceof IOException) {
+                throw new UncheckedIOException((IOException) x);
+            }
+            throw (RuntimeException) x;
+        }
     }
 
     public List<Slot> slots() {
@@ -354,23 +406,25 @@ public final class LockSidecar implements AutoCloseable {
     }
 
     private <T> T withLock(java.util.function.Supplier<T> body) {
-        synchronized (JVM_LOCK) {
-            try (FileLock lock = channel.lock(CLAIM_LOCK_BYTE, 1, false)) {
-                return body.get();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
+        JVM_LOCK.lock();
+        try (FileLock lock = channel.lock(CLAIM_LOCK_BYTE, 1, false)) {
+            return body.get();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        } finally {
+            JVM_LOCK.unlock();
         }
     }
 
     @Override
     public void close() {
-        synchronized (JVM_LOCK) {
-            try {
-                channel.close();
-            } catch (IOException ignored) {
-                // Nothing a caller can act on.
-            }
+        JVM_LOCK.lock();
+        try {
+            channel.close();
+        } catch (IOException ignored) {
+            // Nothing a caller can act on.
+        } finally {
+            JVM_LOCK.unlock();
         }
     }
 }

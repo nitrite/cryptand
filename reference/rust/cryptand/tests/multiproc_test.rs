@@ -259,6 +259,35 @@ fn f220_a_read_of_reused_pages_fails_loudly() {
         let _ = tx.send(v.scan_tree(TREE, None, None, None, true).map(|r| r.len()).map_err(|e| e.to_string()));
     });
     let r = rx.recv_timeout(std::time::Duration::from_secs(30)).expect("read of reused pages hung");
-    assert!(r.as_ref().is_err_and(|m| m.contains("reclaimed under")), "read of reused pages returned {r:?}");
+    // Rule 3 is as loud: on a slow host (Windows CI) the reader's own beat
+    // lands while the slot is released and reports the loss first.
+    assert!(
+        r.as_ref().is_err_and(|m| m.contains("reclaimed under") || m.contains("slot was reclaimed")),
+        "read of reused pages returned {r:?}"
+    );
+    e.close(true).unwrap();
+}
+
+/// F-222: the writer keeps the claim lock from its read of the slots until
+/// its superblock is written, so no claim lands unseen by both. One commit
+/// that misses a slot is enough: its floor frees the reader's pages to the
+/// next window (shown by releasing the slot for exactly one commit).
+#[test]
+fn f222_no_claim_lands_while_the_writer_holds_its_floor() {
+    let (t, mut e) = populated("mp-f222");
+    let sc = std::sync::Arc::new(Sidecar::open_reader(&t.path, DEFAULT_READER_HEARTBEAT_MS).unwrap().unwrap());
+    let (pinned, guard) = sc.reclaim_and_hold(cryptand::multiproc::now_ms()).unwrap();
+    assert_eq!(pinned, None);
+    let path = t.path.clone();
+    let open = std::thread::spawn(move || {
+        let r = Engine::open_read_only(&path, None).unwrap();
+        r.multiproc().unwrap().reader_mode()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!open.is_finished(), "a reader claimed a slot under the writer's floor computation");
+    drop(guard);
+    assert!(matches!(open.join().unwrap(), Some(ReaderMode::Slotted(_))));
+    e.commit(Durability::Sync).unwrap(); // the engine's own guard is released again
+    assert!(matches!(Engine::open_read_only(&t.path, None).unwrap().multiproc().unwrap().reader_mode(), Some(ReaderMode::Slotted(_))));
     e.close(true).unwrap();
 }

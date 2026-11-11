@@ -238,18 +238,42 @@ final class Sidecar {
 
   /// Rules 2 and 3 for the writer: reclaim stale slots, return the lowest
   /// commit a live slot pins, or `null`.
-  int? reclaimAndMinPinned(int now) => _locked(() {
-        int? min;
-        for (var i = 0; i < slotCount; i++) {
-          final s = slot(i);
-          if (s.isStale(now, intervalMs)) {
-            _writeSlot(i, 0, 0, 0);
-          } else if (!s.isFree && (min == null || s.commitId < min)) {
-            min = s.commitId;
-          }
-        }
-        return min;
-      });
+  int? reclaimAndMinPinned(int now) {
+    try {
+      return reclaimAndHold(now);
+    } finally {
+      releaseClaims();
+    }
+  }
+
+  /// F-222: [reclaimAndMinPinned] with the claim lock kept until
+  /// [releaseClaims], which the writer calls once the superblock carrying
+  /// this floor is written. A claim then lands before this read (counted) or
+  /// after that superblock (the reader's re-read sees it and re-pins);
+  /// released in between, a claim could land unseen by both and the next
+  /// window reused its pages.
+  int? reclaimAndHold(int now) {
+    _f.lockSync(FileLock.blockingExclusive, claimLockByte, claimLockByte + 1);
+    _held = true;
+    int? min;
+    for (var i = 0; i < slotCount; i++) {
+      final s = slot(i);
+      if (s.isStale(now, intervalMs)) {
+        _writeSlot(i, 0, 0, 0);
+      } else if (!s.isFree && (min == null || s.commitId < min)) {
+        min = s.commitId;
+      }
+    }
+    return min;
+  }
+
+  bool _held = false;
+
+  void releaseClaims() {
+    if (!_held) return;
+    _held = false;
+    _f.unlockSync(claimLockByte, claimLockByte + 1);
+  }
 
   void close() => _f.closeSync();
 }

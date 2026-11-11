@@ -1087,11 +1087,12 @@ impl Engine {
 
     /// §8 rules 2 and 3 at a commit: reclaim stale slots, refresh our own
     /// heartbeat, and return the lowest commit a live reader pins.
-    fn reader_pins(&mut self) -> Result<Option<u64>> {
-        let Some(multiproc::Attached::Writer { sidecar, .. }) = &self.mp else { return Ok(None) };
+    fn reader_pins(&mut self) -> Result<(Option<u64>, Option<multiproc::ClaimGuard>)> {
+        let Some(multiproc::Attached::Writer { sidecar, .. }) = &self.mp else { return Ok((None, None)) };
         let now = multiproc::now_ms();
         sidecar.refresh_writer(now)?;
-        sidecar.reclaim_and_min_pinned(now)
+        let (pinned, guard) = sidecar.reclaim_and_hold(now)?;
+        Ok((pinned, Some(guard)))
     }
 
     /// §8 for this handle's other processes: `None` when it has no sidecar.
@@ -3843,7 +3844,8 @@ impl Engine {
         self.flush_reserved()?;
         // Trees the commit itself edits, published as roots below.
         self.persist_freelist()?;
-        let pinned = self.reader_pins()?;
+        // F-222: no claim lands between this read and the superblock below.
+        let (pinned, _claims) = self.reader_pins()?;
         let durable = (self.sb.commit_id, self.sb.min_retained_commit, self.pager.min_retained_commit);
         let new_commit = self.sb.commit_id + 1;
         self.sb.commit_id = new_commit;

@@ -1476,7 +1476,9 @@ public final class Engine implements AutoCloseable {
         // retry skipped an id and, slots alternating by id, overwrote the last
         // durable superblock; and the raised retention floor let this
         // commit's frees be reused before any superblock dropped them.
-        OptionalLong pinned = readerPins();
+        // F-222: no claim lands between this read and the superblock below.
+        LockSidecar.Held claims = readerPins();
+        OptionalLong pinned = claims == null ? OptionalLong.empty() : claims.pinned;
         long durableCommit = sb.commitId;
         long durableMinRetained = sb.minRetainedCommit;
         try {
@@ -1522,6 +1524,10 @@ public final class Engine implements AutoCloseable {
             pager.setCommitId(durableCommit);
             pager.setMinRetainedCommit(durableMinRetained);
             throw x;
+        } finally {
+            if (claims != null) {
+                claims.close();
+            }
         }
         pager.publishFrees();
         // F-178: `published` was read at the start; under `os` the writer may
@@ -1749,13 +1755,13 @@ public final class Engine implements AutoCloseable {
     }
 
     /** Rules 2 and 3 at a commit: reclaim stale slots, refresh, lowest live pin. */
-    private OptionalLong readerPins() {
+    private LockSidecar.Held readerPins() {
         if (!sidecarWriter) {
-            return OptionalLong.empty();
+            return null;
         }
         long now = System.currentTimeMillis();
         sidecar.refreshWriter(now);
-        return sidecar.reclaimAndMinPinned(now);
+        return sidecar.reclaimAndHold(now);
     }
 
     private long minRetainedCommit() {

@@ -787,7 +787,7 @@ final class Engine {
     if (mp == null || !mp.writer) return;
     final now = wallMs();
     mp.sidecar!.refreshWriter(now);
-    _readerPin = mp.sidecar!.reclaimAndMinPinned(now);
+    _readerPin = mp.sidecar!.reclaimAndHold(now);
   }
 
   /// Before each read: rule 3, and rule 4's revalidation for a volatile
@@ -1302,19 +1302,24 @@ final class Engine {
     _barrier(durability);
 
     // F/G: publish. Everything at or below `sequenced` is now durable.
-    _refreshReaderPin();
-    commitId++;
-    visibleSeq = sequenced;
-    _refreshRetention(publishing: true);
+    // F-222: no claim lands between this read of the slots and the superblock.
     try {
-      publisher?.call(durability);
-    } catch (_) {
-      // F-095: not a commit. Left numbered, the retry skipped an id and, slots
-      // alternating by id, overwrote the last durable superblock; the raised
-      // floor let this commit's frees be reused early.
-      commitId--;
-      _refreshRetention();
-      rethrow;
+      _refreshReaderPin();
+      commitId++;
+      visibleSeq = sequenced;
+      _refreshRetention(publishing: true);
+      try {
+        publisher?.call(durability);
+      } catch (_) {
+        // F-095: not a commit. Left numbered, the retry skipped an id and, slots
+        // alternating by id, overwrote the last durable superblock; the raised
+        // floor let this commit's frees be reused early.
+        commitId--;
+        _refreshRetention();
+        rethrow;
+      }
+    } finally {
+      multiproc?.sidecar?.releaseClaims();
     }
     store.published();
     _refreshRetention();

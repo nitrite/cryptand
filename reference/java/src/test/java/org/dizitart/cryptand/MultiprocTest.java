@@ -193,14 +193,43 @@ class MultiprocTest {
             assertTrue(e.superblock().minRetainedCommit > pinned, "the writer must have reclaimed");
             LockSidecar.Slot back = sc.claim(pinned, System.currentTimeMillis());
             assertEquals(slot.index(), back.index());
-            CorruptionException x = assertThrows(CorruptionException.class, () -> {
+            // Rule 3 is as loud: on a slow host the reader's own beat lands
+            // while the slot is released and reports the loss first.
+            CryptandException x = assertThrows(CryptandException.class, () -> {
                 try (Engine.Cursor c = v.scan(TREE, null, null, false)) {
                     while (c.next()) {
                         // drain
                     }
                 }
             });
-            assertTrue(x.getMessage().contains("reclaimed under"), x.getMessage());
+            assertTrue(x.getMessage().contains("reclaimed under")
+                    || x.getMessage().contains("slot was reclaimed"), x.getMessage());
+        }
+    }
+
+    @Test
+    @DisplayName("F-222: no claim lands while the writer holds its floor")
+    void noClaimWhileFloorHeld(@TempDir Path dir) throws Exception {
+        Path db = dir.resolve("f222.cryptand");
+        Engine.Options ro = new Engine.Options();
+        ro.readOnly = true;
+        try (Engine e = populated(db);
+             LockSidecar sc = LockSidecar.openReader(db, LockSidecar.DEFAULT_HEARTBEAT_MS)) {
+            LockSidecar.Held held = sc.reclaimAndHold(System.currentTimeMillis());
+            java.util.concurrent.CompletableFuture<Boolean> open =
+                    java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                        try (Engine v = Engine.open(db, ro)) {
+                            return v.readerSlot() != null;
+                        }
+                    });
+            Thread.sleep(300);
+            assertFalse(open.isDone(), "a reader claimed a slot under the writer's floor computation");
+            held.close();
+            assertTrue(open.get(30, java.util.concurrent.TimeUnit.SECONDS));
+            e.commitNow(); // the engine's own hold is released again
+            try (Engine v = Engine.open(db, ro)) {
+                assertNotNull(v.readerSlot());
+            }
         }
     }
 

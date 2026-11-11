@@ -154,6 +154,41 @@ void main() {
     e.close();
   });
 
+  // F-222: the writer keeps the claim lock from its read of the slots until
+  // its superblock is written. Released in between, a claim landed unseen by
+  // that commit's floor and by the reader's re-read, and the next window
+  // reused the reader's pages.
+  test('F-222: no claim lands while the writer holds its floor', () async {
+    final path = db('f222');
+    final e = child.populated(path);
+    final sw = Stopwatch()..start();
+    final warm = await Reader.spawn(path);
+    await warm.line('mode=slotted');
+    final startup = sw.elapsed;
+    final sc = Sidecar.openReader(path, defaultReaderHeartbeatMs, (_) {})!;
+    sc.reclaimAndHold(DateTime.now().millisecondsSinceEpoch);
+    final r = await Reader.spawn(path);
+    try {
+      var claimed = false;
+      final mode = r.line('mode=').then((l) {
+        claimed = true;
+        return l;
+      });
+      await Future<void>.delayed(startup + const Duration(seconds: 2));
+      expect(claimed, isFalse,
+          reason: "a reader claimed a slot under the writer's floor computation");
+      sc.releaseClaims();
+      expect(await mode, startsWith('mode=slotted'));
+    } finally {
+      sc
+        ..releaseClaims()
+        ..close();
+      warm.kill();
+      r.kill();
+      e.close();
+    }
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
   test('a full sidecar opens volatile, says why, and revalidates', () {
     final path = db('full');
     final e = child.populated(path);
