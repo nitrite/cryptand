@@ -41,12 +41,17 @@ String get corpusFile {
 /// pass; anything else escaping is the failure this test exists to find.
 void exercise(String path) {
   final db = DatabaseFile.open(path);
-  db.engine.verifyStructure();
-  for (final (_, d) in db.catalog.all) {
-    final rows = db.engine.scanTree(d.treeId).take(8).toList();
-    for (final e in rows) {
-      db.engine.get(d.treeId, decodeKey(e.cke));
+  try {
+    db.engine.verifyStructure();
+    for (final (_, d) in db.catalog.all) {
+      final rows = db.engine.scanTree(d.treeId).take(8).toList();
+      for (final e in rows) {
+        db.engine.get(d.treeId, decodeKey(e.cke));
+      }
     }
+  } finally {
+    // Windows cannot delete or replace a file that is still open.
+    db.engine.close(flushMemtable: false);
   }
 }
 
