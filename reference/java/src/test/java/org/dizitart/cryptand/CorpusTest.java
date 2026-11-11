@@ -121,7 +121,8 @@ class CorpusTest {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         try (var files = Files.list(dir)) {
             for (Path p : files.collect(java.util.stream.Collectors.toList())) {
-                if (!Files.isRegularFile(p)) {
+                // A `-lock` sidecar is a reader slot, not corpus (00 §2, 13 §8).
+                if (!Files.isRegularFile(p) || p.toString().endsWith("-lock")) {
                     continue;
                 }
                 md.reset();

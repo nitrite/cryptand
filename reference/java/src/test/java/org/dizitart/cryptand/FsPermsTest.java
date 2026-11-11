@@ -15,6 +15,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** PLAN 4.7: created files are owner-only; the lock sidecar never follows a symlink. */
@@ -38,7 +39,7 @@ class FsPermsTest {
         Engine.create(db, options()).close();
         assertEquals("rw-------", mode(db));
 
-        LockSidecar.of(db).close();
+        // Engine.create made the sidecar (13 §8).
         assertEquals("rw-------", mode(db.resolveSibling("p.cryptand-lock")));
 
         // Files.copy keeps the source's mode; restore must not.
@@ -54,7 +55,8 @@ class FsPermsTest {
         Files.write(victim, new byte[] {'k'});
         Path db = dir.resolve("l.cryptand");
         Files.createSymbolicLink(db.resolveSibling("l.cryptand-lock"), victim);
-        assertThrows(java.io.UncheckedIOException.class, () -> LockSidecar.of(db));
+        assertThrows(java.io.UncheckedIOException.class, () -> LockSidecar.openWriter(db, 2000));
+        assertNull(LockSidecar.openReader(db, 2000));
         assertArrayEquals(new byte[] {'k'}, Files.readAllBytes(victim));
     }
 }

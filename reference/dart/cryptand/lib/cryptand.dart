@@ -86,6 +86,8 @@ export 'src/txn.dart'
         TxnWrite;
 export 'src/manifest.dart' show Manifest, SegmentRef, manifestKey;
 export 'src/metrics.dart' show EngineMetrics, Metrics;
+export 'src/multiproc.dart'
+    show Multiproc, Sidecar, SidecarSlot, VolatileReason, defaultReaderHeartbeatMs, sidecarPath, staleMultiplier;
 export 'src/errors.dart';
 export 'src/index.dart'
     show

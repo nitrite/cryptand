@@ -350,6 +350,23 @@ header:  u32 magic, u32 slot_count, u64 writer_pid, u64 writer_heartbeat_ms
 slots:   slot_count × { u64 pid, u64 commit_id, u64 heartbeat_ms }
 ```
 
+`magic` is `0x314B4C43` (bytes `43 4C 4B 31`, `"CLK1"`); every field is
+little-endian (`00-conventions.md` §3); a free slot is all zero. Every
+read-modify-write of a slot — claim, heartbeat, release, reclaim — runs under
+an **exclusive advisory lock on the one byte at offset 2^40** of the sidecar
+(POSIX `fcntl` record lock, Windows `LockFileEx`), past the end of the file so
+that on Windows it never blocks a plain read of the slots. That lock is the
+compare-and-swap of rule 1; implementations in different languages interoperate
+only because they take the same one. A slot belongs to a reader only while both
+its `pid` and its `commit_id` are the ones that reader wrote.
+
+The writer opens an existing sidecar with a valid header without disturbing its
+slots, and creates it (exclusively) when it is absent or invalid. A reader that
+finds no sidecar creates it the same way, with `writer_pid` 0. A reader
+re-reads the superblock after its claim lands and, if `commit_id` moved,
+re-pins to the new superblock before reading any page: the writer may have
+computed a floor between the reader's first read and the claim.
+
 1. A reader claims a slot with a compare-and-swap and publishes the
    `commit_id` it pinned, refreshing `heartbeat_ms` at least every
    `reader_heartbeat_ms` (default 2000). **A stale slot (rule 3) is a free slot

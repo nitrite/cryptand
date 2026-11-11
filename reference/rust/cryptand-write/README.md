@@ -24,7 +24,6 @@ cargo run --release --bin p3_bottleneck            # where scaling actually stop
 | `vlog` | `04-segments.md` §6.2 — a value-log segment and the **reserve-then-`pwrite`** protocol §2.2 requires |
 | `prefix` | the contiguous-prefix watermark that both `visible_seq` and a segment's `bytes` are |
 | `nonce` | `14-security.md` §4.1 — the publish-before-allocate reservation watermark |
-| `multiproc` | `13-operations.md` §8 — the `<name>.cryptand-lock` sidecar: slot claiming, heartbeats, reclamation, and the retention floor a reader pins |
 
 The byte encodings come from `cryptand-conformance`, so the two crates cannot
 drift apart on the format itself.
@@ -93,18 +92,5 @@ buffered writes, whatever the file layout.
 
 ## Multi-process readers
 
-`src/bin/mp_reader.rs` is a reading **process**; `tests/multiproc.rs` spawns
-several of them, because a protocol whose whole subject is coordination between
-processes cannot be tested any other way. Three readers claim distinct slots and
-move the writer's `min_retained_commit` to the oldest commit any of them pinned;
-one stops beating and is reclaimed; twelve racing processes produce twelve
-distinct slots.
-
-The claim's "compare-and-swap" is an exclusive advisory lock around a
-read-scan-write of the sidecar — a plain file has no cross-process atomic word.
-It is taken once per reader open and never on the heartbeat path.
-
-Three gaps found, in `design/tradeoff-analysis.md` §8.15; the one that matters
-is that the sidecar header declared `writer_pid` and `writer_heartbeat_ms` and
-no rule read them, which left an abandoned database silently degrading every
-reader that opened it.
+Moved into the engine (F-219): `cryptand/src/multiproc.rs`, tested across
+processes by `cryptand/tests/multiproc_test.rs`.

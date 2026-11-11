@@ -829,7 +829,8 @@ fn corpus_digests(dir: &std::path::Path) -> std::collections::BTreeMap<String, u
     let mut out = std::collections::BTreeMap::new();
     for entry in std::fs::read_dir(dir).expect("reading the corpus directory") {
         let p = entry.expect("a corpus entry").path();
-        if !p.is_file() {
+        // A `-lock` sidecar is a reader's slot, not corpus (00 §2, 13 §8).
+        if !p.is_file() || p.to_string_lossy().ends_with("-lock") {
             continue;
         }
         let b = std::fs::read(&p).expect("reading a corpus file");

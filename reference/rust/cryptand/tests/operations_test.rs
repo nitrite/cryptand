@@ -11,7 +11,7 @@ use cryptand::checkpoint::Checkpoints;
 use cryptand::container::{Durability, Profile};
 use cryptand::engine::Engine;
 use cryptand::metrics::{Metric, Metrics};
-use cryptand::multiproc::{attach, ReaderMode, Sidecar, VolatileReason};
+use cryptand::multiproc::Sidecar;
 use cryptand::repair::EngineRepair;
 use cryptand::spaceapi::{SpaceApi, Step};
 use cryptand::txn::{bounds_of, Backpressure, Bound, Isolation, Transaction, MAX_DELAY_MS};
@@ -404,20 +404,16 @@ fn a_stale_slot_is_a_free_slot_to_a_claimer() {
     // opens every subsequent reader falls to volatile mode, for a reason it
     // cannot see, against a database where volatile mode is not even necessary.
     let t = TempDb::new("sidecar");
-    let path = cryptand::multiproc::sidecar_path(&t.path);
-    let side = Sidecar::create(&path, 2, 2000).unwrap();
-    assert!(matches!(attach(&side, 10, 1_000_000).unwrap(), ReaderMode::Slotted(_)));
-    assert!(matches!(attach(&side, 11, 1_000_000).unwrap(), ReaderMode::Slotted(_)));
-    // Both slots held by live readers: §8 rule 4 requires the implementation to
-    // report **which** of its two causes it hit.
-    match attach(&side, 12, 1_000_000).unwrap() {
-        ReaderMode::Volatile(VolatileReason::SidecarFull) => {}
-        other => panic!("expected SidecarFull, got {other:?}"),
+    let side = Sidecar::open_writer(&t.path, 2000).unwrap();
+    for c in 0..side.slot_count() as u64 {
+        assert!(side.claim(c, 1_000_000).unwrap().is_some());
     }
-    // Time passes; both heartbeats go stale, so a *claimer* recycles one —
+    // Every slot held by a live reader (the engine reports SidecarFull).
+    assert!(side.claim(99, 1_000_000).unwrap().is_none());
+    // Time passes; the heartbeats go stale, so a *claimer* recycles one —
     // which is rule 1's clause, and the fix for the accumulation above.
     let later = 1_000_000 + 10 * 2000;
-    assert!(matches!(attach(&side, 13, later).unwrap(), ReaderMode::Slotted(_)));
+    assert!(side.claim(100, later).unwrap().is_some());
 }
 
 #[test]
@@ -426,8 +422,7 @@ fn a_dead_writer_is_visible_to_a_reader() {
     // heartbeat older than `3 x reader_heartbeat_ms`, as **no live writer**:
     // nothing will reclaim extents, so its own pin protects nothing.
     let t = TempDb::new("nowriter");
-    let path = cryptand::multiproc::sidecar_path(&t.path);
-    let side = Sidecar::create(&path, 4, 2000).unwrap();
+    let side = Sidecar::open_writer(&t.path, 2000).unwrap();
     let now = cryptand::multiproc::now_ms();
     assert!(side.writer_alive(now).unwrap(), "create publishes the writer's own identity");
     assert!(!side.writer_alive(now + 10_000).unwrap(), "a stale heartbeat is no live writer");
@@ -440,15 +435,16 @@ fn a_reader_slot_pins_min_retained_commit() {
     // §8 rule 2 — the writer computes `min_retained_commit` as the minimum over
     // its own snapshots **and** every live slot; a stale slot does not pin.
     let t = TempDb::new("pin");
-    let path = cryptand::multiproc::sidecar_path(&t.path);
-    let side = Sidecar::create(&path, 4, 2000).unwrap();
+    let side = Sidecar::open_writer(&t.path, 2000).unwrap();
     let now = 5_000_000u64;
     let slot = side.claim(42, now).unwrap().unwrap();
-    assert_eq!(side.min_retained_commit(100, now).unwrap(), 42);
-    let stale = now + 10 * 2000;
-    assert_eq!(side.min_retained_commit(100, stale).unwrap(), 100, "a stale slot does not pin");
+    assert_eq!(side.reclaim_and_min_pinned(now).unwrap(), Some(42));
     side.release(&slot).unwrap();
-    assert_eq!(side.min_retained_commit(100, now).unwrap(), 100);
+    assert_eq!(side.reclaim_and_min_pinned(now).unwrap(), None);
+    side.claim(42, now).unwrap().unwrap();
+    let stale = now + 10 * 2000;
+    assert_eq!(side.reclaim_and_min_pinned(stale).unwrap(), None, "a stale slot does not pin");
+    assert!(side.slots().unwrap().iter().all(|s| s.is_free()), "and is reclaimed");
 }
 
 // ---------------------------------------------------------------------------

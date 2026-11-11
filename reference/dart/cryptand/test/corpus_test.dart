@@ -213,7 +213,10 @@ void main() {
       Map<String, int> snapshot() {
         final out = <String, int>{};
         for (final e in dir.listSync()) {
-          if (e is File) out[e.uri.pathSegments.last] = digestOf(e);
+          // A `-lock` sidecar is a reader slot, not corpus (00 §2, 13 §8).
+          if (e is File && !e.path.endsWith('-lock')) {
+            out[e.uri.pathSegments.last] = digestOf(e);
+          }
         }
         return out;
       }

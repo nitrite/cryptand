@@ -8,48 +8,48 @@ import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalLong;
+import java.util.Set;
 
 /**
  * The multi-process reader sidecar — {@code spec/13-operations.md} §8, feature
- * bit {@code MULTIPROC_READ}.
- *
- * <p>One writing process, any number of reading processes. Immutability makes
- * reading from another process nearly free: every extent a reader holds is one
- * nothing will modify. The only coordination needed is retention.
+ * bit {@code MULTIPROC_READ}. One writing process, any number of reading
+ * processes; the only coordination is retention.
  *
  * <pre>
  *   header:  u32 magic, u32 slot_count, u64 writer_pid, u64 writer_heartbeat_ms
  *   slots:   slot_count × { u64 pid, u64 commit_id, u64 heartbeat_ms }
  * </pre>
  *
- * <p><strong>A stale slot is a free slot to a claimer</strong>, and that clause
- * is normative rather than an optimization. When the writing process dies — or
- * was never there, as for two inspection sessions against a file no application
- * has open — nothing reclaims stale slots. They accumulate, and after
- * {@code slot_count} opens every subsequent reader falls to volatile mode, for
- * a reason it cannot see, against a database where volatile mode is not even
- * necessary.
+ * <p>Every slot read-modify-write holds an exclusive lock on the byte at
+ * {@link #CLAIM_LOCK_BYTE}: the same byte Rust and Dart lock, which is what
+ * makes the claim a cross-language compare-and-swap. A slot belongs to a reader
+ * only while both its pid and its commit id are the ones it wrote.
  */
 public final class LockSidecar implements AutoCloseable {
-
-    public static final int MAGIC = 0x43524C4B;
+    /** {@code "CLK1"} little-endian. */
+    public static final int MAGIC = 0x314B4C43;
     public static final int HEADER_BYTES = 24;
     public static final int SLOT_BYTES = 24;
-    public static final int DEFAULT_SLOTS = 16;
+    public static final int DEFAULT_SLOTS = 64;
     public static final long DEFAULT_HEARTBEAT_MS = 2000;
+    public static final long STALE_MULTIPLIER = 3;
+    public static final long CLAIM_LOCK_BYTE = 1L << 40;
 
-    /** Why a reader could not claim a slot. §8 rule 4 requires saying which. */
-    public enum Volatile {
-        NOT_VOLATILE,
-        /** The sidecar cannot be written — a read-only filesystem. */
-        SIDECAR_UNWRITABLE,
-        /** Every slot is held by a live reader. */
-        NO_FREE_SLOT
-    }
+    /**
+     * {@code FileChannel.lock} throws when this JVM already holds an
+     * overlapping lock, and closing any channel on the file drops the
+     * process's POSIX locks; both are serialized here.
+     */
+    private static final Object JVM_LOCK = new Object();
+
+    /** Rule 4: which of the two ways a reader is volatile. */
+    public enum Volatile { SIDECAR_READ_ONLY, SIDECAR_FULL }
 
     public static final class Slot {
         private final int index;
@@ -80,155 +80,229 @@ public final class LockSidecar implements AutoCloseable {
             return heartbeatMs;
         }
 
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) {
-                return true;
-            }
-            if (!(o instanceof Slot)) {
-                return false;
-            }
-            Slot that = (Slot) o;
-            return index == that.index
-                    && pid == that.pid
-                    && commitId == that.commitId
-                    && heartbeatMs == that.heartbeatMs;
+        public boolean isFree() {
+            return pid == 0;
         }
 
-        @Override
-        public int hashCode() {
-            return java.util.Objects.hash(index, pid, commitId, heartbeatMs);
+        public boolean isStale(long nowMs, long intervalMs) {
+            return !isFree() && nowMs - heartbeatMs > STALE_MULTIPLIER * intervalMs;
         }
 
         @Override
         public String toString() {
-            return "Slot[" + "index=" + index + ", " + "pid=" + pid + ", " + "commitId=" + commitId + ", " + "heartbeatMs=" + heartbeatMs + "]";
+            return "Slot{index=" + index + ", pid=" + pid + ", commitId=" + commitId + "}";
         }
     }
 
     private final Path path;
     private final FileChannel channel;
-    private final int slotCount;
-    private final long heartbeatMs;
-    private int mySlot = -1;
-    private Volatile volatileReason = Volatile.NOT_VOLATILE;
+    private final long intervalMs;
+    private final boolean readOnly;
+    private int slotCount;
 
-    public LockSidecar(Path databasePath, int slotCount, long heartbeatMs) {
-        this.path = databasePath.resolveSibling(databasePath.getFileName() + "-lock");
-        this.slotCount = slotCount;
-        this.heartbeatMs = heartbeatMs;
+    private LockSidecar(Path path, FileChannel channel, long intervalMs, boolean readOnly) {
+        this.path = path;
+        this.channel = channel;
+        this.intervalMs = intervalMs;
+        this.readOnly = readOnly;
+    }
+
+    public static Path pathFor(Path database) {
+        return database.resolveSibling(database.getFileName() + "-lock");
+    }
+
+    public static long pid() {
+        return ProcessHandle.current().pid();
+    }
+
+    /** The writer: keep live readers' slots, (re)create when absent or invalid, publish the pid. */
+    public static LockSidecar openWriter(Path database, long intervalMs) {
+        LockSidecar s = openRw(database, intervalMs, pid());
+        s.withLock(() -> {
+            s.write(8, new ByteWriter(16).u64(pid()).u64(System.currentTimeMillis()).toBytes());
+            return null;
+        });
+        return s;
+    }
+
+    /**
+     * A reader: read-write, creating it with {@code writer_pid} 0 when absent;
+     * read-only when it cannot be written; {@code null} when it cannot be read.
+     */
+    public static LockSidecar openReader(Path database, long intervalMs) {
         try {
-            // PLAN 4.7: the sidecar path is predictable; never follow a planted symlink.
-            this.channel = FileChannel.open(this.path, java.util.Set.of(StandardOpenOption.CREATE,
-                    StandardOpenOption.READ, StandardOpenOption.WRITE, java.nio.file.LinkOption.NOFOLLOW_LINKS),
-                    PageFile.ownerOnly(this.path));
-            if (channel.size() < HEADER_BYTES + (long) slotCount * SLOT_BYTES) {
-                initialize();
+            return openRw(database, intervalMs, 0);
+        } catch (UncheckedIOException e) {
+            try {
+                FileChannel ch = FileChannel.open(pathFor(database), Set.of(StandardOpenOption.READ,
+                        LinkOption.NOFOLLOW_LINKS));
+                LockSidecar s = new LockSidecar(pathFor(database), ch, intervalMs, true);
+                int n = s.readHeader();
+                if (n <= 0) {
+                    s.close();
+                    return null;
+                }
+                s.slotCount = n;
+                return s;
+            } catch (IOException | UncheckedIOException x) {
+                return null;
             }
-        } catch (IOException e) {
-            throw new UncheckedIOException("cannot open the lock sidecar " + this.path, e);
         }
     }
 
-    public static LockSidecar of(Path databasePath) {
-        return new LockSidecar(databasePath, DEFAULT_SLOTS, DEFAULT_HEARTBEAT_MS);
+    private static LockSidecar openRw(Path database, long intervalMs, long writerPid) {
+        Path p = pathFor(database);
+        FileChannel ch;
+        try {
+            // PLAN 4.7: the sidecar path is predictable; never follow a planted symlink.
+            ch = FileChannel.open(p, Set.of(StandardOpenOption.CREATE, StandardOpenOption.READ,
+                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS), PageFile.ownerOnly(p));
+        } catch (IOException e) {
+            throw new UncheckedIOException("cannot open the lock sidecar " + p, e);
+        }
+        LockSidecar s = new LockSidecar(p, ch, intervalMs, false);
+        try {
+            s.slotCount = s.withLock(() -> {
+                int n = s.readHeader();
+                if (n > 0) {
+                    return n;
+                }
+                byte[] image = new byte[HEADER_BYTES + DEFAULT_SLOTS * SLOT_BYTES];
+                System.arraycopy(new ByteWriter(HEADER_BYTES).u32(MAGIC).u32(DEFAULT_SLOTS)
+                        .u64(writerPid).u64(System.currentTimeMillis()).toBytes(), 0, image, 0, HEADER_BYTES);
+                try {
+                    s.channel.truncate(0);
+                    s.write(0, image);
+                    s.channel.force(false);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+                return DEFAULT_SLOTS;
+            });
+        } catch (RuntimeException e) {
+            s.close();
+            throw e;
+        }
+        return s;
+    }
+
+    /** The slot count of a valid header whose slots are all present, else 0. */
+    private int readHeader() {
+        try {
+            if (channel.size() < HEADER_BYTES) {
+                return 0;
+            }
+            ByteReader r = new ByteReader(read(0, HEADER_BYTES));
+            int magic = (int) r.u32();
+            int n = (int) r.u32();
+            boolean ok = magic == MAGIC && n > 0 && channel.size() >= HEADER_BYTES + (long) n * SLOT_BYTES;
+            return ok ? n : 0;
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     public Path path() {
         return path;
     }
 
-    public Volatile volatileReason() {
-        return volatileReason;
+    public boolean readOnly() {
+        return readOnly;
     }
 
-    private void initialize() {
-        byte[] image = new byte[HEADER_BYTES + slotCount * SLOT_BYTES];
-        ByteWriter w = new ByteWriter(HEADER_BYTES);
-        w.u32(MAGIC).u32(slotCount).u64(0).u64(0);
-        System.arraycopy(w.toBytes(), 0, image, 0, HEADER_BYTES);
-        write(0, image);
+    public int slotCount() {
+        return slotCount;
     }
 
-    /** The writing process publishes its pid and refreshes its heartbeat here. */
-    public void claimWriter(long pid, long nowMs) {
-        withLock(() -> {
-            ByteWriter w = new ByteWriter(HEADER_BYTES);
-            w.u32(MAGIC).u32(slotCount).u64(pid).u64(nowMs);
-            write(0, w.toBytes());
-            return null;
-        });
+    public long writerPid() {
+        return new ByteReader(read(8, 8)).u64();
     }
 
-    /**
-     * Rule 5: a {@code writer_pid} of 0, or a heartbeat older than
-     * {@code 3 × reader_heartbeat_ms}, means <strong>no live writer</strong> —
-     * nothing will reclaim extents, so a reader's own pin protects nothing, and
-     * an implementation should say so.
-     */
-    public boolean writerIsLive(long nowMs) {
-        byte[] header = read(0, HEADER_BYTES);
-        ByteReader r = new ByteReader(header);
-        r.u32();
-        r.u32();
-        long pid = r.u64();
+    /** Rule 5: the writer refreshes on the schedule it asks of readers. */
+    public void refreshWriter(long nowMs) {
+        write(16, new ByteWriter(8).u64(nowMs).toBytes());
+    }
+
+    /** Writer close: {@code writer_pid} 0 is "no live writer". */
+    public void clearWriter() {
+        write(8, new ByteWriter(8).u64(0).toBytes());
+    }
+
+    /** Rule 5: pid 0 or an aged writer heartbeat is no live writer. */
+    public boolean writerAlive(long nowMs) {
+        ByteReader r = new ByteReader(read(8, 16));
+        long wpid = r.u64();
         long beat = r.u64();
-        return pid != 0 && nowMs - beat <= 3 * heartbeatMs;
+        return wpid != 0 && nowMs - beat <= STALE_MULTIPLIER * intervalMs;
     }
 
-    /**
-     * Claims a slot, recycling a stale one. Returns the slot index, or
-     * {@code -1} for volatile mode with {@link #volatileReason} set.
-     */
-    public int claimReader(long pid, long commitId, long nowMs) {
+    /** Rule 1: claim a free or stale slot; {@code null} when none is (or read-only). */
+    public Slot claim(long commitId, long nowMs) {
+        if (readOnly) {
+            return null;
+        }
         return withLock(() -> {
             for (int i = 0; i < slotCount; i++) {
                 Slot s = slot(i);
-                boolean freeSlot = s.pid() == 0;
-                boolean stale = !freeSlot && nowMs - s.heartbeatMs() > 3 * heartbeatMs;
-                if (freeSlot || stale) {
-                    writeSlot(i, pid, commitId, nowMs);
-                    mySlot = i;
-                    volatileReason = Volatile.NOT_VOLATILE;
-                    return i;
+                if (s.isFree() || s.isStale(nowMs, intervalMs)) {
+                    writeSlot(i, pid(), commitId, nowMs);
+                    return new Slot(i, pid(), commitId, nowMs);
                 }
             }
-            volatileReason = Volatile.NO_FREE_SLOT;
-            return -1;
-        });
-    }
-
-    public void heartbeat(long commitId, long nowMs) {
-        if (mySlot < 0) {
-            return;
-        }
-        withLock(() -> {
-            writeSlot(mySlot, slot(mySlot).pid(), commitId, nowMs);
             return null;
         });
     }
 
-    /**
-     * Rule 3: a reader whose slot was reclaimed MUST detect it — its own pid is
-     * no longer there — and MUST reopen rather than continue against
-     * possibly-freed extents.
-     */
-    public boolean stillHoldsSlot(long pid) {
-        return mySlot >= 0 && slot(mySlot).pid() == pid;
+    private boolean owns(Slot s) {
+        Slot cur = slot(s.index());
+        return cur.pid() == s.pid() && cur.commitId() == s.commitId();
     }
 
-    /** Rule 2: the writer's retention floor is the minimum over every live slot. */
-    public long minPinnedCommit(long nowMs, long fallback) {
-        long min = fallback;
-        for (int i = 0; i < slotCount; i++) {
-            Slot s = slot(i);
-            if (s.pid() == 0 || nowMs - s.heartbeatMs() > 3 * heartbeatMs) {
-                // A stale slot does not pin.
-                continue;
+    /** Moves a held slot to a newer superblock; {@code null} if it was reclaimed. */
+    public Slot repin(Slot s, long commitId, long nowMs) {
+        return withLock(() -> {
+            if (!owns(s)) {
+                return null;
             }
-            min = Math.min(min, s.commitId());
-        }
-        return min;
+            writeSlot(s.index(), s.pid(), commitId, nowMs);
+            return new Slot(s.index(), s.pid(), commitId, nowMs);
+        });
+    }
+
+    /** Rule 1's refresh, rule 3's detection: {@code false} means reclaimed, reopen. */
+    public boolean heartbeat(Slot s, long nowMs) {
+        return withLock(() -> {
+            if (!owns(s)) {
+                return false;
+            }
+            writeSlot(s.index(), s.pid(), s.commitId(), nowMs);
+            return true;
+        });
+    }
+
+    public void release(Slot s) {
+        withLock(() -> {
+            if (owns(s)) {
+                writeSlot(s.index(), 0, 0, 0);
+            }
+            return null;
+        });
+    }
+
+    /** Rules 2 and 3 for the writer: reclaim stale slots, return the lowest live pin. */
+    public OptionalLong reclaimAndMinPinned(long nowMs) {
+        return withLock(() -> {
+            long min = Long.MAX_VALUE;
+            for (int i = 0; i < slotCount; i++) {
+                Slot s = slot(i);
+                if (s.isStale(nowMs, intervalMs)) {
+                    writeSlot(i, 0, 0, 0);
+                } else if (!s.isFree()) {
+                    min = Math.min(min, s.commitId());
+                }
+            }
+            return min == Long.MAX_VALUE ? OptionalLong.empty() : OptionalLong.of(min);
+        });
     }
 
     public List<Slot> slots() {
@@ -239,22 +313,8 @@ public final class LockSidecar implements AutoCloseable {
         return out;
     }
 
-    public void release(long pid) {
-        if (mySlot < 0) {
-            return;
-        }
-        withLock(() -> {
-            if (slot(mySlot).pid() == pid) {
-                writeSlot(mySlot, 0, 0, 0);
-            }
-            mySlot = -1;
-            return null;
-        });
-    }
-
     private Slot slot(int index) {
-        byte[] b = read(HEADER_BYTES + (long) index * SLOT_BYTES, SLOT_BYTES);
-        ByteReader r = new ByteReader(b);
+        ByteReader r = new ByteReader(read(HEADER_BYTES + (long) index * SLOT_BYTES, SLOT_BYTES));
         return new Slot(index, r.u64(), r.u64(), r.u64());
     }
 
@@ -271,7 +331,7 @@ public final class LockSidecar implements AutoCloseable {
             while (buf.hasRemaining()) {
                 int n = channel.read(buf, pos);
                 if (n < 0) {
-                    break;
+                    throw new IOException("lock sidecar truncated at " + pos);
                 }
                 pos += n;
             }
@@ -294,20 +354,23 @@ public final class LockSidecar implements AutoCloseable {
     }
 
     private <T> T withLock(java.util.function.Supplier<T> body) {
-        try (FileLock lock = channel.lock()) {
-            return body.get();
-        } catch (IOException e) {
-            volatileReason = Volatile.SIDECAR_UNWRITABLE;
-            throw new UncheckedIOException(e);
+        synchronized (JVM_LOCK) {
+            try (FileLock lock = channel.lock(CLAIM_LOCK_BYTE, 1, false)) {
+                return body.get();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
         }
     }
 
     @Override
     public void close() {
-        try {
-            channel.close();
-        } catch (IOException ignored) {
-            // Nothing a caller can act on.
+        synchronized (JVM_LOCK) {
+            try {
+                channel.close();
+            } catch (IOException ignored) {
+                // Nothing a caller can act on.
+            }
         }
     }
 }

@@ -36,6 +36,7 @@ import 'cve.dart';
 import 'database.dart';
 import 'engine.dart';
 import 'manifest.dart' show SegmentRef;
+import 'multiproc.dart';
 import 'errors.dart';
 import 'profile.dart';
 import 'rtree.dart' show RTreeNode;
@@ -415,7 +416,49 @@ abstract final class DatabaseFile {
               (floor) => _publishNonceFloor(raf, e.superblock!, ring, floor)));
     final db = Database(engine: e);
     e.publisher = (_) => _publishInPlace(db);
+    _attachWriter(e, path);
     return db;
+  }
+
+  /// 13 §8 for the writer: publish this process in the sidecar and heartbeat
+  /// it. A sidecar that cannot be opened leaves readers volatile (they say
+  /// why) and `MULTIPROC_READ` unset: no coordination claimed that was not had.
+  static void _attachWriter(Engine e, String path) {
+    try {
+      e.multiproc = Multiproc.writer(
+          Sidecar.openWriter(path, defaultReaderHeartbeatMs, _chmodOwnerOnly));
+      e.featuresOptional |= 1 << Feature.multiprocRead;
+    } on FileSystemException {
+      // no coordination
+    }
+  }
+
+  /// 13 §8, a read-only open: claim a slot for the current superblock, then
+  /// re-read it and re-pin until the claim covers the current one (the writer
+  /// may have computed a floor between the read and the claim). No slot is
+  /// volatile mode, with its reason.
+  static (Multiproc, Superblock) _attachReader(RandomAccessFile raf, String path) {
+    var sb = _readSuperblock(raf);
+    final sc = Sidecar.openReader(path, defaultReaderHeartbeatMs, _chmodOwnerOnly);
+    if (sc == null) {
+      return (Multiproc.reader(null, null, VolatileReason.sidecarReadOnly), sb);
+    }
+    var slot = sc.claim(sb.commitId, wallMs());
+    if (slot == null) {
+      final why = sc.readOnly ? VolatileReason.sidecarReadOnly : VolatileReason.sidecarFull;
+      return (Multiproc.reader(sc, null, why), sb);
+    }
+    while (true) {
+      final cur = _readSuperblock(raf);
+      if (cur.commitId == slot!.commitId) {
+        return (Multiproc.reader(sc, slot, null), cur);
+      }
+      slot = sc.repin(slot, cur.commitId, wallMs());
+      if (slot == null) {
+        sc.close();
+        throw const LockedException('reader slot reclaimed during open (13 §8 rule 3)');
+      }
+    }
   }
 
   /// Reads a file back into an engine.
@@ -762,22 +805,35 @@ abstract final class DatabaseFile {
     // M5: the store reads pages from the file on demand; only the superblock
     // region (slot B is at most 64 KiB in) is read up front.
     final raf = File(path).openSync(mode: readOnly ? FileMode.read : FileMode.append);
+    Multiproc? mp;
     try {
       if (!readOnly) _takeWriterLock(raf, path);
-      final db = _openOn(raf, path, key, readOnly: readOnly);
+      // 13 §8: a reader pins its superblock before it reads a page of it.
+      Superblock? pinned;
+      if (readOnly) (mp, pinned) = _attachReader(raf, path);
+      final db = _openOn(raf, path, key, readOnly: readOnly, pinned: pinned);
+      if (mp != null) {
+        db.engine
+          ..multiproc = mp
+          ..currentFloor = () => _readSuperblock(raf).minRetainedCommit;
+      } else if (!readOnly) {
+        _attachWriter(db.engine, path);
+      }
       return db
         ..engine.onClose = () {
           db.engine.store.file = null;
           _close(raf);
         };
     } catch (_) {
+      mp?.detach();
       _close(raf);
       rethrow;
     }
   }
 
-  static Database _openOn(RandomAccessFile raf, String path, List<int>? key,
-      {required bool readOnly}) {
+  /// `01-container.md` §2.1 steps 1-3: the valid slot with the greater
+  /// `commit_id`.
+  static Superblock _readSuperblock(RandomAccessFile raf) {
     final fileLen = raf.lengthSync();
     final head = (1 << 16) + Sb.size;
     raf.setPositionSync(0);
@@ -812,10 +868,16 @@ abstract final class DatabaseFile {
     if (fileLen < 2 * pageSize) {
       throw const CorruptionException('file is shorter than its two slots');
     }
-    final sb = Superblock.open(
+    return Superblock.open(
       Uint8List.sublistView(bytes, 0, Sb.size),
       Uint8List.sublistView(bytes, pageSize, pageSize + Sb.size),
     );
+  }
+
+  static Database _openOn(RandomAccessFile raf, String path, List<int>? key,
+      {required bool readOnly, Superblock? pinned}) {
+    final fileLen = raf.lengthSync();
+    final sb = pinned ?? _readSuperblock(raf);
     // §3 of `spec/11-conformance.md`: an unknown bit in `features_required`
     // is a refusal, named.
     for (var b = 0; b < 64; b++) {
@@ -1114,17 +1176,20 @@ bool _samePath(String a, String b) {
 /// FFI, before any byte is written. No-op on Windows.
 void _writeOwnerOnly(String path, Uint8List bytes) {
   final f = File(path)..createSync();
-  if (!Platform.isWindows) {
-    final p = path.toNativeUtf8z();
-    try {
-      if (_chmod(p, 384 /* 0600 */) != 0) {
-        throw FileSystemException('chmod 0600 failed', path);
-      }
-    } finally {
-      _free(p);
-    }
-  }
+  _chmodOwnerOnly(path);
   f.writeAsBytesSync(bytes, flush: true);
+}
+
+void _chmodOwnerOnly(String path) {
+  if (Platform.isWindows) return;
+  final p = path.toNativeUtf8z();
+  try {
+    if (_chmod(p, 384 /* 0600 */) != 0) {
+      throw FileSystemException('chmod 0600 failed', path);
+    }
+  } finally {
+    _free(p);
+  }
 }
 
 final _libc = DynamicLibrary.process();

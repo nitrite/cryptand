@@ -18,6 +18,7 @@ use crate::container::{
 };
 use crate::cow::CowTree;
 use crate::cve;
+use crate::multiproc;
 use crate::error::{corrupt, invalid, Error, Result};
 use crate::manifest::{Manifest, SegmentRef};
 use crate::pager::{FreeExtent, Pager};
@@ -346,6 +347,8 @@ pub struct Engine {
     /// When set, this handle may not write, and it performed no write when it
     /// opened. See [`Engine::open_read_only`].
     read_only: bool,
+    /// `13-operations.md` §8: this handle's side of the lock sidecar.
+    mp: Option<crate::multiproc::Attached>,
     /// Range deletes currently in the memtable. See `insert_mem`.
     memtable_range_deletes: u64,
     manifest_cache: HashMap<u8, Vec<SegmentRef>>,
@@ -556,6 +559,7 @@ impl Engine {
             segments: IdMap::default(),
             lru_clock: 0,
             read_only: false,
+            mp: None,
             memtable_range_deletes: 0,
             manifest_cache: HashMap::new(),
             manifest_all_cache: None,
@@ -620,6 +624,7 @@ impl Engine {
             // Before `write_store_metadata`, which is the first page write.
             e.arm()?;
         }
+        e.attach_writer();
         e.write_store_metadata()?;
         e.commit(Durability::Sync)?;
         Ok(e)
@@ -645,43 +650,15 @@ impl Engine {
     }
 
     fn open_with(path: &Path, key: Option<&[u8]>, read_only: bool) -> Result<Engine> {
-        // Read both slots without knowing the page size yet: slot A is always
-        // at offset 0 and is exactly 4096 bytes.
-        let mut probe = Pager::open_shared(path, 4096, u64::MAX)?;
-        let a = Superblock::parse(&probe.read_at(0, 4096)?).ok();
-        // F-069: with slot A invalid the page size is unknown, and slot B sits
-        // at offset `page_size`. Try every legal size (`page_size_log2`
-        // 12..=16) and accept a slot only where its own page size names the
-        // offset it was found at. Assuming 4096 lost every other file whose
-        // slot A was bad, including any crashed before its first close.
-        let sizes: Vec<usize> = match &a {
-            Some(sb) => vec![sb.page_size()],
-            None => (12..=16).map(|l| 1usize << l).collect(),
-        };
-        let mut b: Option<Superblock> = None;
-        for page_size in sizes {
-            let mut probe = Pager::open_shared(path, page_size, u64::MAX)?;
-            let Ok(raw) = probe.read_at(page_size as u64, 4096) else { continue };
-            if let Ok(sb) = Superblock::parse(&raw) {
-                if sb.page_size() == page_size && b.as_ref().is_none_or(|x| sb.commit_id > x.commit_id) {
-                    b = Some(sb);
-                }
-            }
-        }
-        // Step 3: the valid slot with the greater commit_id.
-        let sb = match (a, b) {
-            (Some(x), Some(y)) => {
-                if x.commit_id >= y.commit_id {
-                    x
-                } else {
-                    y
-                }
-            }
-            (Some(x), None) => x,
-            (None, Some(y)) => y,
-            (None, None) => {
-                return corrupt("neither superblock slot is valid: not a Cryptand database")
-            }
+        let mut sb = read_superblock(path)?;
+        // `13-operations.md` §8: a reader pins its superblock in the sidecar
+        // before it reads a single page of it.
+        let mp = if read_only {
+            let (a, pinned) = attach_reader(path, sb)?;
+            sb = pinned;
+            Some(a)
+        } else {
+            None
         };
         sb.check_features()?;
         crate::limits::check_vlog_min(sb.vlog_min, sb.page_size())?;
@@ -781,6 +758,7 @@ impl Engine {
             segments: IdMap::default(),
             lru_clock: 0,
             read_only,
+            mp,
             memtable_range_deletes: 0,
             manifest_cache: HashMap::new(),
             manifest_all_cache: None,
@@ -851,6 +829,7 @@ impl Engine {
         // tampered, and including the shared conformance corpus, whose files
         // this changed on every run.
         if !read_only {
+            e.attach_writer();
             if e.sb.cipher != 0 {
                 e.publish_nonce_floor()?;
             }
@@ -1078,6 +1057,58 @@ impl Engine {
             && self.sb.features_optional & feature::bit(feature::CONVERTING) == 0;
     }
 
+    /// §8 for the writer: publish this process in the sidecar and heartbeat
+    /// it. A sidecar that cannot be opened leaves readers volatile (they
+    /// report why) and `MULTIPROC_READ` unset: no coordination is claimed that
+    /// was not achieved.
+    fn attach_writer(&mut self) {
+        let Some(path) = self.pager.path.clone() else { return };
+        if let Ok(sc) = multiproc::Sidecar::open_writer(&path, multiproc::DEFAULT_READER_HEARTBEAT_MS) {
+            self.mp = Some(multiproc::Attached::writer(sc));
+            self.sb.set_feature(feature::MULTIPROC_READ, false);
+        }
+    }
+
+    /// §8 rules 2 and 3 at a commit: reclaim stale slots, refresh our own
+    /// heartbeat, and return the lowest commit a live reader pins.
+    fn reader_pins(&mut self) -> Result<Option<u64>> {
+        let Some(multiproc::Attached::Writer { sidecar, .. }) = &self.mp else { return Ok(None) };
+        let now = multiproc::now_ms();
+        sidecar.refresh_writer(now)?;
+        sidecar.reclaim_and_min_pinned(now)
+    }
+
+    /// §8 for this handle's other processes: `None` when it has no sidecar.
+    pub fn multiproc(&self) -> Option<&multiproc::Attached> {
+        self.mp.as_ref()
+    }
+
+    /// Rule 3: a reader whose slot was reclaimed MUST reopen.
+    fn check_slot(&self) -> Result<()> {
+        if self.mp.as_ref().is_some_and(|m| m.slot_lost()) {
+            return Err(Error::Unavailable("this reader's sidecar slot was reclaimed (13 §8 rule 3): reopen".into()));
+        }
+        Ok(())
+    }
+
+    /// Before each read operation: rule 3's check, and rule 4's revalidation
+    /// for a volatile reader. Its snapshot is still intact while the writer's
+    /// published floor is below it -- an extent live at commit C is freed at
+    /// C+1 or later and reusable only once the floor reaches it.
+    fn check_reader(&mut self) -> Result<()> {
+        self.check_slot()?;
+        if self.mp.as_ref().and_then(|m| m.reader_mode()).is_some_and(|m| m.is_volatile()) {
+            if let Some(path) = self.pager.path.clone() {
+                if read_superblock(&path)?.min_retained_commit > self.sb.commit_id {
+                    return Err(Error::Unavailable(
+                        "volatile reader: the writer reclaimed past this snapshot (13 §8 rule 4): reopen".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn arm(&mut self) -> Result<()> {
         // Every write path passes through here, so refusing here is exhaustive.
         if self.read_only {
@@ -1111,6 +1142,8 @@ impl Engine {
         }
         self.pager.crypto = None;
         self.closed = true;
+        // §8 rule 5: `writer_pid` 0 before the writer lock goes.
+        self.mp = None;
         // §10: the exclusive advisory lock is held for the writing lifetime,
         // and this is the end of it.
         self.pager.release();
@@ -2032,6 +2065,7 @@ impl Engine {
         key: &Value,
         at: Option<&Snapshot>,
     ) -> Result<Option<ValueRef>> {
+        self.check_reader()?;
         let mut prefix = std::mem::take(&mut self.key_scratch);
         prefix.clear();
         prefix.extend_from_slice(&tree.to_be_bytes());
@@ -2425,6 +2459,7 @@ impl Engine {
         at: Option<&Snapshot>,
         values: bool,
     ) -> Result<ScanCursor> {
+        self.check_reader()?;
         let with_tree = |k: &[u8]| {
             let mut v = tree.to_be_bytes().to_vec();
             v.extend_from_slice(k);
@@ -3777,6 +3812,7 @@ impl Engine {
         }
         // Trees the commit itself edits, published as roots below.
         self.persist_freelist()?;
+        let pinned = self.reader_pins()?;
         let durable = (self.sb.commit_id, self.sb.min_retained_commit, self.pager.min_retained_commit);
         let new_commit = self.sb.commit_id + 1;
         self.sb.commit_id = new_commit;
@@ -3791,7 +3827,8 @@ impl Engine {
         self.sb.checkpoint_root = self.checkpoints.root;
         self.sb.changefeed_root = self.changefeed.root;
         self.sb.root_nonces = self.root_nonces();
-        self.sb.min_retained_commit = self.min_retained_commit();
+        // §8 rule 2: other processes' live slots pin like our own snapshots.
+        self.sb.min_retained_commit = pinned.map_or(self.min_retained_commit(), |c| self.min_retained_commit().min(c.saturating_sub(1)));
         self.sb.min_retained_seq = self.min_retained_seq();
         self.sb.modified_utc_ms = now_millis();
         self.pager.min_retained_commit = self.sb.min_retained_commit;
@@ -4182,6 +4219,75 @@ pub struct ScanCursor {
     ready: std::collections::VecDeque<(Vec<u8>, Vec<u8>)>,
 }
 
+
+/// `01-container.md` §2.1 steps 1-3: the valid superblock slot with the
+/// greater `commit_id`.
+fn read_superblock(path: &Path) -> Result<Superblock> {
+        // Read both slots without knowing the page size yet: slot A is always
+        // at offset 0 and is exactly 4096 bytes.
+        let mut probe = Pager::open_shared(path, 4096, u64::MAX)?;
+        let a = Superblock::parse(&probe.read_at(0, 4096)?).ok();
+        // F-069: with slot A invalid the page size is unknown, and slot B sits
+        // at offset `page_size`. Try every legal size (`page_size_log2`
+        // 12..=16) and accept a slot only where its own page size names the
+        // offset it was found at. Assuming 4096 lost every other file whose
+        // slot A was bad, including any crashed before its first close.
+        let sizes: Vec<usize> = match &a {
+            Some(sb) => vec![sb.page_size()],
+            None => (12..=16).map(|l| 1usize << l).collect(),
+        };
+        let mut b: Option<Superblock> = None;
+        for page_size in sizes {
+            let mut probe = Pager::open_shared(path, page_size, u64::MAX)?;
+            let Ok(raw) = probe.read_at(page_size as u64, 4096) else { continue };
+            if let Ok(sb) = Superblock::parse(&raw) {
+                if sb.page_size() == page_size && b.as_ref().is_none_or(|x| sb.commit_id > x.commit_id) {
+                    b = Some(sb);
+                }
+            }
+        }
+        // Step 3: the valid slot with the greater commit_id.
+        Ok(match (a, b) {
+            (Some(x), Some(y)) => {
+                if x.commit_id >= y.commit_id {
+                    x
+                } else {
+                    y
+                }
+            }
+            (Some(x), None) => x,
+            (None, Some(y)) => y,
+            (None, None) => {
+                return corrupt("neither superblock slot is valid: not a Cryptand database")
+            }
+        })
+}
+
+/// `13-operations.md` §8, a read-only open: claim a slot for `sb`, then
+/// re-read the superblock and re-pin until the claim covers the current one
+/// (the writer may have computed a floor between our read and the claim).
+/// No slot means volatile mode, with its reason.
+fn attach_reader(path: &Path, mut sb: Superblock) -> Result<(multiproc::Attached, Superblock)> {
+    use multiproc::{Attached, ReaderMode, Sidecar, VolatileReason};
+    let Some(sc) = Sidecar::open_reader(path, multiproc::DEFAULT_READER_HEARTBEAT_MS)? else {
+        return Ok((Attached::reader(None, ReaderMode::Volatile(VolatileReason::SidecarReadOnly)), sb));
+    };
+    let Some(mut slot) = sc.claim(sb.commit_id, multiproc::now_ms())? else {
+        let why = if sc.is_read_only() { VolatileReason::SidecarReadOnly } else { VolatileReason::SidecarFull };
+        return Ok((Attached::reader(Some(sc), ReaderMode::Volatile(why)), sb));
+    };
+    loop {
+        let cur = read_superblock(path)?;
+        if cur.commit_id == slot.commit_id {
+            return Ok((Attached::reader(Some(sc), ReaderMode::Slotted(slot)), sb));
+        }
+        if !sc.repin(&mut slot, cur.commit_id, multiproc::now_ms())? {
+            return Err(Error::Unavailable("reader slot reclaimed during open (13 §8 rule 3)".into()));
+        }
+        sb = cur;
+    }
+}
+
 impl ScanCursor {
     fn in_tree(tree: u32, upper_uk: Option<&[u8]>, uk: &[u8]) -> bool {
         uk.len() >= 4 && uk[..4] == tree.to_be_bytes() && upper_uk.is_none_or(|u| uk < u)
@@ -4196,6 +4302,7 @@ impl ScanCursor {
     /// The next live row `(cke_key, value)`, or `None` at the end. `value` is
     /// empty when the cursor was opened without values.
     pub fn next(&mut self, e: &mut Engine) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        e.check_slot()?;
         if self.ready.is_empty() {
             self.fill(e)?;
         }

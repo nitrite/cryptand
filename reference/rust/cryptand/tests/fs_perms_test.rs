@@ -21,9 +21,8 @@ fn created_files_are_owner_only() {
     drop(Engine::create(&t.path, Profile::Desktop).unwrap());
     assert_eq!(mode(&t.path), 0o600);
 
-    let side = sidecar_path(&t.path);
-    drop(Sidecar::create(&side, 2, 2000).unwrap());
-    assert_eq!(mode(&side), 0o600);
+    // Engine::create made the sidecar (13 §8).
+    assert_eq!(mode(&sidecar_path(&t.path)), 0o600);
 
     // fs::copy carries the source's mode; restore must not.
     std::fs::set_permissions(&t.path, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -39,8 +38,8 @@ fn sidecar_refuses_a_symlink() {
     std::fs::write(&victim.path, b"keep").unwrap();
     let side = sidecar_path(&t.path);
     std::os::unix::fs::symlink(&victim.path, &side).unwrap();
-    assert!(Sidecar::create(&side, 2, 2000).is_err());
-    assert!(Sidecar::open(&side, 2000).is_err());
+    assert!(Sidecar::open_writer(&t.path, 2000).is_err());
+    assert!(Sidecar::open_reader(&t.path, 2000).unwrap().is_none());
     assert_eq!(std::fs::read(&victim.path).unwrap(), b"keep");
     std::fs::remove_file(&side).unwrap();
 }

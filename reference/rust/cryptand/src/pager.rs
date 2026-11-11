@@ -1216,7 +1216,7 @@ impl Pager {
 /// dies, which is what makes a crashed writer's database openable again with
 /// no cleanup step.
 fn take_writer_lock(file: &File, path: &Path) -> Result<()> {
-    match lock_byte(file) {
+    match lock_byte(file, LOCK_BYTE, true) {
         Ok(true) => Ok(()),
         Ok(false) => Err(crate::error::Error::Locked(format!(
             "{} is open for writing by another process",
@@ -1236,9 +1236,11 @@ fn take_writer_lock(file: &File, path: &Path) -> Result<()> {
 /// `01-container.md` §10 — the writer lock byte.
 const LOCK_BYTE: u64 = 1 << 62;
 
-/// `Ok(false)` when another writer holds the byte.
+/// `Ok(false)` when another holder has the byte at `at`. `lock = false`
+/// releases it instead (always `Ok(true)`). Also the sidecar's claim lock
+/// (`13-operations.md` §8).
 #[cfg(unix)]
-fn lock_byte(file: &File) -> std::io::Result<bool> {
+pub(crate) fn lock_byte(file: &File, at: u64, lock: bool) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     const CMD: libc::c_int = libc::F_OFD_SETLK;
@@ -1248,9 +1250,9 @@ fn lock_byte(file: &File) -> std::io::Result<bool> {
     const CMD: libc::c_int = libc::F_SETLK;
     // SAFETY: zeroed `flock` is valid; OFD locks require l_pid = 0.
     let mut fl: libc::flock = unsafe { std::mem::zeroed() };
-    fl.l_type = libc::F_WRLCK as _;
+    fl.l_type = if lock { libc::F_WRLCK } else { libc::F_UNLCK } as _;
     fl.l_whence = libc::SEEK_SET as _;
-    fl.l_start = LOCK_BYTE as _;
+    fl.l_start = at as _;
     fl.l_len = 1;
     // SAFETY: valid fd and a valid `flock` pointer.
     if unsafe { libc::fcntl(file.as_raw_fd(), CMD, &fl) } == 0 {
@@ -1264,7 +1266,7 @@ fn lock_byte(file: &File) -> std::io::Result<bool> {
 }
 
 #[cfg(windows)]
-fn lock_byte(file: &File) -> std::io::Result<bool> {
+pub(crate) fn lock_byte(file: &File, at: u64, lock: bool) -> std::io::Result<bool> {
     use std::os::windows::io::AsRawHandle;
     #[repr(C)]
     struct Overlapped {
@@ -1277,16 +1279,22 @@ fn lock_byte(file: &File) -> std::io::Result<bool> {
     #[link(name = "kernel32")]
     extern "system" {
         fn LockFileEx(h: *mut std::ffi::c_void, flags: u32, reserved: u32, lo: u32, hi: u32, ov: *mut Overlapped) -> i32;
+        fn UnlockFileEx(h: *mut std::ffi::c_void, reserved: u32, lo: u32, hi: u32, ov: *mut Overlapped) -> i32;
     }
     const EXCLUSIVE_FAIL_IMMEDIATELY: u32 = 0x2 | 0x1;
     const ERROR_LOCK_VIOLATION: i32 = 33;
     let mut ov = Overlapped {
         internal: 0,
         internal_high: 0,
-        offset: LOCK_BYTE as u32,
-        offset_high: (LOCK_BYTE >> 32) as u32,
+        offset: at as u32,
+        offset_high: (at >> 32) as u32,
         h_event: std::ptr::null_mut(),
     };
+    if !lock {
+        // SAFETY: as below.
+        unsafe { UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut ov) };
+        return Ok(true);
+    }
     // SAFETY: valid handle; `ov` outlives the synchronous call.
     if unsafe { LockFileEx(file.as_raw_handle(), EXCLUSIVE_FAIL_IMMEDIATELY, 0, 1, 0, &mut ov) } != 0 {
         return Ok(true);

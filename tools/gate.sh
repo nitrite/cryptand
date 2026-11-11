@@ -28,6 +28,7 @@ stage "java verify"         "$ref/java" mvn -B -q verify
 stage "dart analyze"        "$ref/dart/cryptand" dart analyze --fatal-infos
 stage "dart test"           "$ref/dart/cryptand" dart test
 stage "interop"             "$root" "$ref/conformance/interop/run.sh"
+stage "multiproc (3x3)"     "$root" python3 -I "$ref/conformance/interop/multiproc.py"
 
 stage "oplog regress (rust)" "$ref/rust" sh -c 'cargo build -q --release -p cryptand --features harness --bin oplog_check && target/release/oplog_check ../conformance/oplog/regress/*.jsonl'
 stage "oplog regress (java)" "$ref/java" mvn -B -q test -Djacoco.skip=true -Dtest=OplogCheckTest

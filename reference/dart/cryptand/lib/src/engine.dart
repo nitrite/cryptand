@@ -24,6 +24,7 @@ import 'crc32c.dart';
 import 'errors.dart';
 import 'filter.dart' show cfh64;
 import 'manifest.dart';
+import 'multiproc.dart';
 import 'profile.dart';
 import 'security.dart';
 import 'segment.dart';
@@ -722,6 +723,9 @@ final class Engine {
   /// references is ever overwritten."
   int get minRetainedCommit {
     var m = commitId;
+    // 13 §8 rule 2: other processes' live slots pin like our snapshots.
+    final p = _readerPin;
+    if (p != null && p < m) m = p;
     for (final s in _liveSnapshots) {
       if (s.commitId < m) m = s.commitId;
     }
@@ -752,6 +756,44 @@ final class Engine {
   /// not by [commitId], which is already durable: attributed to [commitId],
   /// the next publish reused it (and zeroed it) while the live superblock
   /// still named it, and a kill before that publish left a torn file.
+  // -------------------------------------------------------------------------
+  // 13 §8 — multi-process readers
+  // -------------------------------------------------------------------------
+
+  /// This handle's side of the lock sidecar, set by `file.dart`.
+  Multiproc? multiproc;
+
+  /// For a volatile reader: the writer's published floor, read from the file.
+  int Function()? currentFloor;
+
+  /// The lowest commit a live reader slot pinned at the last commit.
+  int? _readerPin;
+
+  /// Rules 2 and 3 at a commit: reclaim stale slots, refresh, take the pin.
+  void _refreshReaderPin() {
+    final mp = multiproc;
+    if (mp == null || !mp.writer) return;
+    final now = wallMs();
+    mp.sidecar!.refreshWriter(now);
+    _readerPin = mp.sidecar!.reclaimAndMinPinned(now);
+  }
+
+  /// Before each read: rule 3, and rule 4's revalidation for a volatile
+  /// reader. Its snapshot is intact while the writer's published floor is
+  /// below it: an extent live at commit C is freed at C+1 or later.
+  void _checkReader() {
+    final mp = multiproc;
+    if (mp == null || mp.writer) return;
+    mp
+      ..beatIfDue()
+      ..checkSlot();
+    final floor = currentFloor;
+    if (mp.volatileReason != null && floor != null && floor() > commitId) {
+      throw const LockedException(
+          'volatile reader: the writer reclaimed past this snapshot (13 §8 rule 4): reopen');
+    }
+  }
+
   void _refreshRetention({bool publishing = false}) {
     store
       ..commitId = publishing ? commitId : commitId + 1
@@ -1094,6 +1136,7 @@ final class Engine {
 
   void _write(int treeId, CValue key, Uint8List encodedValue, int op,
       {int? expiryMs}) {
+    multiproc?.beatIfDue(); // 13 §8 rule 5
     final cke = encodeKey(key);
     final seq = _nextSeq++;
     final ik = internalKey(treeId, cke, seq, op);
@@ -1247,6 +1290,7 @@ final class Engine {
     _barrier(durability);
 
     // F/G: publish. Everything at or below `sequenced` is now durable.
+    _refreshReaderPin();
     commitId++;
     visibleSeq = sequenced;
     _refreshRetention(publishing: true);
@@ -1318,6 +1362,8 @@ final class Engine {
       // before the handle, so `_close` re-taking §10's writer lock is last.
       final f = store.file;
       store.file = null;
+      multiproc?.detach(); // rule 5: writer_pid 0, or the slot released
+      multiproc = null;
       if (onClose != null) {
         onClose!();
       } else {
@@ -2368,6 +2414,7 @@ final class Engine {
   /// candidate is examined and the winner is the entry with the greatest seq,
   /// never the first hit in segment order.
   Uint8List? get(int treeId, CValue key, {Snapshot? at}) {
+    _checkReader();
     final rec = _winner(treeId, key, at);
     return rec == null ? null : _resolve(rec);
   }
@@ -2622,6 +2669,7 @@ final class Engine {
   /// entry for a user key wins, and a `DELETE` hides it.
   Iterable<({Uint8List cke, Uint8List value})> scanTree(int treeId,
       {KeyRange? range, Snapshot? at}) sync* {
+    _checkReader();
     final ceiling = at?.seq;
     final rangeDeletes = _allRangeDeletes(treeId);
     final lower = userKeyPrefix(treeId, range?.lower ?? Uint8List(0));
@@ -2731,6 +2779,9 @@ final class Engine {
         continue;
       }
       if (expiry != null && expiry <= nowMs) continue;
+      multiproc
+        ?..beatIfDue()
+        ..checkSlot();
       yield (
         cke: Uint8List.sublistView(userKey, 4),
         value: _resolveKind(valueKind, value),

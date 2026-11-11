@@ -338,17 +338,14 @@ class OperationsTest {
     @Test
     @DisplayName("a reader recycles a stale slot rather than falling to volatile mode")
     void staleSlotsAreRecycled(@TempDir Path dir) {
-        Path db = dir.resolve("mp.cryptand");
-        try (LockSidecar s = new LockSidecar(db, 2, 100)) {
-            assertEquals(0, s.claimReader(101, 5, 1_000));
-            assertEquals(1, s.claimReader(102, 5, 1_000));
-            // Both slots held by live readers: volatile mode, and the reason is
-            // reported rather than left to be inferred.
-            assertEquals(-1, s.claimReader(103, 5, 1_000));
-            assertEquals(LockSidecar.Volatile.NO_FREE_SLOT, s.volatileReason());
-            // Long enough later, both are stale and a claimer recycles one.
-            assertEquals(0, s.claimReader(104, 6, 5_000));
-            assertEquals(LockSidecar.Volatile.NOT_VOLATILE, s.volatileReason());
+        try (LockSidecar s = LockSidecar.openWriter(dir.resolve("mp.cryptand"), 100)) {
+            for (int i = 0; i < s.slotCount(); i++) {
+                assertNotNull(s.claim(5, 1_000));
+            }
+            // Every slot held by a live reader: the engine reports SIDECAR_FULL.
+            assertNull(s.claim(5, 1_000));
+            // Long enough later, they are stale and a claimer recycles one.
+            assertNotNull(s.claim(6, 5_000));
         }
     }
 
@@ -356,21 +353,24 @@ class OperationsTest {
     @DisplayName("no live writer is detectable, so a reader knows its pin protects nothing")
     void writerLiveness(@TempDir Path dir) {
         Path db = dir.resolve("w.cryptand");
-        try (LockSidecar s = new LockSidecar(db, 4, 100)) {
-            assertFalse(s.writerIsLive(1_000), "writer_pid 0 means no live writer");
-            s.claimWriter(4242, 1_000);
-            assertTrue(s.writerIsLive(1_050));
-            assertFalse(s.writerIsLive(9_000), "a heartbeat older than 3x the interval is not live");
+        try (LockSidecar s = LockSidecar.openReader(db, 100)) {
+            assertFalse(s.writerAlive(1_000), "writer_pid 0 means no live writer");
+        }
+        try (LockSidecar s = LockSidecar.openWriter(db, 100)) {
+            s.refreshWriter(1_000);
+            assertTrue(s.writerAlive(1_050));
+            assertFalse(s.writerAlive(9_000), "a heartbeat older than 3x the interval is not live");
         }
     }
 
     @Test
     @DisplayName("only live slots pin the retention floor")
     void staleSlotDoesNotPin(@TempDir Path dir) {
-        try (LockSidecar s = new LockSidecar(dir.resolve("p.cryptand"), 4, 100)) {
-            s.claimReader(1, 7, 1_000);
-            assertEquals(7, s.minPinnedCommit(1_050, 99));
-            assertEquals(99, s.minPinnedCommit(9_000, 99), "a stale slot does not pin");
+        try (LockSidecar s = LockSidecar.openWriter(dir.resolve("p.cryptand"), 100)) {
+            s.claim(7, 1_000);
+            assertEquals(java.util.OptionalLong.of(7), s.reclaimAndMinPinned(1_050));
+            assertEquals(java.util.OptionalLong.empty(), s.reclaimAndMinPinned(9_000), "a stale slot does not pin");
+            assertTrue(s.slots().stream().allMatch(LockSidecar.Slot::isFree), "and is reclaimed");
         }
     }
 }

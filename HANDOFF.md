@@ -29,7 +29,15 @@
 - Audit 11-11 (PLAN A1): F-215 (blob read, R+D), F-216 (Dart postings `first_doc`, human go),
   F-217 (postings decode, R+J) fixed, each with a test that fails reverted. F-218: CI had not
   run since 10-12 (trigger lacked `dart-storage`) and was red on Windows; test fixed, branch
-  added, **first run not yet read**. F-219: multi-process readers unwired; human: wire for 1.0.
+  added, **first run not yet read**.
+- F-219 (A1.5) wired 11-11 in R+J+D: writer sidecar + heartbeat + slots in each commit's floor,
+  reader claim/re-pin/heartbeat/release, volatile with reason. Spec 13 §8 now names magic
+  "CLK1", the claim lock (1 byte at 2^40) and a reader creating a missing sidecar (human 11-11).
+  Gate stage `multiproc (3x3)` = `reference/conformance/interop/multiproc.py`. Readers now leave
+  `*.cryptand-lock` beside files they open (gitignored; corpus digests skip them).
+  Dart beats on its own ops only (a Dart timer kept never-closed handles' processes alive): an
+  idle Dart reader >6 s is reclaimed and its next read says reopen; R/J beat on a thread.
+  F-220 (open): a read of reused pages hangs (R) or returns 0 rows (J, D) instead of failing.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -63,14 +71,12 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Next action
 
-1. `gh run list --branch dart-storage`: read the first CI run since 10-12; fix what Linux and
-   Windows show (A1.3). 2. Soak: when remote `reference/bench/runs/soak2/java-done` exists, read
-   `java.out`; at `done`, `dart.out` (+ `soak-11-03/rust.out`); add Dart to PLAN 6.7's scope line,
-   record in RESULTS.md, tick 6.7. 3. A1.5 (F-219) Rust leg, then A1.4's interop step. Then 6.8.
+1. `gh run list --branch dart-storage`: read the first CI run since 10-12 (now also runs the
+   multiproc tests on Windows); fix what Linux and Windows show (A1.3). 2. Soak: when remote
+   `reference/bench/runs/soak2/java-done` exists, read `java.out`; at `done`, `dart.out` (+
+   `soak-11-03/rust.out`); record in RESULTS.md, tick 6.7. 3. A1.4's interop full-text step. Then 6.8.
 
 ## Log
+- 11-11: F-219 multi-process readers wired R+J+D, spec 13 §8 pinned (magic, lock byte, no-sidecar), 3x3 gate stage; F-220 filed.
 - 11-11: audit A1: F-215..F-219 filed; F-215/216/217 fixed, F-218 CI trigger + Windows test, F-219 approved to wire.
-- 11-06: F-213 (Java reopen hang after kill) fixed; Java soak relaunched on remote.
-- 11-09: F-214 (R CoW node cache stale after shrink, unencrypted) fixed; Java soak relaunched.
-- 11-03 — F-212 (J aged scan, stale liveness gate) fixed; soak 6.7 relaunched.
 - 11-11: 6.7 Java soak FAIL traced to harness (per-op fsync, uncapped heap, cut cycle); fixed 4991082, Dart soak added, J+D rerun launched.

@@ -3,6 +3,7 @@ package org.dizitart.cryptand.lsm;
 import org.dizitart.cryptand.CorruptionException;
 import org.dizitart.cryptand.Database;
 import org.dizitart.cryptand.InvalidArgumentException;
+import org.dizitart.cryptand.LockedException;
 import org.dizitart.cryptand.Snapshot;
 import org.dizitart.cryptand.TreeDescriptor;
 import org.dizitart.cryptand.UnsupportedFeatureException;
@@ -12,6 +13,7 @@ import org.dizitart.cryptand.container.Feature;
 import org.dizitart.cryptand.container.PageFile;
 import org.dizitart.cryptand.container.PageHeader;
 import org.dizitart.cryptand.container.PageTree;
+import org.dizitart.cryptand.container.LockSidecar;
 import org.dizitart.cryptand.container.Pager;
 import org.dizitart.cryptand.container.Profile;
 import org.dizitart.cryptand.container.ReadPins;
@@ -40,6 +42,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -437,6 +440,7 @@ public final class Engine implements AutoCloseable {
             e.enableEncryption();
         }
         e.loadTrees();
+        e.attachWriter();
         e.startCommitter();
         e.commitNow();
         if (e.cipher != null) {
@@ -512,6 +516,23 @@ public final class Engine implements AutoCloseable {
     private static Engine openLocked(PageFile file, Options options) {
         byte[][] image = new byte[1][];
         Superblock sb = chooseSuperblock(file, image);
+        // 13 §8: a reader pins its superblock before it reads a page of it.
+        ReaderAttach mp = options.readOnly ? attachReader(file, image, sb) : null;
+        if (mp != null) {
+            sb = mp.sb;
+        }
+        try {
+            return openPinned(file, options, image, sb, mp);
+        } catch (RuntimeException x) {
+            if (mp != null) {
+                mp.close();
+            }
+            throw x;
+        }
+    }
+
+    private static Engine openPinned(PageFile file, Options options, byte[][] image, Superblock sb,
+                                     ReaderAttach mp) {
         FileCipher cipher = null;
         if (sb.cipher != Superblock.Cipher.NONE) {
             if (sb.cipher != Superblock.Cipher.XCHACHA20_POLY1305) {
@@ -594,11 +615,15 @@ public final class Engine implements AutoCloseable {
             // absent here, and this pager read through to the file on every page.
             pager.pageCacheBytes(options.profile.pageCacheBytes());
             Engine e = new Engine(file, pager, sb, options);
+            if (mp != null) {
+                e.adoptReader(mp);
+            }
             if (cipher != null) {
                 e.installCipher(cipher);
             }
             e.loadTrees();
             if (!options.readOnly) {
+                e.attachWriter();
                 // 10 §4: a value-log segment a previous session left open is sealed
                 // at its last durable watermark and new writes go to a fresh
                 // segment. Encrypted, re-appending would reuse a nonce; the rule is
@@ -1448,6 +1473,7 @@ public final class Engine implements AutoCloseable {
         // retry skipped an id and, slots alternating by id, overwrote the last
         // durable superblock; and the raised retention floor let this
         // commit's frees be reused before any superblock dropped them.
+        OptionalLong pinned = readerPins();
         long durableCommit = sb.commitId;
         long durableMinRetained = sb.minRetainedCommit;
         try {
@@ -1463,7 +1489,10 @@ public final class Engine implements AutoCloseable {
             // compaction could never satisfy §5's condition 2 and the key index
             // would grow without bound while the value side looked healthy.
             sb.minRetainedSeq = oldestLiveSnapshot(published);
-            sb.minRetainedCommit = minRetainedCommit();
+            // 13 §8 rule 2: other processes' live slots pin like our snapshots.
+            sb.minRetainedCommit = pinned.isPresent()
+                    ? Math.min(minRetainedCommit(), Math.max(0, pinned.getAsLong() - 1))
+                    : minRetainedCommit();
             lastLocalityDebt = vlog.localityDebt();
             pager.setCommitId(sb.commitId);
             pager.setMinRetainedCommit(sb.minRetainedCommit);
@@ -1520,6 +1549,212 @@ public final class Engine implements AutoCloseable {
      * this, which is what stops a compaction from handing a live cursor's pages
      * to the next allocation.
      */
+    // ---------------------------------------------------------------
+    // 13 §8 — multi-process readers
+    // ---------------------------------------------------------------
+
+    /** A read-only open's sidecar state, taken before the engine exists. */
+    private static final class ReaderAttach {
+        LockSidecar sidecar;
+        LockSidecar.Slot slot;
+        LockSidecar.Volatile why;
+        Superblock sb;
+
+        void close() {
+            if (sidecar != null) {
+                if (slot != null) {
+                    sidecar.release(slot);
+                }
+                sidecar.close();
+            }
+        }
+    }
+
+    /**
+     * Claim a slot for {@code sb}, then re-read the superblock and re-pin until
+     * the claim covers the current one: the writer may have computed a floor
+     * between the first read and the claim. No slot is volatile mode, with why.
+     */
+    private static ReaderAttach attachReader(PageFile file, byte[][] image, Superblock sb) {
+        ReaderAttach a = new ReaderAttach();
+        a.sb = sb;
+        a.sidecar = LockSidecar.openReader(file.path(), LockSidecar.DEFAULT_HEARTBEAT_MS);
+        if (a.sidecar == null) {
+            a.why = LockSidecar.Volatile.SIDECAR_READ_ONLY;
+            return a;
+        }
+        a.slot = a.sidecar.claim(sb.commitId, System.currentTimeMillis());
+        if (a.slot == null) {
+            a.why = a.sidecar.readOnly() ? LockSidecar.Volatile.SIDECAR_READ_ONLY : LockSidecar.Volatile.SIDECAR_FULL;
+            return a;
+        }
+        while (true) {
+            Superblock cur = chooseSuperblock(file, image);
+            if (cur.commitId == a.slot.commitId()) {
+                a.sb = cur;
+                return a;
+            }
+            LockSidecar.Slot moved = a.sidecar.repin(a.slot, cur.commitId, System.currentTimeMillis());
+            if (moved == null) {
+                a.slot = null;
+                a.close();
+                throw new LockedException("reader slot reclaimed during open (13 §8 rule 3)");
+            }
+            a.slot = moved;
+        }
+    }
+
+    private LockSidecar sidecar;
+    private boolean sidecarWriter;
+    private LockSidecar.Slot readerSlot;
+    private LockSidecar.Volatile volatileReason;
+    private volatile boolean slotLost;
+    private java.util.concurrent.CountDownLatch beatStop;
+    private Thread beat;
+
+    private void adoptReader(ReaderAttach a) {
+        sidecar = a.sidecar;
+        readerSlot = a.slot;
+        volatileReason = a.why;
+        if (readerSlot != null) {
+            LockSidecar.Slot s = readerSlot;
+            startBeat(() -> {
+                boolean ok;
+                try {
+                    ok = sidecar.heartbeat(s, System.currentTimeMillis());
+                } catch (RuntimeException x) {
+                    ok = false;
+                }
+                if (!ok) {
+                    slotLost = true;
+                }
+                return ok;
+            });
+        }
+    }
+
+    /**
+     * The writer publishes itself in the sidecar and heartbeats it. A sidecar
+     * that cannot be opened leaves readers volatile (they say why) and
+     * {@code MULTIPROC_READ} unset: no coordination is claimed that was not had.
+     */
+    private void attachWriter() {
+        if (file.path() == null) {
+            return;
+        }
+        try {
+            sidecar = LockSidecar.openWriter(file.path(), LockSidecar.DEFAULT_HEARTBEAT_MS);
+        } catch (java.io.UncheckedIOException x) {
+            return;
+        }
+        sidecarWriter = true;
+        sb.featuresOptional |= 1L << org.dizitart.cryptand.container.Feature.MULTIPROC_READ;
+        startBeat(() -> {
+            try {
+                sidecar.refreshWriter(System.currentTimeMillis());
+                return true;
+            } catch (RuntimeException x) {
+                return false;
+            }
+        });
+    }
+
+    private void startBeat(java.util.function.BooleanSupplier body) {
+        beatStop = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch stop = beatStop;
+        // A latch, not an interrupt: an interrupt in channel IO closes the channel.
+        beat = new Thread(() -> {
+            try {
+                while (!stop.await(LockSidecar.DEFAULT_HEARTBEAT_MS / 2,
+                        java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    if (!body.getAsBoolean()) {
+                        return;
+                    }
+                }
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }, "cryptand-sidecar-heartbeat");
+        beat.setDaemon(true);
+        beat.start();
+    }
+
+    private void detachSidecar() {
+        if (beat != null) {
+            beatStop.countDown();
+            try {
+                beat.join(5000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            beat = null;
+        }
+        if (sidecar == null) {
+            return;
+        }
+        try {
+            if (sidecarWriter) {
+                sidecar.clearWriter(); // rule 5: no live writer
+            } else if (readerSlot != null) {
+                sidecar.release(readerSlot);
+            }
+        } catch (RuntimeException ignored) {
+            // A stale slot ages out on its own (rule 3).
+        } finally {
+            sidecar.close();
+            sidecar = null;
+        }
+    }
+
+    /** Rule 4: why this read-only handle is volatile, or null when it holds a slot (or writes). */
+    public LockSidecar.Volatile volatileReason() {
+        return volatileReason;
+    }
+
+    /** The slot this read-only handle holds, or null. */
+    public LockSidecar.Slot readerSlot() {
+        return readerSlot;
+    }
+
+    /** Rule 5, for a reader to report: is a writing process live? */
+    public boolean writerAlive() {
+        if (sidecarWriter) {
+            return true;
+        }
+        return sidecar != null && sidecar.writerAlive(System.currentTimeMillis());
+    }
+
+    /** Rule 3: a reader whose slot was reclaimed MUST reopen. */
+    private void checkSlot() {
+        if (slotLost) {
+            throw new LockedException("this reader's sidecar slot was reclaimed (13 §8 rule 3): reopen");
+        }
+    }
+
+    /**
+     * Before each read: rule 3, and rule 4's revalidation for a volatile
+     * reader. Its snapshot is intact while the writer's published floor is
+     * below it: an extent live at commit C is freed at C+1 or later.
+     */
+    private void checkReader() {
+        checkSlot();
+        if (volatileReason != null
+                && chooseSuperblock(file, new byte[1][]).minRetainedCommit > sb.commitId) {
+            throw new LockedException(
+                    "volatile reader: the writer reclaimed past this snapshot (13 §8 rule 4): reopen");
+        }
+    }
+
+    /** Rules 2 and 3 at a commit: reclaim stale slots, refresh, lowest live pin. */
+    private OptionalLong readerPins() {
+        if (!sidecarWriter) {
+            return OptionalLong.empty();
+        }
+        long now = System.currentTimeMillis();
+        sidecar.refreshWriter(now);
+        return sidecar.reclaimAndMinPinned(now);
+    }
+
     private long minRetainedCommit() {
         long floor = sb.commitId;
         for (long[] s : liveSnapshots) {
@@ -1837,6 +2072,7 @@ public final class Engine implements AutoCloseable {
 
     private BtreePage.Leaf lookup(int treeId, byte[] cke, long snapshotSeq, long nowMs,
             boolean requirePublished, boolean withMemtable) {
+        checkReader();
         BtreePage.Leaf best = lookupRaw(treeId, cke, snapshotSeq, requirePublished, withMemtable);
         if (best == null) {
             return null;
@@ -2178,6 +2414,7 @@ public final class Engine implements AutoCloseable {
         private final long pinnedCommit;
 
         Cursor(int treeId, byte[] lowCke, byte[] highCke, boolean reverse, long snapshotSeq, long nowMs) {
+            checkReader();
             this.treeId = treeId;
             this.reverse = reverse;
             this.snapshotSeq = snapshotSeq;
@@ -2244,6 +2481,7 @@ public final class Engine implements AutoCloseable {
         }
 
         public boolean next() {
+            checkSlot();
             if (windowPos < window.size()) {
                 current = window.get(windowPos++);
                 scannedRows.incrementAndGet();
@@ -5196,6 +5434,7 @@ public final class Engine implements AutoCloseable {
                 cipher.close();
             }
             vlog.readOnlyCiphers.forEach(FileCipher::close);
+            detachSidecar();
             file.close();
         }
     }

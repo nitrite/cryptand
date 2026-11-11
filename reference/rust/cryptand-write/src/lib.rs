@@ -9,7 +9,6 @@
 //! no L0 flush. `README.md` says what that costs the measurement.
 
 pub mod engine;
-pub mod multiproc;
 pub mod nonce;
 pub mod posio;
 pub mod prefix;
