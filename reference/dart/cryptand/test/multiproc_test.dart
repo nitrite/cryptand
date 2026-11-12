@@ -196,6 +196,37 @@ void main() {
     }
   }, timeout: const Timeout(Duration(minutes: 2)));
 
+  // 13 §8 rules 1 and 5: the beat is periodic, not only on this handle's own
+  // operations. Idle past three intervals, the reader's slot was reclaimed at
+  // the writer's next commit and the writer read as "no live writer".
+  test('idle handles keep beating', () async {
+    final path = db('idle');
+    final e = child.populated(path);
+    final r = DatabaseFile.openReadOnly(path).engine;
+    await Future<void>.delayed(
+        const Duration(milliseconds: staleMultiplier * defaultReaderHeartbeatMs + 500));
+    expect(r.multiproc!.writerAlive, isTrue, reason: 'rule 5: an idle writer is still live');
+    e
+      ..put(child.tree, CNitriteId(0), child.doc(9))
+      ..commit();
+    expect(live(path), 1, reason: 'rule 1: an idle reader still holds its slot');
+    expect(r.get(child.tree, CNitriteId(1)), isNotNull);
+    r.close(flushMemtable: false);
+    e.close();
+  }, timeout: const Timeout(Duration(minutes: 1)));
+
+  // The beat must not keep a process alive: a handle never closed would hang it.
+  test('a reader never closed does not hold its process open', () async {
+    final path = db('leak');
+    child.populated(path).close();
+    final p = await Process.start(Platform.resolvedExecutable,
+        ['run', 'tool/multiproc_child.dart', 'leak', path]);
+    p.stderr.drain<void>();
+    final out = await p.stdout.transform(utf8.decoder).join();
+    expect(await p.exitCode.timeout(const Duration(seconds: 60)), 0);
+    expect(out, contains('beats=true'));
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
   test('a full sidecar opens volatile, says why, and revalidates', () {
     final path = db('full');
     final e = child.populated(path);

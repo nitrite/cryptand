@@ -12,7 +12,9 @@
 /// reader only while both its pid and its commit id are the ones it wrote.
 library;
 
+import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'errors.dart';
@@ -278,9 +280,41 @@ final class Sidecar {
   void close() => _f.closeSync();
 }
 
+/// 13 §8 rules 1 and 5: the periodic beat for every live handle of this
+/// isolate. A timer here would keep the isolate alive, and a handle never
+/// closed would hang its process, so the clock is a second isolate and its
+/// ticks arrive on a port that does not. The beats themselves stay on this
+/// isolate: POSIX record locks are per process, so a beat from another
+/// isolate would release a claim lock this one is holding (F-222).
+/// ponytail: an isolate blocked in synchronous code for 3 intervals without
+/// touching its handle still goes stale; only a second locking primitive
+/// (OFD locks over FFI) would let another isolate beat for it.
+final Set<Multiproc> _live = {};
+RawReceivePort? _ticks;
+
+void _startTicks() {
+  if (_ticks != null) return;
+  final port = _ticks = RawReceivePort((Object? _) {
+    for (final m in _live.toList()) {
+      m.beatIfDue(force: true);
+    }
+  })
+    ..keepIsolateAlive = false;
+  // If the clock cannot start, handles still beat on their own operations.
+  Isolate.spawn(_clock, (port.sendPort, Isolate.current.controlPort)).ignore();
+}
+
+/// Ticks until the isolate it serves exits.
+void _clock((SendPort, SendPort) a) {
+  final (ticks, owner) = a;
+  Isolate(owner).addOnExitListener(RawReceivePort((Object? _) => Isolate.exit()).sendPort);
+  Timer.periodic(const Duration(milliseconds: defaultReaderHeartbeatMs ~/ 2),
+      (_) => ticks.send(null));
+}
+
 /// An engine's side of the sidecar. A writer has [writer] set; a reader has
-/// [slot] (slotted) or [volatileReason]. Both beat from [beatIfDue] on their
-/// own operations, never on a timer.
+/// [slot] (slotted) or [volatileReason]. Both beat from [beatIfDue]: on their
+/// own operations, and on the clock above while their isolate is idle.
 final class Multiproc {
   final Sidecar? sidecar;
   final bool writer;
@@ -289,20 +323,19 @@ final class Multiproc {
   bool slotLost = false;
   final Stopwatch _sinceBeat = Stopwatch()..start();
 
-  /// No timer, for the reason a reader has none: a Dart timer keeps the
-  /// process alive, and a handle never closed would hang it. The writer beats
-  /// at each commit and write; idle past 3 intervals, readers report no live
-  /// writer (rule 5) while its floor still honours every live slot.
   Multiproc.writer(Sidecar this.sidecar)
       : writer = true,
         slot = null,
-        volatileReason = null;
+        volatileReason = null {
+    _live.add(this);
+    _startTicks();
+  }
 
-  /// No timer: a periodic timer keeps the isolate alive, and a reader that is
-  /// never closed would hang its process. A reader beats on each read; one
-  /// idle past 3 intervals is reclaimed and its next read says reopen.
-  /// ponytail: per-read beats only; an isolate-backed beat if idle readers matter.
-  Multiproc.reader(this.sidecar, this.slot, this.volatileReason) : writer = false;
+  Multiproc.reader(this.sidecar, this.slot, this.volatileReason) : writer = false {
+    if (slot == null) return; // volatile: nothing to beat
+    _live.add(this);
+    _startTicks();
+  }
 
   void beatIfDue({bool force = false}) {
     final sc = sidecar;
@@ -332,6 +365,7 @@ final class Multiproc {
   bool get writerAlive => writer || (sidecar?.writerAlive(wallMs()) ?? false);
 
   void detach() {
+    _live.remove(this);
     final sc = sidecar;
     if (sc == null) return;
     try {

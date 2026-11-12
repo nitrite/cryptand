@@ -3,6 +3,7 @@
 /// (`reference/conformance/interop/multiproc.py`).
 ///
 ///     reader PATH : print the mode; on a line, scan tree 16 and print rows/bad; on a line, exit
+///     leak PATH   : open a reader, idle 3 s, print whether its beat moved, return unclosed
 ///     writer PATH : create, 5000 rows of 200 x 1, print ready; on a line, churn and print
 ///                   the floor; on a line, close
 library;
@@ -43,10 +44,17 @@ void churn(Engine e) {
     ..commit();
 }
 
-void main(List<String> args) {
+Future<void> main(List<String> args) async {
   // Sync reads of stdin: the child is a script, not a server.
   String? next() => stdin.readLineSync();
   final path = args[1];
+  if (args[0] == 'leak') {
+    final mp = DatabaseFile.openReadOnly(path).engine.multiproc!;
+    await Future<void>.delayed(const Duration(seconds: 3));
+    final beat = mp.sidecar!.slot(mp.slot!.index).heartbeatMs;
+    print('beats=${beat > mp.slot!.heartbeatMs}');
+    return;
+  }
   if (args[0] == 'writer') {
     final e = populated(path);
     print('ready commit=${e.commitId}');
