@@ -1823,11 +1823,10 @@ final class Engine {
         top(p + 1);
       }
     }
-    // A retained snapshot or checkpoint can still read what it freed. An
-    // extent freed at [commitId] is named only by the superblock before it,
-    // in the slot the cut's own commit overwrites.
+    // A retained snapshot or checkpoint can still read what it freed: an
+    // extent tagged past the floor stays above the cut (01 §6).
     for (final e in store.freeExtents) {
-      if (e.commitId > minRetainedCommit + 1) {
+      if (e.commitId > minRetainedCommit) {
         top(e.startPage + e.pages);
       }
     }

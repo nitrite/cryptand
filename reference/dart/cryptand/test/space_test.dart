@@ -13,10 +13,11 @@ void main() {
     // space_test. Before the fix: 460 MB at 100 and superlinear (1 GB at
     // 300). Then flat near 80 MB with tiered levels keeping every version;
     // since §5 drops a superseded version at any level (F-150), ~26 MB.
+    // Sampled at 100: the last plateau step lands near cycle 90 (01 §6 tags).
     final path =
         '${Directory.systemTemp.createTempSync('cryptand-f150-').path}/db.cryptand';
     DatabaseFile.save(Database(engine: Engine()), path);
-    var at75 = 0;
+    var at100 = 0;
     for (var cycle = 0; cycle < 150; cycle++) {
       final e = DatabaseFile.open(path).engine;
       for (var i = 0; i < 256; i++) {
@@ -24,7 +25,7 @@ void main() {
       }
       e.commit();
       e.close();
-      if (cycle == 75) at75 = File(path).lengthSync();
+      if (cycle == 100) at100 = File(path).lengthSync();
     }
     final len = File(path).lengthSync();
     final e = DatabaseFile.open(path).engine;
@@ -33,8 +34,8 @@ void main() {
           e.get(16, CNitriteId(i)), Uint8List(4096)..fillRange(0, 4096, 149));
     }
     e.close();
-    expect(len, lessThanOrEqualTo(at75 + at75 ~/ 20),
-        reason: 'still growing: $at75 at cycle 75');
+    expect(len, lessThanOrEqualTo(at100 + at100 ~/ 20),
+        reason: 'still growing: $at100 at cycle 100');
     expect(len, lessThan(32 << 20));
   });
 
@@ -175,5 +176,22 @@ void main() {
     back.close();
     expect(midJob, greaterThan(0), reason: 'no commit landed inside a job');
     expect(leaks, 0, reason: 'pages neither reachable nor free');
+  });
+
+  test('F-225: a free is tagged with the published commit id (01 §6, as R/J)',
+      () {
+    final e = Engine();
+    e.put(16, CNitriteId(1), Uint8List(8));
+    e.commit();
+    e.commit();
+    final published = e.commitId;
+    final p = e.store.allocExtent(1);
+    e.store.published(); // named by a durable superblock: not commit 0
+    e.store.free(p);
+    final tags = [
+      for (final x in e.store.freeExtents)
+        if (x.startPage == p) x.commitId
+    ];
+    expect(tags, [published]);
   });
 }

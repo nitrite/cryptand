@@ -405,7 +405,7 @@ final class PageStore {
       // prefix and the first one past it ends the search. `continue` walked
       // every unreclaimable extent on each allocation: quadratic in a
       // session's frees (4000 vector puts with early write-backs, 206 s).
-      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId) break;
+      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId - 1) break;
       if (e.value >= pages && e.value < bestPages) {
         bestKey = e.key;
         bestPages = e.value;
@@ -438,7 +438,7 @@ final class PageStore {
   int? allocBelow(int pages, int limit) {
     (int, int)? best;
     for (final e in _free.entries) {
-      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId) continue;
+      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId - 1) continue;
       if (e.value >= pages &&
           e.key.$2 < limit &&
           (best == null || e.key.$2 < best.$2)) {
@@ -477,7 +477,7 @@ final class PageStore {
   (int, int, int)? takeForFreeTree(int pages) {
     (int, int)? best;
     for (final e in _free.entries) {
-      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId) continue;
+      if (e.key.$1 > minRetainedCommit || e.key.$1 >= commitId - 1) continue;
       if (e.value > pages && (best == null || e.key.$2 < best.$2)) {
         best = e.key;
       }
@@ -523,12 +523,14 @@ final class PageStore {
     }
   }
 
-  /// §6 — records a freed extent under the committing `commit_id`. It becomes
-  /// reallocatable only once that id is at or below [minRetainedCommit].
+  /// §6 — records a freed extent under the last *published* `commit_id`
+  /// ([commitId] - 1), as Rust and Java do. It becomes reallocatable only once
+  /// that id is at or below [minRetainedCommit], and never while it is still
+  /// the published id (the allocators' `>= commitId - 1` guard).
   void freeExtent(int startPage, int pages) {
     if (startPage < 2 || pages <= 0) return;
     final fresh = _unpublished.remove(startPage) == pages;
-    _free[(fresh ? 0 : commitId, startPage)] = pages;
+    _free[(fresh ? 0 : commitId - 1, startPage)] = pages;
   }
 
   void free(int pageId) {
@@ -543,7 +545,7 @@ final class PageStore {
   /// allocation grew the file, and tree 1 (rebuilt at the end of the file
   /// each commit) grew with the list.
   void coalesceReclaimable() {
-    bool ok((int, int) k) => k.$1 <= minRetainedCommit && k.$1 < commitId;
+    bool ok((int, int) k) => k.$1 <= minRetainedCommit && k.$1 < commitId - 1;
     final runs = [
       for (final e in _free.entries)
         if (ok(e.key)) (e.key.$2, e.key.$2 + e.value, e.key.$1)

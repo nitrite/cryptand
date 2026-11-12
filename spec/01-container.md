@@ -268,6 +268,9 @@ most-reclaimable extents first.
 **Reclamation rule.** An extent freed at `commit_id = N` may be reallocated once
 `N ≤ min_retained_commit`, the greatest commit id such that no live reader holds
 a snapshot at or below it.
+`N` is the `commit_id` of the last *published* superblock when the extent is
+freed, not the id of the commit in progress (F-225). Either tag is safe; an
+extent tagged one higher is only reclaimed one commit later.
 
 Allocation order:
 
