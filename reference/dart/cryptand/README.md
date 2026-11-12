@@ -35,6 +35,16 @@ and declares `Level 0 (single-writer)` — a single Dart isolate has no
 shared-memory threads, so it produces byte-identical files without concurrent
 writers.
 
+**Sharing a file between processes** (13 §8): a handle proves it is alive by a
+heartbeat that a helper isolate sends every `reader_heartbeat_ms`. It beats only
+while the isolate that owns the handle is responsive. If that isolate is blocked
+in synchronous code for more than 6 s, its claim goes stale, and its next read
+fails with `LockedException` ("reopen"); no data is lost or misread. This
+matters only on desktop, where another process can open the same file: on
+iOS/Android one app process owns its sandbox (and the OS kills a UI isolate
+blocked that long), and the web has no `dart:io` files. To avoid it, do long
+synchronous work in another isolate.
+
 ## Usage
 
 ```dart

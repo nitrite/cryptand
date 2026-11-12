@@ -55,6 +55,12 @@
   raises `ulimit -n`: at 256 the Dart runner died of EMFILE in the 65-reader test and hung.
   F-222's MUST is in 13 §8 (human 11-12).
 
+- 11-12: F-225 (D): frees tagged with the published commit id, as R/J; 01 §6 says so. F-224
+  residual accepted for 1.0 (desktop-only, fails safe), documented in the Dart README.
+- Soak 6.7 rerun launched 11-12 (`~/soak67.sh`, remote): R, then J, then D, 24 h each on a
+  fresh 10^8 base each (deleted after). Out: remote `reference/bench/runs/soak3/` (`<lang>.out`,
+  `<lang>.rc`, `done`).
+
 ## Must-keep (any Dart rewrite or refactor)
 
 F-127/F-128 format bits; `_cmpU64`/`_addSaturating`; F-135/F-136 zeroing;
@@ -83,17 +89,15 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
-- F-224 residual: a Dart isolate blocked in sync code > 6 s without touching its handle still
-  goes stale (13 §8 rules 1, 5). Closing it needs OFD locks over FFI. Worth it?
 - Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
 
-1. Soak: when remote
-   `reference/bench/runs/soak2/java-done` exists, read `java.out`; at `done`, `dart.out` (+
-   `soak-11-03/rust.out`); record in RESULTS.md, tick 6.7. 2. A1.4's interop full-text step. Then 6.8.
+1. Soak: as each remote `runs/soak3/<lang>.rc` appears (R ~11-13, J ~11-14, D ~11-15),
+   read `<lang>.out`; at `done` record all three in RESULTS.md, tick 6.7. Never build in that clone meanwhile. 2. A1.4's interop full-text step. Then 6.8.
 
 ## Log
+- 11-12: F-225 (Dart free tags = published id, 01 §6 note); F-224 residual documented; gate quick green on remote; soak3 R->J->D launched.
 - 11-12: review of F-205..F-221: F-222 (claim/floor race) and F-223 (failed commit lost catalog edits) found and fixed; F-212 re-fixed; CI failures read and fixed; CI 26/26 green (A1.3 done). F-224: Dart periodic beat (clock isolate), gate green, CI 26/26 (run 43141265762). A push run can stick queued with no jobs: `gh workflow run CI --ref dart-storage`.
 - 11-11: F-211 redesign R+D (deferred reserved trees) + F-221 in R; F-221 fixed (D); F-211 Dart 4x; soak2 found dead (ENOSPC).
 - 11-11: F-220 fixed R+J+D (reader page checks, no format change); F-221 filed (Dart CoW commit_id 0).
