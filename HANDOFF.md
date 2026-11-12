@@ -83,9 +83,8 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
-- 13 §8 rules 1 and 5 ask for a heartbeat every `reader_heartbeat_ms`; Dart beats on its own
-  operations only (idle reader reclaimed after 6 s, idle writer reads as "no live writer").
-  Relax the spec for single-threaded runtimes, or give Dart an isolate-backed beat?
+- F-224 residual: a Dart isolate blocked in sync code > 6 s without touching its handle still
+  goes stale (13 §8 rules 1, 5). Closing it needs OFD locks over FFI. Worth it?
 - Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
@@ -95,6 +94,6 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
    `soak-11-03/rust.out`); record in RESULTS.md, tick 6.7. 2. A1.4's interop full-text step. Then 6.8.
 
 ## Log
-- 11-12: review of F-205..F-221: F-222 (claim/floor race) and F-223 (failed commit lost catalog edits) found and fixed; F-212 re-fixed; CI failures read and fixed; CI 26/26 green (A1.3 done). A push run can stick queued with no jobs: `gh workflow run CI --ref dart-storage`.
+- 11-12: review of F-205..F-221: F-222 (claim/floor race) and F-223 (failed commit lost catalog edits) found and fixed; F-212 re-fixed; CI failures read and fixed; CI 26/26 green (A1.3 done). F-224: Dart periodic beat (clock isolate), gate green. A push run can stick queued with no jobs: `gh workflow run CI --ref dart-storage`.
 - 11-11: F-211 redesign R+D (deferred reserved trees) + F-221 in R; F-221 fixed (D); F-211 Dart 4x; soak2 found dead (ENOSPC).
 - 11-11: F-220 fixed R+J+D (reader page checks, no format change); F-221 filed (Dart CoW commit_id 0).
