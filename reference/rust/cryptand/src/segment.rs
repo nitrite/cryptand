@@ -1197,7 +1197,14 @@ impl SegmentBuilder {
     }
 
     /// Finishes the segment and returns the complete extent.
-    pub fn build(mut self) -> Result<Vec<u8>> {
+    pub fn build(self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.build_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// `build` into `out` (cleared first), so a caller can reuse one buffer (F-226).
+    pub fn build_into(mut self, out: &mut Vec<u8>) -> Result<()> {
         self.flush_leaf()?;
         if self.pages.is_empty() {
             return invalid("an empty segment has no root");
@@ -1235,14 +1242,15 @@ impl SegmentBuilder {
 
         let filter_page = self.emit_filter()?;
         let header = self.build_header(root_page, root_entries, filter_page)?;
-        let mut out = Vec::with_capacity(self.page_size * (self.pages.len() + 1));
+        out.clear();
+        out.reserve(self.page_size * (self.pages.len() + 1));
         out.extend_from_slice(&header);
         // F-158: each page is dropped once copied, so the output is held once,
         // not twice, at its peak.
         for p in self.pages.drain(..) {
             out.extend_from_slice(&p);
         }
-        Ok(out)
+        Ok(())
     }
 
     fn emit_filter(&mut self) -> Result<u64> {
@@ -1431,6 +1439,11 @@ enum CellMatch {
 
 impl Segment {
     pub fn open(extent: Vec<u8>, page_size: usize) -> Result<Segment> {
+        Segment::open_bytes(&extent, page_size)
+    }
+
+    /// `open` on a borrowed extent: the pages are copied either way.
+    pub fn open_bytes(extent: &[u8], page_size: usize) -> Result<Segment> {
         check_page_size(page_size)?;
         if extent.len() < page_size || extent.len() % page_size != 0 {
             return corrupt(format!(

@@ -439,6 +439,10 @@ pub struct Engine {
     /// the published floor it must not reach. Equal means "publish first".
     nonce_next: u64,
     nonce_limit: u64,
+    /// F-226: one compaction output buffer, reused. A fresh ~33 MB Vec per
+    /// output, freed after the write, was kept resident by macOS malloc's
+    /// large-block cache: soak RSS reached 1.3 GB on a ~200 MB live heap.
+    extent_buf: Vec<u8>,
 }
 
 /// Bench counter (F-186): segments opened by scan cursors.
@@ -587,6 +591,7 @@ impl Engine {
             events: Vec::new(),
             durability_achieved: Durability::None,
             counters: Counters::default(),
+            extent_buf: Vec::new(),
             keys: None,
             read_only_keys: Vec::new(),
             checkpoint_floor: (None, None),
@@ -786,6 +791,7 @@ impl Engine {
             events: Vec::new(),
             durability_achieved: Durability::from_code(sb.durability_achieved),
             counters: Counters::default(),
+            extent_buf: Vec::new(),
             keys,
             read_only_keys: Vec::new(),
             checkpoint_floor: (None, None),
@@ -2983,15 +2989,22 @@ impl Engine {
         if b.entry_count() == 0 {
             return Ok(());
         }
-        let extent = b.build()?;
+        let mut extent = std::mem::take(&mut self.extent_buf);
+        let r = self.write_output(job, b, &mut extent);
+        self.extent_buf = extent;
+        r
+    }
+
+    fn write_output(&mut self, job: &mut CompactionJob, b: SegmentBuilder, extent: &mut Vec<u8>) -> Result<()> {
+        b.build_into(extent)?;
         let pages = (extent.len() / self.pager.page_size) as u32;
         let start = self.pager.alloc_extent(pages)?;
-        if let Err(e) = self.pager.write_extent(start, &extent) {
+        if let Err(e) = self.pager.write_extent(start, extent) {
             self.pager.free_extent(start, pages, 0); // ENOSPC (M2.3): owned by nothing
             return Err(e);
         }
         self.counters.write_amp_key_index += extent.len() as u64;
-        match Segment::open(extent, self.pager.page_size) {
+        match Segment::open_bytes(extent, self.pager.page_size) {
             Ok(seg) => job.outputs.push(SegmentRef::of(
                 &seg,
                 job.target_level,
