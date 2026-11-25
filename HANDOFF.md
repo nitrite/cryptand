@@ -73,7 +73,13 @@
 - soak5 (11-22/23, remote `runs/soak5/`, `~/soak5.sh`): Rust 24 h on the aged db, CRYPTAND_HWM + 1 s
   RSS samples. 72 cycles all sound, fds 10, bytes flat; RSS FAIL again (thirds 1158 -> 1328 MB, top
   process peaks 951-1343 MB) while live-heap HWM never past 203 MB in any cycle. Spikes are
-  allocator retention / non-heap, not engine-held memory. Remote is idle.
+  allocator retention / non-heap, not engine-held memory.
+- F-226 root cause + fix (11-26, 91b7383, gate quick green on remote): each compaction output was a
+  fresh ~33 MB Vec, freed after write; macOS malloc keeps freed large blocks resident (vmmap
+  `MALLOC_LARGE (empty)`). Engine now reuses one `extent_buf`. **soak6 running** (launched 11-26,
+  `~/soak6.sh`, main clone at 91b7383, aged db): out `runs/soak6/` (`rust.out`, `rust.rc`, `done`,
+  `rss1s.csv`); done ~11-27 evening IST. PASS = rss thirds no longer GREW. Probe diff saved in
+  `~/cryptand-patches/f226-probes-11-26.diff` and `git stash` on remote.
 
 ## Must-keep (any Dart rewrite or refactor)
 
