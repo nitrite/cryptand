@@ -60,6 +60,20 @@
 - Soak 6.7 rerun launched 11-12 (`~/soak67.sh`, remote): R, then J, then D, 24 h each on a
   fresh 10^8 base each (deleted after). Out: remote `reference/bench/runs/soak3/` (`<lang>.out`,
   `<lang>.rc`, `done`).
+- soak3 result: J 62 cycles PASS, D 59 PASS, R 69 FAIL on "RSS GREW". Not a leak (each cycle is
+  a fresh process): per-cycle peak sits 300-670 MB, with 3 spikes ~1.2-1.3 GB at cycles 38/47/63,
+  already there 30 s after verify (verify RSS itself ~100 MB). Two spikes landing in the last third
+  tripped the thirds heuristic. Tracked as F-226 (FINDINGS.md).
+- F-226 hunt (11-20/21, remote, uncommitted remote edits in engine.rs COMPACT print + rss_scale.rs):
+  soak4 (Rust, rss per phase) was stopped by hand at cycle 24 (driver killed, child EPIPE), peak
+  ~550 MB. trace5 (MallocStackLogging, fresh base) caught 720 MB once, seed 119, footprint inflated
+  by stack logging. trace6 (CRYPTAND_HWM live-heap counter, seeds 201-260, 20 min each): live heap
+  never past 217 MB, so the spikes are not live Rust heap: suspect allocator retention or non-heap
+  memory, and the spike needs an aged db (soak3 cycles 38+), which trace runs on a fresh base lack.
+- soak5 (11-22/23, remote `runs/soak5/`, `~/soak5.sh`): Rust 24 h on the aged db, CRYPTAND_HWM + 1 s
+  RSS samples. 72 cycles all sound, fds 10, bytes flat; RSS FAIL again (thirds 1158 -> 1328 MB, top
+  process peaks 951-1343 MB) while live-heap HWM never past 203 MB in any cycle. Spikes are
+  allocator retention / non-heap, not engine-held memory. Remote is idle.
 
 ## Must-keep (any Dart rewrite or refactor)
 
