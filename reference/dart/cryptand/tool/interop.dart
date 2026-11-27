@@ -297,6 +297,102 @@ bool passwordArg = false;
 /// `--half`: `encrypt`/`decrypt` stop part-way (gate steps 7 and 8).
 bool halfArg = false;
 
+// A1.4 / F-216 leg: `{n, body}` under a full-text index on `body` (stopword
+// "the", positions on); same bodies and queries as Rust and Java.
+const textDocs = 300;
+const textTerms = ['common', 'w3', 'w3 x5', 'tail1 common', 'moved2', 'rust', 'java', 'dart', 'zzz'];
+const textPhrases = ['x5 common', 'common tail1', 'w3 x5', 'moved2 x4'];
+
+String textBody(int n) => 'w${n % 7} the x${n % 11} common tail${n % 3}';
+
+CDoc textDoc(int id, int n, String body) => CDoc({
+      '_id': CNitriteId(id),
+      'n': CInt.of(NumType.i64, n),
+      'body': CStr(body),
+    });
+
+void cmdWriteText(String path) {
+  DatabaseFile.save(Database(engine: Engine()), path);
+  final db = DatabaseFile.open(path);
+  final c = db.createCollection('notes');
+  for (var n = 0; n < 100; n++) {
+    c.put(CNitriteId(n + 1), textDoc(n + 1, n, textBody(n)));
+  }
+  c.createFullTextIndex(['body'], analyzer: Analyzer(stopwords: ['the']));
+  for (var n = 100; n < textDocs; n++) {
+    c.put(CNitriteId(n + 1), textDoc(n + 1, n, textBody(n)));
+  }
+  db.engine.close();
+  print('wrote $textDocs text documents to $path');
+}
+
+/// `id -> (n, body)` of every document.
+Map<int, (int, String)> textLive(Collection c) => {
+      for (final (id, doc) in c.all)
+        if (doc.fields['n'] is CInt && doc.fields['body'] is CStr)
+          (id as CNitriteId).id: (
+            (doc.fields['n'] as CInt).magnitude.lo * ((doc.fields['n'] as CInt).negative ? -1 : 1),
+            (doc.fields['body'] as CStr).value
+          )
+    };
+
+void cmdMutateText(String path, String tag) {
+  final db = DatabaseFile.open(path, key: keyArg);
+  final c = db.collection('notes')!;
+  var maxId = 0, maxN = 0;
+  for (final MapEntry(key: id, value: (n, _)) in textLive(c).entries) {
+    if (id > maxId) maxId = id;
+    if (n > maxN) maxN = n;
+    if (n % 10 == 3) {
+      c.remove(CNitriteId(id));
+    } else if (n % 10 == 5) {
+      c.put(CNitriteId(id), textDoc(id, n, 'moved${n % 5} x${n % 11} common $tag'));
+    }
+  }
+  for (var k = 1; k <= 50; k++) {
+    c.put(CNitriteId(maxId + k), textDoc(maxId + k, maxN + k, textBody(maxN + k)));
+  }
+  db.engine.close();
+  print('mutated $path');
+}
+
+int cmdCheckText(String path) {
+  final db = DatabaseFile.open(path, key: keyArg);
+  final c = db.collection('notes')!;
+  final live = textLive(c);
+  final post = [for (final (_, d) in db.catalog.indexesOf('notes')) if (d.kind == TreeKind.postings) d].single;
+  var bad = 0, hits = 0;
+  bool same(List<int> a, List<int> b) => a.length == b.length && [for (var i = 0; i < a.length; i++) a[i] == b[i]].every((x) => x);
+  for (final q in textTerms) {
+    final want = [
+      for (final MapEntry(key: id, value: (_, b)) in live.entries)
+        if (q.split(' ').every(b.split(' ').contains)) id
+    ]..sort();
+    final got = [for (final v in c.fullTextSearch(post, q)) (v as CNitriteId).id]..sort();
+    if (!same(got, want)) {
+      stderr.writeln("search '$q': got ${got.length} ids, want ${want.length}");
+      bad++;
+    }
+    hits += got.length;
+  }
+  for (final q in textPhrases) {
+    final want = [
+      for (final MapEntry(key: id, value: (_, b)) in live.entries)
+        if (' $b '.contains(' $q ')) id
+    ]..sort();
+    final got = [for (final v in c.phraseSearch(post, q)) (v as CNitriteId).id]..sort();
+    if (!same(got, want)) {
+      stderr.writeln("phrase '$q': got ${got.length} ids, want ${want.length}");
+      bad++;
+    }
+    hits += got.length;
+  }
+  db.engine.close(flushMemtable: false);
+  print('documents ${live.length}, hits $hits');
+  print('text: ${bad == 0 ? 'ok' : '$bad wrong answers'}');
+  return bad == 0 ? 0 : 1;
+}
+
 void main(List<String> args) {
   halfArg = args.contains('--half');
   args = [for (final a in args) if (a != '--half') a];
@@ -338,6 +434,12 @@ void main(List<String> args) {
         exit(cmdCheckIndexed(args[1]));
       case 'mutate-indexed':
         cmdMutateIndexed(args[1]);
+      case 'write-text':
+        cmdWriteText(args[1]);
+      case 'mutate-text':
+        cmdMutateText(args[1], args[2]);
+      case 'check-text':
+        exit(cmdCheckText(args[1]));
       case 'encrypt':
         // F-072, gate step 7: `--key` is the new raw key; `--half` stops
         // right after the switch, nothing rewritten yet.

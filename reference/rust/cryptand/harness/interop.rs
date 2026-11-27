@@ -472,6 +472,118 @@ fn cmd_mutate_indexed(path: &str) -> cryptand::Result<()> {
     Ok(())
 }
 
+/// A1.4 / F-216 leg: documents `{n, body}` under a full-text index on
+/// `body` (stopword "the", positions on). Bodies are lowercase ASCII words,
+/// so the checker can work out every answer from the words themselves.
+fn text_body(n: i64) -> String {
+    format!("w{} the x{} common tail{}", n % 7, n % 11, n % 3)
+}
+
+fn text_doc(id: i64, n: i64, body: &str) -> Value {
+    Value::Doc(vec![
+        ("_id".into(), Value::NitriteId(id)),
+        ("n".into(), Value::int(NumType::I64, n as i128)),
+        ("body".into(), Value::Str(body.into())),
+    ])
+}
+
+const TEXT_DOCS: i64 = 300;
+const TEXT_TERMS: [&str; 9] = ["common", "w3", "w3 x5", "tail1 common", "moved2", "rust", "java", "dart", "zzz"];
+const TEXT_PHRASES: [&str; 4] = ["x5 common", "common tail1", "w3 x5", "moved2 x4"];
+
+fn cmd_write_text(path: &str) -> cryptand::Result<()> {
+    let mut db = cryptand::database::Database::create(&PathBuf::from(path), Profile::Desktop)?;
+    let mut c = db.collection("notes")?;
+    // The first 100 are indexed by the build scan, the rest on insert.
+    for n in 0..100 {
+        c.insert(&mut db.engine, &text_doc(n + 1, n, &text_body(n)))?;
+    }
+    db.create_text_index(&c, &["body"], vec!["the".into()], "none", true)?;
+    for n in 100..TEXT_DOCS {
+        c.insert(&mut db.engine, &text_doc(n + 1, n, &text_body(n)))?;
+    }
+    db.commit(Durability::Sync)?;
+    db.close()?;
+    println!("wrote {TEXT_DOCS} text documents to {path}");
+    Ok(())
+}
+
+/// `(id, n, body)` of every document.
+fn text_live(db: &mut cryptand::database::Database, c: &cryptand::database::Collection) -> cryptand::Result<Vec<(i64, i64, String)>> {
+    let mut out = Vec::new();
+    for d in c.scan(&mut db.engine)? {
+        if let (Some(Value::NitriteId(id)), Some(Value::Int { neg, mag, .. }), Some(Value::Str(b))) = (d.field("_id"), d.field("n"), d.field("body")) {
+            out.push((*id, if *neg { -(*mag as i64) } else { *mag as i64 }, b.clone()));
+        }
+    }
+    Ok(out)
+}
+
+/// Removes `n % 10 == 3`, rewrites `n % 10 == 5` to a body naming `tag`, adds 50.
+fn cmd_mutate_text(path: &str, tag: &str) -> cryptand::Result<()> {
+    let mut db = cryptand::database::Database::open(&PathBuf::from(path), key_arg().as_deref())?;
+    let mut c = db.collection("notes")?;
+    let live = text_live(&mut db, &c)?;
+    let (max_id, max_n) = live.iter().fold((0, 0), |a, (id, n, _)| (a.0.max(*id), a.1.max(*n)));
+    for (id, n, _) in &live {
+        match n % 10 {
+            3 => c.remove(&mut db.engine, *id)?,
+            5 => {
+                c.insert(&mut db.engine, &text_doc(*id, *n, &format!("moved{} x{} common {tag}", n % 5, n % 11)))?;
+            }
+            _ => {}
+        }
+    }
+    for k in 1..=50 {
+        c.insert(&mut db.engine, &text_doc(max_id + k, max_n + k, &text_body(max_n + k)))?;
+    }
+    db.commit(Durability::Sync)?;
+    db.close()?;
+    println!("mutated {path}");
+    Ok(())
+}
+
+/// Every term and phrase query answered exactly as the live bodies say.
+fn cmd_check_text(path: &str) -> cryptand::Result<ExitCode> {
+    let mut db = cryptand::database::Database::open(&PathBuf::from(path), key_arg().as_deref())?;
+    let c = db.collection("notes")?;
+    let live = text_live(&mut db, &c)?;
+    let ix = db.engine.text_indexes.first().map(|i| i.name.clone()).ok_or(cryptand::Error::Invalid("no text index".into()))?;
+    let words = |b: &str| b.split(' ').map(str::to_string).collect::<Vec<_>>();
+    let mut bad = 0;
+    let mut hits = 0;
+    for q in TEXT_TERMS {
+        let mut want: Vec<i64> = live.iter().filter(|(_, _, b)| q.split(' ').all(|w| words(b).iter().any(|x| x == w))).map(|r| r.0).collect();
+        want.sort_unstable();
+        let got = db.with_text(&ix, |t, e| t.search(e, q))?;
+        if got != want {
+            eprintln!("search '{q}': got {} ids, want {}", got.len(), want.len());
+            bad += 1;
+        }
+        hits += got.len();
+    }
+    for q in TEXT_PHRASES {
+        let qw = words(q);
+        let mut want: Vec<i64> = live.iter().filter(|(_, _, b)| words(b).windows(qw.len()).any(|w| w == qw.as_slice())).map(|r| r.0).collect();
+        want.sort_unstable();
+        let got = db.with_text(&ix, |t, e| t.phrase(e, q))?;
+        if got != want {
+            eprintln!("phrase '{q}': got {} ids, want {}", got.len(), want.len());
+            bad += 1;
+        }
+        hits += got.len();
+    }
+    let docs = c.scan(&mut db.engine)?;
+    let findings = db.with_text(&ix, |t, e| t.verify(e, &docs))?;
+    if !findings.is_empty() {
+        eprintln!("text verify: {findings:?}");
+        bad += 1;
+    }
+    println!("documents {}, hits {hits}", live.len());
+    println!("text: {}", if bad == 0 { "ok".to_string() } else { format!("{bad} wrong answers") });
+    Ok(if bad == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
 fn cmd_verify(path: &str) -> cryptand::Result<ExitCode> {
     let mut e = Engine::open(&PathBuf::from(path), key_arg().as_deref())?;
     let r = e.verify()?;
@@ -666,6 +778,9 @@ fn main() -> ExitCode {
         Some("write-indexed") if args.len() >= 2 => cmd_write_indexed(&args[1]).map(|_| ExitCode::SUCCESS),
         Some("check-indexed") if args.len() >= 2 => cmd_check_indexed(&args[1]),
         Some("mutate-indexed") if args.len() >= 2 => cmd_mutate_indexed(&args[1]).map(|_| ExitCode::SUCCESS),
+        Some("write-text") if args.len() >= 2 => cmd_write_text(&args[1]).map(|_| ExitCode::SUCCESS),
+        Some("mutate-text") if args.len() >= 3 => cmd_mutate_text(&args[1], &args[2]).map(|_| ExitCode::SUCCESS),
+        Some("check-text") if args.len() >= 2 => cmd_check_text(&args[1]),
         _ => {
             eprintln!(
                 "interop write|read|mutate <tag>|verify <file>|corpus <dir> [--key <hex>]"

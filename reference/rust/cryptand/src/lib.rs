@@ -65,6 +65,7 @@ pub mod keyapi;
 pub mod spaceapi;
 pub mod stats;
 pub mod store;
+pub mod text;
 pub mod txn;
 pub mod unicode;
 pub mod unicode_tables;

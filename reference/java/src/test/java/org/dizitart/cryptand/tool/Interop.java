@@ -563,6 +563,127 @@ public final class Interop {
         System.out.println("mutated " + path);
     }
 
+    // A1.4 / F-216 leg: `{n, body}` under a full-text index on `body`
+    // (stopword "the", positions on); same bodies and queries as Rust and Dart.
+    private static final int TEXT_DOCS = 300;
+    private static final String[] TEXT_TERMS = {"common", "w3", "w3 x5", "tail1 common", "moved2", "rust", "java", "dart", "zzz"};
+    private static final String[] TEXT_PHRASES = {"x5 common", "common tail1", "w3 x5", "moved2 x4"};
+
+    private static String textBody(long n) {
+        return "w" + (n % 7) + " the x" + (n % 11) + " common tail" + (n % 3);
+    }
+
+    private static Value.Doc textDoc(long n, String body) {
+        Map<String, Value> f = new LinkedHashMap<>();
+        f.put("n", Value.i64(n));
+        f.put("body", new Value.Str(body));
+        return Value.Doc.of(f);
+    }
+
+    private static void writeText(String path, byte[] key) {
+        Engine.Options o = options(key);
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.create(Path.of(path), o)) {
+            org.dizitart.cryptand.Collection c = db.collection("notes");
+            for (int n = 0; n < 100; n++) {
+                c.insert(textDoc(n, textBody(n)));
+            }
+            c.createTextIndex(List.of("body"), List.of("the"), "none", true);
+            for (int n = 100; n < TEXT_DOCS; n++) {
+                c.insert(textDoc(n, textBody(n)));
+            }
+        }
+        System.out.println("wrote " + TEXT_DOCS + " text documents to " + path);
+    }
+
+    /** {@code id -> [n, body]} of every document. */
+    private static Map<Long, Object[]> textLive(org.dizitart.cryptand.Collection c) {
+        Map<Long, Object[]> live = new java.util.TreeMap<>();
+        try (Engine.Cursor cur = c.scan(false)) {
+            while (cur.next()) {
+                long id = ((Value.NitriteId) org.dizitart.cryptand.key.Cke.decode(cur.row().key())).id();
+                Value.Doc d = c.decode(cur.row().value());
+                if (d.field("n") != null && d.field("body") instanceof Value.Str) {
+                    live.put(id, new Object[] {SegmentMeta.longOf(d.field("n")), ((Value.Str) d.field("body")).value()});
+                }
+            }
+        }
+        return live;
+    }
+
+    private static void mutateText(String path, String tag, byte[] key) {
+        Engine.Options o = options(key);
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.open(Path.of(path), o)) {
+            org.dizitart.cryptand.Collection c = db.collection("notes");
+            long maxN = 0;
+            for (Map.Entry<Long, Object[]> e : textLive(c).entrySet()) {
+                long n = (Long) e.getValue()[0];
+                maxN = Math.max(maxN, n);
+                if (n % 10 == 3) {
+                    c.remove(e.getKey());
+                } else if (n % 10 == 5) {
+                    c.update(e.getKey(), textDoc(n, "moved" + (n % 5) + " x" + (n % 11) + " common " + tag));
+                }
+            }
+            for (long k = 1; k <= 50; k++) {
+                c.insert(textDoc(maxN + k, textBody(maxN + k)));
+            }
+        }
+        System.out.println("mutated " + path);
+    }
+
+    private static int checkText(String path, byte[] key) {
+        Engine.Options o = options(key);
+        o.durability = Superblock.Durability.OS;
+        try (Database db = Database.open(Path.of(path), o)) {
+            org.dizitart.cryptand.Collection c = db.collection("notes");
+            Map<Long, Object[]> live = textLive(c);
+            org.dizitart.cryptand.index.FullTextIndex ix = c.textIndexes().get(0);
+            int bad = 0;
+            int hits = 0;
+            for (String q : TEXT_TERMS) {
+                List<Long> want = new ArrayList<>();
+                for (Map.Entry<Long, Object[]> e : live.entrySet()) {
+                    List<String> w = List.of(((String) e.getValue()[1]).split(" "));
+                    if (w.containsAll(List.of(q.split(" ")))) {
+                        want.add(e.getKey());
+                    }
+                }
+                List<Long> got = new ArrayList<>(ix.search(q));
+                java.util.Collections.sort(got);
+                if (!got.equals(want)) {
+                    System.err.println("search '" + q + "': got " + got.size() + " ids, want " + want.size());
+                    bad++;
+                }
+                hits += got.size();
+            }
+            for (String q : TEXT_PHRASES) {
+                List<Long> want = new ArrayList<>();
+                for (Map.Entry<Long, Object[]> e : live.entrySet()) {
+                    if ((" " + e.getValue()[1] + " ").contains(" " + q + " ")) {
+                        want.add(e.getKey());
+                    }
+                }
+                List<Long> got = new ArrayList<>(ix.phrase(q));
+                java.util.Collections.sort(got);
+                if (!got.equals(want)) {
+                    System.err.println("phrase '" + q + "': got " + got.size() + " ids, want " + want.size());
+                    bad++;
+                }
+                hits += got.size();
+            }
+            List<String> findings = ix.verify();
+            if (!findings.isEmpty()) {
+                System.err.println("text verify: " + findings);
+                bad++;
+            }
+            System.out.println("documents " + live.size() + ", hits " + hits);
+            System.out.println("text: " + (bad == 0 ? "ok" : bad + " wrong answers"));
+            return bad == 0 ? 0 : 1;
+        }
+    }
+
     /** F-072: {@code rotate <encrypted file> <new key hex> --key K}, copy-and-swap. */
     private static void rotate(String path, byte[] key, byte[] newKey) {
         Engine e = Engine.rotateMasterKey(Engine.open(Path.of(path), options(key)), null, newKey);
@@ -796,6 +917,12 @@ public final class Interop {
                 mutateIndexed(args[1], key);
             } else if (args.length >= 2 && args[0].equals("check-indexed")) {
                 System.exit(checkIndexed(args[1], key));
+            } else if (args.length >= 2 && args[0].equals("write-text")) {
+                writeText(args[1], key);
+            } else if (args.length >= 3 && args[0].equals("mutate-text")) {
+                mutateText(args[1], args[2], key);
+            } else if (args.length >= 2 && args[0].equals("check-text")) {
+                System.exit(checkText(args[1], key));
             } else if (args.length >= 3 && args[0].equals("rotate")) {
                 rotate(args[1], key, org.dizitart.cryptand.util.Hex.parse(args[2]));
             } else if (args.length >= 2 && args[0].equals("corpus")) {

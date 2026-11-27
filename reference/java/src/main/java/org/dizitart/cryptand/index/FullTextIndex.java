@@ -309,8 +309,9 @@ public final class FullTextIndex {
      * has none.
      */
     private Map.Entry<Long, List<Postings.Posting>> blockFor(int termId, long id) {
-        byte[] high = id == Long.MAX_VALUE ? Postings.key(termId + 1, Long.MIN_VALUE) : Postings.key(termId, id + 1);
-        try (Engine.Cursor c = engine.scan(postingsTree, Postings.key(termId, Long.MIN_VALUE), high, true)) {
+        // F-227: the cursor's upper bound is inclusive (Engine.Cursor), so the
+        // bound is `id` itself; `id + 1` also took a block starting at id + 1.
+        try (Engine.Cursor c = engine.scan(postingsTree, Postings.key(termId, Long.MIN_VALUE), Postings.key(termId, id), true)) {
             Map.Entry<Long, List<Postings.Posting>> e = firstOf(termId, c);
             if (e != null) {
                 return e;

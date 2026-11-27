@@ -234,6 +234,28 @@ class FullTextTest {
         }
     }
 
+    @Test
+    @DisplayName("F-227: updating the document just before a block's first one stays in its own block")
+    void updateBeforeABlockBoundary(@TempDir Path dir) {
+        try (Database db = Database.create(dir.resolve("f227.cryptand"), options())) {
+            Collection c = db.collection("posts");
+            FullTextIndex index = c.createTextIndex(List.of("body"), List.of(), "none", true);
+            // Ids 1..300 in order give blocks starting at 1, 129 and 257.
+            for (long id = 1; id <= 300; id++) {
+                Map<String, Value> f = new java.util.LinkedHashMap<>();
+                f.put("_id", new Value.NitriteId(id));
+                f.put("body", new Value.Str("word"));
+                c.insert(Value.Doc.of(f));
+            }
+            Map<String, Value> f = new java.util.LinkedHashMap<>();
+            f.put("body", new Value.Str("word again"));
+            c.update(256, Value.Doc.of(f));
+            assertEquals(300, index.term("word").df());
+            assertEquals(300, index.postings(index.term("word").id()).size());
+            assertEquals(List.of(), index.verify());
+        }
+    }
+
     /**
      * §4.3: a phrase query against an index without positions is rejected, not
      * approximated with a conjunction.

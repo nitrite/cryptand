@@ -295,6 +295,7 @@ pub struct Engine {
     /// published descriptor still names.
     pub spatial_indexes: Vec<crate::rtree::SpatialIndex>,
     pub vector_indexes: Vec<crate::vector::VectorIndex>,
+    pub text_indexes: Vec<crate::text::TextIndex>,
     /// Records the bounded scans have examined. See
     /// [`Engine::scan_records_examined`] for why this counter exists.
     pub scan_examined: u64,
@@ -547,6 +548,7 @@ impl Engine {
             memtable_bytes: 0,
             memtable_entry_limit: pc.memtable_entries,
             spatial_indexes: Vec::new(),
+            text_indexes: Vec::new(),
             vector_indexes: Vec::new(),
             nonce_headroom: Engine::NONCE_HEADROOM,
             policy: LevelPolicy {
@@ -747,6 +749,7 @@ impl Engine {
             memtable_bytes: 0,
             memtable_entry_limit: pc.memtable_entries,
             spatial_indexes: Vec::new(),
+            text_indexes: Vec::new(),
             vector_indexes: Vec::new(),
             nonce_headroom: Engine::NONCE_HEADROOM,
             policy: LevelPolicy {

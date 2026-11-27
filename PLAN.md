@@ -396,7 +396,7 @@ and differential tests reach. In priority order:
   fixed, `dart-storage` added to the trigger. Fix whatever the first run shows
   on Linux and Windows (a month of unbuilt code, incl. the Dart rewrite).
   **Verify:** one CI run with all 26 jobs green on the release commit.
-- [ ] **A1.4** F-216 (S1) Dart postings `first_doc` was zigzag, the spec and
+- [x] **A1.4** F-216 (S1) Dart postings `first_doc` was zigzag, the spec and
   R/J say raw i64. Dart fixed 11-11 (human go); one byte literal asserted in
   all three. Left: a full-text write/search step in `interop/run.sh`, all 6
   directions.

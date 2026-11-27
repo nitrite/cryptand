@@ -199,6 +199,9 @@ impl Database {
             } else if d.kind() == kind::VECTOR_GRAPH && !self.engine.vector_indexes.iter().any(|i| i.name == n) {
                 let ix = crate::vector::VectorIndex::open(&mut self.engine, &n, d)?;
                 self.engine.vector_indexes.push(ix);
+            } else if d.kind() == kind::POSTINGS && !self.engine.text_indexes.iter().any(|i| i.name == n) {
+                let ix = crate::text::TextIndex::open(&mut self.engine, &n, &d)?;
+                self.engine.text_indexes.push(ix);
             }
         }
         Ok(())
@@ -314,6 +317,57 @@ impl Database {
         self.engine.vector_indexes.push(ix);
         self.commit(Durability::Sync)?;
         Ok(name)
+    }
+
+    /// Creates a full-text index, `07-fulltext.md` §1: the postings tree is the
+    /// index's identity, with a term dictionary and its reverse beside it.
+    /// The stopword list is stored in the file, sorted and canonical (§2.3).
+    pub fn create_text_index(&mut self, c: &Collection, fields: &[&str], stopwords: Vec<String>, stemmer: &str, positions: bool) -> Result<String> {
+        // Refused before a tree exists, not after (§2.1).
+        crate::analyzer::Analyzer::new(crate::analyzer::STD, stopwords.clone(), stemmer)?;
+        let name = self.unique_name(&format!("idx:{}:{}:full_text", c.name, fields.join(",")))?;
+        let terms = self.create_tree(&format!("{name}:terms"), kind::TERM_DICT, &c.name, Some("string"), 0, vec![])?;
+        let termids = self.create_tree(&format!("{name}:termids"), kind::TERM_INDEX, &c.name, Some("u32"), 0, vec![])?;
+        let u = |x: u32| Value::int(NumType::U32, x as i128);
+        let sw = crate::analyzer::canonical_stopwords(stopwords).into_iter().map(Value::Str).collect();
+        let params = vec![
+            ("index_type".to_string(), Value::Str(index_type::FULL_TEXT.into())),
+            ("data_tree".to_string(), u(c.tree)),
+            ("fields".to_string(), Value::Array(fields.iter().map(|f| Value::Str(f.to_string())).collect())),
+            ("analyzer".to_string(), Value::Str(crate::analyzer::STD.into())),
+            ("analyzer_params".to_string(), Value::Doc(vec![
+                ("stopwords".to_string(), Value::Array(sw)),
+                ("stemmer".to_string(), Value::Str(stemmer.into())),
+            ])),
+            ("term_dict".to_string(), u(terms.tree_id())),
+            ("term_index".to_string(), u(termids.tree_id())),
+            ("positions".to_string(), Value::Bool(positions)),
+        ];
+        let d = self.create_tree(&name, kind::POSTINGS, &c.name, Some("array"), feature::bit(feature::TEXT), params)?;
+        let mut ix = crate::text::TextIndex::open(&mut self.engine, &name, &d)?;
+        for doc in c.scan(&mut self.engine)? {
+            if let Some(Value::NitriteId(id)) = doc.field("_id") {
+                ix.put(&mut self.engine, *id, &doc, None)?;
+            }
+        }
+        self.engine.text_indexes.push(ix);
+        self.commit(Durability::Sync)?;
+        Ok(name)
+    }
+
+    /// Runs `f` on the open text index `name`.
+    pub fn with_text<T>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut crate::text::TextIndex, &mut Engine) -> Result<T>,
+    ) -> Result<T> {
+        let mut all = std::mem::take(&mut self.engine.text_indexes);
+        let r = match all.iter_mut().find(|i| i.name == name) {
+            Some(ix) => f(ix, &mut self.engine),
+            None => invalid(format!("no open text index {name}")),
+        };
+        self.engine.text_indexes = all;
+        r
     }
 
     /// Runs `f` on the open spatial index `name`.
@@ -448,14 +502,23 @@ impl Collection {
 
     /// Whether the engine holds a spatial or vector index of this collection.
     fn indexed(&self, e: &Engine) -> bool {
-        e.spatial_indexes.iter().any(|i| i.owner == self.name) || e.vector_indexes.iter().any(|i| i.owner == self.name)
+        e.spatial_indexes.iter().any(|i| i.owner == self.name)
+            || e.vector_indexes.iter().any(|i| i.owner == self.name)
+            || e.text_indexes.iter().any(|i| i.owner == self.name)
     }
 
     /// The spatial and vector index side of a write; `doc` None is a delete.
     fn maintain(&self, e: &mut Engine, id: i64, doc: Option<&Value>, previous: Option<&Value>) -> Result<()> {
         let mut sp = std::mem::take(&mut e.spatial_indexes);
         let mut vx = std::mem::take(&mut e.vector_indexes);
+        let mut tx = std::mem::take(&mut e.text_indexes);
         let r = (|| {
+            for ix in tx.iter_mut().filter(|i| i.owner == self.name) {
+                match doc {
+                    Some(d) => ix.put(e, id, d, previous)?,
+                    None => ix.remove(e, id, previous)?,
+                }
+            }
             for ix in sp.iter_mut().filter(|i| i.owner == self.name) {
                 match doc {
                     Some(d) => ix.put(e, id, d, previous, None)?,
@@ -472,6 +535,7 @@ impl Collection {
         })();
         e.spatial_indexes = sp;
         e.vector_indexes = vx;
+        e.text_indexes = tx;
         r
     }
 

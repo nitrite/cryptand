@@ -1,6 +1,6 @@
 # HANDOFF — Cryptand 1.0 release
 
-## State (2026-11-27)
+## State (2026-11-28)
 
 - Branch `dart-storage` (pushed). Manifests 1.0.0, nothing published, no tags.
   Done: M0, M4; M1–M3, M5 per PLAN status table. M6 6.5 rungs (index,
@@ -82,6 +82,9 @@
   `~/cryptand-patches/f226-probes-11-26.diff` and `git stash` on remote.
 - soak6 PASS (11-27): 70 cycles all sound, RSS thirds 309 -> 275 MB, fds 9, bytes flat. 6.7 done
   R+J+D (J/D from soak3), in RESULTS.md §8.
+- A1.4 done 11-28: Rust gained a maintained full-text index (`text.rs`, F-228); interop step 14 (text
+  write/mutate/search, 3 writers x 3 mutators x 3 readers) green in gate quick on remote; fails 23/36
+  with D's F-216 fix reverted. F-227 (J `blockFor` inclusive bound) fixed. F-229 open: phrase gap rule.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -111,13 +114,15 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
+- F-229: phrase query with a stopword inside: D counts the query gap, J/R don't. Which rule goes in 07 §3?
 - Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
 
-1. A1.4's interop full-text step. Then 6.8 (P2 vs fjall/RocksDB).
+1. 6.8 (P2 vs fjall/RocksDB), after the human settles F-229.
 
 ## Log
+- 11-28: remote cleaned (129 GB free); A1.4 done (Rust full-text, step 14), F-227 fixed, F-228/F-229 filed; gate quick green.
 - 11-27: soak6 PASS (F-226 fixed); 6.7 ticked, soak results in RESULTS.md §8.
 - 11-12: F-225 (Dart free tags = published id, 01 §6 note); F-224 residual documented; gate quick green on remote; soak3 R->J->D launched.
 - 11-12: review of F-205..F-221: F-222 (claim/floor race) and F-223 (failed commit lost catalog edits) found and fixed; F-212 re-fixed; CI failures read and fixed; CI 26/26 green (A1.3 done). F-224: Dart periodic beat (clock isolate), gate green, CI 26/26 (run 43141265762). A push run can stick queued with no jobs: `gh workflow run CI --ref dart-storage`.

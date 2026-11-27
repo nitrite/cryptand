@@ -338,6 +338,35 @@ for w in rust java dart; do
   fi
 done
 
+# A1.4 (F-216, F-227): a full-text index kept by every writer. Each writes
+# it, each mutates (removes, rewrites, adds) through its own maintenance in
+# turn, and after every mutation all three answer the same term and phrase
+# queries exactly as the live bodies say, and Rust and Java rebuild df/ttf
+# (07 §6) and agree.
+KEY=""
+for w in rust java dart; do
+  say "14. $w writes a full-text index; rust, java and dart mutate and search"
+  tf="$work/text-$w.cryptand"
+  run_impl $w write-text "$tf" >/dev/null || { bad "$w could not write the text file"; continue; }
+  for m in none rust java dart; do
+    if [[ $m != none ]]; then
+      run_impl $m mutate-text "$tf" $m >/dev/null || { bad "$m could not mutate ${w}'s text file"; continue; }
+    fi
+    for r in rust java dart; do
+      q="$(run_impl $r check-text "$tf" 2>&1 | tail -1)"
+      [[ "$q" == "text: ok" ]] || bad "${w}'s file after $m: $r says $q"
+    done
+  done
+  v1="$(run_impl rust verify "$tf" 2>&1 | head -1)"
+  v2="$(run_impl java verify "$tf" 2>&1 | head -1)"
+  v3="$(run_impl dart verify "$tf" 2>&1 | head -1)"
+  if [[ "$v1" == *" 0 findings"* && "$v2" == *" 0 findings"* && "$v3" == *" 0 findings"* ]]; then
+    ok "every reader agrees after every mutator; rust $v1; java $v2; dart $v3"
+  else
+    bad "rust $v1; java $v2; dart $v3"
+  fi
+done
+
 say "result"
 if [[ $fail -eq 0 ]]; then
   printf '   \033[32mthe round-trip gate passes in both directions\033[0m\n'
