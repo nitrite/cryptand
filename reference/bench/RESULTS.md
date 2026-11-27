@@ -311,6 +311,20 @@ footprint ≤ 416 MB: 64 MB of cache, 32 MB of memtable for each of 3 trees, plu
 
 Still to run: 10⁸ Rust index, 10⁷ full text, 10⁷ spatial, HNSW recall@10 at 10⁶ × 128-d.
 
+## 8. Soak (PLAN 6.7), 24 h at 10⁸, kill -9 every 10-30 min
+
+Remote M1 16 GB. Each cycle: reopen, `verify`, mixed load, kill -9. PASS =
+all verify sound and no RSS / fd / file-size growth from first to last third.
+
+| Impl | Run | Cycles | Verify | RSS peak MB (1st -> last third) | fds | Bytes (1st -> last third) |
+|---|---|---:|---|---|---:|---|
+| Rust | soak6, 11-26/27, after F-226 | 70 | all sound | 309 -> 275 | 9 | 90.06 GB flat |
+| Java | soak3, 11-13/14 | 62 | all sound | 3342 -> 3299 (fixed 3 GB heap) | 23 | 140.15 GB flat |
+| Dart | soak3, 11-14/15 | 59 | all sound | 295 -> 241 | 16 | 139.0 -> 143.2 GB |
+
+Rust's earlier soaks (soak3, soak5) failed on RSS from macOS malloc keeping
+freed compaction buffers resident (F-226). Logs: remote `bench/runs/soak3`, `soak6`.
+
 ## Running it
 
 ```bash
