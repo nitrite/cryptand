@@ -87,6 +87,11 @@
   with D's F-216 fix reverted. F-227 (J `blockFor` inclusive bound) fixed. F-229 fixed (D, human: J/R rule, 07 §3):
   a stopword dropped from a phrase query leaves no gap; step 14 phrases include stopwords.
 
+- 6.8 (11-28, remote, `~/p2.sh`, out `runs/p2/`): new `cryptand-compare` bin `p2`, RocksDB with the
+  nitrite-rocksdb-adapter config. Cryptand FAILED: load WA 1.6 -> 6.0, file 131 GB for 64 GB, ENOSPC (F-230).
+  fjall load WA 2.09, overwrite ~8 and climbing; RocksDB runs after it. 64 GB leaves too little
+  disk headroom (125 GB free): rerun Cryptand after F-230.
+
 ## Must-keep (any Dart rewrite or refactor)
 
 F-127/F-128 format bits; `_cmpU64`/`_addSaturating`; F-135/F-136 zeroing;
@@ -119,9 +124,10 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Next action
 
-1. 6.8 running on remote (`~/p2.sh`, out `runs/p2/`: `<engine>.out|.rc`, `done`); then fill RESULTS.md + README table.
+1. Diagnose F-230 (Cryptand WA growth during load); read fjall/RocksDB `runs/p2` results when `done` appears.
 
 ## Log
+- 11-28: 6.8 launched (p2 harness, adapter RocksDB config); Cryptand P2 failed, F-230 filed.
 - 11-28: F-229 fixed (D phrase gap = J/R rule, spec 07 §3); gate quick green on remote.
 - 11-28: remote cleaned (129 GB free); A1.4 done (Rust full-text, step 14), F-227 fixed, F-228/F-229 filed; gate quick green.
 - 11-27: soak6 PASS (F-226 fixed); 6.7 ticked, soak results in RESULTS.md §8.
