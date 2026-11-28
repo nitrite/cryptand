@@ -567,7 +567,7 @@ public final class Interop {
     // (stopword "the", positions on); same bodies and queries as Rust and Dart.
     private static final int TEXT_DOCS = 300;
     private static final String[] TEXT_TERMS = {"common", "w3", "w3 x5", "tail1 common", "moved2", "rust", "java", "dart", "zzz"};
-    private static final String[] TEXT_PHRASES = {"x5 common", "common tail1", "w3 x5", "moved2 x4"};
+    private static final String[] TEXT_PHRASES = {"x5 common", "common tail1", "w3 x5", "moved2 x4", "x5 the common", "w3 the x5"};
 
     private static String textBody(long n) {
         return "w" + (n % 7) + " the x" + (n % 11) + " common tail" + (n % 3);
@@ -661,7 +661,9 @@ public final class Interop {
             for (String q : TEXT_PHRASES) {
                 List<Long> want = new ArrayList<>();
                 for (Map.Entry<Long, Object[]> e : live.entrySet()) {
-                    if ((" " + e.getValue()[1] + " ").contains(" " + q + " ")) {
+                    // 07 §3 (F-229): a stopword dropped from the query leaves no gap.
+                    String qn = String.join(" ", java.util.Arrays.stream(q.split(" ")).filter(w -> !w.equals("the")).toArray(String[]::new));
+                    if ((" " + e.getValue()[1] + " ").contains(" " + qn + " ")) {
                         want.add(e.getKey());
                     }
                 }

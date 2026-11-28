@@ -308,8 +308,10 @@ fn soak(path: &std::path::Path, n: i64, seed: u64) -> cryptand::Result<()> {
     use cryptand::verify::EngineVerify;
     use std::io::Write;
     let mut db = Database { engine: Engine::open(path, None)? };
+    eprintln!("rss_open_mb={}", rss_mb());
     let t = std::time::Instant::now();
     let report = db.engine.verify()?;
+    eprintln!("rss_verify_mb={}", rss_mb());
     for f in &report.findings {
         eprintln!("verify {:?}: {}", f.class, f.what);
     }
@@ -338,6 +340,9 @@ fn soak(path: &std::path::Path, n: i64, seed: u64) -> cryptand::Result<()> {
         if ops % 1000 == 0 {
             db.commit(Durability::Sync)?;
             println!("acked={ops}");
+            if ops <= 10_000 || ops % 1_000_000 == 0 {
+                eprintln!("rss_acked_{ops}_mb={}", rss_mb());
+            }
             std::io::stdout().flush()?;
         }
     }

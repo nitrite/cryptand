@@ -301,7 +301,7 @@ bool halfArg = false;
 // "the", positions on); same bodies and queries as Rust and Java.
 const textDocs = 300;
 const textTerms = ['common', 'w3', 'w3 x5', 'tail1 common', 'moved2', 'rust', 'java', 'dart', 'zzz'];
-const textPhrases = ['x5 common', 'common tail1', 'w3 x5', 'moved2 x4'];
+const textPhrases = ['x5 common', 'common tail1', 'w3 x5', 'moved2 x4', 'x5 the common', 'w3 the x5'];
 
 String textBody(int n) => 'w${n % 7} the x${n % 11} common tail${n % 3}';
 
@@ -378,7 +378,8 @@ int cmdCheckText(String path) {
   for (final q in textPhrases) {
     final want = [
       for (final MapEntry(key: id, value: (_, b)) in live.entries)
-        if (' $b '.contains(' $q ')) id
+        // 07 §3 (F-229): a stopword dropped from the query leaves no gap.
+        if (' $b '.contains(' ${q.split(' ').where((w) => w != 'the').join(' ')} ')) id
     ]..sort();
     final got = [for (final v in c.phraseSearch(post, q)) (v as CNitriteId).id]..sort();
     if (!same(got, want)) {

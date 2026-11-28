@@ -161,6 +161,12 @@ and says so. This is the correct failure — loud and specific.
 A query string is analyzed with the same analyzer and params as the index. Phrase
 queries require `positions = true`.
 
+A phrase matches a document when its analyzed terms occur at consecutive
+positions: the *i*-th term that survives query analysis at `p + i` for some
+position `p` of the first. A stopword (or over-length segment) dropped from the
+query leaves no gap, so `"quick the brown"` matches `"quick brown"` and does
+not match `"quick the brown"` indexed with `the` as a stopword (F-229).
+
 Scoring is **not** part of the format. BM25 parameters, field boosts and ranking
 are the SDK's business; the format supplies `df`, `ttf`, per-document term
 frequency and (optionally) positions, which is everything a scorer needs. Two

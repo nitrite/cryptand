@@ -336,6 +336,13 @@ void main() {
       expect(c.phraseSearch(idx, 'lazy brown'), [const CNitriteId(2)]);
     });
 
+    test('F-229: a stopword dropped from a phrase query leaves no gap', () {
+      // 07 §3, as Rust and Java: the i-th surviving term at start + i.
+      final idx = c.createFullTextIndex(['body'], analyzer: Analyzer(stopwords: ['the']));
+      expect(c.phraseSearch(idx, 'quick the brown'), [const CNitriteId(1)]);
+      expect(c.phraseSearch(idx, 'lazy the brown'), [const CNitriteId(2)]);
+    });
+
     test('a phrase query against a positionless index is REJECTED', () {
       // Section 4.3: "An implementation MUST reject a phrase query against an
       // index without positions rather than approximate it with a

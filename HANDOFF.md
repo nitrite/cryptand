@@ -84,7 +84,8 @@
   R+J+D (J/D from soak3), in RESULTS.md §8.
 - A1.4 done 11-28: Rust gained a maintained full-text index (`text.rs`, F-228); interop step 14 (text
   write/mutate/search, 3 writers x 3 mutators x 3 readers) green in gate quick on remote; fails 23/36
-  with D's F-216 fix reverted. F-227 (J `blockFor` inclusive bound) fixed. F-229 open: phrase gap rule.
+  with D's F-216 fix reverted. F-227 (J `blockFor` inclusive bound) fixed. F-229 fixed (D, human: J/R rule, 07 §3):
+  a stopword dropped from a phrase query leaves no gap; step 14 phrases include stopwords.
 
 ## Must-keep (any Dart rewrite or refactor)
 
@@ -114,14 +115,14 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
-- F-229: phrase query with a stopword inside: D counts the query gap, J/R don't. Which rule goes in 07 §3?
 - Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
 
-1. 6.8 (P2 vs fjall/RocksDB), after the human settles F-229.
+1. 6.8 running on remote (`~/p2.sh`, out `runs/p2/`: `<engine>.out|.rc`, `done`); then fill RESULTS.md + README table.
 
 ## Log
+- 11-28: F-229 fixed (D phrase gap = J/R rule, spec 07 §3); gate quick green on remote.
 - 11-28: remote cleaned (129 GB free); A1.4 done (Rust full-text, step 14), F-227 fixed, F-228/F-229 filed; gate quick green.
 - 11-27: soak6 PASS (F-226 fixed); 6.7 ticked, soak results in RESULTS.md §8.
 - 11-12: F-225 (Dart free tags = published id, 01 §6 note); F-224 residual documented; gate quick green on remote; soak3 R->J->D launched.

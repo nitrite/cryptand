@@ -489,7 +489,7 @@ fn text_doc(id: i64, n: i64, body: &str) -> Value {
 
 const TEXT_DOCS: i64 = 300;
 const TEXT_TERMS: [&str; 9] = ["common", "w3", "w3 x5", "tail1 common", "moved2", "rust", "java", "dart", "zzz"];
-const TEXT_PHRASES: [&str; 4] = ["x5 common", "common tail1", "w3 x5", "moved2 x4"];
+const TEXT_PHRASES: [&str; 6] = ["x5 common", "common tail1", "w3 x5", "moved2 x4", "x5 the common", "w3 the x5"];
 
 fn cmd_write_text(path: &str) -> cryptand::Result<()> {
     let mut db = cryptand::database::Database::create(&PathBuf::from(path), Profile::Desktop)?;
@@ -563,7 +563,8 @@ fn cmd_check_text(path: &str) -> cryptand::Result<ExitCode> {
         hits += got.len();
     }
     for q in TEXT_PHRASES {
-        let qw = words(q);
+        // 07 §3 (F-229): a stopword dropped from the query leaves no gap.
+        let qw: Vec<String> = words(q).into_iter().filter(|w| w != "the").collect();
         let mut want: Vec<i64> = live.iter().filter(|(_, _, b)| words(b).windows(qw.len()).any(|w| w == qw.as_slice())).map(|r| r.0).collect();
         want.sort_unstable();
         let got = db.with_text(&ix, |t, e| t.phrase(e, q))?;

@@ -787,8 +787,11 @@ final class Collection {
       final first = perTerm[tokens.first.text]![docId]!;
       for (final start in first) {
         var ok = true;
-        for (final t in tokens.skip(1)) {
-          final want = start + (t.position - tokens.first.position);
+        // 07 §3 (F-229): the i-th surviving query term at start + i; a
+        // stopword dropped from the query leaves no gap.
+        for (var i = 1; i < tokens.length; i++) {
+          final t = tokens[i];
+          final want = start + i;
           if (!perTerm[t.text]![docId]!.contains(want)) {
             ok = false;
             break;
