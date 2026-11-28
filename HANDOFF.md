@@ -122,6 +122,8 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
+- F-231: Cryptand inline WA 14.3x vs fjall ~7x (all-or-nothing L2->L3 push). Fix it for 1.0 (writer policy, no format change) or ship with it documented?
+
 
 - Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
@@ -132,6 +134,7 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
    RESULTS.md + README, and revise performance-model P2 for the inline row (it still assumes vlog_min 256).
 
 ## Log
+- 11-28: F-231 filed: inline WA is the all-or-nothing last-level push (L2->L3 ~6.9x of the total).
 - 11-28: F-230 diagnosed (inline values, not a defect); P2 rerun at 40 GB, two rows, launched.
 - 11-28: 6.8 launched (p2 harness, adapter RocksDB config); Cryptand P2 failed, F-230 filed.
 - 11-28: F-229 fixed (D phrase gap = J/R rule, spec 07 §3); gate quick green on remote.

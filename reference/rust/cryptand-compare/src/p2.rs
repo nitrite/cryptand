@@ -66,7 +66,7 @@ trait Kv {
     }
 }
 
-struct C(Engine, std::path::PathBuf);
+struct C(Engine, std::path::PathBuf, std::collections::BTreeMap<(u8, u8), (u64, u64)>);
 impl Kv for C {
     fn put(&mut self, _k: &[u8], i: u64, v: &[u8]) {
         let k = Value::NitriteId((1_767_225_600_000i64 * 4_194_304) + (i as i64) * 4096 + 1);
@@ -75,11 +75,19 @@ impl Kv for C {
     fn barrier(&mut self) {
         self.0.flush().unwrap();
         self.0.commit(Durability::Os).unwrap();
+        for ev in self.0.events.drain(..) {
+            if let cryptand::engine::StoreEvent::Compacted { from, to, bytes } = ev {
+                let e = self.2.entry((from, to)).or_default();
+                e.0 += 1;
+                e.1 += bytes;
+            }
+        }
     }
     fn stats(&self) -> String {
         let c = &self.0.counters;
         let f = std::fs::metadata(&self.1).map(|m| m.len()).unwrap_or(0);
-        format!(" vlog={} keyidx={} gc={} pager={} file={f}", c.write_amp_value, c.write_amp_key_index, c.write_amp_gc, c.bytes_written_device)
+        let lv: String = self.2.iter().map(|((a, b), (n, by))| format!(" L{a}->L{b}:{n}/{}MB", by >> 20)).collect();
+        format!(" vlog={} keyidx={} gc={} file={f}{lv}", c.write_amp_value, c.write_amp_key_index, c.write_amp_gc)
     }
 }
 
@@ -114,7 +122,7 @@ fn main() {
     let mut db: Box<dyn Kv> = match engine {
         "cryptand" => {
             std::fs::create_dir_all(path).unwrap();
-            Box::new(C(Engine::create(&path.join("db.cff"), Profile::Desktop).unwrap(), path.join("db.cff")))
+            Box::new(C(Engine::create(&path.join("db.cff"), Profile::Desktop).unwrap(), path.join("db.cff"), Default::default()))
         }
         "fjall" => {
             let db = fjall::Database::open(fjall::Config::new(path)).unwrap();
