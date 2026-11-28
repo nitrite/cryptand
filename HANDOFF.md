@@ -122,15 +122,17 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
-- F-230: P2 at 1000 B measures inline documents, not separation. Rerun at 4 KB values, revise P2 for inline, or both?
 
 - Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
 
-1. Human picks F-230's P2 regime; then rerun Cryptand (fits disk only below ~50 GB inline). Read fjall/RocksDB `runs/p2` when `done` appears.
+1. P2 rerun (human 11-28: both rows) running: `~/p2.sh`, 40 GB x 3 overwrites, rows 1000 B (inline) and
+   4096 B (separated), cryptand/fjall/rocksdb, out `runs/p2b/<engine>-<bytes>.out|.rc`, `done`. Then fill
+   RESULTS.md + README, and revise performance-model P2 for the inline row (it still assumes vlog_min 256).
 
 ## Log
+- 11-28: F-230 diagnosed (inline values, not a defect); P2 rerun at 40 GB, two rows, launched.
 - 11-28: 6.8 launched (p2 harness, adapter RocksDB config); Cryptand P2 failed, F-230 filed.
 - 11-28: F-229 fixed (D phrase gap = J/R rule, spec 07 §3); gate quick green on remote.
 - 11-28: remote cleaned (129 GB free); A1.4 done (Rust full-text, step 14), F-227 fixed, F-228/F-229 filed; gate quick green.
