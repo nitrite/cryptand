@@ -88,7 +88,9 @@
   a stopword dropped from a phrase query leaves no gap; step 14 phrases include stopwords.
 
 - 6.8 (11-28, remote, `~/p2.sh`, out `runs/p2/`): new `cryptand-compare` bin `p2`, RocksDB with the
-  nitrite-rocksdb-adapter config. Cryptand FAILED: load WA 1.6 -> 6.0, file 131 GB for 64 GB, ENOSPC (F-230).
+  nitrite-rocksdb-adapter config. Cryptand FAILED: load WA 1.6 -> 6.0, file 131 GB for 64 GB, ENOSPC (F-230). Diagnosed: 1000 B
+  values sit under desktop vlog_min 2048 (inline, key-index WA 5.4x at 8 GB); separated 4 KB values give 2.6x
+  as P2 predicts. P2 text still assumes vlog_min 256.
   fjall load WA 2.09, overwrite ~8 and climbing; RocksDB runs after it. 64 GB leaves too little
   disk headroom (125 GB free): rerun Cryptand after F-230.
 
@@ -120,11 +122,13 @@ F-137 key-on-plaintext refusal; F-138 `uvar() < 0 ||` checks; `_writeOwnerOnly`
 
 ## Open questions for the human
 
+- F-230: P2 at 1000 B measures inline documents, not separation. Rerun at 4 KB values, revise P2 for inline, or both?
+
 - Schedule (human, 11-01): 6.7, 6.8, M7, M8 sequentially, ASAP.
 
 ## Next action
 
-1. Diagnose F-230 (Cryptand WA growth during load); read fjall/RocksDB `runs/p2` results when `done` appears.
+1. Human picks F-230's P2 regime; then rerun Cryptand (fits disk only below ~50 GB inline). Read fjall/RocksDB `runs/p2` when `done` appears.
 
 ## Log
 - 11-28: 6.8 launched (p2 harness, adapter RocksDB config); Cryptand P2 failed, F-230 filed.

@@ -61,9 +61,12 @@ fn value(i: u64, rev: u64, len: usize, buf: &mut Vec<u8>) {
 trait Kv {
     fn put(&mut self, k: &[u8], i: u64, v: &[u8]);
     fn barrier(&mut self);
+    fn stats(&self) -> String {
+        String::new()
+    }
 }
 
-struct C(Engine);
+struct C(Engine, std::path::PathBuf);
 impl Kv for C {
     fn put(&mut self, _k: &[u8], i: u64, v: &[u8]) {
         let k = Value::NitriteId((1_767_225_600_000i64 * 4_194_304) + (i as i64) * 4096 + 1);
@@ -72,6 +75,11 @@ impl Kv for C {
     fn barrier(&mut self) {
         self.0.flush().unwrap();
         self.0.commit(Durability::Os).unwrap();
+    }
+    fn stats(&self) -> String {
+        let c = &self.0.counters;
+        let f = std::fs::metadata(&self.1).map(|m| m.len()).unwrap_or(0);
+        format!(" vlog={} keyidx={} gc={} pager={} file={f}", c.write_amp_value, c.write_amp_key_index, c.write_amp_gc, c.bytes_written_device)
     }
 }
 
@@ -106,7 +114,7 @@ fn main() {
     let mut db: Box<dyn Kv> = match engine {
         "cryptand" => {
             std::fs::create_dir_all(path).unwrap();
-            Box::new(C(Engine::create(&path.join("db.cff"), Profile::Desktop).unwrap()))
+            Box::new(C(Engine::create(&path.join("db.cff"), Profile::Desktop).unwrap(), path.join("db.cff")))
         }
         "fjall" => {
             let db = fjall::Database::open(fjall::Config::new(path)).unwrap();
@@ -133,12 +141,13 @@ fn main() {
     let t = Instant::now();
     let mut buf = Vec::with_capacity(vlen);
     let mut logical = 0u64;
-    let report = |phase: &str, ops: u64, logical: u64, t: &Instant| {
+    let report = |db: &dyn Kv, phase: &str, ops: u64, logical: u64, t: &Instant| {
         let dev = device_written() - dev0;
         println!(
-            "phase={phase} ops={ops} logical={logical} device={dev} wa={:.3} secs={:.0}",
+            "phase={phase} ops={ops} logical={logical} device={dev} wa={:.3} secs={:.0}{}",
             dev as f64 / logical.max(1) as f64,
-            t.elapsed().as_secs_f64()
+            t.elapsed().as_secs_f64(),
+            db.stats()
         );
     };
 
@@ -151,11 +160,11 @@ fn main() {
             db.barrier();
         }
         if (i + 1) % (n / 20).max(1) == 0 {
-            report("load", i + 1, logical, &t);
+            report(&*db, "load", i + 1, logical, &t);
         }
     }
     db.barrier();
-    report("load", n, logical, &t);
+    report(&*db, "load", n, logical, &t);
     let load_logical = logical;
     let load_dev = device_written() - dev0;
 
@@ -172,12 +181,12 @@ fn main() {
             db.barrier();
         }
         if (op + 1) % (total / 60).max(1) == 0 {
-            report("overwrite", op + 1, logical, &t);
+            report(&*db, "overwrite", op + 1, logical, &t);
         }
     }
     db.barrier();
+    report(&*db, "final", n + total, logical, &t);
     drop(db);
-    report("final", n + total, logical, &t);
     let dev = device_written() - dev0;
     println!(
         "{engine}_wa_steady={:.3} unit=ratio",
