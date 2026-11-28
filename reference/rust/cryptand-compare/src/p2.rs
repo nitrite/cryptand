@@ -88,7 +88,8 @@ impl Kv for F {
 struct R(rocksdb::DB);
 impl Kv for R {
     fn put(&mut self, k: &[u8], _i: u64, v: &[u8]) {
-        self.0.put(k, v).unwrap();
+        let cf = self.0.cf_handle("p2").unwrap();
+        self.0.put_cf(&cf, k, v).unwrap();
     }
     fn barrier(&mut self) {
         self.0.flush_wal(false).unwrap();
@@ -113,9 +114,16 @@ fn main() {
             Box::new(F(db, ks))
         }
         "rocksdb" => {
+            // As nitrite-rocksdb-adapter's StoreFactory: default DB options, each
+            // map a column family with optimizeUniversalStyleCompaction() (Java's
+            // default budget, 512 MB), plain puts (no sync).
             let mut o = rocksdb::Options::default();
             o.create_if_missing(true);
-            Box::new(R(rocksdb::DB::open(&o, path).unwrap()))
+            o.create_missing_column_families(true);
+            let mut cf = rocksdb::Options::default();
+            cf.optimize_universal_style_compaction(512 << 20);
+            let cfd = rocksdb::ColumnFamilyDescriptor::new("p2", cf);
+            Box::new(R(rocksdb::DB::open_cf_descriptors(&o, path, vec![cfd]).unwrap()))
         }
         e => panic!("unknown engine {e}"),
     };
